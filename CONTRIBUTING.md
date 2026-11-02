@@ -34,10 +34,11 @@ Run these commands from the GodotJS module directory:
 | Command | Scope |
 | --- | --- |
 | `pnpm build:engine-js` | The existing `jsb.runtime`, `jsb.editor`, and `web-bridge` packages |
-| `pnpm build:packages` | Ecosystem packages in `packages/` |
+| `pnpm build:packages` | Ecosystem packages in `packages/` plus the existing React renderer and build tool |
 | `pnpm typecheck:packages` | Type-check ecosystem packages without emitting files |
 | `pnpm build` | Build embedded scripts, then ecosystem packages |
 | `pnpm test` | The existing engine runtime matrix; requires its Godot build environment |
+| `pnpm test:react` | React renderer contracts and build-tool tests |
 
 The [architecture guide](docs/architecture.md) explains the build and dependency boundaries. Follow [the package conventions](packages/README.md) when adding an ecosystem package. `tests/project` remains outside the workspace; install its dependencies with `pnpm -C tests/project install --ignore-workspace` when following the engine test workflow.
 

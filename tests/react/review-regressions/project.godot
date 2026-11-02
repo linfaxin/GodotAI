@@ -1,0 +1,14 @@
+config_version=5
+
+[application]
+config/name="React review regressions"
+run/main_scene="res://generated/react/scenes/app.tscn"
+
+[godotjs]
+react/enabled=true
+
+[GodotJS]
+runtime/debugger/debugger_port=0
+
+[rendering]
+renderer/rendering_method="gl_compatibility"

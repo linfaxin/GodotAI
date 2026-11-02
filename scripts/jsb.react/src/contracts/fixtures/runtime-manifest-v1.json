@@ -1,0 +1,95 @@
+{
+  "schemaVersion": 1,
+  "generation": "g1",
+  "sourceSnapshotHash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "compilerVersion": "0.1.0",
+  "runtimeAbi": "godot-react/1",
+  "nativeBridgeAbi": "godot-react-native/1",
+  "entryInterfaceHash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "mode": "production",
+  "target": {
+    "sourceCommit": "b1d8b3f",
+    "sourceDiffHash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "godotVersion": "4.6.1",
+    "buildFlags": {
+      "debug": false
+    },
+    "platform": "linux",
+    "arch": "x86_64",
+    "engine": "quickjs",
+    "godotSchemaHash": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "react": {
+    "react": "19.3.1",
+    "reconciler": "0.34.0",
+    "scheduler": "0.28.0"
+  },
+  "profile": {
+    "id": "core-ui-v1",
+    "version": 1,
+    "hash": "2807c96de6bd7f87174263262ec5c9d1a8f473a1e5620175f2edf179cb58eae5"
+  },
+  "entries": {
+    "app": {
+      "id": "app",
+      "module": "app",
+      "exportName": "default",
+      "script": "res://generated/react/entries/app.ts",
+      "scene": "res://generated/react/scenes/app.tscn",
+      "startupAssets": []
+    }
+  },
+  "modules": {
+    "app": {
+      "uri": "res://.godot/GodotJS/react-build/g1/App.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "dependencies": [],
+      "kind": "view"
+    }
+  },
+  "resources": {},
+  "nativeScripts": {
+    "app": {
+      "source": "res://generated/react/entries/app.ts",
+      "output": "res://.godot/GodotJS/generated/react/entries/app.js",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "dependencies": []
+    }
+  },
+  "artifacts": {
+    "res://.godot/GodotJS/react-build/g1/App.js": {
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "owner": "compiler",
+      "kind": "runtime"
+    },
+    "res://generated/react/entries/app.ts": {
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "owner": "compiler",
+      "kind": "native-script-source"
+    },
+    "res://.godot/GodotJS/generated/react/entries/app.js": {
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "owner": "compiler",
+      "kind": "runtime"
+    },
+    "res://generated/react/scenes/app.tscn": {
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "owner": "compiler",
+      "kind": "runtime"
+    }
+  },
+  "sourceOrigins": {
+    "res://.godot/GodotJS/react-build/g1/App.js": {
+      "source": "res://src/App.tsx",
+      "line": 0,
+      "column": 0
+    }
+  },
+  "nativeScriptProfiles": {
+    "example": {
+      "type": "Node2D",
+      "script": "res://generated/react/entries/app.ts",
+      "schemaHash": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  }
+}

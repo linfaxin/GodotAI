@@ -1,0 +1,6 @@
+[gd_scene format=3]
+
+[node name="TemplatePanel" type="VBoxContainer"]
+
+[node name="Caption" type="Label" parent="."]
+text = "managed-template"

@@ -88,7 +88,8 @@ public:
     GodotJSEditorPlugin();
     virtual ~GodotJSEditorPlugin() override;
 
-    void start_tsc_watch();
+    void start_tsc_watch(bool p_skip_initial = false);
+    virtual bool build() override;
     bool is_tsc_watching();
     void kill_tsc();
 

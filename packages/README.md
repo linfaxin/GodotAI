@@ -7,6 +7,10 @@ Use `packages/<name>` for reusable GodotJS libraries. Applications belong in `ap
 | Package | Status | Output |
 | --- | --- | --- |
 | [`@godot-js/tsx`](tsx/README.md) | Private package foundation; no runtime API yet | CommonJS and declarations in `dist/` |
+| [`@godot-js/react`](../scripts/jsb.react/README.md) | Existing React renderer; kept in its current location | CommonJS and declarations in `scripts/jsb.react/dist/` |
+| [`@godot-js/react-build`](../scripts/jsb.react-build/README.md) | Existing scene compiler and toolchain; kept in its current location | ESM and declarations in `scripts/jsb.react-build/dist/` |
+
+The root ecosystem build explicitly includes the two existing React packages. Their source locations, package interfaces, and `test:react` entry point are preserved; new libraries use `packages/`.
 
 ## Adding a package
 
@@ -28,6 +32,6 @@ Use `packages/<name>` for reusable GodotJS libraries. Applications belong in `ap
 
 ## Verification and releases
 
-Run `pnpm build:packages` and `pnpm typecheck:packages` from the repository root. Before making a package public, validate its packed tarball in an isolated consumer, including entry points, declaration resolution, declared dependencies, and supported host environments.
+Run `pnpm build:packages` and `pnpm typecheck:packages` from the repository root. The latter checks new packages under `packages/`; the existing React packages check their types during their builds and are covered by `pnpm test:react`. Before making a package public, validate its packed tarball in an isolated consumer, including entry points, declaration resolution, declared dependencies, and supported host environments.
 
 The root package version continues to identify the existing engine release. Public ecosystem packages will need their own semver and npm publication process; the current engine release script creates GitHub Releases.

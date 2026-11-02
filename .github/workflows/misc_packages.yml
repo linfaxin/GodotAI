@@ -20,3 +20,7 @@ jobs:
       - name: 🛠️ Type-check ecosystem packages
         run: pnpm typecheck:packages
         shell: bash
+
+      - name: React contracts, renderer and compiler tests
+        run: pnpm test:react
+        shell: bash

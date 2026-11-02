@@ -1,4 +1,5 @@
 #include "jsb_resource_loader.h"
+#include "../internal/jsb_react_manifest.h"
 
 #include "jsb_script_language.h"
 #include "jsb_script.h"
@@ -161,5 +162,5 @@ String ResourceFormatLoaderGodotJSScript::get_resource_type(const String& p_path
 
 void ResourceFormatLoaderGodotJSScript::get_dependencies(const String& p_path, List<String>* p_dependencies, bool p_add_types)
 {
-    //TODO
+    jsb::internal::ReactManifest::get_script_dependencies(p_path, p_dependencies);
 }

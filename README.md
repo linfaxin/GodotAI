@@ -20,11 +20,14 @@
 
 For full documentation, visit [godotjs.github.io](https://godotjs.github.io/documentation/getting-started/).
 
+For the React / TSX renderer and scene migration workflow, see the [React / TSX guide](docs/react-tsx.zh-CN.md).
+The [implementation and support matrix](docs/react-tsx-implementation.zh-CN.md) lists the available profiles and their limits.
+
 ## Repository development
 
 This repository uses a pnpm workspace for embedded engine scripts and ecosystem packages. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and build commands, [the architecture guide](docs/architecture.md) for module boundaries, and [packages/README.md](packages/README.md) for package conventions.
 
-The [TSX package](packages/tsx/README.md) currently contains a private buildable foundation. The [playground](apps/playground/README.md) is a documented future direction; it has no application or runtime implementation.
+The [TSX package](packages/tsx/README.md) currently contains a private buildable foundation, separate from the existing React renderer. The [playground](apps/playground/README.md) is a documented future direction; it has no application or runtime implementation.
 
 ---
 

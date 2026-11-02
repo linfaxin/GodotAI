@@ -28,6 +28,14 @@ namespace jsb
         // from APIs) must stay false so GC finalization only unbinds them.
         bool js_owned_non_ref_ = false;
 
+        // React ownership is optional. Zero preserves the legacy binding path.
+        // Both fields are accessed under ObjectDB's lock, including from the
+        // background InstanceBindingCallbacks::free_callback path.
+        uint64_t react_owner_token = 0;
+        ObjectID react_object_id;
+        bool react_expected_release = false;
+        String react_retirement_batch;
+
 #if JSB_DEBUG
         // The raw pointer to the native object.
         // It must be a unique pointer which implies that different objects have different addresses.

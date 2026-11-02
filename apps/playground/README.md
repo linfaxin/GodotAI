@@ -13,7 +13,7 @@ Eventually provide a statically hosted playground where editing, TypeScript/TSX 
 - The TSX package would remain a host-independent Godot scene library.
 - Versioned engine assets and type snapshots could be distributed separately from the application, using pinned npm/jsDelivr resources where supported.
 
-Create these packages and runtime projects only when their implementation is scheduled. There are currently no browser SDK, compiler, resolver, runner, bootstrap, or engine asset packages.
+Create these browser-specific packages and runtime projects only when their implementation is scheduled. There are currently no playground SDK, browser compiler, CDN resolver, runner, bootstrap, or engine asset packages. The existing desktop React renderer and scene toolchain remain available separately.
 
 ## Validation before implementation
 

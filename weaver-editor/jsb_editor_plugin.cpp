@@ -1,6 +1,7 @@
 #include "jsb_editor_plugin.h"
 #include "jsb_docked_panel.h"
 #include "jsb_export_plugin.h"
+#include "../internal/jsb_react_manifest.h"
 
 #if GODOT_4_7_OR_NEWER
 #include "core/object/callable_mp.h"
@@ -526,6 +527,11 @@ void GodotJSEditorPlugin::collect_invalid_files(const String& p_path, Vector<Str
         }
         else
         {
+            if (jsb::internal::ReactManifest::is_managed_output(it_path))
+            {
+                it = dir->_get_next();
+                continue;
+            }
             if (!(it_path.ends_with("." JSB_JAVASCRIPT_EXT) || it_path.ends_with("." JSB_COMMONJS_EXT) || it_path.ends_with("." JSB_MODULE_EXT)) || !FileAccess::exists(jsb::internal::PathUtil::convert_javascript_path(it_path)))
             {
                 // invalid if it's not a source map file, or no corresponding .js file exist
@@ -1021,22 +1027,25 @@ bool GodotJSEditorPlugin::is_tsc_watching()
     return tsc_ && tsc_->is_running();
 }
 
-void GodotJSEditorPlugin::start_tsc_watch()
+void GodotJSEditorPlugin::start_tsc_watch(bool p_skip_initial)
 {
     if (tsc_ && tsc_->is_running())
     {
         JSB_LOG(Error, "tsc is already running, please stop it before starting a new one.");
         return;
     }
-    if (!FileAccess::exists("res://node_modules/typescript/bin/tsc"))
+    const bool react = jsb::internal::ReactManifest::is_enabled();
+    const String compiler = react ? "./node_modules/@godot-js/react-build/dist/cli.js" : "./node_modules/typescript/bin/tsc";
+    if (!FileAccess::exists("res://" + compiler.trim_prefix("./")))
     {
-        JSB_LOG(Error, "typescript not installed propertly, please run 'npm i' to install all essential npm packages at first.");
+        JSB_LOG(Error, "Build driver is not installed: %s. Install project dependencies first.", compiler);
         return;
     }
 
     List<String> args;
-    args.push_back("./node_modules/typescript/bin/tsc");
-    args.push_back("-w");
+    args.push_back(compiler);
+    args.push_back(react ? "watch" : "-w");
+    if (react && p_skip_initial) args.push_back("--skip-initial");
 
 #ifdef WINDOWS_ENABLED
     const String exe_path = "node.exe";
@@ -1045,7 +1054,7 @@ void GodotJSEditorPlugin::start_tsc_watch()
     const String exe_path = "node";
 #endif
     //TODO no console output in this way, implement pipes here
-    tsc_ = jsb::internal::Process::create("tsc", exe_path, args);
+    tsc_ = jsb::internal::Process::create(react ? "godot-react" : "tsc", exe_path, args);
     if (!tsc_ || !tsc_->is_running())
     {
         kill_tsc();
@@ -1053,6 +1062,48 @@ void GodotJSEditorPlugin::start_tsc_watch()
         return;
     }
     JSB_LOG(Verbose, "tsc watching...");
+}
+
+bool GodotJSEditorPlugin::build()
+{
+    if (!jsb::internal::ReactManifest::is_enabled()) return true;
+    const String driver = "res://node_modules/@godot-js/react-build/dist/cli.js";
+    if (!FileAccess::exists(driver))
+    {
+        JSB_LOG(Error, "React build driver is missing; install @godot-js/react-build before running this project.");
+        return false;
+    }
+    // F5 is a publication boundary. Keep an active watcher alive: the legacy
+    // Process::stop uses a hard kill and could orphan its resource importer.
+    // The compiler's publisher fence serializes foreground and watch builds.
+    List<String> args;
+    args.push_back(ProjectSettings::get_singleton()->globalize_path(driver));
+    args.push_back("build");
+    args.push_back("--wait-publisher-ms");
+    args.push_back("30000");
+#ifdef WINDOWS_ENABLED
+    const String executable = "node.exe";
+#else
+    const String executable = "node";
+#endif
+    String output;
+    int exit_code = -1;
+    const Error execution = OS::get_singleton()->execute(executable, args, &output, &exit_code, true);
+    if (!output.is_empty()) JSB_LOG(Log, "%s", output);
+    if (execution != OK || exit_code != 0)
+    {
+        JSB_LOG(Error, "React build failed (process error=%d, exit=%d). Run was blocked.", execution, exit_code);
+        return false;
+    }
+    Dictionary manifest;
+    String manifest_path;
+    String reason;
+    if (jsb::internal::ReactManifest::load_active(manifest, manifest_path, reason) != OK)
+    {
+        JSB_LOG(Error, "React build preflight rejected the project: %s", reason);
+        return false;
+    }
+    return true;
 }
 
 void GodotJSEditorPlugin::kill_tsc()

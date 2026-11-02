@@ -3,6 +3,7 @@
 #include "jsb_editor_utility_funcs.h"
 #include "jsb_callable.h"
 #include "jsb_object_bindings.h"
+#include "jsb_react_bridge.h"
 
 namespace jsb
 {
@@ -593,6 +594,7 @@ namespace jsb
                 v8::Local<v8::Object> internal_obj = v8::Object::New(isolate);
 
                 jsb_obj->Set(context, impl::Helper::new_string_ascii(isolate, "internal"), internal_obj).Check();
+                p_env->get_react_bridge().install(context, internal_obj);
 
                 internal_obj->Set(context, impl::Helper::new_string_ascii(isolate, "find_module"), JSB_NEW_FUNCTION(context, _find_module, {})).Check();
                 internal_obj->Set(context, impl::Helper::new_string_ascii(isolate, "add_module"), JSB_NEW_FUNCTION(context, _add_module, {})).Check();

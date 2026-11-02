@@ -4,3 +4,7 @@ packages:
   - impl/web/bridge
   - packages/*
   - apps/*
+onlyBuiltDependencies:
+  - esbuild
+allowBuilds:
+  esbuild: true

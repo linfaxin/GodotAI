@@ -2,6 +2,8 @@
 
 Private package foundation for a future GodotJS scene declaration layer shared by native and browser hosts.
 
+This foundation does not replace the implemented [`@godot-js/react` renderer](../../scripts/jsb.react/README.md) or its [build tool](../../scripts/jsb.react-build/README.md). Their existing APIs and source locations are preserved.
+
 ## Current state
 
 The package has an empty entry point, a CommonJS build, declaration output, and a type-check command. It exports no runtime API. It is private and excluded from Changesets release planning.

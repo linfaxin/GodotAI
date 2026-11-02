@@ -1,6 +1,7 @@
 #include "jsb_object_bindings.h"
 #include "jsb_transpiler.h"
 #include "jsb_type_convert.h"
+#include "jsb_react_bridge.h"
 // TODO: Refactor. Violates isolation of bridge.
 #include "../weaver/jsb_script_instance.h"
 #include "../weaver/jsb_script_language.h"
@@ -276,6 +277,12 @@ namespace jsb
             return;
         }
 
+        if (!ReactBridge::allows_bound_free(gd_object))
+        {
+            jsb_throw(isolate, "E_STRUCTURAL_PERMISSION: React-owned nodes can only be freed by the renderer");
+            return;
+        }
+
         Callable::CallError err;
         const Variant dummy = gd_object->callp(jsb_string_name(free), nullptr, 0, err);
         jsb_check(dummy.get_type() == Variant::NIL);
@@ -398,6 +405,15 @@ namespace jsb
             }
         }
 
+        // The bridge executes its exact native operations directly. A general
+        // reflected call never inherits a renderer permission during reentry.
+        if (!ReactBridge::allows_bound_method(gd_object, method_bind->get_name(), argv, argc))
+        {
+            for (int index = 0; index < argc; ++index) args[index].~Variant();
+            jsb_throw(isolate, "E_STRUCTURAL_PERMISSION: reflected mutation of a React-owned object is forbidden");
+            return;
+        }
+
         // call godot method
         Callable::CallError error;
         Variant crval = method_bind->call(gd_object, argv, argc, error);
@@ -516,6 +532,12 @@ namespace jsb
 
         Variant args[] = { property_info.index, cvar };
         const Variant* argv[] = { &args[0], &args[1] };
+
+        if (!ReactBridge::allows_bound_method(gd_object, property_info.setter_func->get_name(), argv, 2))
+        {
+            jsb_throw(isolate, "E_STRUCTURAL_PERMISSION: indexed mutation of a React-owned object is forbidden");
+            return;
+        }
 
         // call godot method
         Callable::CallError error;

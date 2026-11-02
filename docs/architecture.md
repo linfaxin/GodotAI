@@ -13,12 +13,13 @@ GodotJS combines a native Godot module with embedded JavaScript support code and
 | `scripts/jsb.runtime/` | Private runtime support embedded in the engine |
 | `scripts/jsb.editor/` | Private editor support and type generation |
 | `impl/web/bridge/` | Private TypeScript bridge compiled into Emscripten glue |
+| `scripts/jsb.react/`, `scripts/jsb.react-build/` | Existing React renderer and scene toolchain; retained in their current locations |
 | `packages/` | Reusable libraries with their own build and package entry points |
 | `apps/` | Application consumers; currently only the playground README |
 | `configs/tsconfig/` | Shared checks for new TypeScript packages |
 | `tests/project/` | Independent GodotJS consumer used by engine integration tests |
 
-The active workspace contains the root orchestration package, the three embedded-script packages, and `packages/tsx`. The workspace also reserves `apps/*`; a README-only directory does not become a package.
+The active workspace contains the root orchestration package, the three embedded-script packages, the existing React renderer and build-tool packages, and `packages/tsx`. The workspace also reserves `apps/*`; a README-only directory does not become a package.
 
 ## Build boundaries
 
@@ -31,10 +32,11 @@ pnpm install --frozen-lockfile
 | Command | Responsibility |
 | --- | --- |
 | `pnpm build:engine-js` | Build only `@godot-js/jsb-runtime`, `@godot-js/jsb-editor`, and `@godot-js/web-bridge` |
-| `pnpm build:packages` | Build ecosystem packages selected by their `packages/` location |
+| `pnpm build:packages` | Build packages selected by their `packages/` location and the two existing React packages |
 | `pnpm typecheck:packages` | Check ecosystem package types without emitting files |
 | `pnpm build` | Build embedded scripts followed by ecosystem packages |
 | `pnpm test` | Run the existing engine runtime matrix |
+| `pnpm test:react` | Run React renderer contracts and build-tool tests |
 
 SCons invokes `build:engine-js` before generating embedded sources when `skip_js_runtime` is disabled. It checks for pnpm and the embedded packages' local TypeScript installations and reports the explicit preparation command when dependencies are missing. It does not invoke `pnpm install` or the aggregate build.
 
@@ -49,7 +51,7 @@ impl/web/js/library_godotjs_jsbi.js
 
 The runtime and editor bundles retain AMD output. SCons embeds them into generated native source; the browser bridge is supplied to Emscripten as pre-JS and a JS library. Changes to these internal sources still require rebuilding the corresponding engine artifacts.
 
-`skip_js_runtime=yes` continues to consume previously built or downloaded files. The CI environment job builds only the embedded-script packages and uploads the same directories before native engine compilation. A separate ecosystem job builds and checks reusable packages in parallel. The final `builds-done` gate requires both the runtime matrix and ecosystem checks, so package failures block the final checks and releases without blocking engine artifact production or native build execution.
+`skip_js_runtime=yes` continues to consume previously built or downloaded files. The CI environment job builds only the embedded-script packages and uploads the same directories before native engine compilation; runtime-matrix setup also builds only these scripts. A separate ecosystem job builds reusable packages, checks new package types, and runs the existing React tests in parallel. The final `builds-done` gate requires both the runtime matrix and ecosystem checks, so package failures block the final checks and releases without blocking engine artifact production or native build execution.
 
 There is no engine-only dependency installation profile at present. A full explicit workspace install prepares all active packages. If applications later add substantial dependencies, validate a dedicated preparation profile before promising filtered installation; a filtered build alone does not isolate installation.
 
@@ -57,7 +59,7 @@ There is no engine-only dependency installation profile at present. A full expli
 
 Keep the embedded-script packages private. Their package names identify workspace build units, not separately installable engine runtimes.
 
-Reusable libraries belong in `packages/`, and applications consume those libraries. Libraries do not depend on application code. Declare package dependencies with `workspace:*` and use package entry points rather than imports into another package's source directory.
+New reusable libraries belong in `packages/`, and applications consume those libraries. The existing `@godot-js/react` and `@godot-js/react-build` packages stay under `scripts/` and are explicitly included in the ecosystem build. Libraries do not depend on application code. Declare package dependencies with `workspace:*` and use package entry points rather than imports into another package's source directory.
 
 GodotJS provides modules such as `godot`, `godot-jsb`, `godot.lib.api`, and `godot.annotations` inside the engine. Future ecosystem code must use the intended host API and preserve required host modules as external references when bundling. It must not install the private embedded packages as substitute runtimes.
 
@@ -67,7 +69,7 @@ Do not create empty renderer, reactivity, compiler, resolver, or type packages s
 
 The shared base config contains only common checks. Each package chooses its module format, resolution, target, libraries, ambient types, and output directory. Existing internal configs remain unchanged.
 
-The current TSX foundation emits CommonJS and declarations to `packages/tsx/dist/`. It has no JSX runtime or scene API yet. Additional entry points and formats should be introduced with their implementations and consumer verification, rather than exposed as empty compatibility promises.
+The current TSX foundation emits CommonJS and declarations to `packages/tsx/dist/`. It has no JSX runtime or scene API yet and does not replace the implemented React renderer. Additional entry points and formats should be introduced with their implementations and consumer verification, rather than exposed as empty compatibility promises.
 
 Keep Node tools, browser applications, and Godot user programs in distinct type environments. In particular, do not inherit the internal runtime's Node ambient types into every ecosystem package.
 
