@@ -13,13 +13,8 @@ jobs:
       - name: 🛠️ pnpm install
         uses: ./.github/actions/pnpm-install
 
-      - name: 🛠️ pnpm build
-        run: |
-          pnpm build
-        shell: bash
-
-      - name: React contracts, renderer and compiler tests
-        run: pnpm test:react
+      - name: 🛠️ Build embedded engine scripts
+        run: pnpm build:engine-js
         shell: bash
 
       - name: ⬆️ Upload scripts/out

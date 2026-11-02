@@ -21,9 +21,9 @@ jobs:
       - name: 🛠️ pnpm install
         uses: ./.github/actions/pnpm-install
 
-      - name: 🛠️ pnpm build
+      - name: 🛠️ Build embedded engine scripts
         run: |
-          pnpm build
+          pnpm build:engine-js
         shell: bash
 
       - name: ⏬ Download host-v8 artifact

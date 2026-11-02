@@ -1,0 +1,26 @@
+name: 🧩 Ecosystem Packages
+on:
+  workflow_call:
+
+jobs:
+  packages:
+    name: 🧩 Build and check packages
+    runs-on: ubuntu-latest
+    steps:
+      - name: ⏬ Checkout repository
+        uses: actions/checkout@v6
+
+      - name: 🛠️ pnpm install
+        uses: ./.github/actions/pnpm-install
+
+      - name: 🛠️ Build ecosystem packages
+        run: pnpm build:packages
+        shell: bash
+
+      - name: 🛠️ Type-check ecosystem packages
+        run: pnpm typecheck:packages
+        shell: bash
+
+      - name: React contracts, renderer and compiler tests
+        run: pnpm test:react
+        shell: bash
