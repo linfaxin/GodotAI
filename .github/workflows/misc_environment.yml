@@ -18,6 +18,10 @@ jobs:
           pnpm build
         shell: bash
 
+      - name: React contracts, renderer and compiler tests
+        run: pnpm test:react
+        shell: bash
+
       - name: ⬆️ Upload scripts/out
         uses: actions/upload-artifact@v7
         with:

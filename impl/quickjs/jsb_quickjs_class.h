@@ -118,6 +118,10 @@ namespace jsb::impl
             constructor_data.callback(info);
             if (isolate->is_error_thrown())
             {
+                // The scope owns only the push_copy reference. A failed native
+                // constructor must also release its original newly-created
+                // wrapper so its InternalData/finalizer can be reclaimed.
+                JS_FreeValue(ctx, this_val);
                 return JS_EXCEPTION;
             }
 

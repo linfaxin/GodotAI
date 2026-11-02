@@ -42,6 +42,7 @@ namespace jsb
 
         ~ObjectHandlePtr()
         {
+            ptr_ = nullptr;
             if (lock_) lock_->write_unlock();
         }
 
@@ -50,9 +51,9 @@ namespace jsb
 
         ObjectHandlePtr& operator=(std::nullptr_t)
         {
+            ptr_ = nullptr;
             if (lock_) lock_->write_unlock();
             lock_ = nullptr;
-            ptr_ = nullptr;
             return *this;
         }
 
@@ -66,6 +67,7 @@ namespace jsb
         {
             if (this != &p_other)
             {
+                ptr_ = nullptr;
                 if (lock_) lock_->write_unlock();
                 lock_ = p_other.lock_;
                 ptr_ = std::move(p_other.ptr_);
@@ -92,6 +94,7 @@ namespace jsb
 
         ~ObjectHandleConstPtr()
         {
+            ptr_ = nullptr;
             if (lock_) lock_->read_unlock();
         }
 
@@ -99,9 +102,9 @@ namespace jsb
         explicit operator bool() const { return (bool) ptr_; }
         ObjectHandleConstPtr& operator=(std::nullptr_t)
         {
+            ptr_ = nullptr;
             if (lock_) lock_->read_unlock();
             lock_ = nullptr;
-            ptr_ = nullptr;
             return *this;
         }
 
@@ -115,6 +118,7 @@ namespace jsb
         {
             if (this != &p_other)
             {
+                ptr_ = nullptr;
                 if (lock_) lock_->read_unlock();
                 lock_ = p_other.lock_;
                 ptr_ = std::move(p_other.ptr_);
@@ -152,6 +156,15 @@ namespace jsb
         }
 
     public:
+        struct RemovedIdentity
+        {
+            NativeObjectID id;
+            uint64_t react_owner_token = 0;
+            ObjectID react_object_id;
+            bool expected_release = false;
+            String retirement_batch;
+        };
+
         ObjectDB(int p_capacity)
         {
             objects_.reserve(p_capacity);
@@ -239,6 +252,13 @@ namespace jsb
 
                 if (existing_handle.ref_.IsEmpty())
                 {
+                    // Replacing the lifetime of a published React object would
+                    // invalidate its facade without an authorized retirement.
+                    if (existing_handle.react_owner_token != 0)
+                    {
+                        JSB_OBJECT_DB_STATEMENT(lock_.write_unlock());
+                        return {};
+                    }
                     objects_.remove_at_checked(existing_object_id);
                     objects_index_.erase(p_pointer);
                 }
@@ -259,14 +279,60 @@ namespace jsb
         }
 
         // [MUTABLE]
-        jsb_force_inline void remove_object(ObjectHandlePtr& p_handle, void* p_pointer)
+        jsb_force_inline RemovedIdentity remove_object_and_take_identity(ObjectHandlePtr& p_handle, void* p_pointer)
         {
 #if JSB_DEBUG
             jsb_check(p_handle->pointer == p_pointer);
 #endif
+            RemovedIdentity removed;
+            const NativeObjectID* id = objects_index_.getptr(p_pointer);
+            if (id) removed.id = *id;
+            removed.react_owner_token = p_handle->react_owner_token;
+            removed.react_object_id = p_handle->react_object_id;
+            removed.expected_release = p_handle->react_expected_release;
+            removed.retirement_batch = p_handle->react_retirement_batch;
             JSB_OBJECT_DB_PREPARE_FOR_REMOVAL(p_handle);
             remove_object_internal(p_pointer);
             p_handle = nullptr;
+            return removed;
+        }
+
+        jsb_force_inline void remove_object(ObjectHandlePtr& p_handle, void* p_pointer)
+        {
+            (void) remove_object_and_take_identity(p_handle, p_pointer);
+        }
+
+        bool set_react_owner(const NativeObjectID& p_id, uint64_t p_owner, bool p_created = false, ObjectID p_object_id = ObjectID())
+        {
+            ObjectHandlePtr handle = get_mutable_object(p_id);
+            if (!handle || (handle->react_owner_token && p_owner && handle->react_owner_token != p_owner)) return false;
+            handle->react_owner_token = p_owner;
+            handle->react_object_id = p_owner ? p_object_id : ObjectID();
+            handle->react_expected_release = false;
+            handle->react_retirement_batch = String();
+            if (p_created) handle->js_owned_non_ref_ = true;
+            return true;
+        }
+
+        bool set_react_expected_release(const NativeObjectID& p_id, const String& p_batch = String())
+        {
+            ObjectHandlePtr handle = get_mutable_object(p_id);
+            if (!handle || !handle->react_owner_token) return false;
+            handle->react_expected_release = true;
+            handle->react_retirement_batch = p_batch;
+            return true;
+        }
+
+        uint64_t get_react_owner(void* p_pointer) const
+        {
+            const ObjectHandleConstPtr handle = try_get_object(p_pointer);
+            return handle ? handle->react_owner_token : 0;
+        }
+
+        ObjectHandlePtr get_mutable_object(const NativeObjectID& p_id)
+        {
+            JSB_OBJECT_DB_STATEMENT(lock_.write_lock());
+            return JSB_OBJECT_DB_HANDLE(ObjectHandlePtr, objects_.try_get_value_scoped(p_id));
         }
     };
 }

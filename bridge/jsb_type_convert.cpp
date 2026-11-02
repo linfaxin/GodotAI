@@ -1,5 +1,6 @@
 ﻿#include "jsb_type_convert.h"
 #include "jsb_environment.h"
+#include "jsb_react_bridge.h"
 
 // Not ideal. Need to clean up access.
 #include "../weaver/jsb_script_language.h"
@@ -424,6 +425,11 @@ namespace jsb
         {
             return true;
         }
+        if (ReactBridge::is_owned(p_godot_obj))
+        {
+            impl::Helper::throw_error(isolate, "E_NATIVE_REBIND: an owned React Node cannot be rebound or transferred to another environment");
+            return false;
+        }
 
         // freshly bind existing gd object (not constructed in javascript)
 
@@ -456,8 +462,7 @@ namespace jsb
             jsb_check(TypeConvert::is_object(r_jval));
 
             // the lifecycle will be managed by javascript runtime, DO NOT DELETE it externally
-            environment->bind_godot_object(class_id, p_godot_obj, r_jval.As<v8::Object>());
-            return true;
+            return (bool) environment->bind_godot_object(class_id, p_godot_obj, r_jval.As<v8::Object>());
         }
         JSB_LOG(Error, "failed to expose godot class '%s'", class_name);
         return false;

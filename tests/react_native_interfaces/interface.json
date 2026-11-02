@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "nativeLeaf": "Node2D",
+  "callbacks": ["_ready", "_process", "_physics_process", "_input"],
+  "rpc": {
+    "rpcPing": { "arguments": ["dto", "networkId"], "mode": "anyPeer", "channel": 0 },
+    "rpcReply": { "arguments": ["dto"], "mode": "authority", "channel": 0 },
+    "rpcAuthority": { "arguments": ["string"], "mode": "authority", "channel": 0 },
+    "rpcLocal": { "arguments": ["integer"], "mode": "anyPeer", "sync": "local", "channel": 1 },
+    "rpcUnreliable": { "arguments": ["integer"], "mode": "anyPeer", "transferMode": "unreliableOrdered", "channel": 2 },
+    "rpcMissingChannel": { "arguments": ["integer"], "mode": "anyPeer", "channel": 4 }
+  }
+}

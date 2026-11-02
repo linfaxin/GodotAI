@@ -20,6 +20,9 @@
 
 For full documentation, visit [godotjs.github.io](https://godotjs.github.io/documentation/getting-started/).
 
+For the React / TSX renderer and scene migration workflow, see the [React / TSX guide](docs/react-tsx.zh-CN.md).
+The [implementation and support matrix](docs/react-tsx-implementation.zh-CN.md) lists the available profiles and their limits.
+
 ---
 
 See [Breaking Changes](https://godotjs.github.io/misc/breaking-changes/) if upgrading from old versions.

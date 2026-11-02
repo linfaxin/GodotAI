@@ -16,25 +16,18 @@ namespace jsb::internal
 
         void clear();
 
+        // Stack coordinates are one-based; column zero is explicitly unknown.
+        bool parse_stack_frame(const String& p_line, SourcePosition& r_position);
+        static String resolve_source_path(const String& p_generated_file, const String& p_source_root, const String& p_source);
+        static bool map_source_position(const SourcePosition& p_generated, const SourceMap& p_map, SourcePosition& r_original);
+
     private:
-#if JSB_WITH_SOURCEMAP
-        struct MatchResult
-        {
-            String function;
-            String filename;
-            int line = 0;
-
-            // not available in quickjs.impl
-            int col = 0;
-        };
-
         SourceMap* find_source_map(const String& p_filename);
-        bool match(const String& p_line, MatchResult& r_result);
 
         Ref<RegEx> source_map_match1_;
         Ref<RegEx> source_map_match2_;
+        Ref<RegEx> source_map_match3_;
         HashMap<String, SourceMap> cached_source_maps_;
-#endif
     };
 }
 

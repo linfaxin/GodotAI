@@ -40,7 +40,7 @@ namespace jsb
             }
 
             TransferData transfer_data;
-            from_env->prepare_transfer_out(NativeObjectID::none(), transfers.size(), variant, transfer_data);
+            if (!from_env->prepare_transfer_out(NativeObjectID::none(), transfers.size(), variant, transfer_data)) return;
             transfers.insert(variant, transfer_data);
         }
 

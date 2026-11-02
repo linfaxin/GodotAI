@@ -1,0 +1,23 @@
+{
+  "name": "@godot-js/react-build",
+  "version": "0.1.0",
+  "description": "TypeScript, template and publication toolchain for the GodotJS React renderer",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "bin": { "godot-react": "dist/cli.js" },
+  "files": ["dist", "README.md"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "pnpm build && node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@godot-js/react": "workspace:*",
+    "esbuild": "^0.25.0",
+    "typescript": "6.0.3"
+  },
+  "devDependencies": { "@types/node": "^24.12.2" },
+  "engines": { "node": ">=22" },
+  "license": "MIT"
+}

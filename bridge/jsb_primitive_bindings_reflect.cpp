@@ -6,6 +6,7 @@
 #include "jsb_transpiler.h"
 #include "jsb_bridge_helper.h"
 #include "jsb_type_convert.h"
+#include "jsb_react_bridge.h"
 #include "../internal/jsb_variant_info.h"
 #include "../internal/jsb_variant_util.h"
 
@@ -233,6 +234,13 @@ namespace jsb
                 for (int index = 0; index < argc; ++index)
                 {
                     args[index].~Variant();
+                }
+
+                if (instance->get_type() == Variant::CALLABLE && !ReactBridge::allows_callable(*instance))
+                {
+                    env->dealloc_variant(instance);
+                    jsb_throw(isolate, "E_STRUCTURAL_PERMISSION: Callable cannot write a React-owned lifetime");
+                    return;
                 }
 
                 env->bind_valuetype(instance, self);
@@ -502,6 +510,41 @@ namespace jsb
                 return;
             }
 
+            // Value-type Callable/Signal methods can eventually reach exactly
+            // the same Object mutations as ordinary JSB bindings. Validate the
+            // target, method and bound/runtime arguments before invoking them.
+            bool permitted = true;
+            if (self && self->get_type() == Variant::CALLABLE)
+            {
+                const Callable callable = *self;
+                if (method_info.builtin_func == Variant::get_validated_builtin_method(Variant::CALLABLE, "call")
+                    || method_info.builtin_func == Variant::get_validated_builtin_method(Variant::CALLABLE, "call_deferred"))
+                    permitted = ReactBridge::allows_callable(callable, argv, allocated_argc);
+                else if (method_info.builtin_func == Variant::get_validated_builtin_method(Variant::CALLABLE, "callv"))
+                {
+                    const Array input = args[0];
+                    std::vector<const Variant*> values;
+                    values.reserve(input.size());
+                    for (int i = 0; i < input.size(); ++i) values.push_back(&input[i]);
+                    permitted = ReactBridge::allows_callable(callable, values.data(), (int) values.size());
+                }
+            }
+            if (self && self->get_type() == Variant::SIGNAL)
+            {
+                const Signal signal = *self;
+                StringName method;
+                if (method_info.builtin_func == Variant::get_validated_builtin_method(Variant::SIGNAL, "connect")) method = "connect";
+                else if (method_info.builtin_func == Variant::get_validated_builtin_method(Variant::SIGNAL, "disconnect")) method = "disconnect";
+                else if (method_info.builtin_func == Variant::get_validated_builtin_method(Variant::SIGNAL, "emit")) method = "emit_signal";
+                if (method != StringName()) permitted = ReactBridge::allows_bound_method(signal.get_object(), method, argv, allocated_argc);
+            }
+            if (!permitted)
+            {
+                for (int index = 0; index < allocated_argc; ++index) args[index].~Variant();
+                jsb_throw(isolate, "E_STRUCTURAL_PERMISSION: Callable/Signal cannot mutate a React-owned lifetime");
+                return;
+            }
+
             // call godot method
             if constexpr (HasReturnValueT)
             {
@@ -513,6 +556,12 @@ namespace jsb
                 for (int index = 0; index < allocated_argc; ++index)
                 {
                     args[index].~Variant();
+                }
+
+                if (crval.get_type() == Variant::CALLABLE && !ReactBridge::allows_callable(crval))
+                {
+                    jsb_throw(isolate, "E_STRUCTURAL_PERMISSION: Callable cannot write a React-owned lifetime");
+                    return;
                 }
 
                 v8::Local<v8::Value> jrval;

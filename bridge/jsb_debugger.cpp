@@ -464,7 +464,7 @@ namespace jsb
                         JSB_DEBUGGER_LOG(VeryVerbose, "GET /json/version");
                         _response_json(wsi, HTTP_STATUS_OK, content.ptr(), content.length());
                     }
-                    else if (uri.ends_with(".map") || uri.ends_with(".ts") || uri.ends_with(".js"))
+                    else if (uri.ends_with(".map") || uri.ends_with(".ts") || uri.ends_with(".tsx") || uri.ends_with(".js"))
                     {
                         if (uri.find("..") != -1)
                         {
@@ -494,7 +494,7 @@ namespace jsb
                         {
                             mime = "application/javascript";
                         }
-                        else if (uri.ends_with(".ts"))
+                        else if (uri.ends_with(".ts") || uri.ends_with(".tsx"))
                         {
                             mime = "application/x-typescript";
                         }

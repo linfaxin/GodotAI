@@ -29,6 +29,7 @@
 
 namespace jsb
 {
+    class ReactBridge;
     enum : uint32_t { kIsolateEmbedderData = 0, };
     enum : uint32_t { kContextEmbedderData = 0, };
 
@@ -72,6 +73,7 @@ namespace jsb
                 // should only be used in gc callback.
                 // break the binding. free the managed native object.
                 TYPE_GC_FREE,
+                TYPE_RELEASE_BINDING_REF,
 
                 TYPE_REF,
                 TYPE_DEREF,
@@ -157,6 +159,7 @@ namespace jsb
         StringNameCache string_name_cache_;
 
         ObjectDB object_db_;
+        std::unique_ptr<ReactBridge> react_bridge_;
         HashSet<void*> persistent_objects_;
 
         internal::VariantAllocator variant_allocator_;
@@ -324,7 +327,7 @@ namespace jsb
          */
         Variant call_script_method(ScriptClassID p_script_class_id, NativeObjectID p_object_id, const StringName& p_method, const Variant** p_argv, int p_argc, Callable::CallError& r_error);
 
-        void prepare_transfer_out(NativeObjectID p_worker_handle_id, int transfer_index, const Variant& p_variant, TransferData& r_transfer_data);
+        bool prepare_transfer_out(NativeObjectID p_worker_handle_id, int transfer_index, const Variant& p_variant, TransferData& r_transfer_data);
         void finalize_transfer_out(const TransferData& p_data);
         void transfer_in_bind(const v8::Local<v8::Context>& p_context, const TransferData& p_data);
         void transfer_in_apply_state(const TransferData& p_data);
@@ -456,6 +459,14 @@ namespace jsb
         }
 
         jsb_force_inline NativeObjectID try_get_object_id(void* p_pointer) const { return object_db_.try_get_object_id(p_pointer); }
+
+        ReactBridge& get_react_bridge();
+        jsb_force_inline ReactBridge* get_react_bridge_if_exists() const { return react_bridge_.get(); }
+        jsb_force_inline uint64_t react_owner_for_pointer(void* p_pointer) const { return object_db_.get_react_owner(p_pointer); }
+        jsb_force_inline bool claim_react_owner(NativeObjectID p_id, uint64_t p_owner, bool p_created = false, ObjectID p_object_id = ObjectID())
+        { return object_db_.set_react_owner(p_id, p_owner, p_created, p_object_id); }
+        jsb_force_inline bool mark_react_expected_release(NativeObjectID p_id, const String& p_batch = String())
+        { return object_db_.set_react_expected_release(p_id, p_batch); }
 
         // whether the `p_pointer` registered in the object binding map
         // return true, and the corresponding JS value if `p_pointer` is valid

@@ -1,0 +1,62 @@
+{
+  "name": "@godot-js/react",
+  "version": "0.1.0",
+  "description": "React renderer for React-owned Godot node trees",
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./contracts": {
+      "types": "./dist/contracts/index.d.ts",
+      "default": "./dist/contracts/index.js"
+    },
+    "./schema": {
+      "types": "./dist/schema/index.d.ts",
+      "default": "./dist/schema/index.js"
+    },
+    "./godot": {
+      "types": "./dist/godot.d.ts",
+      "default": "./dist/godot.js"
+    },
+    "./scheduler": {
+      "types": "./dist/scheduler.d.ts",
+      "default": "./dist/scheduler.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "default": "./dist/testing.js"
+    },
+    "./native-interfaces": {
+      "types": "./dist/native-interfaces.d.ts",
+      "default": "./dist/native-interfaces.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node build.mjs && node --test tests/*.test.cjs src/contracts/*.test.cjs"
+  },
+  "dependencies": {
+    "react": "19.3.1",
+    "react-reconciler": "0.34.0",
+    "scheduler": "0.28.0"
+  },
+  "devDependencies": {
+    "@types/react": "19.3.0",
+    "typescript": "^6.0.3",
+    "esbuild": "0.25.12"
+  },
+  "peerDependencies": {
+    "@types/react": "19.3.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

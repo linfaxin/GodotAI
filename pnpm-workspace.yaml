@@ -2,3 +2,7 @@ packages:
   - .
   - scripts/*
   - impl/web/bridge
+onlyBuiltDependencies:
+  - esbuild
+allowBuilds:
+  esbuild: true

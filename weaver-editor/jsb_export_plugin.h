@@ -37,6 +37,7 @@ private:
     void get_script_resources(const String &p_dir, Vector<String> &r_list, bool p_is_node_module = false);
 
     HashSet<String> exported_paths_;
+    Dictionary react_manifest_;
     std::shared_ptr<jsb::Environment> env_;
 };
 

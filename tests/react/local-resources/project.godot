@@ -1,0 +1,14 @@
+config_version=5
+
+[application]
+config/name="GodotJS React local-resource conformance"
+run/main_scene="res://generated/react/scenes/local.tscn"
+
+[rendering]
+renderer/rendering_method="gl_compatibility"
+
+[godotjs]
+react/enabled=true
+
+[GodotJS]
+runtime/debugger/debugger_port=0

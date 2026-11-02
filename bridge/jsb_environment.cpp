@@ -13,6 +13,7 @@
 #include "jsb_essentials.h"
 #include "jsb_amd_module_loader.h"
 #include "jsb_thread_safe_for_nodes_scope.h"
+#include "jsb_react_bridge.h"
 
 #include "../internal/jsb_path_util.h"
 #include "../internal/jsb_class_util.h"
@@ -445,6 +446,13 @@ namespace jsb
         variant_allocator_.drain();
     }
 
+    ReactBridge& Environment::get_react_bridge()
+    {
+        check_internal_state();
+        if (!react_bridge_) react_bridge_ = std::make_unique<ReactBridge>(this);
+        return *react_bridge_;
+    }
+
     void Environment::init()
     {
         jsb::DefaultModuleResolver& resolver = this->add_module_resolver<jsb::DefaultModuleResolver>()
@@ -481,6 +489,11 @@ namespace jsb
             v8::Isolate::Scope isolate_scope(isolate);
             v8::HandleScope handle_scope(isolate);
             v8::Local<v8::Context> context = context_.Get(get_isolate());
+
+            // Detach native signal thunks before clearing their JS callback
+            // context. This performs no user React cleanup; launcher shutdown
+            // owns that earlier lifecycle barrier.
+            if (react_bridge_) react_bridge_->dispose();
 
             function_refs_.clear();
             while (!function_bank_.is_empty()) function_bank_.remove_last();
@@ -607,6 +620,15 @@ namespace jsb
         case AsyncCall::TYPE_REF:       reference_object(p_binding, true); break;
         case AsyncCall::TYPE_DEREF:     reference_object(p_binding, false); break;
         case AsyncCall::TYPE_GC_FREE:   free_object(p_binding, FinalizationType::Default); break;
+        case AsyncCall::TYPE_RELEASE_BINDING_REF:
+        {
+            // The native pointer was already atomically retired on its freeing
+            // thread. Only JS handle disposal belongs to this environment.
+            auto* reference = static_cast<v8::Global<v8::Object>*>(p_binding);
+            reference->Reset();
+            memdelete(reference);
+            break;
+        }
         case AsyncCall::TYPE_TRANSFER_:
             {
                 //TODO need a better way to control lifetime of TransferData?
@@ -859,6 +881,7 @@ namespace jsb
             external_rc = ref_counted->get_reference_count() - 1;
         }
         const NativeObjectID object_id = bind_pointer(p_class_id, NativeClassType::GodotObject, (void*) p_pointer, p_object, external_rc, p_js_owned_non_ref);
+        if (!object_id) return {};
 
         p_pointer->get_instance_binding(this, gd_instance_binding_callbacks);
         return object_id;
@@ -867,10 +890,21 @@ namespace jsb
     NativeObjectID Environment::bind_pointer(NativeClassID p_class_id, NativeClassType::Type p_type, void* p_pointer, const v8::Local<v8::Object>& p_object, int p_external_rc, bool p_js_owned_non_ref)
     {
         check_internal_state();
+        if (p_type == NativeClassType::GodotObject && ReactBridge::is_owned(static_cast<Object*>(p_pointer))
+            && !object_db_.has_object(p_pointer))
+        {
+            impl::Helper::throw_error(isolate_, "E_NATIVE_REBIND: an owned React Node cannot be bound by another environment");
+            return {};
+        }
         jsb_checkf(native_classes_.is_valid_index(p_class_id), "bad class_id");
 
         ObjectHandlePtr handle;
         const NativeObjectID object_id = object_db_.add_object(p_pointer, &handle);
+        if (!object_id || !handle)
+        {
+            impl::Helper::throw_error(isolate_, "E_NATIVE_REBIND: cannot replace an owned native lifetime");
+            return {};
+        }
         jsb_check(p_object->InternalFieldCount() == IF_ObjectFieldCount);
         jsb_check((uintptr_t) p_type % 2 == 0); // fake 2-byte alignment
 
@@ -1006,7 +1040,11 @@ namespace jsb
 
         // erase from ObjectDB before clearing the ref to avoid exposing a transient state
         // with an empty `ref_` in the ObjectDB, which can race with reference callbacks.
-        object_db_.remove_object(object_handle, p_pointer);
+        const ObjectDB::RemovedIdentity removed = object_db_.remove_object_and_take_identity(object_handle, p_pointer);
+        // remove_object_and_take_identity has already released the DB lock.
+        // Background free callbacks only enqueue stable, revisioned data.
+        if (removed.react_owner_token && react_bridge_)
+            react_bridge_->notify_removed(removed.id, removed.react_owner_token, removed.react_object_id, removed.expected_release, removed.retirement_batch);
 
         // TODO: Look into if we ought to be calling obj->free_instance_binding(this)
 
@@ -1019,7 +1057,14 @@ namespace jsb
         //     clear_internal_field(isolate_, obj_ref);
         // }
 
-        obj_ref.Reset();
+        if (!is_caller_thread())
+        {
+            // Reset may touch engine-specific JS handle registries. Moving a
+            // handle is passive; do all actual JS cleanup on the owning thread.
+            auto* reference = memnew(v8::Global<v8::Object>(std::move(obj_ref)));
+            add_async_call(AsyncCall::TYPE_RELEASE_BINDING_REF, reference);
+        }
+        else obj_ref.Reset();
 
         if (p_finalize != FinalizationType::None)
         {
@@ -1034,7 +1079,10 @@ namespace jsb
             if (finalize_type != FinalizationType::None && class_info.type == NativeClassType::GodotObject)
             {
                 const Object* godot_object = static_cast<const Object*>(p_pointer);
-                if (!godot_object->is_ref_counted() && !js_owned_non_ref)
+                // A wrapper retained by another Environment does not own a
+                // React lifetime claimed elsewhere. Its GC may only unbind it.
+                const bool foreign_react_owner = !removed.react_owner_token && ReactBridge::protects_structure(const_cast<Object*>(godot_object));
+                if (foreign_react_owner || (!godot_object->is_ref_counted() && !js_owned_non_ref))
                 {
                     finalize_type = FinalizationType::None;
                 }
@@ -1336,6 +1384,11 @@ namespace jsb
         // Can occur at runtime if object.set_script(...) is used, or in the editor due to hot-reloading etc.
         if (const NativeObjectID object_id = this->try_get_object_id(p_this))
         {
+            if (ReactBridge::is_owned(p_this))
+            {
+                impl::Helper::throw_error(isolate, "E_NATIVE_REBIND: owned React hosts cannot be hot-rebound");
+                return {};
+            }
             JSB_LOG(Verbose, "crossbinding on previously bound object %d (addr:%d), rebind it to script class %d", object_id, (uintptr_t) p_this, p_class_id);
 
             //TODO may not work in this way
@@ -1422,6 +1475,7 @@ namespace jsb
 
     void Environment::rebind(Object *p_this, ScriptClassID p_class_id)
     {
+        ERR_FAIL_COND_MSG(ReactBridge::is_owned(p_this), "E_NATIVE_REBIND: owned React hosts cannot be hot-rebound");
         //TODO a dirty but approaching solution for hot-reloading
         this->check_internal_state();
         v8::Isolate* isolate = get_isolate();
@@ -1434,6 +1488,7 @@ namespace jsb
 
     void Environment::_rebind(v8::Isolate* isolate, const v8::Local<v8::Context> context, Object *p_this, ScriptClassID p_class_id)
     {
+        ERR_FAIL_COND_MSG(ReactBridge::is_owned(p_this), "E_NATIVE_REBIND: owned React hosts cannot be hot-rebound");
         //TODO a dirty but approaching solution for hot-reloading
         v8::Local<v8::Object> instance;
         if (!this->try_get_object(p_this, instance))
@@ -2064,6 +2119,26 @@ namespace jsb
         v8::Context::Scope context_scope(context);
 
         ScriptClassInfoPtr script_class_info = script_classes_.get_value_scoped(p_script_class_id);
+        bool react_owned = false;
+        {
+            const ObjectHandleConstPtr handle = object_db_.try_get_object(p_object_id);
+            react_owned = handle && handle->react_owner_token != 0;
+        }
+        if (react_owned && p_method != SceneStringNames::get_singleton()->_ready)
+        {
+            String exposed_name = p_method;
+            if (exposed_name.begins_with("_")) exposed_name = internal::NamingUtil::get_member_name(exposed_name);
+            if (!script_class_info->methods.has(exposed_name))
+            {
+                // Owned hosts use generated leaf/launcher Scripts. A native
+                // inherited proxy is not a Script override: let Object::callp
+                // fall through to ClassDB for engine callbacks such as
+                // CanvasItem::_top_level_raise_self. Ordinary JSB callers still
+                // pass the ownership guard before reaching this dispatch path.
+                r_error.error = Callable::CallError::CALL_ERROR_INVALID_METHOD;
+                return {};
+            }
+        }
         const internal::TypeGen<StringName, v8::Global<v8::Function>>::UnorderedMapIt it = script_class_info->method_cache.find(p_method);
         v8::Local<v8::Function> method_func;
         if (it == script_class_info->method_cache.end())
@@ -2156,8 +2231,13 @@ namespace jsb
         return _call(isolate, context, js_func.object_.Get(isolate), v8::Undefined(isolate), p_args, p_argcount, r_error);
     }
 
-    void Environment::prepare_transfer_out(NativeObjectID p_worker_handle_id, int transfer_index, const Variant& p_variant, TransferData& r_transfer_data)
+    bool Environment::prepare_transfer_out(NativeObjectID p_worker_handle_id, int transfer_index, const Variant& p_variant, TransferData& r_transfer_data)
     {
+        if (p_variant.get_type() == Variant::OBJECT && ReactBridge::protects_structure(p_variant))
+        {
+            impl::Helper::throw_error(isolate_, "E_NATIVE_TRANSFER: a React-owned Node cannot leave its root environment");
+            return false;
+        }
         r_transfer_data.source_worker_id = p_worker_handle_id;
         r_transfer_data.transfer_index = transfer_index;
         r_transfer_data.variant = p_variant;
@@ -2177,6 +2257,7 @@ namespace jsb
                 r_transfer_data.script_path = script->get_path();
             }
         }
+        return true;
     }
 
     void Environment::finalize_transfer_out(const TransferData& p_transfer_data)
@@ -2186,6 +2267,11 @@ namespace jsb
         if (variant.get_type() == Variant::OBJECT)
         {
             Object* obj = variant;
+            if (ReactBridge::protects_structure(obj))
+            {
+                impl::Helper::throw_error(isolate_, "E_NATIVE_TRANSFER: a React-owned Node cannot be transferred");
+                return;
+            }
             obj->set_script_instance(nullptr);
             free_object(obj, FinalizationType::None);
         }
@@ -2209,6 +2295,12 @@ namespace jsb
         if (!instance)
         {
             JSB_LOG(Error, "transferred object not found: %d", (uint64_t) object_id);
+            return;
+        }
+
+        if (ReactBridge::protects_structure(instance))
+        {
+            impl::Helper::throw_error(isolate_, "E_NATIVE_TRANSFER: another environment cannot bind a React-owned Node");
             return;
         }
 
@@ -2276,6 +2368,11 @@ namespace jsb
             JSB_LOG(Error, "transferred object not found while applying state: %d", (uint64_t) object_id);
             return;
         }
+        if (ReactBridge::protects_structure(instance))
+        {
+            impl::Helper::throw_error(isolate_, "E_NATIVE_TRANSFER: another environment cannot apply state to a React-owned Node");
+            return;
+        }
 
         if (p_data.script_path.is_empty())
         {
@@ -2308,7 +2405,11 @@ namespace jsb
         if (p_variant.get_type() == Variant::OBJECT)
         {
             TransferData* transfer_data = memnew(TransferData);
-            p_from->prepare_transfer_out(p_worker_handle_id, 0, p_variant, *transfer_data);
+            if (!p_from->prepare_transfer_out(p_worker_handle_id, 0, p_variant, *transfer_data))
+            {
+                memdelete(transfer_data);
+                return;
+            }
             p_from->finalize_transfer_out(*transfer_data);
             p_to->add_async_call(AsyncCall::TYPE_TRANSFER_, transfer_data);
         }

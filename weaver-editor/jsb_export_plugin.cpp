@@ -1,6 +1,7 @@
-﻿#include "jsb_export_plugin.h"
+#include "jsb_export_plugin.h"
 
 #include "../weaver/jsb_script.h"
+#include "../internal/jsb_react_manifest.h"
 
 #define JSB_EXPORTER_LOG(Severity, Format, ...) JSB_LOG_IMPL(JSExporter, Severity, Format, ##__VA_ARGS__)
 
@@ -88,6 +89,25 @@ void GodotJSExportPlugin::_export_begin(const HashSet<String>& p_features, bool 
 {
     JSB_EXPORTER_LOG(Verbose, "export_begin path: %s", p_path);
     exported_paths_.clear();
+    react_manifest_.clear();
+    if (jsb::internal::ReactManifest::is_enabled())
+    {
+        String manifest_path;
+        String reason;
+        if (jsb::internal::ReactManifest::load_active(react_manifest_, manifest_path, reason) != OK)
+        {
+            // EditorExportPlugin cannot veto every GUI platform export. The
+            // certified CLI refuses this state before invoking Godot at all.
+            JSB_EXPORTER_LOG(Error, "React export preflight failed: %s", reason);
+            return;
+        }
+        PackedStringArray files;
+        jsb::internal::ReactManifest::collect_export_files(react_manifest_, files, jsb::internal::Settings::is_packaging_with_source_map());
+        for (const String& file : files)
+        {
+            if (!export_raw_file(file, false)) JSB_EXPORTER_LOG(Error, "Missing React export artifact: %s", file);
+        }
+    }
 
     // add all explicitly included file paths in settings
     const PackedStringArray file_paths = jsb::internal::Settings::get_packaging_include_files();
@@ -236,6 +256,21 @@ void GodotJSExportPlugin::_export_file(const String& p_path, const String& p_typ
     if (p_path.ends_with("." JSB_TYPESCRIPT_EXT))
     {
         const String compiled_script_path = jsb::internal::PathUtil::convert_typescript_path(p_path);
+        // A generated NativeScript is described by the sealed manifest. Do not
+        // evaluate application modules merely to discover module.children.
+        if (!react_manifest_.is_empty())
+        {
+            const Dictionary scripts = react_manifest_.get("nativeScripts", Dictionary());
+            const Array keys = scripts.keys();
+            for (int i = 0; i < keys.size(); ++i)
+            {
+                const Dictionary script = scripts.get(keys[i], Variant());
+                if (String(script.get("source", "")) != p_path) continue;
+                const String compiled = script.get("output", compiled_script_path);
+                if (!export_raw_file(compiled, true)) JSB_EXPORTER_LOG(Error, "Missing generated React script: %s", compiled);
+                return;
+            }
+        }
         export_compiled_script(compiled_script_path, true);
 
         // always skip the typescript source from packing
