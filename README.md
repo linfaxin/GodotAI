@@ -20,6 +20,12 @@
 
 For full documentation, visit [godotjs.github.io](https://godotjs.github.io/documentation/getting-started/).
 
+## Repository development
+
+This repository uses a pnpm workspace for embedded engine scripts and ecosystem packages. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and build commands, [the architecture guide](docs/architecture.md) for module boundaries, and [packages/README.md](packages/README.md) for package conventions.
+
+The [TSX package](packages/tsx/README.md) currently contains a private buildable foundation. The [playground](apps/playground/README.md) is a documented future direction; it has no application or runtime implementation.
+
 ---
 
 See [Breaking Changes](https://godotjs.github.io/misc/breaking-changes/) if upgrading from old versions.

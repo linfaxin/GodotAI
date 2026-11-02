@@ -4,7 +4,10 @@
   "private": true,
   "packageManager": "pnpm@10.11.0+sha1.4048eeefd564ff1ab248fac3e2854d38245fe2f1",
   "scripts": {
-    "build": "pnpm -r build",
+    "build": "pnpm run build:engine-js && pnpm run build:packages",
+    "build:engine-js": "pnpm --filter @godot-js/jsb-runtime --filter @godot-js/jsb-editor --filter @godot-js/web-bridge --fail-if-no-match run build",
+    "build:packages": "pnpm --filter \"./packages/**\" --fail-if-no-match run build",
+    "typecheck:packages": "pnpm --filter \"./packages/**\" --fail-if-no-match run typecheck",
     "test": "node scripts/test/run-runtime-matrix.mts",
     "test:skip-builds": "node scripts/test/run-runtime-matrix.mts --skip-builds",
     "changeset": "changeset",

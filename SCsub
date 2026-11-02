@@ -465,11 +465,23 @@ module_obj = []
 print(f"godot engine: {version_info['major']}.{version_info['minor']}")
 check("regex" in env.module_list, "Currently, the 'regex' module is required for using GodotJS. Please rebuild the engine with it enabled.")
 
-# Build JS files before generating
+# Dependencies are installed explicitly from the module root before running SCons.
+# Build only the embedded scripts; ecosystem packages have a separate build.
 if not env["skip_js_runtime"]:
     pnpm_command = shutil.which("pnpm")
-    print(subprocess.run([pnpm_command, "install"], check=True))
-    print(subprocess.run([pnpm_command, "build"], check=True))
+    check(pnpm_command is not None,
+        f"pnpm was not found. Install the version declared in package.json, then run "
+        f"'pnpm install --frozen-lockfile' in {module_path} before compiling Godot.")
+    for project in ("scripts/jsb.runtime", "scripts/jsb.editor", "impl/web/bridge"):
+        check(os.path.isfile(os.path.join(module_path, project, "node_modules", "typescript", "bin", "tsc")),
+            f"Missing TypeScript dependency for {project}. Run 'pnpm install --frozen-lockfile' "
+            f"in {module_path} before compiling Godot.")
+    try:
+        subprocess.run([pnpm_command, "run", "build:engine-js"], cwd=module_path, check=True)
+    except subprocess.CalledProcessError:
+        check(False,
+            f"Failed to build the embedded GodotJS scripts. Run 'pnpm install --frozen-lockfile' "
+            f"and 'pnpm build:engine-js' in {module_path} to check the dependencies and build errors.")
 
 if v8_support is not None:
     # it seems godot always links MT_StaticRelease even if env["dev_build"]

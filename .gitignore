@@ -27,6 +27,7 @@ __MACOSX
 /*/out
 /scripts/*/out
 /impl/web/js/jsbb.impl.js
+/packages/*/dist/
 
 # VS Code
 .vscode
