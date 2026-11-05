@@ -57,7 +57,7 @@ export function canonicalFields(type: string, fields: readonly string[], _parent
 
 export function intrinsicFields(type: string, parentType?: string, profileId?: string): readonly string[] {
   const schema = getHostSchema(type, profileId), fields = [...schema.intrinsicEngineOwned];
-  if ((parentType === "VBoxContainer" || parentType === "HBoxContainer") && Object.hasOwn(schema.properties, "customMinimumSize")) fields.push("layout.position", "layout.size");
+  if (parentType && ['VBoxContainer', 'HBoxContainer', 'PanelContainer', 'MarginContainer', 'ScrollContainer'].includes(parentType) && Object.hasOwn(schema.properties, "customMinimumSize")) fields.push("layout.position", "layout.size");
   return Object.freeze([...new Set(fields)].sort());
 }
 

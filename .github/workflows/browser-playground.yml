@@ -1,0 +1,188 @@
+name: Browser Playground
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/jsb.react*/**'
+      - 'scripts/jsb.web-engine/**'
+      - 'scripts/release/**'
+      - 'scripts/test/**'
+      - 'apps/playground/**'
+      - 'tests/browser-preflight/**'
+      - 'tests/react/**'
+      - 'impl/web/**'
+      - 'bridge/**'
+      - 'compat/**'
+      - 'internal/**'
+      - 'weaver/**'
+      - 'weaver-editor/**'
+      - 'register_types.*'
+      - 'jsb.*'
+      - 'SCsub'
+      - 'config.py'
+      - '*package*'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - '.github/workflows/browser-playground.yml'
+      - '.github/workflows/build_web.yml'
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      engine_target:
+        description: 'Actual engine target, independently of the SDK mode'
+        type: choice
+        options: [template_debug, template_release]
+        default: template_debug
+      release_version:
+        description: 'Exact npm version to prepare (publication is a separate command)'
+        type: string
+        default: '0.1.0'
+  schedule:
+    - cron: '17 3 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: browser-playground-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm test:react
+      - name: Release provenance, integrity, npm-pack consumer and failure gates
+        run: pnpm test:browser:unit
+
+  browser:
+    needs: contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/playwright-browsers
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Checkout the identified upstream engine source
+        uses: actions/checkout@v4
+        with:
+          repository: godotengine/godot
+          ref: 4.6.1-stable
+          path: .browser-engine/source
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: '4.0.11'
+      - run: python3 -m pip install scons==4.9.1
+      - name: Build and collect provenance for an actual single-thread engine
+        env:
+          ENGINE_TARGET: ${{ inputs.engine_target || 'template_debug' }}
+        run: >-
+          node scripts/test/build-browser-engine.mjs
+          --godot-source .browser-engine/source
+          --build-dir "$RUNNER_TEMP/godot-browser-build"
+          --out "$RUNNER_TEMP/browser-engine-report.json"
+          --target "$ENGINE_TARGET"
+          --jobs 4
+      - name: Install the pinned browser verification tools
+        run: |
+          npm install --prefix "$RUNNER_TEMP/browser-tools" --no-audit --no-fund playwright@1.56.1
+          node "$RUNNER_TEMP/browser-tools/node_modules/playwright/cli.js" install --with-deps chromium
+          echo "PLAYWRIGHT_MODULE=$RUNNER_TEMP/browser-tools/node_modules/playwright-core/index.mjs" >> "$GITHUB_ENV"
+          node --input-type=module -e 'const {chromium}=await import(process.env.RUNNER_TEMP+"/browser-tools/node_modules/playwright-core/index.mjs"); console.log("CHROMIUM="+chromium.executablePath())' >> "$GITHUB_ENV"
+      - name: Verify real main-thread compiler, revision and preview races
+        run: node --test apps/playground/test/*.test.mjs
+      - name: Prepare the existing native browser regression gate
+        env:
+          GODOT_SOURCE: ${{ runner.temp }}/godot-browser-build
+          ENGINE_TARGET: ${{ inputs.engine_target || 'template_debug' }}
+        run: |
+          export GODOT_WEB_TEMPLATE="$RUNNER_TEMP/godot-browser-build/bin/godot.web.$ENGINE_TARGET.wasm32.nothreads.zip"
+          node tests/browser-preflight/prepare.mjs "$RUNNER_TEMP/browser-preflight-site"
+      - name: Verify native boot, real canvas input, restart, exit and tamper rejection
+        run: node tests/browser-preflight/verify.mjs "$RUNNER_TEMP/browser-preflight-site" "$RUNNER_TEMP/browser-preflight-results"
+      - name: Verify native authored source locations, compressed columns and uncaught errors
+        env:
+          ENGINE_BUILD_REPORT: ${{ runner.temp }}/browser-engine-report.json
+        run: node tests/browser-preflight/verify-source-maps.mjs "$RUNNER_TEMP/browser-preflight-site" "$RUNNER_TEMP/browser-source-map-results"
+      - name: Prepare the complete static Playground candidate
+        env:
+          RELEASE_VERSION: ${{ inputs.release_version || '0.1.0' }}
+        run: >-
+          node scripts/test/prepare-browser-playground.mjs
+          --engine-report "$RUNNER_TEMP/browser-engine-report.json"
+          --out "$RUNNER_TEMP/browser-playground-site"
+          --version "$RELEASE_VERSION"
+      - name: Verify the actual Playground and collect release-bound evidence
+        run: >-
+          node scripts/test/browser-playground.mjs
+          --site "$RUNNER_TEMP/browser-playground-site"
+          --out "$RUNNER_TEMP/browser-playground-results"
+      - name: Verify HttpOnly same-origin authentication and cross-origin cookie omission
+        run: >-
+          node scripts/test/browser-playground.mjs --authenticated-gate
+          --site "$RUNNER_TEMP/browser-playground-site"
+          --out "$RUNNER_TEMP/browser-authenticated-results"
+      - name: Verify real engine lifecycle pressure and failure cancellation
+        run: >-
+          node scripts/test/browser-stress.mjs
+          --site "$RUNNER_TEMP/browser-playground-site"
+          --out "$RUNNER_TEMP/browser-stress-results"
+          --iterations 100 --failures 20
+      - name: Join exact-release integration, source-map and lifecycle evidence
+        run: >-
+          node scripts/release/collect-browser-evidence.mjs
+          --site "$RUNNER_TEMP/browser-playground-site"
+          --engine-report "$RUNNER_TEMP/browser-engine-report.json"
+          --integration "$RUNNER_TEMP/browser-playground-results/report.json"
+          --authenticated-report "$RUNNER_TEMP/browser-authenticated-results/report.json"
+          --stress "$RUNNER_TEMP/browser-stress-results/report.json"
+          --source-maps "$RUNNER_TEMP/browser-source-map-results/report.json"
+          --out "$RUNNER_TEMP/browser-acceptance.json"
+      - name: Seal the validated candidate and verify its external npm consumer
+        env:
+          RELEASE_VERSION: ${{ inputs.release_version || '0.1.0' }}
+        run: |
+          node scripts/release/build-web-release.mjs --engine-report "$RUNNER_TEMP/browser-engine-report.json" --assets "$RUNNER_TEMP/browser-playground-site/release-assets.json" --out scripts/jsb.web-engine/dist --version "$RELEASE_VERSION" --validation-report "$RUNNER_TEMP/browser-acceptance.json"
+          node scripts/release/pin-web-release.mjs --site "$RUNNER_TEMP/browser-playground-site" --release scripts/jsb.web-engine/dist
+          node scripts/release/verify-web-release.mjs --dir scripts/jsb.web-engine/dist --require-certified --pack-out "$RUNNER_TEMP/browser-release-pack" --report "$RUNNER_TEMP/browser-release-verification.json"
+      - name: Keep the exact candidate, reports and source-build evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-playground-candidate-${{ github.sha }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            ${{ runner.temp }}/browser-engine-report.json
+            ${{ runner.temp }}/browser-engine-report.json.log
+            ${{ runner.temp }}/browser-preflight-results
+            ${{ runner.temp }}/browser-source-map-results
+            ${{ runner.temp }}/browser-playground-results
+            ${{ runner.temp }}/browser-authenticated-results
+            ${{ runner.temp }}/browser-stress-results
+            ${{ runner.temp }}/browser-acceptance.json
+            ${{ runner.temp }}/browser-release-pack
+            ${{ runner.temp }}/browser-release-verification.json
+            ${{ runner.temp }}/browser-playground-site
+            scripts/jsb.web-engine/dist

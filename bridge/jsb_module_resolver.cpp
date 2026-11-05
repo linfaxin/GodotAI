@@ -7,6 +7,8 @@ namespace jsb
 {
     namespace
     {
+        // Keep the evaluator's exact prefix shared with source-map registration.
+        constexpr char module_wrapper_header[] = "(function(exports,require,module,__filename,__dirname){";
         // the cost of copy return is acceptable since Vector copy constructor is by-reference under the hood
         PackedStringArray get_dynamic_search_paths()
         {
@@ -87,7 +89,6 @@ namespace jsb
 
     size_t DefaultModuleResolver::read_all_bytes_with_shebang(const internal::ISourceReader& p_reader, Vector<uint8_t>& o_bytes)
     {
-        static constexpr char header[] = "(function(exports,require,module,__filename,__dirname){";
         static constexpr char footer[] = "\n})";
 
         jsb_check(!p_reader.is_null());
@@ -95,13 +96,13 @@ namespace jsb
         jsb_check(file_len);
         o_bytes.resize((int) (
             file_len +
-            ::std::size(header) + ::std::size(footer) - 2
+            ::std::size(module_wrapper_header) + ::std::size(footer) - 2
             + 1 // zero_terminated anyway
         ));
 
-        memcpy(o_bytes.ptrw(), header, ::std::size(header) - 1);
-        p_reader.get_buffer(o_bytes.ptrw() + ::std::size(header) - 1, file_len);
-        memcpy(o_bytes.ptrw() + file_len + ::std::size(header) - 1, footer, ::std::size(footer)); // include the ending zero
+        memcpy(o_bytes.ptrw(), module_wrapper_header, ::std::size(module_wrapper_header) - 1);
+        p_reader.get_buffer(o_bytes.ptrw() + ::std::size(module_wrapper_header) - 1, file_len);
+        memcpy(o_bytes.ptrw() + file_len + ::std::size(module_wrapper_header) - 1, footer, ::std::size(footer)); // include the ending zero
         return o_bytes.size() - 1;
     }
 
@@ -570,6 +571,7 @@ namespace jsb
             v8::Context::Scope context_scope(context);
 
             const String source_url = p_reader.get_source_url();
+            p_env->get_source_map_cache().set_first_line_column_offset(source_url, (int) ::std::size(module_wrapper_header) - 1);
             Vector<uint8_t> source;
             const size_t len = read_all_bytes_with_shebang(p_reader, source);
             jsb_check((size_t)(int)len == len);

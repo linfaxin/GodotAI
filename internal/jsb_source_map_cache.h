@@ -16,6 +16,12 @@ namespace jsb::internal
 
         void clear();
 
+        // Native module evaluators prepend a wrapper on the first source line.
+        // Only registered modules receive this correction; raw stack fallbacks
+        // and scripts evaluated without a wrapper retain their real coordinates.
+        void set_first_line_column_offset(const String& p_filename, int p_columns);
+        bool remove_module_wrapper_offset(SourcePosition& r_position) const;
+
         // Stack coordinates are one-based; column zero is explicitly unknown.
         bool parse_stack_frame(const String& p_line, SourcePosition& r_position);
         static String resolve_source_path(const String& p_generated_file, const String& p_source_root, const String& p_source);
@@ -28,6 +34,7 @@ namespace jsb::internal
         Ref<RegEx> source_map_match2_;
         Ref<RegEx> source_map_match3_;
         HashMap<String, SourceMap> cached_source_maps_;
+        HashMap<String, int> first_line_column_offsets_;
     };
 }
 

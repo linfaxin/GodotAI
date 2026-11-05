@@ -44,6 +44,11 @@ See [Breaking Changes](https://godotjs.github.io/misc/breaking-changes/) if upgr
 
 ## Examples
 
+The pure-browser TSX Playground lives in [`apps/playground`](apps/playground).
+It compiles and type-checks projects in browser Workers and runs the generated
+PCK in actual Godot WASM. See the [implementation and local verification guide](docs/browser-playground.zh-CN.md)
+and [engine release workflow](scripts/release/README.web.md).
+
 For more information on how to use `GodotJS` in a project, check out [GodotJSExample](https://github.com/ialex32x/GodotJSExample.git) for examples written in typescript.  
 **And, don't forget to run `npm install` and `npx tsc` before opening the example project.**
 

@@ -1,0 +1,36 @@
+import * as React from 'react';
+import { VBoxContainer, HBoxContainer, PanelContainer, MarginContainer,
+  TextureRect, Label, Button, ProgressBar, asset, useAsset, vec2, color } from '@godot-js/react';
+import { Toggle } from '@godot-js/react/ui';
+
+const names = ['ROVER', 'STARSHIP', 'CRYSTAL'];
+const palettes = [color(1, 1, 1), color(0.55, 1, 0.86), color(1, 0.65, 0.85)];
+function Studio() {
+  // All PNG assets are project files. Select one in the file tree to inspect it.
+  const rover = useAsset(asset('rover', 'Texture2D'));
+  const ship = useAsset(asset('ship', 'Texture2D'));
+  const crystal = useAsset(asset('crystal', 'Texture2D'));
+  const [selected, setSelected] = React.useState(0);
+  const [palette, setPalette] = React.useState(0);
+  const [flipped, setFlipped] = React.useState(false);
+  const [large, setLarge] = React.useState(false);
+  React.useEffect(() => { console.log('PIXEL_STUDIO', JSON.stringify({ selected, palette, flipped, large })); }, [selected, palette, flipped, large]);
+  return <VBoxContainer customMinimumSize={vec2(420, 300)}>
+    <Label text="PIXEL STUDIO  /  Native texture playground" modulate={color(0.65, 0.88, 1)} />
+    <HBoxContainer>{names.map((name, index) => <Button key={name} name={'Select' + index} text={name}
+      customMinimumSize={vec2(136, 28)} toggleMode buttonPressed={selected === index} onPressed={() => setSelected(index)} />)}</HBoxContainer>
+    <PanelContainer><MarginContainer marginLeft={8} marginRight={8} marginTop={8} marginBottom={8}>
+      <TextureRect name="Artwork" texture={[rover, ship, crystal][selected]} flipH={flipped}
+        customMinimumSize={vec2(400, 112)} expandMode={1} stretchMode={large ? 6 : 4} modulate={palettes[palette]} />
+    </MarginContainer></PanelContainer>
+    <HBoxContainer>
+      <Toggle name="Mirror" text="Mirror" checked={flipped} onCheckedChange={setFlipped} customMinimumSize={vec2(136, 30)} />
+      <Toggle name="Zoom" text="Zoom to fill" checked={large} onCheckedChange={setLarge} customMinimumSize={vec2(136, 30)} />
+      <Button name="Palette" text={'Palette ' + (palette + 1)} onPressed={() => setPalette(n => (n + 1) % palettes.length)} customMinimumSize={vec2(136, 30)} />
+    </HBoxContainer>
+    <ProgressBar value={(selected + 1) / names.length * 100} showPercentage={false} />
+    <Label text={'ASSET  ' + (selected + 1) + ' / ' + names.length + '     ' + names[selected] + '     PNG / 32 x 32'} />
+    <Label text="Try a texture, mirror it, then change its color palette." />
+  </VBoxContainer>;
+}
+export default function App() { return <React.Suspense fallback={<Label text="Loading pixel assets..." />}><Studio /></React.Suspense>; }
