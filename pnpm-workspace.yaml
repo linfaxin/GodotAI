@@ -2,6 +2,7 @@ packages:
   - .
   - scripts/*
   - impl/web/bridge
+  - packages/*
   - apps/*
 onlyBuiltDependencies:
   - esbuild
