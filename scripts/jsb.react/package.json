@@ -33,6 +33,10 @@
     "./native-interfaces": {
       "types": "./dist/native-interfaces.d.ts",
       "default": "./dist/native-interfaces.js"
+    },
+    "./ui": {
+      "types": "./dist/ui.d.ts",
+      "default": "./dist/ui.js"
     }
   },
   "files": [

@@ -27,7 +27,7 @@ The [implementation and support matrix](docs/react-tsx-implementation.zh-CN.md) 
 
 This repository uses a pnpm workspace for embedded engine scripts and ecosystem packages. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and build commands, [the architecture guide](docs/architecture.md) for module boundaries, and [packages/README.md](packages/README.md) for package conventions.
 
-The [TSX package](packages/tsx/README.md) currently contains a private buildable foundation, separate from the existing React renderer. The [playground](apps/playground/README.md) is a documented future direction; it has no application or runtime implementation.
+The [TSX package](packages/tsx/README.md) currently contains a private buildable foundation, separate from the existing React renderer. The [playground](apps/playground/README.md) provides a static Monaco workbench, browser TSX compilation and isolated Godot WASM execution with fixed built-in dependencies.
 
 ---
 
@@ -49,6 +49,11 @@ See [Breaking Changes](https://godotjs.github.io/misc/breaking-changes/) if upgr
 - [x] Asynchronously loaded modules (limited support) (_temporarily only available in v8.impl, quickjs.impl_)
 
 ## Examples
+
+The pure-browser TSX Playground lives in [`apps/playground`](apps/playground).
+It compiles and type-checks projects in browser Workers and runs the generated
+PCK in actual Godot WASM. See the [implementation and local verification guide](docs/browser-playground.zh-CN.md)
+and [engine release workflow](scripts/release/README.web.md).
 
 For more information on how to use `GodotJS` in a project, check out [GodotJSExample](https://github.com/ialex32x/GodotJSExample.git) for examples written in typescript.  
 **And, don't forget to run `npm install` and `npx tsc` before opening the example project.**

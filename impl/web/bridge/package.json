@@ -2,7 +2,8 @@
   "name": "@godot-js/web-bridge",
   "private": true,
   "scripts": {
-    "build": "tsc"
+    "build": "tsc",
+    "test": "tsc && node --test test/*.test.mjs"
   },
   "devDependencies": {
     "@types/emscripten": "^1.41.5",

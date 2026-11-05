@@ -1,0 +1,83 @@
+{
+  "status": "passed",
+  "validatedAt": "2026-11-02T19:37:28.526000+08:00",
+  "browser": "154.0.8037.57",
+  "engine": "Godot 4.6.1 / Emscripten 4.0.11 / browser JS backend",
+  "mode": "production",
+  "profile": "core-ui-v1",
+  "threads": false,
+  "crossOriginIsolated": false,
+  "audio": "Dummy",
+  "physics": "Dummy",
+  "releaseCertified": false,
+  "webContainers": false,
+  "runtimeCompilationServer": false,
+  "browserChecks": [
+    {
+      "name": "no-cross-origin-isolation",
+      "status": "passed"
+    },
+    {
+      "name": "browser-tsx-syntax-diagnostic",
+      "status": "passed"
+    },
+    {
+      "name": "node-builtin-import-rejected",
+      "status": "passed"
+    },
+    {
+      "name": "browser-worker-tsx-and-pinned-jsdelivr-npm",
+      "status": "passed"
+    },
+    {
+      "name": "real-godot-wasm-boot",
+      "status": "passed"
+    },
+    {
+      "name": "real-canvas-click-updates-native-label",
+      "status": "passed"
+    },
+    {
+      "name": "edit-and-restart-fresh-generation",
+      "status": "passed"
+    },
+    {
+      "name": "clean-engine-exit",
+      "status": "passed"
+    },
+    {
+      "name": "static-server-only-no-runtime-node",
+      "status": "passed"
+    },
+    {
+      "name": "browser-generated-pck-without-pack-server",
+      "status": "passed"
+    },
+    {
+      "name": "sealed-module-tampering-rejected",
+      "status": "passed"
+    }
+  ],
+  "bridgeTests": {
+    "passed": 4,
+    "failed": 0
+  },
+  "artifactHashes": {
+    "assets/godot.wasm": "8ee59822d7b0e66119dba6995795a09c8e71df02a674a27cd928cd66528bfd19",
+    "assets/godot.js": "78aae691800f82bfac5b4bbb2a0d69f13d2bf04b45eaf8372ef7309a00db5389",
+    "assets/runtime.json": "506abfcf8f828233ea78ab0942563ac724c8e2501d3327889f9187b8b8b3ca72",
+    "compiler.js": "35aadc5b76ff3d7f10c8a48d6f2c4ad3db84aee149a5b6096a2160503f0d4ce4"
+  },
+  "fixes": [
+    "Guard Emscripten pthread globals omitted in threads=no builds",
+    "Release outstanding native value-type storage at isolate destruction",
+    "Unregister finalizers and ignore late callbacks after isolate release"
+  ],
+  "limitations": [
+    "Chromium / single-thread / core UI only; other engine/browser/profile combinations are not certified.",
+    "npm probe covers only pinned clsx@2.1.1, not general npm resolution.",
+    "No multi-file project, TypeScript semantic checking, resource import or state-preserving HMR.",
+    "Default WebAudio driver showed an initialization/teardown race during immediate startup-failure shutdown; this UI gate explicitly uses Dummy audio.",
+    "Engine WASM is a prebuilt static local asset; versioned npm/jsDelivr distribution of engine assets is not validated."
+  ]
+}

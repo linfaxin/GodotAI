@@ -1,0 +1,10 @@
+import * as React from 'react';
+import { Button, color, vec2 } from '@godot-js/react';
+
+export default function Upgrade(props: { title: string; cost: number; balance: number; disabled: boolean; onBuy: () => void }) {
+  const affordable = props.balance >= props.cost;
+  return <Button name={props.title} customMinimumSize={vec2(204, 32)}
+    text={props.title + ' / ' + props.cost + ' ore'}
+    disabled={props.disabled || !affordable} onPressed={props.onBuy}
+    modulate={affordable ? color(0.65, 1, 0.88) : color(0.7, 0.75, 0.82)} />;
+}

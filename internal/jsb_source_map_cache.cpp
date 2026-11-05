@@ -27,6 +27,7 @@ namespace jsb::internal
             {
                 key = ProjectSettings::get_singleton()->localize_path(key);
             }
+            if (!key.contains("://") && !key.is_absolute_path()) key = String("res://").path_join(key);
             return key;
         }
     }
@@ -120,6 +121,7 @@ namespace jsb::internal
             }
             if (!enabled) continue;
             const SourceMap* map = find_source_map(generated.filename);
+            if (!remove_module_wrapper_offset(generated)) continue;
             SourcePosition original;
             if (!map || !map_source_position(generated, *map, original)) continue;
 
@@ -175,12 +177,34 @@ namespace jsb::internal
             JSB_LOG(Verbose, "invalidating source map cache of file %s", p_filename);
     }
 
+    void SourceMapCache::set_first_line_column_offset(const String& p_filename, int p_columns)
+    {
+        const String key = source_map_key(p_filename);
+        if (p_columns > 0) first_line_column_offsets_.insert(key, p_columns);
+        else first_line_column_offsets_.erase(key);
+    }
+
+    bool SourceMapCache::remove_module_wrapper_offset(SourcePosition& r_position) const
+    {
+        if (r_position.line == 1 && r_position.column > 0)
+        {
+            if (const int* offset = first_line_column_offsets_.getptr(source_map_key(r_position.filename)))
+            {
+                // A location inside the wrapper itself has no authored map.
+                if (r_position.column <= *offset) return false;
+                r_position.column -= *offset;
+            }
+        }
+        return true;
+    }
+
     void SourceMapCache::clear()
     {
         source_map_match1_.unref();
         source_map_match2_.unref();
         source_map_match3_.unref();
         cached_source_maps_.clear();
+        first_line_column_offsets_.clear();
     }
 
     SourceMap* SourceMapCache::find_source_map(const String& p_filename)

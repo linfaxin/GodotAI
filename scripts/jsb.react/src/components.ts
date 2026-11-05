@@ -32,4 +32,17 @@ export interface CollisionShape2DProps extends Node2DProps {shape?:AssetRef<"Cir
 export const CharacterBody2D=component<"CharacterBody2D",CharacterBody2DProps>("CharacterBody2D");
 export const StaticBody2D=component<"StaticBody2D",StaticBody2DProps>("StaticBody2D");
 export const CollisionShape2D=component<"CollisionShape2D",CollisionShape2DProps>("CollisionShape2D");
-export const G=Object.freeze({Node,Node2D,Control,VBoxContainer,HBoxContainer,Label,Button,CanvasLayer,CharacterBody2D,StaticBody2D,CollisionShape2D});
+export type TextureAssetRef=AssetRef<'Texture2D'|'ImageTexture'|'CompressedTexture2D'>;
+export interface MarginContainerProps extends ControlProps {marginLeft?:number;marginRight?:number;marginTop?:number;marginBottom?:number}
+export interface ScrollContainerProps extends ControlProps {horizontalScrollMode?:0|1|2|3|4;verticalScrollMode?:0|1|2|3|4;followFocus?:boolean}
+export interface TextureRectProps extends ControlProps {texture?:TextureAssetRef|null;expandMode?:0|1|2|3|4|5;stretchMode?:0|1|2|3|4|5|6;flipH?:boolean;flipV?:boolean}
+/** ProgressBar uses a fixed 0..100 range with unquantized values. */
+export interface ProgressBarProps extends ControlProps {value?:number;minValue?:0;maxValue?:100;step?:0;showPercentage?:boolean;fillMode?:0|1|2|3;onValueChanged?:(value:number)=>void}
+export interface Sprite2DProps extends Node2DProps {texture?:TextureAssetRef|null;centered?:boolean;offset?:Vector2Value;flipH?:boolean;flipV?:boolean}
+export const PanelContainer=component<'PanelContainer',ControlProps>('PanelContainer');
+export const MarginContainer=component<'MarginContainer',MarginContainerProps>('MarginContainer');
+export const ScrollContainer=component<'ScrollContainer',ScrollContainerProps>('ScrollContainer');
+export const TextureRect=component<'TextureRect',TextureRectProps>('TextureRect');
+export const ProgressBar=component<'ProgressBar',ProgressBarProps>('ProgressBar');
+export const Sprite2D=component<'Sprite2D',Sprite2DProps>('Sprite2D');
+export const G=Object.freeze({Node,Node2D,Control,VBoxContainer,HBoxContainer,Label,Button,CanvasLayer,CharacterBody2D,StaticBody2D,CollisionShape2D,PanelContainer,MarginContainer,ScrollContainer,TextureRect,ProgressBar,Sprite2D});

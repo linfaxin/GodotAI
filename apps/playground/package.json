@@ -1,0 +1,17 @@
+{
+  "name": "@godot-js/playground",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "dependencies": {
+    "@godot-js/react-browser": "workspace:*",
+    "monaco-editor": "0.55.1"
+  },
+  "devDependencies": {
+    "clsx": "2.1.1",
+    "esbuild": "0.25.12"
+  }
+}

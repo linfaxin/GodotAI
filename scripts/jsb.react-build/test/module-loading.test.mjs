@@ -5,6 +5,21 @@ import os from 'node:os';
 import {promises as fs} from 'node:fs';
 import {bundleClosedModules} from '../dist/module-loading.js';
 import {buildProject} from '../dist/index.js';
+import {bundleClosedModulesWith} from '../dist/core/module-loading.js';
+import * as esbuild from 'esbuild';
+
+test('browser namespaces accept owned input aliases and validate the emitted external URI', async () => {
+  const uri = 'res://generated/react/test/vendor/react.js';
+  const options = rewritten => ({ entryPoints: ['entry'], bundle: true, write: false, format: 'cjs', platform: 'neutral', plugins: [{ name: 'browser-vfs', setup(build) {
+    build.onResolve({ filter: /^entry$/ }, () => ({ path: '/src/App.tsx', namespace: 'project' }));
+    build.onLoad({ filter: /.*/, namespace: 'project' }, () => ({ contents: 'import React from "react"; export default React;', loader: 'ts' }));
+    build.onResolve({ filter: /^react$/ }, () => ({ path: rewritten, external: true }));
+  } }] });
+  const result = await bundleClosedModulesWith(esbuild, options(uri), [uri], { react: uri });
+  assert(result.outputFiles[0].text.includes(uri));
+  await assert.rejects(bundleClosedModulesWith(esbuild, options('unregistered-package'), [uri], { react: uri }), /E_DYNAMIC_MODULE/);
+  await assert.rejects(bundleClosedModulesWith(esbuild, options(uri), []), /E_DYNAMIC_MODULE/);
+});
 
 test('unresolved loaders and escaped require in dependencies are rejected with source locations', async t=>{
   const root=await fs.mkdtemp(path.join(os.tmpdir(),'react-module-loading-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));

@@ -106,6 +106,8 @@ jobs:
           scons-flags: >-
             ${{ env.SCONS_FLAGS }}
             ${{ matrix.engine == 'qjs-ng' && 'use_quickjs_ng=yes' || '' }}
+            threads=${{ matrix.threads }}
+            dlink_enabled=${{ matrix.dlink }}
           platform: web
           target: ${{ matrix.target }}
 

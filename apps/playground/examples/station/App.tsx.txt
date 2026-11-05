@@ -1,0 +1,46 @@
+import * as React from 'react';
+import { VBoxContainer, HBoxContainer, MarginContainer, ScrollContainer,
+  Label, Button, TextureRect, ProgressBar, asset, useAsset, color, vec2 } from '@godot-js/react';
+import Upgrade from './Upgrade';
+import { INITIAL_STATE, MISSION_TARGET, update, drillCost, droneCost } from './game';
+
+function Outpost() {
+  const banner = useAsset(asset('outpost', 'Texture2D'));
+  const [station, dispatch] = React.useReducer(update, INITIAL_STATE);
+  const complete = station.mined >= MISSION_TARGET;
+  const disabled = complete || station.paused;
+  // Functional reducer updates keep the timer and button events consistent.
+  React.useEffect(() => {
+    if (disabled || station.drones === 0) return;
+    const timer = setInterval(() => dispatch({ type: 'tick' }), 1000);
+    return () => clearInterval(timer);
+  }, [disabled, station.drones]);
+  React.useEffect(() => {
+    console.log('OUTPOST', JSON.stringify(station));
+  }, [station]);
+  return <ScrollContainer customMinimumSize={vec2(448, 300)} horizontalScrollMode={0}>
+    <MarginContainer marginLeft={12} marginRight={12} marginTop={8} marginBottom={8}>
+      <VBoxContainer customMinimumSize={vec2(416, 0)}>
+        <Label text="ORBITAL OUTPOST  /  Mining expedition" modulate={color(0.65, 0.88, 1)} />
+        <TextureRect texture={banner} customMinimumSize={vec2(416, 56)} expandMode={1} stretchMode={0} />
+        <Label text={'ORE  ' + station.ore + '      DRILL  +' + station.drill + '      DRONES  ' + station.drones + '/s'} />
+        <ProgressBar name="MissionProgress" value={station.mined / MISSION_TARGET * 100} />
+        <Button name="Mine" customMinimumSize={vec2(416, 38)}
+          text={complete ? 'MISSION COMPLETE!  /  Cargo ready' : 'Mine asteroid   +' + station.drill + ' ore'}
+          disabled={disabled} onPressed={() => dispatch({ type: 'mine' })} modulate={color(0.65, 1, 0.88)} />
+        <HBoxContainer>
+          <Upgrade title="Upgrade drill" cost={drillCost(station.drill)} balance={station.ore} disabled={disabled} onBuy={() => dispatch({ type: 'drill' })} />
+          <Upgrade title="Build drone" cost={droneCost(station.drones)} balance={station.ore} disabled={disabled} onBuy={() => dispatch({ type: 'drone' })} />
+        </HBoxContainer>
+        <Label name="MissionStatus" text={complete ? 'Well done, captain! Start a new expedition below.' : station.paused ? 'Expedition paused.' : 'MISSION  ' + station.mined + ' / ' + MISSION_TARGET + ' mined  /  Upgrades spend ore.'} />
+        <HBoxContainer>
+          <Button name="Pause" text={station.paused ? 'Resume' : 'Pause'} disabled={complete} onPressed={() => dispatch({ type: 'pause' })} customMinimumSize={vec2(204, 28)} />
+          <Button name="Restart" text="New expedition" onPressed={() => dispatch({ type: 'reset' })} customMinimumSize={vec2(204, 28)} />
+        </HBoxContainer>
+      </VBoxContainer>
+    </MarginContainer>
+  </ScrollContainer>;
+}
+export default function App() {
+  return <React.Suspense fallback={<Label text="Preparing expedition..." />}><Outpost /></React.Suspense>;
+}

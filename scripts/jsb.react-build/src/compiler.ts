@@ -16,6 +16,7 @@ import { generateNativeInterface } from "./native-interfaces.js";
 import {discoverNativeTarget,discoverNativeReport} from "./native-target.js";
 import { fail, type BuildOptions, type BuildResult, type ProjectConfig } from "./types.js";
 import {bundleClosedModules} from "./module-loading.js";
+import { CANONICAL_IMPORTS } from './core/imports.js';
 
 export const COMPILER_VERSION = "0.1.0";
 interface PreparedProject { config: ProjectConfig; snapshot: Snapshot; templates: ImportedTemplate[]; resources: Map<string, ManifestResource>; runtimeRoot: string; compilerOptions: ts.CompilerOptions; program: ts.Program; }
@@ -132,17 +133,17 @@ function externalNative(): esbuild.Plugin {
 async function bundleRuntime(prepared: PreparedProject, generation: string): Promise<{ uri: string; outputs: Record<string, string>; shims: Record<string, string> }> {
   const { config, runtimeRoot, snapshot, templates } = prepared;
   const resolver = createRequire(path.join(runtimeRoot, "package.json"));
-  const runtimeMain = resolver.resolve("@godot-js/react"), godot = resolver.resolve("@godot-js/react/godot"), scheduler = resolver.resolve("@godot-js/react/scheduler"), nativeInterfaces = resolver.resolve("@godot-js/react/native-interfaces"),contracts=resolver.resolve("@godot-js/react/contracts"),schema=resolver.resolve("@godot-js/react/schema");
+  const runtimeMain = resolver.resolve("@godot-js/react"), godot = resolver.resolve("@godot-js/react/godot"), scheduler = resolver.resolve("@godot-js/react/scheduler"), nativeInterfaces = resolver.resolve("@godot-js/react/native-interfaces"),contracts=resolver.resolve("@godot-js/react/contracts"),schema=resolver.resolve("@godot-js/react/schema"),ui=resolver.resolve("@godot-js/react/ui");
   const nodePaths = [path.join(runtimeRoot, "node_modules"), path.join(config.projectRoot, "node_modules")];
   const outfile = within(config.projectRoot, `.godot/GodotJS/react-build/${generation}/runtime/runtime.js`);
-  const bundle = await esbuild.build({ stdin: { contents: `exports.React=require("react");exports.jsxRuntime=require("react/jsx-runtime");exports.jsxDevRuntime=require("react/jsx-dev-runtime");exports.sdk=require(${JSON.stringify(runtimeMain)});exports.godot=require(${JSON.stringify(godot)});exports.nativeInterfaces=require(${JSON.stringify(nativeInterfaces)});exports.scheduler=require(${JSON.stringify(scheduler)});exports.contracts=require(${JSON.stringify(contracts)});exports.schema=require(${JSON.stringify(schema)});`, resolveDir: runtimeRoot, sourcefile: "godot-react-runtime-entry.js", loader: "js" },
+  const bundle = await esbuild.build({ stdin: { contents: `exports.React=require("react");exports.jsxRuntime=require("react/jsx-runtime");exports.jsxDevRuntime=require("react/jsx-dev-runtime");exports.sdk=require(${JSON.stringify(runtimeMain)});exports.godot=require(${JSON.stringify(godot)});exports.nativeInterfaces=require(${JSON.stringify(nativeInterfaces)});exports.scheduler=require(${JSON.stringify(scheduler)});exports.contracts=require(${JSON.stringify(contracts)});exports.schema=require(${JSON.stringify(schema)});exports.ui=require(${JSON.stringify(ui)});`, resolveDir: runtimeRoot, sourcefile: "godot-react-runtime-entry.js", loader: "js" },
     bundle: true, write: false, platform: "neutral", format: "cjs", mainFields: ["main", "module"], target: "es2022", outfile, sourcemap: "external", sourcesContent: true, nodePaths,inject:[path.join(runtimeRoot,"dist","internal","performance.mjs")],
     define: { "process.env.NODE_ENV": JSON.stringify(config.mode) }, plugins: [externalNative(), { name: "godot-scheduler", setup(b) { b.onResolve({ filter: /^scheduler$/ }, () => ({ path: scheduler })); } }],
   });
   const outputs: Record<string, string> = {};
   for (const file of bundle.outputFiles!) outputs[toRes(config.projectRoot, file.path)] = file.path.endsWith(".map") ? normalizeSourceMap(file.text, outfile, snapshot.root, runtimeRoot, templates) : `${file.text}\n//# sourceMappingURL=runtime.js.map\n`;
   const uri = toRes(config.projectRoot, outfile), shims: Record<string, string> = {};
-  for (const [specifier, member] of Object.entries({ react: "React", "react/jsx-runtime": "jsxRuntime", "react/jsx-dev-runtime": "jsxDevRuntime", "@godot-js/react": "sdk", "@godot-js/react/godot": "godot", "@godot-js/react/native-interfaces": "nativeInterfaces",scheduler:"scheduler","@godot-js/react/scheduler":"scheduler","@godot-js/react/contracts":"contracts","@godot-js/react/schema":"schema" })) {
+  for (const [specifier, member] of Object.entries(CANONICAL_IMPORTS)) {
     const shimUri = `res://.godot/GodotJS/react-build/${generation}/runtime/shim-${Object.keys(shims).length}.js`;
     outputs[shimUri] = `module.exports=require(${JSON.stringify(uri)}).${member};\n`; shims[specifier] = shimUri;
   }

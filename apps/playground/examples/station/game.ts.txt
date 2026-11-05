@@ -1,0 +1,24 @@
+// Try changing these numbers, then run again.
+export const MISSION_TARGET = 120;
+export const INITIAL_STATE = { ore: 0, mined: 0, drill: 1, drones: 0, paused: false };
+export type Station = typeof INITIAL_STATE;
+export type Action = { type: 'mine' | 'tick' | 'drill' | 'drone' | 'pause' | 'reset' };
+export const drillCost = (level: number) => level * 8;
+export const droneCost = (count: number) => 12 + count * 10;
+
+export function update(state: Station, action: Action): Station {
+  if (action.type === 'reset') return { ...INITIAL_STATE };
+  if (action.type === 'pause') return { ...state, paused: !state.paused };
+  if (state.paused || state.mined >= MISSION_TARGET) return state;
+  if (action.type === 'mine' || action.type === 'tick') {
+    const amount = Math.min(action.type === 'mine' ? state.drill : state.drones, MISSION_TARGET - state.mined);
+    return { ...state, ore: state.ore + amount, mined: state.mined + amount };
+  }
+  if (action.type === 'drill' && state.ore >= drillCost(state.drill)) {
+    return { ...state, ore: state.ore - drillCost(state.drill), drill: state.drill + 1 };
+  }
+  if (action.type === 'drone' && state.ore >= droneCost(state.drones)) {
+    return { ...state, ore: state.ore - droneCost(state.drones), drones: state.drones + 1 };
+  }
+  return state;
+}
