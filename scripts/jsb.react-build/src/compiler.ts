@@ -4,7 +4,8 @@ import { createRequire } from "node:module";
 import ts from "typescript";
 import * as esbuild from "esbuild";
 import { RUNTIME_ABI, NATIVE_BRIDGE_ABI, REACT_VERSIONS, canonicalJson, validateRuntimeManifest, type RuntimeManifestV1, type ManifestArtifact, type ManifestModule, type ManifestResource, type TargetCertification } from "@godot-js/react/contracts";
-import { profileReference,HOST_SCHEMA,PHYSICS_HOST_SCHEMA,getHostSchema } from "@godot-js/react/schema";
+import { profileReference } from "@godot-js/react/schema";
+import { checkHostProfile } from './host-profile.js';
 import { loadConfig, entryConfig } from "./config.js";
 import { atomicJson, command, exists, fromRes, generationId, readJson, sha256, slash, snapshotProject, toRes, verifySnapshot, within, write, type Snapshot } from "./fs.js";
 import { acquirePublisher, generatedRoot, sealManifest, stopManagedApplications } from "./publication.js";
@@ -97,10 +98,7 @@ async function prepare(config: ProjectConfig, staging: string): Promise<Prepared
   if (config.verification?.entry) roots.push(within(snapshot.root, config.verification.entry));
   const program = ts.createProgram(roots, compilerOptions);
   const diagnostics = ts.getPreEmitDiagnostics(program); if (diagnostics.length) fail("E_TYPESCRIPT", formatDiagnostics(diagnostics));
-  const checker=program.getTypeChecker(),knownHosts=new Set([...Object.keys(HOST_SCHEMA),...Object.keys(PHYSICS_HOST_SCHEMA)]);
-  for(const file of program.getSourceFiles())if(!file.isDeclarationFile&&file.fileName.startsWith(snapshot.root)){
-    const visit=(node:ts.Node)=>{if(ts.isJsxOpeningElement(node)||ts.isJsxSelfClosingElement(node)){let symbol=checker.getSymbolAtLocation(node.tagName);if(symbol?.flags&&symbol.flags&ts.SymbolFlags.Alias)symbol=checker.getAliasedSymbol(symbol);if(symbol&&knownHosts.has(symbol.name)&&symbol.declarations?.some(d=>path.resolve(d.getSourceFile().fileName).startsWith(path.join(runtimeRoot,"dist")))){try{getHostSchema(symbol.name,config.profileId);}catch{const point=file.getLineAndCharacterOfPosition(node.getStart(file));fail("E_PROFILE_UNSUPPORTED",`${symbol.name} requires a different capability profile (${slash(path.relative(snapshot.root,file.fileName))}:${point.line+1}:${point.character+1})`);}}}ts.forEachChild(node,visit);};visit(file);
-  }
+  checkHostProfile(program, runtimeRoot, snapshot.root, config.profileId);
   for (const id of Object.keys(config.entries)) {
     const entry = entryConfig(config, id), file = program.getSourceFile(within(snapshot.root, entry.module));
     if (!file) fail("E_ENTRY", `Entry ${id} is not a program source`);

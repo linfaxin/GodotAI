@@ -1,0 +1,128 @@
+import * as React from 'react';
+import { Node, Node2D, CanvasLayer, StaticBody2D, CharacterBody2D, CollisionShape2D,
+  Sprite2D, PanelContainer, MarginContainer, VBoxContainer, HBoxContainer, TextureRect,
+  ProgressBar, Button, Label, asset, useAsset, useNodeRef, useNativeReady,
+  usePhysicsProcess, vec2, color } from '@godot-js/react';
+
+function World() {
+  // Load every possible texture before publishing the physics scene. Changing
+  // skins then cannot suspend and hide a body that is already moving.
+  const rover = useAsset(asset('rover', 'Texture2D'));
+  const ship = useAsset(asset('ship', 'Texture2D'));
+  const crystal = useAsset(asset('crystal', 'Texture2D'));
+  const floor = useAsset(asset('floor', 'RectangleShape2D'));
+  const wall = useAsset(asset('wall', 'RectangleShape2D'));
+  const actor = useAsset(asset('actor', 'CircleShape2D'));
+  const body = useNodeRef<'CharacterBody2D'>();
+  const sprite = useNodeRef<'Sprite2D'>();
+  const floorNode = useNodeRef<'StaticBody2D'>();
+  const floorSprite = useNodeRef<'Sprite2D'>();
+  const rightWall = useNodeRef<'StaticBody2D'>();
+  const hudAnchor = useNodeRef<'Node2D'>();
+  const hudPanel = useNodeRef<'PanelContainer'>();
+  const layoutLogged = React.useRef(false);
+  const [round, setRound] = React.useState(0);
+  const [paused, setPaused] = React.useState(false);
+  const [skin, setSkin] = React.useState<'rover' | 'ship'>('rover');
+  const [bounces, setBounces] = React.useState(0);
+  const controls = React.useRef({ paused: false, kick: false, direction: 1, ticks: 0, readyRound: -1 });
+
+  React.useEffect(() => {
+    console.log('GAME2D_STATUS', JSON.stringify({ round, paused, skin, bounces }));
+  }, [round, paused, skin, bounces]);
+  useNativeReady(sprite, () => {
+    console.log('GAME2D_NATIVE', JSON.stringify({ round, body: body.current?.nativeKey, sprite: sprite.current?.nativeKey }));
+  });
+  useNativeReady(hudPanel, panel => {
+    if (layoutLogged.current || !floorNode.current || !floorSprite.current || !rightWall.current || !hudAnchor.current) return;
+    const position = hudAnchor.current.readPosition();
+    const minimum = panel.read<{ x: number; y: number }>('customMinimumSize');
+    layoutLogged.current = true;
+    console.log('GAME2D_LAYOUT', JSON.stringify({
+      floor: floorNode.current.readPosition(), floorScale: floorSprite.current.read('scale'),
+      rightWall: rightWall.current.readPosition(),
+      hud: { x: position.x, y: position.y, width: minimum.x, height: minimum.y },
+      hudSizeKind: 'customMinimumSize',
+    }));
+  });
+  React.useLayoutEffect(() => {
+    if (body.current && sprite.current) console.log('GAME2D_SKIN', JSON.stringify({ round, skin, body: body.current.nativeKey, sprite: sprite.current.nativeKey }));
+  }, [round, skin]);
+
+  usePhysicsProcess(body, { writes: ['position', 'velocity'] }, (commands, dt) => {
+    const input = controls.current;
+    if (!input.paused) {
+      const previous = commands.readVelocity();
+      let vx = previous.x || 140 * input.direction;
+      let vy = Math.min(previous.y + 720 * dt, 520);
+      if (input.kick) { vy = -340; input.kick = false; }
+      commands.setVelocity(vec2(vx, vy));
+      const collided = commands.moveAndSlide();
+      const position = commands.readPosition();
+      if (collided) {
+        if (position.x < 62 || position.x > 536) {
+          input.direction = position.x < 62 ? 1 : -1;
+          vx = 140 * input.direction;
+        }
+        if (position.y > 270 && vy > 10) { vy = -Math.max(230, vy * 0.86); setBounces(n => n + 1); }
+        if (position.y < 180 && vy < 0) vy = Math.abs(vy);
+        commands.setVelocity(vec2(vx, vy));
+        if (input.readyRound !== round && sprite.current?.isValid()) {
+          input.readyRound = round;
+          console.log('GAME2D_READY', JSON.stringify({ round, body: commands.nativeKey, sprite: sprite.current.nativeKey, x: position.x, y: position.y, skin }));
+        }
+      }
+    }
+    if (++input.ticks % 60 === 0) {
+      const position = commands.readPosition(), velocity = commands.readVelocity();
+      console.log('GAME2D_TICK', JSON.stringify({ round, paused: input.paused, x: position.x, y: position.y, velocityX: velocity.x, velocityY: velocity.y }));
+    }
+  });
+
+  function togglePause() { controls.current.paused = !controls.current.paused; setPaused(controls.current.paused); }
+  function reset() {
+    controls.current.kick = false; controls.current.direction = 1;
+    setRound(n => n + 1); setBounces(0);
+  }
+  // Fit the complete chamber and HUD inside the embedded 578 x 323 canvas.
+  return <Node name="Game2D">
+    <StaticBody2D name="Floor" ref={floorNode} position={vec2(300, 304)}>
+      <CollisionShape2D shape={floor} />
+      <Sprite2D ref={floorSprite} texture={crystal} scale={vec2(16.5, 0.5)} modulate={color(0.45, 0.75, 0.9)} />
+    </StaticBody2D>
+    <StaticBody2D name="Ceiling" position={vec2(300, 156)}><CollisionShape2D shape={floor} /></StaticBody2D>
+    <StaticBody2D name="LeftWall" position={vec2(38, 230)}><CollisionShape2D shape={wall} /></StaticBody2D>
+    <StaticBody2D name="RightWall" ref={rightWall} position={vec2(560, 230)}><CollisionShape2D shape={wall} /></StaticBody2D>
+    <CharacterBody2D key={round} name="Actor" ref={body}
+      initial={{ position: vec2(140, 205), velocity: vec2(140, 0) }} engineOwned={['position', 'velocity']}>
+      <CollisionShape2D shape={actor} />
+      <Sprite2D name="ActorSprite" ref={sprite} texture={skin === 'rover' ? rover : ship} scale={vec2(1.5, 1.5)} />
+    </CharacterBody2D>
+    <CanvasLayer layer={1}>
+      <Node2D ref={hudAnchor} position={vec2(20, 12)}>
+        <PanelContainer ref={hudPanel} customMinimumSize={vec2(540, 126)}>
+          <MarginContainer marginLeft={12} marginRight={12} marginTop={8} marginBottom={8}>
+            <VBoxContainer>
+              <HBoxContainer>
+                <TextureRect texture={skin === 'rover' ? rover : ship} customMinimumSize={vec2(24, 24)} expandMode={1} stretchMode={5} />
+                <Label text="2D FIELD LAB  /  Textures + real physics" modulate={color(0.65, 0.88, 1)} />
+              </HBoxContainer>
+              <Label text={'BOUNCES  ' + bounces + '    SKIN  ' + skin.toUpperCase() + '    ROUND  ' + (round + 1)} />
+              <ProgressBar value={Math.min(bounces * 10, 100)} showPercentage={false} customMinimumSize={vec2(500, 8)} />
+              <HBoxContainer>
+                <Button name="LaunchGame2D" text="Launch" customMinimumSize={vec2(106, 30)} disabled={paused} onPressed={() => { controls.current.kick = true; }} />
+                <Button name="PauseGame2D" text={paused ? 'Resume' : 'Pause'} customMinimumSize={vec2(106, 30)} onPressed={togglePause} />
+                <Button name="ResetGame2D" text="Reset" customMinimumSize={vec2(106, 30)} onPressed={reset} />
+                <Button name="TextureGame2D" text={skin === 'rover' ? 'Rover' : 'Ship'} customMinimumSize={vec2(106, 30)} onPressed={() => setSkin(value => value === 'rover' ? 'ship' : 'rover')} />
+              </HBoxContainer>
+            </VBoxContainer>
+          </MarginContainer>
+        </PanelContainer>
+      </Node2D>
+    </CanvasLayer>
+  </Node>;
+}
+
+export default function App() {
+  return <React.Suspense fallback={<Label text="Preparing textures and collision shapes..." />}><World /></React.Suspense>;
+}

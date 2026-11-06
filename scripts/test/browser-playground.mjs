@@ -9,6 +9,7 @@ import { options, digest, within, inspectRelease, canonical, hashSiteRuntimeFile
 import { browserDriver } from './browser-launch.mjs';
 import { verifyWorkbench } from './browser-workbench.mjs';
 import { verifyDemos } from './browser-demos.mjs';
+import { verifyGame2D, waitGame2D } from './browser-game-2d.mjs';
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const args = options(process.argv.slice(2), ['--smoke-only', '--authenticated-gate']);
@@ -38,7 +39,8 @@ context.on('request', request => requests.push({ method: request.method(), url: 
 page.on('requestfailed', request => logs.push({ type: 'requestfailed', text: request.url() + ': ' + request.failure()?.errorText }));
 await page.addInitScript(()=>addEventListener('unhandledrejection',event=>console.error('UNHANDLED_STACK '+(event.reason?.stack??String(event.reason)))));
 const report = { status: 'running', browser: browser.version(), browserFamily: driver.name, checks: [], startedAt: new Date().toISOString() };
-const pass = (name, details = {}) => report.checks.push({ name, status: 'passed', ...details });
+const pass = (name, details = {}) => report.checks.push({ name, status: 'passed', ...details, browserFamily: driver.name, browserVersion: report.browser });
+const artifactProfile = () => page.evaluate(() => ({ profileId: playground.lastArtifact.manifest.profile.id, sdkMode: playground.lastArtifact.manifest.mode }));
 async function siteArtifacts() {
   return hashSiteRuntimeFiles(site);
 }
@@ -120,7 +122,7 @@ try {
   await page.waitForFunction(() => playground.events.some(event => event.type === 'log' && event.text.includes('"text":"Count: 1"')), null, { timeout: 15000 });
   const first = await page.evaluate(() => ({ buildKey: playground.lastArtifact.buildKey, generation: playground.lastArtifact.generation, hash: playground.lastArtifact.manifest.sourceSnapshotHash }));
   await page.screenshot({ path: resolve(out, 'playground.png'), fullPage: true });
-  pass('real-cross-origin-godot-counter-click', first);
+  pass('real-cross-origin-godot-counter-click', { ...first, ...await artifactProfile() });
   if (!args['smoke-only']) report.checks.push(...await verifyWorkbench(page,out));
   if (gated) {
     for (const kind of ['engine-js', 'engine-wasm']) {
@@ -201,7 +203,7 @@ try {
     assert(!mediaEvents.some(event => event.type === 'log' && event.level === 'error'));
     await page.screenshot({ path: resolve(out, 'media.png'), fullPage: true });
     assert.equal((await page.evaluate(() => playground.stop())).reason, 'clean-exit');
-    pass('png-ui-media-native-controls-and-controlled-baseline');
+    pass('png-ui-media-native-controls-and-controlled-baseline', await artifactProfile());
     const physicsSource = await readFile(resolve(repo, 'tests/react/physics/src/Physics.tsx'), 'utf8');
     const floor = await readFile(resolve(repo, 'tests/react/physics/assets/floor-shape.tres'), 'utf8');
     const actor = await readFile(resolve(repo, 'tests/react/physics/assets/actor-shape.tres'), 'utf8');
@@ -211,16 +213,49 @@ try {
     await page.waitForFunction(runId => playground.events.some(event => event.runId === runId && event.type === 'log' && event.text.includes('GODOT_REACT_PHYSICS_BEHAVIOR_OK')), physicsRun.runId, { timeout: 45000 });
     assert(await page.evaluate(runId => playground.events.some(event => event.runId === runId && event.text?.includes('GODOT_REACT_PHYSICS_STALE_TOKEN_OK')), physicsRun.runId));
     assert.equal((await page.evaluate(() => playground.stop())).reason, 'clean-exit');
-    pass('real-web-physics-collision-and-stale-command-rejection');
+    pass('real-web-physics-collision-and-stale-command-rejection', await artifactProfile());
+    const unsupported = structuredClone(physics); unsupported.config.profileId = 'future-2d-v999';
+    const runsBeforeUnsupported = await page.evaluate(() => playground.runs.length);
+    await page.evaluate(project => playground.importProject(project), unsupported);
+    assert.equal(await page.evaluate(() => playground.exportProject().config.profileId), 'future-2d-v999');
+    assert.equal(await page.locator('#profile').inputValue(), 'future-2d-v999');
+    assert.match(await page.locator('#profile option:checked').textContent(), /当前运行版本不支持/);
+    assert.equal(await page.locator('#profile option:checked').isDisabled(), true);
+    assert(await page.evaluate(() => playground.diagnostics.some(item => item.code === 'E_PROFILE_UNSUPPORTED')));
+    assert.equal(await page.evaluate(() => playground.runs.length), runsBeforeUnsupported);
+    assert.equal(await page.locator('#preview iframe').count(), 0);
+    assert.equal(await page.evaluate(() => playground.exportProject().files['/src/App.tsx']), physicsSource);
+    pass('unsupported-profile-retained-and-refused-with-explicit-ui');
+    const combination = await verifyGame2D(page, { repo, out, browserFamily: driver.name, browserVersion: report.browser,
+      expectedProfile: initialRelease.profiles.find(profile => profile.id === 'game-2d-v1') });
+    report.checks.push(...combination.checks); report.coverage = combination.coverage;
     report.checks.push(...await verifyDemos(page, out));
-    await page.click('#share');
-    await page.waitForURL(url => url.hash.startsWith('#project='));
+    // Restore the mixed project from IndexedDB, then share and explicitly run it.
+    await page.evaluate(project => playground.importProject(project), combination.productionProject);
+    await waitGame2D(page, await page.evaluate(() => playground.runs.at(-1).runId));
+    await page.waitForFunction(() => document.getElementById('saved').textContent === '已自动保存');
     await page.reload();
     await page.waitForFunction(() => window.playground?.ready, null, { timeout: 180000 });
-    assert.equal(await page.evaluate(() => playground.exportProject().config.profileId), 'behavior-physics-v1');
+    assert.equal(await page.evaluate(() => playground.exportProject().config.profileId), 'game-2d-v1');
+    await page.waitForFunction(() => playground.runs.length === 1 && !!playground.runs[0].runId, null, { timeout: 90000 });
+    await waitGame2D(page, await page.evaluate(() => playground.runs.at(-1).runId));
+    pass('game-2d-indexeddb-restores-and-automatically-runs');
+    await page.click('#share');
+    await page.waitForURL(url => url.hash.startsWith('#project='));
+    // Sharing is a fresh-visitor test. Retire the current native preview before
+    // navigation; active-engine reload is covered by the IndexedDB case above.
+    const sharedExit = await page.evaluate(() => playground.stop());
+    assert.equal(sharedExit.reason, 'clean-exit'); assert.equal(sharedExit.code, 0);
+    await page.reload();
+    await page.waitForFunction(() => window.playground?.ready, null, { timeout: 180000 });
+    assert.equal(await page.evaluate(() => playground.exportProject().config.profileId), 'game-2d-v1');
     assert.equal(await page.locator('iframe').count(), 0, 'Shared projects require an explicit Run');
     pass('compressed-share-restores-without-autorun');
     await page.evaluate(url => playground.setPreviewUrl(url), previewServer.url + '/preview.html');
+    await page.evaluate(() => playground.run());
+    await waitGame2D(page, await page.evaluate(() => playground.runs.at(-1).runId));
+    assert.equal((await page.evaluate(() => playground.stop())).reason, 'clean-exit');
+    pass('game-2d-shared-project-manually-runs');
     await page.locator('#files .file').filter({hasText:'App.tsx'}).click({button:'right'});await page.click('#rename-file');
     await page.fill('#filename', '/src/Renamed.tsx'); await page.locator('#file-form button').click();
     assert.equal(await page.evaluate(() => playground.exportProject().config.entry), '/src/Renamed.tsx');
@@ -254,9 +289,18 @@ try {
   report.status = 'passed';
 } catch (error) {
   report.status = 'failed'; report.failure = String(error); report.stack = error.stack; process.exitCode = 1;
-  await page.screenshot({ path: resolve(out, 'failure.png'), fullPage: true }).catch(() => {});
+  await page.screenshot({ path: resolve(out, 'failure.png'), fullPage: true, timeout: 10000 }).catch(() => {});
 } finally {
-  report.state = await page.evaluate(() => window.playground && { ready: playground.ready, revision: playground.revision, diagnostics: playground.diagnostics, errors: playground.errors, events: playground.events.slice(-80), runs: playground.runs }).catch(() => null);
+  let stateDeadline;
+  try {
+    report.state = await Promise.race([
+      page.evaluate(() => window.playground && { ready: playground.ready, revision: playground.revision, diagnostics: playground.diagnostics, errors: playground.errors, events: playground.events.slice(-80), runs: playground.runs }).catch(() => null),
+      new Promise(resolve => { stateDeadline = setTimeout(() => resolve(null), 10000); }),
+    ]);
+  } finally { clearTimeout(stateDeadline); }
+  if (!report.state) {
+    report.status = 'failed'; report.failure ??= 'Final page state could not be read before its deadline'; process.exitCode = 1;
+  }
   report.logs = logs; report.pageErrors = pageErrors; report.network = requests;
   report.externalRequests=externalRequests;
   report.staticRequests = server.requests;
@@ -274,7 +318,7 @@ try {
     report.siteArtifactHashes = await siteArtifacts();
     assert.equal(canonical(report.siteArtifactHashes), canonical(initialSiteArtifacts), 'Static runtime templates must not change during validation');
     for (const path of ['index.html', 'main.js', 'compiler-worker.js', 'types-worker.js', 'preview.html', 'preview.js']) assert(report.siteArtifactHashes[path], `Missing validated static template ${path}`);
-    report.scope = { browser: ({ chromium: 'Chromium', firefox: 'Firefox', webkit: 'Playwright WebKit (Linux)' })[driver.name] + ' ' + report.browser, sdkModes: report.checks.some(check => check.name === 'development-sdk-real-web-boot') ? ['production', 'development'] : ['production'], profiles: ['core-ui-v1', ...(report.checks.some(check => check.name === 'png-ui-media-native-controls-and-controlled-baseline') ? ['ui-media-v1'] : []), ...(report.checks.some(check => check.name === 'real-web-physics-collision-and-stale-command-rejection') ? ['behavior-physics-v1'] : [])], engineTarget: release.engine.target, threads: false, crossOriginIsolated: false, audio: 'Dummy' };
+    report.scope = { browser: ({ chromium: 'Chromium', firefox: 'Firefox', webkit: 'Playwright WebKit (Linux)' })[driver.name] + ' ' + report.browser, sdkModes: report.checks.some(check => check.name === 'development-sdk-real-web-boot') ? ['production', 'development'] : ['production'], profiles: ['core-ui-v1', ...(report.checks.some(check => check.name === 'png-ui-media-native-controls-and-controlled-baseline') ? ['ui-media-v1'] : []), ...(report.checks.some(check => check.name === 'real-web-physics-collision-and-stale-command-rejection') ? ['behavior-physics-v1'] : []), ...(report.coverage?.length === 2 ? ['game-2d-v1'] : [])], engineTarget: release.engine.target, threads: false, crossOriginIsolated: false, audio: 'Dummy' };
   } catch (error) { report.status = 'failed'; report.failure = String(error); process.exitCode = 1; }
   report.finishedAt = new Date().toISOString();
   await writeFile(resolve(out, 'report.json'), JSON.stringify(report, null, 2));

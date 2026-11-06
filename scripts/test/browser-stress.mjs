@@ -12,6 +12,9 @@ const configuration = options(process.argv.slice(2));
 const site = resolve(configuration.site ?? resolve(repository, '../work/browser-implementation/site'));
 const out = resolve(configuration.out ?? resolve(repository, '../work/browser-implementation/stress'));
 const iterations = Number(configuration.iterations ?? 100), failures = Number(configuration.failures ?? 20);
+const fixture = configuration.fixture ?? 'counter', sdkMode = configuration.mode ?? 'production';
+if (!['counter', 'game2d'].includes(fixture) || !['production', 'development'].includes(sdkMode)) throw Error('Expected --fixture counter|game2d --mode production|development');
+const identity = () => ({ fixture, profileId: fixture === 'game2d' ? 'game-2d-v1' : 'core-ui-v1', sdkMode });
 for (const [key, value] of [['iterations', iterations], ['failures', failures]]) if (!Number.isSafeInteger(value) || value < 0 || value > 10000) throw Error(`Invalid --${key}`);
 await mkdir(out, { recursive: true });
 let playwrightModule = process.env.PLAYWRIGHT_MODULE;
@@ -36,7 +39,7 @@ page.on('pageerror', error => pageErrors.push(String(error)));
 page.on('console', event => { if (event.type() === 'error') { consoleErrors.push(event.text()); if (consoleErrors.length > 100) consoleErrors.shift(); } });
 const report = {
   status: 'running', browser: browser.version(), startedAt: new Date().toISOString(),
-  requested: { iterations, failures }, checks: [], cycles: [], failureCycles: [], samples: [],
+  requested: { iterations, failures, fixture, sdkMode }, checks: [], cycles: [], failureCycles: [], samples: [],
   limitations: [
     'Parent-page JS heap and DOM counters do not measure the native heap or every cross-site renderer.',
     'Native counts and logs, when available, are observed diagnostics rather than a memory-zero-leak certificate.',
@@ -67,7 +70,8 @@ async function runArtifact() {
   assert(result.runId && !seenRuns.has(result.runId), 'Every engine instance has a fresh runId');
   seenRuns.add(result.runId);
   await page.waitForFunction(runId => playground.events.some(event => event.type === 'log' && event.runId === runId && /GODOT_REACT_BOOT_REPORT/.test(event.text)), result.runId);
-  return { ...result, startedMs: Date.now() - started };
+  if (fixture === 'game2d') await page.waitForFunction(runId => playground.events.some(event => event.type === 'log' && event.runId === runId && event.text.includes('GAME2D_READY')), result.runId);
+  return { ...result, ...identity(), nativeReady: fixture === 'game2d', startedMs: Date.now() - started };
 }
 async function nativeObservation(runId) {
   return page.evaluate(runId => {
@@ -97,12 +101,12 @@ try {
   const initialTypes = await page.evaluate(() => playground.check());
   assert.equal(initialTypes.ok, true, `Initial counter must type check: ${JSON.stringify(initialTypes.diagnostics)}`);
   const first = await page.evaluate(() => playground.run());
-  report.scope = await page.evaluate(() => {
+  report.differentialScope = await page.evaluate(() => {
     const project = playground.exportProject(), release = playground.release;
     return { browserEngine: 'Chromium', sdkModes: [project.config.mode], profiles: [project.config.profileId], threads: release.engine.threads,
       engineTarget: release.engine.engineTarget ?? release.engine.target, godotVersion: release.engine.godotVersion, crossOriginIsolated };
   });
-  report.scope.audio = /["']--audio-driver["']\s*,\s*["']Dummy["']/.test(await readFile(resolve(site, 'preview.js'), 'utf8')) ? 'Dummy' : 'engine-default; audible output unverified';
+  report.differentialScope.audio = /["']--audio-driver["']\s*,\s*["']Dummy["']/.test(await readFile(resolve(site, 'preview.js'), 'utf8')) ? 'Dummy' : 'engine-default; audible output unverified';
   const baseline = await page.evaluate(() => ({ buildKey: playground.lastArtifact.buildKey, sourceHash: playground.lastArtifact.manifest.sourceSnapshotHash, source: playground.exportProject().files['/src/Counter.tsx'] }));
   await page.waitForFunction(runId => playground.events.some(event => event.type === 'log' && event.runId === runId && event.text.includes('"text":"Count: 0"')), first.runId);
   await page.frameLocator('iframe').locator('canvas').click({ position: { x: 170, y: 45 } });
@@ -116,10 +120,26 @@ try {
   assert.equal(difference.oldExit?.reason, 'clean-exit');
   await stopRun(changed);
   pass('code-only-edit-real-native-label-differential', { before: { buildKey: baseline.buildKey, sourceHash: baseline.sourceHash }, after: difference });
+  // Keep the counter edit regression separate from the selected lifecycle artifact.
+  if (fixture === 'game2d' || sdkMode !== 'production') {
+    await page.evaluate(name => playground.loadExample(name), fixture);
+    const project = await page.evaluate(() => playground.exportProject());
+    project.config.mode = sdkMode;
+    await page.evaluate(project => playground.importProject(project), project);
+    const checked = await page.evaluate(() => playground.check());
+    assert.equal(checked.ok, true, JSON.stringify(checked.diagnostics));
+    const prepared = await page.evaluate(() => playground.run());
+    if (fixture === 'game2d') await page.waitForFunction(runId => playground.events.some(event => event.type === 'log' && event.runId === runId && event.text.includes('GAME2D_READY')), prepared.runId);
+    await stopRun(prepared);
+  }
+  report.scope = { ...report.differentialScope, ...identity(), browserFamily: 'chromium', sdkModes: [sdkMode], profiles: [identity().profileId] };
+  assert.equal(await page.evaluate(() => playground.lastArtifact.manifest.profile.id), report.scope.profileId);
+  assert.equal(await page.evaluate(() => playground.lastArtifact.manifest.mode), sdkMode);
+  Object.assign(report.scope, await page.evaluate(() => ({ buildKey: playground.lastArtifact.buildKey, generation: playground.lastArtifact.generation })));
   await sample('before-repeated-runs');
   for (let index = 0; index < iterations; index++) {
     const run = await runArtifact(), exit = await stopRun(run), observations = await nativeObservation(run.runId);
-    report.cycles.push({ index, runId: run.runId, generation: run.generation, buildKey: run.buildKey, startupMs: run.startedMs, exit, nativeDiagnostics: observations });
+    report.cycles.push({ index, ...identity(), runId: run.runId, generation: run.generation, buildKey: run.buildKey, nativeReady: run.nativeReady, startupMs: run.startedMs, exit, nativeDiagnostics: observations });
     if ((index + 1) % 10 === 0 || index === iterations - 1) { await sample(`run-${index + 1}`); await checkpoint(); }
   }
   pass('repeated-artifact-real-engine-run-clean-exit', { iterations: report.cycles.length, uniqueRunIds: new Set(report.cycles.map(cycle => cycle.runId)).size, compilationPerCycle: false });
@@ -133,8 +153,9 @@ try {
       assert.equal(await page.locator('iframe').count(), 1, 'Failed compilation keeps the active preview');
       assert.equal(await page.evaluate(runId => playground.events.some(event => event.type === 'exit' && event.report.runId === runId), run.runId), false);
       await page.evaluate(source => playground.setFile('/src/App.tsx', source), source);
-      report.failureCycles.push({ index, kind: 'semantic-build-refused', activeRunId: run.runId, rejected, exit: await stopRun(run) });
+      report.failureCycles.push({ index, ...identity(), generation: run.generation, buildKey: run.buildKey, kind: 'semantic-build-refused', activeRunId: run.runId, rejected, exit: await stopRun(run) });
     } else {
+      const artifact = await page.evaluate(() => ({ generation: playground.lastArtifact.generation, buildKey: playground.lastArtifact.buildKey }));
       const before = await page.evaluate(() => playground.events.filter(event => event.type === 'state' && event.state === 'loading-frame').map(event => event.runId));
       await page.evaluate(() => { window.__stressPendingRun = playground.runArtifact().then(result => ({ resolved: true, runId: result.runId }), error => ({ resolved: false, error: String(error) })); });
       await page.waitForFunction(before => playground.events.some(event => event.type === 'state' && event.state === 'loading-frame' && !before.includes(event.runId)), before);
@@ -143,7 +164,7 @@ try {
       const pending = await page.evaluate(() => window.__stressPendingRun);
       assert.equal(exit?.runId, runId); assert.equal(await page.locator('iframe').count(), 0);
       assert(['clean-exit', 'forced-frame-disposal', 'unresponsive'].includes(exit.reason), `Unexpected cancellation exit ${exit.reason}`);
-      report.failureCycles.push({ index, kind: 'cancel-engine-startup', runId, exit, pending });
+      report.failureCycles.push({ index, ...identity(), ...artifact, kind: 'cancel-engine-startup', runId, exit, pending });
     }
     if ((index + 1) % 5 === 0 || index === failures - 1) await checkpoint();
   }

@@ -220,3 +220,137 @@ test('aggregate evidence binds exact release, real file bytes, static templates 
   await writeFile(resolve(site, 'preview.js'), 'changed after passing integration');
   await assert.rejects(collectBrowserEvidence(configuration), /templates changed/);
 });
+
+function combinationCoverage(browserFamily, browserVersion, sourceReport) {
+  const name = sourceReport ? `${sourceReport}:game-2d-native-composition` : 'game-2d-native-composition';
+  return ['production', 'development'].map(sdkMode => ({ profileId: 'game-2d-v1', sdkMode, browserFamily, browserVersion, sourceReport, status: 'passed', checks: [name] }));
+}
+function browserValidation(browserFamily, browserVersion, sourceReport) {
+  const native = ['production', 'development'].map(sdkMode => ({ name: 'game-2d-native-composition', profileId: 'game-2d-v1', sdkMode }));
+  const legacy = [
+    { name: 'real-cross-origin-godot-counter-click', profileId: 'core-ui-v1', sdkMode: 'production' },
+    { name: 'png-ui-media-native-controls-and-controlled-baseline', profileId: 'ui-media-v1', sdkMode: 'production' },
+    { name: 'real-web-physics-collision-and-stale-command-rejection', profileId: 'behavior-physics-v1', sdkMode: 'production' },
+  ];
+  return { browser: browserVersion, browserFamily,
+    checks: [...native, ...legacy].map(check => ({ ...check, name: sourceReport ? `${sourceReport}:${check.name}` : check.name,
+      status: 'passed', browserFamily, browserVersion, sourceReport })),
+    coverage: combinationCoverage(browserFamily, browserVersion, sourceReport) };
+}
+function combinationValidation(release) {
+  const reports = ['chromium', 'firefox', 'webkit'].map(family => browserValidation(family, `fixture-${family}`, family === 'chromium' ? 'integration' : family));
+  return { status: 'passed', runtimeRelease: release.id,
+    checks: reports.flatMap(report => report.checks),
+    coverage: reports.flatMap(report => report.coverage),
+    artifactHashes: Object.fromEntries(release.files.filter(file => file.kind !== 'attestation').map(file => [file.path, file.sha256])),
+    scope: { lifecycle: { iterations: 100, failureCases: 20, scope: { fixture: 'game2d', profileId: 'game-2d-v1', sdkMode: 'production', browserFamily: 'chromium' } } } };
+}
+
+test('combined profile certification requires exact browser/mode tuples and combination lifecycle', async t => {
+  const f = await fixture(t, true);
+  f.config.metadata.profiles.push({ id: 'game-2d-v1', version: 1, hash: digest('fixture combined profile') });
+  await writeJson(f.configuration.assets, f.config); await buildRelease(f.configuration);
+  const release = await inspectRelease(f.dir), evidence = combinationValidation(release), path = resolve(f.root, 'combined-validation.json');
+  const seal = async value => { await writeJson(path, value); return buildRelease({ ...f.configuration, 'validation-report': path }); };
+  for (const mutate of [
+    value => { value.coverage = []; },
+    value => { value.checks = value.checks.filter(check => check.sdkMode !== 'development'); },
+    value => { delete value.scope.lifecycle.iterations; },
+    value => { value.coverage = value.coverage.filter(tuple => !(tuple.browserFamily === 'webkit' && tuple.sdkMode === 'development')); },
+    value => { value.coverage[0].checks = ['not-a-passed-native-check']; },
+    value => { value.checks = value.checks.filter(check => check.profileId === 'game-2d-v1'); },
+    value => { value.checks = value.checks.filter(check => check.profileId !== 'ui-media-v1'); },
+    value => { value.checks.find(check => check.profileId === 'core-ui-v1').browserVersion = 'wrong-version'; },
+    value => { value.checks.find(check => check.profileId === 'game-2d-v1').browserFamily = 'firefox'; },
+    value => { value.checks.find(check => check.profileId === 'game-2d-v1').browserVersion = 'wrong-version'; },
+    value => { value.checks.find(check => check.profileId === 'game-2d-v1').sourceReport = 'firefox'; },
+    value => { value.coverage.push(structuredClone(value.coverage[0])); },
+    value => { value.checks.push(structuredClone(value.checks[0])); },
+    value => {
+      value.checks = value.checks.filter(check => check.sourceReport === 'integration');
+      for (const tuple of value.coverage) tuple.checks = ['integration:game-2d-native-composition'];
+    },
+    value => { value.scope.lifecycle.scope.fixture = 'counter'; },
+    value => { value.scope.lifecycle.iterations = 99; },
+    value => { value.scope.lifecycle.failureCases = 19; },
+  ]) { const invalid = structuredClone(evidence); mutate(invalid); await assert.rejects(seal(invalid), /E_GAME2D_EVIDENCE/); }
+  await seal(evidence);
+  assert.equal((await inspectRelease(f.dir, { requireCertified: true })).id, release.id);
+  const descriptor = await json(resolve(f.dir, 'release.json'));
+  for (const mutate of [
+    value => { value.coverage = value.coverage.filter(tuple => tuple.browserFamily !== 'firefox'); },
+    value => { value.checks = value.checks.filter(check => check.profileId === 'game-2d-v1'); },
+    value => {
+      value.checks = value.checks.filter(check => check.sourceReport === 'integration');
+      for (const tuple of value.coverage) tuple.checks = ['integration:game-2d-native-composition'];
+    },
+  ]) {
+    const invalid = structuredClone(descriptor); mutate(invalid.certification);
+    await writeJson(resolve(f.dir, 'release.json'), invalid);
+    await assert.rejects(inspectRelease(f.dir, { requireCertified: true }), /E_GAME2D_EVIDENCE/);
+  }
+});
+
+test('combined aggregate rejects counter pressure, missing browsers, changed bytes and stale reports', async t => {
+  const f = await fixture(t, true);
+  f.config.metadata.profiles.push({ id: 'game-2d-v1', version: 1, hash: digest('fixture combined profile') });
+  await writeJson(f.configuration.assets, f.config); await buildRelease(f.configuration);
+  const release = await inspectRelease(f.dir), site = resolve(f.root, 'site');
+  await cp(f.dir, resolve(site, 'release'), { recursive: true });
+  for (const name of ['index.html', 'main.js', 'compiler-worker.js', 'types-worker.js', 'preview.html', 'preview.js']) await writeFile(resolve(site, name), `/* fixture ${name} */`);
+  const integration = { ...combinationValidation(release), ...browserValidation('chromium', 'fixture-chromium'),
+    artifactHashes: Object.fromEntries(release.files.map(file => [file.path, file.sha256])),
+    siteArtifactHashes: await hashSiteRuntimeFiles(site), generatedArtifacts: { maps: Array.from({ length: 2 }, () => ({ sha256: digest('fixture map'), sealedSha256: digest('fixture map'), version: 3, mappings: true })) } };
+  const scope = { fixture: 'game2d', profileId: 'game-2d-v1', sdkMode: 'production', browserFamily: 'chromium', buildKey: digest('fixture build'), generation: 'fixture-generation' };
+  const cycleIdentity = { fixture: 'game2d', profileId: 'game-2d-v1', sdkMode: 'production', buildKey: digest('fixture build'), generation: 'fixture-generation' };
+  const stress = { status: 'passed', runtimeRelease: release.id, browser: integration.browser, checks: [{ name: 'fixture-lifecycle', status: 'passed' }], scope,
+    siteArtifactHashes: integration.siteArtifactHashes,
+    cycles: Array.from({ length: 100 }, (_, index) => ({ ...cycleIdentity, nativeReady: true, runId: `run-${index}`, exit: { runId: `run-${index}`, reason: 'clean-exit', code: 0 } })),
+    failureCycles: Array.from({ length: 20 }, (_, index) => index % 2
+      ? { ...cycleIdentity, kind: 'cancel-engine-startup', runId: `cancel-${index}`, exit: { runId: `cancel-${index}`, reason: 'forced-frame-disposal' } }
+      : { ...cycleIdentity, kind: 'semantic-build-refused', activeRunId: `semantic-${index}`, rejected: { accepted: false }, exit: { runId: `semantic-${index}`, reason: 'clean-exit', code: 0 } }) };
+  const maps = { status: 'passed', browser: integration.browser, checks: ['caught', 'compressed', 'uncaught'].map(name => ({ name, status: 'passed' })), engine: {
+    archiveSha256: f.report.template.sha256, sourceSnapshotHash: f.report.source.snapshotHash, godotSourceSnapshotHash: f.report.godotSource.snapshotHash, recipeSha256: f.report.recipeSha256,
+    assets: { 'godot.js': digest(await readFile(resolve(f.root, 'engine/godot.js'))), 'godot.wasm': digest(await readFile(resolve(f.root, 'engine/godot.wasm'))) } } };
+  const firefox = { ...structuredClone(integration), ...browserValidation('firefox', 'fixture-firefox') };
+  const webkit = { ...structuredClone(integration), ...browserValidation('webkit', 'fixture-webkit') };
+  const config = { site, 'engine-report': f.configuration['engine-report'] };
+  for (const [name, report] of [['integration', integration], ['stress', stress], ['source-maps', maps], ['firefox-report', firefox], ['webkit-report', webkit]]) { config[name] = resolve(f.root, `${name}.json`); await writeJson(config[name], report); }
+  const accepted = await collectBrowserEvidence(config);
+  assert.equal(accepted.coverage.length, 6);
+  assert.equal(accepted.scope.additionalBrowsers.length, 2);
+  const completeChecks = structuredClone(integration.checks);
+  integration.checks = integration.checks.filter(check => check.profileId === 'game-2d-v1'); await writeJson(config.integration, integration);
+  await assert.rejects(collectBrowserEvidence(config), /legacy regression/);
+  integration.checks = completeChecks; await writeJson(config.integration, integration);
+  const firefoxChecks = structuredClone(firefox.checks);
+  firefox.checks = structuredClone(integration.checks); await writeJson(config['firefox-report'], firefox);
+  await assert.rejects(collectBrowserEvidence(config), /matching profile, mode, browser version and source/);
+  firefox.checks = firefoxChecks; await writeJson(config['firefox-report'], firefox);
+  await assert.rejects(collectBrowserEvidence({ ...config, 'webkit-report': undefined }), /Missing webkit/);
+  stress.scope.fixture = 'counter'; await writeJson(config.stress, stress);
+  await assert.rejects(collectBrowserEvidence(config), /Lifecycle must exercise/);
+  stress.scope.fixture = 'game2d'; stress.cycles[3].profileId = 'core-ui-v1'; await writeJson(config.stress, stress);
+  await assert.rejects(collectBrowserEvidence(config), /artifact identity/);
+  stress.cycles[3].profileId = 'game-2d-v1'; await writeJson(config.stress, stress);
+  firefox.runtimeRelease = digest('stale additional report'); await writeJson(config['firefox-report'], firefox);
+  await assert.rejects(collectBrowserEvidence(config), /exact runtimeRelease/);
+  firefox.runtimeRelease = release.id; firefox.artifactHashes['assets/godot.js'] = digest('changed bytes'); await writeJson(config['firefox-report'], firefox);
+  await assert.rejects(collectBrowserEvidence(config), /identical release and static/);
+  firefox.artifactHashes = structuredClone(integration.artifactHashes); await writeJson(config['firefox-report'], firefox);
+  const authenticated = structuredClone(integration);
+  for (const name of ['http-only-cookie-gated-same-origin-release-js-and-gzip-wasm', 'cross-origin-cdn-does-not-receive-site-cookie', 'game-2d-indexeddb-restores-and-automatically-runs', 'game-2d-shared-project-manually-runs']) {
+    authenticated.checks.push({ name, status: 'passed', browserFamily: 'chromium', browserVersion: integration.browser });
+  }
+  config['authenticated-report'] = resolve(f.root, 'authenticated.json'); await writeJson(config['authenticated-report'], authenticated);
+  assert.equal((await collectBrowserEvidence(config)).coverage.length, 8);
+  const fullAuthenticated = structuredClone(authenticated);
+  authenticated.coverage = []; authenticated.checks = authenticated.checks.filter(check => !check.profileId || check.profileId === 'core-ui-v1');
+  await writeJson(config['authenticated-report'], authenticated);
+  await assert.rejects(collectBrowserEvidence(config), /combination coverage/);
+  for (const name of ['game-2d-indexeddb-restores-and-automatically-runs', 'game-2d-shared-project-manually-runs']) {
+    const invalid = structuredClone(fullAuthenticated); invalid.checks = invalid.checks.filter(check => check.name !== name);
+    await writeJson(config['authenticated-report'], invalid);
+    await assert.rejects(collectBrowserEvidence(config), /Missing authenticated full-suite check/);
+  }
+});

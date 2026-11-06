@@ -39,6 +39,7 @@ flowchart LR
 | `core-ui-v1` | 核心 UI、事件、ref、React hooks 与组合组件 |
 | `ui-media-v1` | 六种额外宿主、PNG/JPEG Texture2D、受限 UI 属性 |
 | `behavior-physics-v1` | 实际 GodotPhysics2D、frame commands、失效 token 拒绝 |
+| `game-2d-v1` | core、media、physics 的显式并集：17 类宿主，可在同一 root 组合贴图、碰撞体与 HUD |
 | 模板/任意 TSCN | 关闭；原生 SceneState 校验和可信发布绑定完成前拒绝 |
 | 运行时 npm 加载 | 关闭；仅支持内置 React、Godot SDK、scheduler、clsx 的固定版本，未内置包/版本明确报错 |
 | 音频 | 主 Runner 显式使用 Dummy；独立 AudioWorklet 生命周期探针不代表可听输出已认证 |
@@ -47,6 +48,14 @@ flowchart LR
 | 无限循环 | 有期限并尝试销毁 frame；浏览器线程/进程调度决定能否抢占，不承诺任意代码可中断 |
 
 原始场景、脚本资源、间接 PackedScene、伪造预验证证书、任意原生属性透传和未闭合动态模块加载都不会进入默认能力面。详细 npm/资源边界见 `scripts/jsb.react-browser/README.md`。
+
+统一 2D profile 保留原三个 profile 的定义与 hash，SDK 和默认示例不迁移。`profile.version=1` 是协议结构版本，能力扩展使用新的 ID。物理后端由已校验 profile 的 `physics` feature 选择；不会因换用统一 profile 而落入 Dummy。
+
+贴图与碰撞形状先加载，再挂载 World。运动由 `usePhysicsProcess` 持有 position/velocity，Sprite2D 通过原生父子变换跟随。换图保持角色身份，重置释放旧角色子树；共享纹理与形状缓存至 root shutdown。暂停角色运动不等于全局暂停引擎，Suspense 隐藏也不会自动关闭碰撞。PNG/JPEG 在配置和 `useAsset` 中均声明为 `Texture2D`，底层生成 ImageTexture 不改变逻辑类型。
+
+组合验证明确采用上述预加载范围：真实浏览器用例覆盖冷资源的 Suspense、同一原生场景中的贴图/碰撞/HUD、换图与重置，以及 IndexedDB 和分享往返；错误 `.tres` 在启动新引擎前被拒绝并保留旧预览。SDK 适配器测试另覆盖首次资产 pump 前取消、原生资产加载失败不发布半成品物理体、共享资源保留到 root shutdown。压力测试的取消发生在 `loading-frame`，覆盖引擎启动取消，不能据此声称任意运行中网络资源延迟、隐藏场景暂停物理或动态纹理流式加载已认证。每项浏览器与 SDK 模式的实际结论以绑定同一发布制品的报告为准。
+
+Node 构建器可识别统一 profile 的宿主，但仍只接受原有 `.tres` 资源子集，本次不增加 Node PNG/JPEG 导入。恢复或导入的 profile 若不受当前 release 支持，项目仍保留并显示不支持原因，不静默降级。
 
 ## 开发与验证
 
@@ -60,10 +69,11 @@ flowchart LR
 | 小队编成 | 在 5 点能量预算内招募队员，达到 80 战力后发射；Context、受控 Toggle、稳定 key 与派生状态 |
 | 像素素材实验室 | 三张原创 PNG、镜像、缩放、配色切换；useAsset、TextureRect、原生控件与资源文件 |
 | 弹跳实验场 | 可见小球与封闭碰撞场地，发射冲量、地月重力、暂停与重置；实际 GodotPhysics2D、React HUD 与引擎属性所有权 |
+| 贴图碰撞实验场 | 预加载贴图和形状，原生精灵跟随物理角色；换图、暂停角色运动、重置与 HUD，使用 `game-2d-v1` |
 | 多文件计数器 | 简洁的状态更新、ref、组件拆分与内置 clsx 入门 |
 | 类型与错误诊断 | 主动修复示例中的类型错误，练习源码定位 |
 
-四个场景项目附带可编辑 README，说明操作方式和修改练习。像素素材为本项目原创，可通过 `python apps/playground/examples/generate_art.py` 重建。
+场景示例附带可编辑 README，说明操作方式和修改练习。像素素材为本项目原创，可通过 `python apps/playground/examples/generate_art.py` 重建。
 页面标题为 GodotAI Playground，工作区参考 VS Code 的深色布局。资源管理器按目录展示文件，支持类型图标、折叠全部、方向键导航和搜索时展开匹配路径。文件操作使用右键菜单、Shift+F10 或每行「⋯」，支持重命名、复制路径和删除；入口文件与最后一个文件禁止删除。桌面通过项目菜单或 `Ctrl/⌘ + B` 控制文件面板，手机使用「文件」入口。内置依赖与运行设置保留在文件面板底部。
 文件搜索和可关闭标签页只改变编辑视图；切换文件会保留光标与滚动位置。
 「内置依赖」只读展示固定版本：React 19.3.1、`@godot-js/react` 0.1.0、scheduler 0.28.0、clsx 2.1.1，全部可以直接 import。不提供添加、删除或版本编辑入口。项目文件列表不再包含 package.json；恢复或导入旧项目时移除依赖清单与锁文件，源码保持原样，并统一使用站点内置版本。导出配置中的 dependencies 仅用于兼容通用项目格式，重新导入时仍恢复固定内置版本。

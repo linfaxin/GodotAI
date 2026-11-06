@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { options, required, fail, inspectRelease, json, digest, canonical, within, writeJson, hashSiteRuntimeFiles } from './web-release-utils.mjs';
+import { hasGame2dProfile, assertGame2dCoverage, assertLegacyProfileCoverage, assertGame2dLifecycle, assertGame2dCertification } from './game-2d-evidence.mjs';
 
 function ensure(value, message) { if (!value) fail('E_BROWSER_EVIDENCE', message); }
 function passed(report, name) {
@@ -21,10 +22,25 @@ export async function collectBrowserEvidence(configuration) {
     const path = resolve(configuration['authenticated-report']);
     inputs['authenticated-assets'] = { bytes: await readFile(path), report: await json(path) };
   }
+  for (const family of ['firefox', 'webkit']) {
+    const path = configuration[`${family}-report`];
+    if (path) inputs[family] = { bytes: await readFile(resolve(path)), report: await json(resolve(path)) };
+  }
   const integration = inputs.integration.report, stress = inputs.stress.report, maps = inputs['source-maps'].report, build = inputs['engine-report'].report;
   passed(integration, 'Integration'); passed(stress, 'Stress'); passed(maps, 'Native source-map');
   ensure(integration.runtimeRelease === release.id && stress.runtimeRelease === release.id, 'Integration/stress reports must name this exact runtimeRelease');
   ensure(integration.browser === stress.browser && maps.browser === integration.browser, 'Reports must exercise the same actual browser version');
+  if (hasGame2dProfile(release)) {
+    assertGame2dCoverage(integration, 'chromium');
+    assertLegacyProfileCoverage(integration, 'chromium');
+    assertGame2dLifecycle(stress);
+    for (const family of ['firefox', 'webkit']) {
+      ensure(inputs[family], `Missing ${family} combination report`);
+      passed(inputs[family].report, family);
+      assertGame2dCoverage(inputs[family].report, family);
+      assertLegacyProfileCoverage(inputs[family].report, family);
+    }
+  }
   ensure(build.status === 'built' && build.template?.sha256 === release.engine.archiveSha256, 'Build report must identify this candidate engine archive');
   ensure(digest(await readFile(build.template.path)) === build.template.sha256, 'Actual engine archive changed after its build report');
   const attestation = await json(within(resolve(site, 'release'), release.attestation));
@@ -56,9 +72,19 @@ export async function collectBrowserEvidence(configuration) {
   const templates = await hashSiteRuntimeFiles(site);
   ensure(canonical(templates) === canonical(integration.siteArtifactHashes), 'Static app/preview/worker templates changed after integration validation');
   ensure(canonical(templates) === canonical(stress.siteArtifactHashes), 'Static app/preview/worker templates changed after lifecycle validation');
+  for (const family of ['firefox', 'webkit']) if (inputs[family]) {
+    const additional = inputs[family].report;
+    passed(additional, family);
+    ensure(additional.runtimeRelease === release.id, `${family} report must name this exact runtimeRelease`);
+    ensure(canonical(additional.siteArtifactHashes) === canonical(templates) && canonical(additional.artifactHashes) === canonical(actualHashes), `${family} evidence must bind identical release and static template bytes`);
+  }
   const authenticated = inputs['authenticated-assets']?.report;
   if (authenticated) {
     passed(authenticated, 'Authenticated asset');
+    if (hasGame2dProfile(release)) {
+      assertGame2dCoverage(authenticated, 'chromium');
+      assertLegacyProfileCoverage(authenticated, 'chromium');
+    }
     ensure(authenticated.runtimeRelease === release.id && authenticated.browser === integration.browser, 'Authenticated assets must use the same release and actual browser');
     ensure(canonical(authenticated.siteArtifactHashes) === canonical(templates) && canonical(authenticated.artifactHashes) === canonical(actualHashes), 'Authenticated asset evidence must match current static templates and release bytes');
     for (const name of ['http-only-cookie-gated-same-origin-release-js-and-gzip-wasm', 'cross-origin-cdn-does-not-receive-site-cookie']) ensure(authenticated.checks.some(check => check.name === name && check.status === 'passed'), `Missing authenticated asset check ${name}`);
@@ -66,13 +92,16 @@ export async function collectBrowserEvidence(configuration) {
   const generated = integration.generatedArtifacts;
   ensure(generated?.maps?.length >= 2 && generated.maps.every(map => map.sha256 === map.sealedSha256 && map.version === 3 && map.mappings), 'Generated source-map bytes must match their sealed manifest artifacts');
   const evidenceHashes = Object.fromEntries(Object.entries(inputs).map(([name, input]) => [name, digest(input.bytes)]));
-  const groups = [['integration', integration], ['stress', stress], ['native-source-maps', maps], ...(authenticated ? [['authenticated-assets', authenticated]] : [])];
-  const checks = groups.flatMap(([group, report]) => report.checks.map(check => ({ ...check, name: `${group}:${check.name}` })));
-  const result = { status: 'passed', runtimeRelease: release.id, checks, artifactHashes: actualHashes, siteArtifactHashes: templates, generatedArtifacts: generated,
+  const groups = [['integration', integration], ['stress', stress], ['native-source-maps', maps], ...(authenticated ? [['authenticated-assets', authenticated]] : []), ...['firefox', 'webkit'].filter(family => inputs[family]).map(family => [family, inputs[family].report])];
+  const checks = groups.flatMap(([group, report]) => report.checks.map(check => ({ ...check, name: `${group}:${check.name}`, sourceReport: group })));
+  const coverage = groups.flatMap(([group, report]) => (report.coverage ?? []).map(tuple => ({ ...tuple, checks: tuple.checks.map(name => `${group}:${name}`), sourceReport: group })));
+  const result = { status: 'passed', runtimeRelease: release.id, checks, coverage, artifactHashes: actualHashes, siteArtifactHashes: templates, generatedArtifacts: generated,
     scope: { ...integration.scope, lifecycle: { iterations: stress.cycles.length, failureCases: stress.failureCycles.length, scope: stress.scope, nativeMemoryConclusion: stress.nativeMemoryConclusion },
       nativeSourceMaps: { browser: maps.browser, scenarios: ['caught', 'compressed', 'uncaught'], expectedLocation: maps.expectedLocation } },
     evidenceHashes, engineArchiveSha256: build.template.sha256, collectedAt: new Date().toISOString() };
   if (authenticated) result.scope.authenticatedAssets = { fixtureCookie: 'HttpOnly/Lax', topology: 'same-site separate origins', sameOriginCredentials: true, crossOriginCredentialsOmitted: true };
+  result.scope.additionalBrowsers = ['firefox', 'webkit'].filter(family => inputs[family]).map(family => ({ browserFamily: family, browserVersion: inputs[family].report.browser, evidenceSha256: digest(inputs[family].bytes), scope: inputs[family].report.scope }));
+  assertGame2dCertification(release, result);
   if (configuration.out) await writeJson(resolve(configuration.out), result);
   return result;
 }

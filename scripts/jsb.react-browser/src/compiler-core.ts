@@ -8,7 +8,7 @@ import { sha256, canonicalJson, utf8, text, buildKey, COMPILER_VERSION, selectMa
 import { packProject } from './pck.js';
 import type { ModuleGraph } from './resolve.js';
 import { checkProjectTypes, type TypecheckInput, type TypecheckResult, type TypeProject } from './typecheck.js';
-import { compileAssets } from './assets.js';
+import { compileAssets, type ImageDecoder } from './assets.js';
 
 export interface CompilerProject extends TypeProject {
   hash: string;
@@ -27,6 +27,8 @@ export interface CompilerCoreEnvironment<Resolved extends CompilerProject = Comp
   resolveModule?(specifier: string, importer: string, kind: string, project: Resolved): string;
   check?: (input: TypecheckInput) => Promise<TypecheckResult>;
   progress?: (stage: string) => void;
+  /** Optional image adapter for non-browser hosts; browsers use the native decoder. */
+  decodeImage?: ImageDecoder;
 }
 const aborted = (signal?: AbortSignal) => signal?.throwIfAborted();
 export function createBrowserCompilerCore<Resolved extends CompilerProject>(environment: CompilerCoreEnvironment<Resolved>) {
@@ -80,7 +82,7 @@ export function createBrowserCompilerCore<Resolved extends CompilerProject>(envi
     if (!checked.ok) throw new BrowserBuildError('E_TYPESCRIPT', 'Project has semantic type errors', checked.diagnostics);
     environment.progress?.('bundling');
     const files = new Map<string, Uint8Array>(), modules: Record<string, ManifestModule> = {};
-    const compiledAssets = await compileAssets(snapshot, { generation, signal });
+    const compiledAssets = await compileAssets(snapshot, { generation, signal, decodeImage: environment.decodeImage });
     for (const resource of Object.values(compiledAssets.resources)) if (!getProfileSchema(snapshot.config.profileId).profile.resources.includes(resource.type))
       throw new BrowserBuildError('E_PROFILE_RESOURCE', `Resource ${resource.type} requires a different capability profile`);
     for (const [uri, bytes] of compiledAssets.files) files.set(uri, bytes);
@@ -162,7 +164,7 @@ export function createBrowserCompilerCore<Resolved extends CompilerProject>(envi
     validateRuntimeManifest(manifest);
     const path = `res://generated/react/manifests/${generation}.json`, manifestBytes = utf8.encode(canonicalJson(manifest));
     files.set(path, manifestBytes); files.set('res://generated/react/active.json', utf8.encode(canonicalJson({ schemaVersion: 1, generation, manifestPath: path, manifestSha256: await sha256(manifestBytes), state: 'READY' })));
-    files.set('res://project.godot', utf8.encode(`config_version=5\n[application]\nconfig/name="GodotJS Playground"\nrun/main_scene="${manifests[selectMainEntry(snapshot.config)].scene}"\n[display]\nwindow/size/viewport_width=640\nwindow/size/viewport_height=360\n[rendering]\nrenderer/rendering_method="gl_compatibility"\nenvironment/defaults/default_clear_color=Color(0.06, 0.08, 0.11, 1)\n[physics]\n2d/physics_engine="${snapshot.config.profileId === 'behavior-physics-v1' ? 'GodotPhysics2D' : 'Dummy'}"\n3d/physics_engine="Dummy"\n[godotjs]\nreact/enabled=true\n[GodotJS]\nruntime/debugger/debugger_port=0\n`));
+    files.set('res://project.godot', utf8.encode(`config_version=5\n[application]\nconfig/name="GodotJS Playground"\nrun/main_scene="${manifests[selectMainEntry(snapshot.config)].scene}"\n[display]\nwindow/size/viewport_width=640\nwindow/size/viewport_height=360\n[rendering]\nrenderer/rendering_method="gl_compatibility"\nenvironment/defaults/default_clear_color=Color(0.06, 0.08, 0.11, 1)\n[physics]\n2d/physics_engine="${getProfileSchema(snapshot.config.profileId).profile.features.physics ? 'GodotPhysics2D' : 'Dummy'}"\n3d/physics_engine="Dummy"\n[godotjs]\nreact/enabled=true\n[GodotJS]\nruntime/debugger/debugger_port=0\n`));
     files.set('res://.godot/global_script_class_cache.cfg', utf8.encode('list=Array[Dictionary]([])\n'));
     aborted(signal); environment.progress?.('packing');
     const version = release.engine.godotVersion.match(/^(\d+)\.(\d+)(?:\.(\d+))?/);

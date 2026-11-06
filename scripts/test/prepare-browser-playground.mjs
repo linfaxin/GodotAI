@@ -59,8 +59,7 @@ export async function preparePlayground(config) {
   for (const [url, target] of [['https://cdn.jsdelivr.net/npm/esbuild-wasm@0.25.12/lib/browser.min.js', compilerJs], ['https://cdn.jsdelivr.net/npm/esbuild-wasm@0.25.12/esbuild.wasm', compilerWasm]]) {
     try { await stat(target); } catch { const response = await fetch(url); if (!response.ok) throw Error('E_COMPILER_DOWNLOAD: ' + response.status); await writeFile(target, new Uint8Array(await response.arrayBuffer())); }
   }
-  const profiles = ['core-ui-v1', 'behavior-physics-v1'];
-  try { profileReference('ui-media-v1'); profiles.push('ui-media-v1'); } catch {}
+  const profiles = ['core-ui-v1', 'behavior-physics-v1', 'ui-media-v1', 'game-2d-v1'];
   const assets = { sdk: sdkFiles, types, contracts, bootstrap,
     compiler: { js: compilerJs, wasm: compilerWasm, typescript: resolve(tsRoot, 'lib/typescript.js') },
     metadata: { version: config.version ?? '0.1.0', sdkVersion: sdkRequire('./package.json').version, runtimeAbi: RUNTIME_ABI, nativeBridgeAbi: NATIVE_BRIDGE_ABI, react: REACT_VERSIONS,
