@@ -24,6 +24,7 @@ namespace jsb::impl
 
         uint8_t internal_field_count = 0;
         void* internal_fields[2] = { nullptr, nullptr };
+        bool value_type_deleter = false;
     };
 
 #if INTPTR_MAX >= INT64_MAX

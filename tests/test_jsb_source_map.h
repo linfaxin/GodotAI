@@ -3,6 +3,7 @@
 
 #include "../internal/jsb_source_map.h"
 #include "../internal/jsb_source_map_cache.h"
+#include "../internal/jsb_format.h"
 #include "tests/test_macros.h"
 
 #include <climits>
@@ -244,6 +245,41 @@ namespace jsb::tests::source_maps
         CHECK(SourceMapCache::resolve_source_path("res://generated/App.js", "res://src", "res://other/A.tsx") == "res://other/A.tsx");
         CHECK(SourceMapCache::resolve_source_path("C:\\build\\App.js", "../src", "App.tsx") == "C:/src/App.tsx");
         CHECK(SourceMapCache::resolve_source_path("https://host/maps/App.js", "../src", "App.tsx") == "https://host/src/App.tsx");
+    }
+
+    TEST_CASE("[jsb.source-map] registered CommonJS wrappers correct only first-line columns")
+    {
+        internal::SourceMapCache cache;
+        internal::SourceMap map;
+        internal::SourcePosition generated, original;
+        REQUIRE(map.parse(json("AAAA,UAAU,UAAU")));
+        constexpr int prefix = sizeof("(function(exports,require,module,__filename,__dirname){") - 1;
+        cache.set_first_line_column_offset("res://generated/App.js", prefix);
+        REQUIRE(cache.parse_stack_frame(jsb_format("    at render (res://generated/App.js:1:%d)", prefix + 11), generated));
+        REQUIRE(cache.remove_module_wrapper_offset(generated));
+        CHECK(generated.column == 11);
+        REQUIRE(internal::SourceMapCache::map_source_position(generated, map, original));
+        CHECK(original.filename == "res://src/App.tsx");
+        CHECK(original.column == 11);
+        // V8 origins may omit res://; both forms identify the same module.
+        generated.filename = "generated/App.js";
+        generated.column = prefix + 21;
+        REQUIRE(cache.remove_module_wrapper_offset(generated));
+        CHECK(generated.column == 21);
+        generated.column = prefix;
+        CHECK_FALSE(cache.remove_module_wrapper_offset(generated));
+        generated.column = 0;
+        REQUIRE(cache.remove_module_wrapper_offset(generated));
+        CHECK(generated.column == 0);
+        generated.line = 2;
+        generated.column = 7;
+        REQUIRE(cache.remove_module_wrapper_offset(generated));
+        CHECK(generated.column == 7);
+        cache.clear();
+        generated.line = 1;
+        generated.column = prefix + 11;
+        REQUIRE(cache.remove_module_wrapper_offset(generated));
+        CHECK(generated.column == prefix + 11);
     }
 }
 

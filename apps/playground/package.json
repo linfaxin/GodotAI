@@ -8,11 +8,13 @@
     "dev": "node scripts/serve.mjs",
     "test": "node --test scripts/*.test.mjs",
     "test:browser": "node scripts/browser-test.mjs",
-    "test:browser:projects": "node scripts/browser-project-test.mjs"
+    "test:browser:projects": "node scripts/browser-project-test.mjs",
+    "build:conformance": "node build.mjs"
   },
   "dependencies": {
     "@godot-js/react": "workspace:*",
-    "react": "19.3.1"
+    "react": "19.3.1",
+    "@godot-js/react-browser": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^24.12.2",
@@ -20,6 +22,8 @@
     "esbuild": "0.25.12",
     "monaco-editor": "0.55.1",
     "playwright": "1.57.0",
-    "typescript": "6.0.3"
-  }
+    "typescript": "6.0.3",
+    "clsx": "2.1.1"
+  },
+  "version": "0.1.0"
 }

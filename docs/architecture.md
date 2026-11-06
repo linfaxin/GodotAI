@@ -15,11 +15,13 @@ GodotJS combines a native Godot module with embedded JavaScript support code and
 | `impl/web/bridge/` | Private TypeScript bridge compiled into Emscripten glue |
 | `scripts/jsb.react/`, `scripts/jsb.react-build/` | Existing React renderer and scene toolchain; retained in their current locations |
 | `packages/` | Reusable libraries with their own build and package entry points |
-| `apps/` | Application consumers, including the browser playground |
+| `apps/playground/` | Static Monaco workbench, built-in demos and browser compile worker |
+| `scripts/jsb.react-browser/` | Browser compiler core, fixed built-ins, verified asset loading and isolated runner |
+| `scripts/jsb.web-engine/` | Versioned engine, SDK, compiler and declaration release assets |
 | `configs/tsconfig/` | Shared checks for new TypeScript packages |
 | `tests/project/` | Independent GodotJS consumer used by engine integration tests |
 
-The active workspace contains the root orchestration package, the three embedded-script packages, the existing React renderer and build-tool packages, `packages/tsx`, and `apps/playground`.
+The active workspace contains the root orchestration package, the three embedded-script packages, the React renderer, Node and browser build tools, the Web engine release package, `packages/tsx`, and the Playground application.
 
 ## Build boundaries
 
@@ -32,7 +34,8 @@ pnpm install --frozen-lockfile
 | Command | Responsibility |
 | --- | --- |
 | `pnpm build:engine-js` | Build only `@godot-js/jsb-runtime`, `@godot-js/jsb-editor`, and `@godot-js/web-bridge` |
-| `pnpm build:packages` | Build packages selected by their `packages/` location and the two existing React packages |
+| `pnpm build:packages` | Build packages selected by their `packages/` location, React renderer, Node compiler and browser compiler |
+| `pnpm build:playground` | Build the eight-demo showcase using a matching GodotJS editor and single-thread Web template |
 | `pnpm typecheck:packages` | Check ecosystem package types without emitting files |
 | `pnpm build` | Build embedded scripts followed by ecosystem packages |
 | `pnpm test` | Run the existing engine runtime matrix |
@@ -59,7 +62,7 @@ There is no engine-only dependency installation profile at present. A full expli
 
 Keep the embedded-script packages private. Their package names identify workspace build units, not separately installable engine runtimes.
 
-New reusable libraries belong in `packages/`, and applications consume those libraries. The existing `@godot-js/react` and `@godot-js/react-build` packages stay under `scripts/` and are explicitly included in the ecosystem build. Libraries do not depend on application code. Declare package dependencies with `workspace:*` and use package entry points rather than imports into another package's source directory.
+New reusable libraries belong in `packages/`, and applications consume those libraries. The existing `@godot-js/react`, `@godot-js/react-build`, and browser-specific `@godot-js/react-browser` packages stay under `scripts/` and are explicitly included in the ecosystem build. Libraries do not depend on application code. Declare package dependencies with `workspace:*` and use package entry points rather than imports into another package's source directory.
 
 GodotJS provides modules such as `godot`, `godot-jsb`, `godot.lib.api`, and `godot.annotations` inside the engine. Future ecosystem code must use the intended host API and preserve required host modules as external references when bundling. It must not install the private embedded packages as substitute runtimes.
 
@@ -83,8 +86,8 @@ The current foundation is verified through embedded-script builds, the ecosystem
 
 The root package version continues to drive the existing engine version header and GitHub release flow. Private foundations are excluded from Changesets release planning. Public ecosystem packages will need independent semver and npm publication checks when enabled; do not repurpose the engine release predicate for them.
 
-## Browser playground
+## Browser application
 
-The [playground](../apps/playground/README.md) owns a browser editor, a TypeScript compiler worker, a sandboxed single-thread engine runner, its bootstrap project and a static asset preparation/export pipeline. It consumes the implemented React renderer through an explicit `showcase-v1` profile. Its scenes use trusted prebuilt assets and the SDK Root lifecycle; it does not expand the existing certified CLI's template/resource import profiles.
+The [Playground](../apps/playground/README.md) is an implemented static application. It compiles TSX, checks types, builds PCK artifacts and runs the single-threaded Godot Web engine in a separate origin without a runtime Node.js service or WebContainers. Its default dependency path uses fixed, prebundled React, Godot SDK, scheduler and clsx; the dependency list is read-only. Generic npm resolution remains a separate browser-library adapter.
 
-The runner supports three fixed host modules and matching generated declaration snapshots. General CDN/npm resolution, a reusable browser SDK, independently published engine assets and general animation/resource support remain deferred. `pnpm build:playground` is separate from the standard workspace build because it requires a matching GodotJS editor, a glTF importer and a Web template.
+`pnpm build:playground` builds the default eight-demo showcase (`apps/playground/src`, `web`, and `scripts`). The original browser SDK workbench remains a conformance fixture, built separately by `pnpm --filter @godot-js/playground build:conformance` into `dist-conformance/`. The browser workflow separately builds the engine, prepares and verifies its versioned release, then exercises actual canvas input, source maps, lifecycle pressure and same-origin authentication. Browser assets and engine release files remain outside the embedded-script build boundary. [Implementation and local operation](browser-playground.zh-CN.md) describe the supported profiles and static deployment.

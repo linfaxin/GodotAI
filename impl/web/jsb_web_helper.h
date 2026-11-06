@@ -15,7 +15,6 @@ namespace jsb::impl
         // deleter for valuetype optimization (no ObjectHandle needed)
         static void SetDeleter(Variant* p_pointer, const v8::Local<v8::Object> value, const v8::WeakCallbackInfo<void>::Callback callback, void *deleter_data)
         {
-            //TODO [web.impl] SetDeleter: not tested
             v8::Isolate* isolate = value->GetIsolate();
             const jsb::impl::StackPosition sp = value->stack_pos_;
             const jsb::impl::InternalDataID index = (jsb::impl::InternalDataID)(uintptr_t) jsbi_GetOpaque(isolate->rt(), sp);
@@ -27,6 +26,7 @@ namespace jsb::impl
             jsb_checkf(!callback || !data->weak.callback, "overriding an existing value is not allowed");
             data->weak.parameter = (void*) deleter_data;
             data->weak.callback = (void*) callback;
+            data->value_type_deleter = true;
         }
 
         static PackedByteArray to_packed_byte_array(v8::Isolate* isolate, const v8::Local<v8::ArrayBuffer>& array_buffer)

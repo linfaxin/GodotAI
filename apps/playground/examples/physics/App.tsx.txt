@@ -1,0 +1,77 @@
+import * as React from 'react';
+import { Node, Node2D, StaticBody2D, CharacterBody2D, CollisionShape2D,
+  VBoxContainer, HBoxContainer, Button, Label, asset, useAsset, useNodeRef,
+  usePhysicsProcess, vec2, color } from '@godot-js/react';
+
+// Visible blocks use native controls; the shapes underneath do real collisions.
+function Block({ x, y, width, height }: { x: number; y: number; width: number; height: number }) {
+  return <Node2D position={vec2(x, y)}><Button mouseFilter={2} text=""
+    customMinimumSize={vec2(width, height)} modulate={color(2, 4, 5)} /></Node2D>;
+}
+function World() {
+  const floor = useAsset(asset('floor', 'RectangleShape2D'));
+  const wall = useAsset(asset('wall', 'RectangleShape2D'));
+  const ball = useAsset(asset('ball', 'CircleShape2D'));
+  const body = useNodeRef<'CharacterBody2D'>();
+  const controls = React.useRef({ kick: false, direction: 1, paused: false, lowGravity: false });
+  const [bounces, setBounces] = React.useState(0);
+  const [paused, setPaused] = React.useState(false);
+  const [lowGravity, setLowGravity] = React.useState(false);
+  const [round, setRound] = React.useState(0);
+  const stats = React.useRef({ ticks: 0 });
+  React.useEffect(() => { console.log('BOUNCE_STATUS', JSON.stringify({ bounces, paused, lowGravity, round })); }, [bounces, paused, lowGravity, round]);
+  function launch() { controls.current.kick = true; }
+  // The physics callback owns position/velocity; React owns the HUD and controls.
+  usePhysicsProcess(body, { writes: ['position', 'velocity'] }, (commands, dt) => {
+    const input = controls.current;
+    if (input.paused) return;
+    const previous = commands.readVelocity();
+    const gravity = input.lowGravity ? 280 : 900;
+    let vx = previous.x || 150 * input.direction;
+    let vy = previous.y + gravity * dt;
+    if (input.kick) { vy = -420; vx = 180 * input.direction; input.kick = false; }
+    commands.setVelocity(vec2(vx, Math.min(vy, 600)));
+    const collided = commands.moveAndSlide();
+    const position = commands.readPosition();
+    if (collided) {
+      if (position.x < 42 || position.x > 414) {
+        input.direction = position.x < 42 ? 1 : -1;
+        vx = 180 * input.direction;
+      }
+      if (position.y > 280 && vy > 10) {
+        vy = -Math.max(260, Math.abs(vy) * 0.85);
+        setBounces(n => n + 1);
+        console.log('Collision at', Math.round(position.y));
+      }
+      if (position.y < 140 && vy < 0) vy = Math.abs(vy);
+      commands.setVelocity(vec2(vx, vy));
+    }
+    if (++stats.current.ticks % 60 === 0) console.log('BOUNCE_LAB', JSON.stringify({ x: Math.round(position.x), y: Math.round(position.y), lowGravity: input.lowGravity }));
+  });
+  return <Node>
+    <VBoxContainer customMinimumSize={vec2(448, 100)}>
+      <Label text="BOUNCE LAB  /  Real 2D collisions" modulate={color(0.65, 0.88, 1)} />
+      <Label text={'BOUNCES  ' + bounces + '    GRAVITY  ' + (lowGravity ? 'MOON' : 'EARTH')} />
+      <HBoxContainer>
+        <Button name="Launch" text="Launch!" customMinimumSize={vec2(106, 30)} onPressed={launch} disabled={paused} />
+        <Button name="Gravity" text={lowGravity ? 'Moon gravity' : 'Earth gravity'} customMinimumSize={vec2(126, 30)} onPressed={() => { controls.current.lowGravity = !lowGravity; setLowGravity(!lowGravity); }} />
+        <Button name="PausePhysics" text={paused ? 'Resume' : 'Pause'} customMinimumSize={vec2(90, 30)} onPressed={() => { controls.current.paused = !paused; setPaused(!paused); }} />
+        <Button name="ResetPhysics" text="Reset" customMinimumSize={vec2(90, 30)} onPressed={() => { setRound(n => n + 1); setBounces(0); controls.current.kick = false; }} />
+      </HBoxContainer>
+      <Label text="Launch the orange probe. Switch gravity while it flies." />
+    </VBoxContainer>
+    <Block x={16} y={112} width={424} height={12} />
+    <Block x={16} y={120} width={12} height={188} />
+    <Block x={428} y={120} width={12} height={188} />
+    <Block x={16} y={308} width={424} height={16} />
+    <StaticBody2D position={vec2(228, 316)}><CollisionShape2D shape={floor} /></StaticBody2D>
+    <StaticBody2D position={vec2(228, 116)}><CollisionShape2D shape={floor} /></StaticBody2D>
+    <StaticBody2D position={vec2(22, 214)}><CollisionShape2D shape={wall} /></StaticBody2D>
+    <StaticBody2D position={vec2(434, 214)}><CollisionShape2D shape={wall} /></StaticBody2D>
+    <CharacterBody2D key={round} ref={body} initial={{ position: vec2(100, 150), velocity: vec2(150, 0) }} engineOwned={['position', 'velocity']}>
+      <CollisionShape2D shape={ball} />
+      <Node2D position={vec2(-11, -20)} scale={vec2(1.8, 1.8)}><Label text="O" modulate={color(1, 0.65, 0.25)} /></Node2D>
+    </CharacterBody2D>
+  </Node>;
+}
+export default function App() { return <React.Suspense fallback={<Label text="Building the test chamber..." />}><World /></React.Suspense>; }

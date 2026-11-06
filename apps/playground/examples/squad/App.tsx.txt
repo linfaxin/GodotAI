@@ -1,0 +1,48 @@
+import * as React from 'react';
+import { VBoxContainer, HBoxContainer, Label, Button, color, vec2 } from '@godot-js/react';
+import { Toggle } from '@godot-js/react/ui';
+
+// The roster and the budget are shared by the cards through Context.
+const crew = [
+  { id: 'pilot', name: 'PILOT', role: 'Navigation', cost: 2, power: 35 },
+  { id: 'engineer', name: 'ENGINEER', role: 'Ship repair', cost: 3, power: 50 },
+  { id: 'scout', name: 'SCOUT', role: 'Deep space scan', cost: 2, power: 30 },
+];
+const Theme = React.createContext({ selected: ['pilot'], deployed: false, toggle: (_id: string) => {} });
+
+function CrewCard({ member }: { member: typeof crew[number] }) {
+  const team = React.useContext(Theme);
+  const selected = team.selected.includes(member.id);
+  const cost = crew.filter(person => team.selected.includes(person.id)).reduce((sum, person) => sum + person.cost, 0);
+  return <HBoxContainer customMinimumSize={vec2(420, 48)}>
+    <VBoxContainer customMinimumSize={vec2(275, 0)}>
+      <Label text={member.name + '   /   ' + member.cost + ' energy'} modulate={selected ? color(0.6, 1, 0.85) : color(0.72, 0.78, 0.88)} />
+      <Label text={member.role + '   +' + member.power + ' power'} />
+    </VBoxContainer>
+    <Toggle customMinimumSize={vec2(136, 40)} text={selected ? 'ON BOARD' : 'Recruit'}
+      checked={selected} disabled={team.deployed || (!selected && cost + member.cost > 5)} onCheckedChange={() => team.toggle(member.id)} />
+  </HBoxContainer>;
+}
+
+export default function App() {
+  const [selected, setSelected] = React.useState(['pilot']);
+  const [deployed, setDeployed] = React.useState(false);
+  const team = crew.filter(person => selected.includes(person.id));
+  const energy = team.reduce((sum, member) => sum + member.cost, 0);
+  const power = team.reduce((sum, member) => sum + member.power, 0);
+  function toggle(id: string) { setSelected(previous => previous.includes(id) ? previous.filter(value => value !== id) : [...previous, id]); }
+  React.useEffect(() => { console.log('SQUAD', JSON.stringify({ selected, energy, power, deployed })); }, [selected, deployed]);
+  return <Theme.Provider value={{ selected, deployed, toggle }}>
+    <VBoxContainer customMinimumSize={vec2(420, 300)}>
+      <Label text="MISSION CONTROL  /  Assemble your crew" modulate={color(0.65, 0.88, 1)} />
+      <Label text={'ENERGY  ' + energy + ' / 5      POWER  ' + power + ' / 80 required'} />
+      {crew.map(member => <CrewCard key={member.id} member={member} />)}
+      <Label text={deployed ? 'LAUNCH SUCCESSFUL! Your crew reached the outer rim.' : power >= 80 ? 'Crew ready. You are cleared for launch.' : 'Balance the energy budget to reach 80 power.'} />
+      <HBoxContainer>
+        <Button name="Deploy" text={deployed ? 'Crew deployed' : 'Launch expedition'} disabled={power < 80 || deployed}
+          customMinimumSize={vec2(240, 36)} onPressed={() => setDeployed(true)} />
+        <Button name="ResetSquad" text="Reset crew" customMinimumSize={vec2(172, 36)} onPressed={() => { setSelected(['pilot']); setDeployed(false); }} />
+      </HBoxContainer>
+    </VBoxContainer>
+  </Theme.Provider>;
+}

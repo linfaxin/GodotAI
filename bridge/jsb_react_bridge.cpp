@@ -8,6 +8,7 @@
 #include "scene/main/node.h"
 #include "scene/main/scene_tree.h"
 #include "scene/main/window.h"
+#include "scene/gui/control.h"
 #include "core/io/resource_loader.h"
 #include "core/object/script_language.h"
 #include "core/version.h"
@@ -192,6 +193,7 @@ namespace jsb
             // only available to authors when its runtime profile is certified.
             static const char* types[] = { "Node", "Node2D", "Node3D", "Control", "VBoxContainer", "HBoxContainer",
                 "Label", "Button", "CanvasLayer", "LineEdit", "HSlider", "Sprite2D", "CharacterBody2D",
+                "PanelContainer", "MarginContainer", "ScrollContainer", "TextureRect", "ProgressBar",
                 "CollisionShape2D", "StaticBody2D", "RigidBody2D", "Area2D", "AnimationPlayer", "Camera2D",
                 "CharacterBody3D", "CollisionShape3D", "StaticBody3D", "RigidBody3D", "Area3D", "Camera3D",
                 "MeshInstance3D", "SubViewport", "SubViewportContainer", "ColorRect", "PointLight2D",
@@ -233,7 +235,12 @@ namespace jsb
                 "constant_linear_velocity", "constant_angular_velocity", "one_way_collision", "one_way_collision_margin",
                 "color", "energy", "texture_scale", "shadow_enabled", "occluder", "mesh", "material_override",
                 "environment", "current", "fov", "near", "far", "light_color", "light_energy", "centered", "stream", "volume_db",
-                "projection", "mass", "linear_damp", "angular_damp", "sleeping", "target_position", "exclude_parent" };
+                "projection", "mass", "linear_damp", "angular_damp", "sleeping", "target_position", "exclude_parent",
+                "horizontal_scroll_mode", "vertical_scroll_mode", "follow_focus", "expand_mode", "stretch_mode",
+                "flip_h", "flip_v", "centered", "show_percentage", "fill_mode",
+                "theme_override_constants/margin_left", "theme_override_constants/margin_right",
+                "theme_override_constants/margin_top", "theme_override_constants/margin_bottom" };
+
             for (const char* candidate : names) if (name == candidate) return true;
             return false;
         }
@@ -1393,7 +1400,15 @@ namespace jsb
             if (info.Length() < 3 || !info[2]->IsString()) { fail("E_PROPERTY: native property required"); return; }
             const StringName property = impl::Helper::to_string(isolate, info[2]);
             bool valid = false;
-            const Variant previous = node->get(property, &valid);
+            const String property_text = property;
+            const bool margin_property = property_text == "theme_override_constants/margin_left"
+                || property_text == "theme_override_constants/margin_right" || property_text == "theme_override_constants/margin_top"
+                || property_text == "theme_override_constants/margin_bottom";
+            Control* margin_control = margin_property && node->is_class("MarginContainer") ? Object::cast_to<Control>(node) : nullptr;
+            if (margin_property && !margin_control) { fail("E_PROPERTY_PERMISSION: margin constants require MarginContainer"); return; }
+            const StringName margin_name = margin_property ? StringName(property_text.trim_prefix("theme_override_constants/")) : StringName();
+            const Variant previous = margin_control ? Variant(margin_control->get_theme_constant(margin_name)) : node->get(property, &valid);
+            if (margin_control) valid = true;
             if (!valid) { fail("E_PROPERTY: unknown native property"); return; }
             if (op == READ)
             {
@@ -1405,13 +1420,14 @@ namespace jsb
             if (property == StringName("name") && node->get_parent()) { fail("E_CONSTRUCTION_PROP: name is fixed after attachment"); return; }
             Variant value;
             if (!state.safe_from_js(*root, context, info[3], value, previous.get_type())) { fail("E_VALUE_CODEC: invalid property value"); return; }
-            node->set(property, value, &valid);
+            if (margin_control) margin_control->add_theme_constant_override(margin_name, value);
+            else node->set(property, value, &valid);
             if (!valid) { fail("E_NATIVE_SET: native rejected the property"); return; }
             node = state.resolve(*root, key);
             if (!node) { fail("E_NATIVE_LOST: property setter retired its target"); return; }
             if (property == StringName("name")) owned->name = node->get_name();
             if (!verify()) return;
-            const Variant stored = node->get(property, &valid);
+            const Variant stored = margin_property ? Variant(Object::cast_to<Control>(node)->get_theme_constant(margin_name)) : node->get(property, &valid);
             v8::Local<v8::Value> encoded;
             if (!valid || !stored_equivalent(node, property, value, stored) || !state.safe_to_js(*root, context, stored, encoded))
             { fail("E_NATIVE_SET: stored value verification failed for " + String(property)); return; }

@@ -97,3 +97,7 @@ The editor uses Monaco Editor 0.55.1; its MIT license and third-party notices ar
 Builds include upstream notices under `dist/third-party/`, linked from the credits dialog. SimpleDungeons remains deferred: its scenes, navigation and dungeon gameplay require a separate integration beyond the small BSP example.
 
 GDQuest's NC-SA art and compute-based water demos are not included.
+
+## Browser SDK conformance workbench
+
+The root-level `main.ts`, `compiler-worker.ts`, `preview.ts`, `build.mjs`, `examples/` and `test/` remain the browser SDK conformance fixture used by the existing release, isolation, source-map and stress gates. They are not the default eight-demo application. `pnpm --filter @godot-js/playground build:conformance` builds that fixture into `dist-conformance/`; `scripts/test/prepare-browser-playground.mjs` continues to prepare release-bound fixtures into its explicit output directory. The browser SDK and its existing tests remain supported. See [the browser SDK guide](../../docs/browser-playground.zh-CN.md).

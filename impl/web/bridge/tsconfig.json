@@ -108,5 +108,5 @@
     "skipLibCheck": true,                                /* Skip type checking all .d.ts files. */
     "ignoreDeprecations": "6.0"
   },
-  "exclude": ["test"]
+  "include": ["src/**/*"]
 }

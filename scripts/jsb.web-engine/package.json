@@ -1,0 +1,15 @@
+{
+  "name": "@godot-js/web-engine",
+  "version": "0.1.0",
+  "description": "Immutable single-thread GodotJS browser engine, SDK and compiler release assets",
+  "private": false,
+  "type": "module",
+  "exports": {
+    "./release.json": "./dist/release.json",
+    "./*": "./dist/*"
+  },
+  "files": ["dist", "README.md"],
+  "publishConfig": { "access": "public" },
+  "scripts": { "build": "node -e \"console.log('Web engine assets are prepared by scripts/release/build-web-release.mjs')\"" },
+  "license": "MIT"
+}

@@ -11,3 +11,5 @@ project/asset-hub.tres.uid
 project/export_presets.cfg
 project/*.log
 project/**/*.uid
+node_modules/
+dist-conformance/

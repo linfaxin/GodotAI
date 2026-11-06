@@ -26,7 +26,7 @@ a new root may be created after shutdown. A failed application start releases
 its preopened empty native scope.
 
 The compiler owns the bootstrap, entry TSCNs, canonical React/JSX vendor bundle
-and manifest. See [project usage and migration](../../docs/react-tsx.md).
+and manifest. See [project usage and migration](../../docs/react-tsx.zh-CN.md).
 Importing the SDK in Node does not import Godot. `@godot-js/react/testing`
 provides a mock private backend for tests with the real reconciler.
 
@@ -35,6 +35,87 @@ provides a mock private backend for tests with the real reconciler.
 Core hosts: Node, Node2D, Control, VBoxContainer, HBoxContainer, Label, Button,
 CanvasLayer. Text is supplied through `Label.text` or `Button.text`.
 Host properties and commands are a checked whitelist; unknown fields fail.
+
+### Profiles
+
+Choose `profileId` in the compiler project configuration. Custom integrations
+pass the same `profileId` to `createRoot`; generated launchers obtain it from
+the sealed manifest. Profiles bind an exact schema hash and resource whitelist.
+
+| Profile | Hosts beyond core | Resource types |
+| --- | --- | --- |
+| `core-ui-v1` (default) | The eight core hosts listed above | `Resource`, `CanvasItemMaterial` |
+| `ui-media-v1` | `PanelContainer`, `MarginContainer`, `ScrollContainer`, `TextureRect`, `ProgressBar`, `Sprite2D` | Core plus `Texture2D`, `ImageTexture`, `CompressedTexture2D` |
+| `behavior-physics-v1` | `CharacterBody2D`, `StaticBody2D`, `CollisionShape2D` | Core plus `CircleShape2D`, `RectangleShape2D`, `CapsuleShape2D` |
+
+The two extension profiles each include core. Selecting `ui-media-v1` does not
+enable physics hosts, and selecting `behavior-physics-v1` does not enable media
+hosts. `G.TextureRect` and named `TextureRect` imports refer to the same host and
+have the same profile checks. The renderer validates the active profile even
+when author code is JavaScript or casts away TypeScript types.
+
+`MarginContainer` adds integer `marginLeft`, `marginRight`, `marginTop` and
+`marginBottom` values from 0 to 16384. They map to controlled native theme
+constants; removing a controlled margin restores its immutable initial value.
+`PanelContainer`, `MarginContainer` and `ScrollContainer` own their children's
+layout position and size, as the existing row and column containers do.
+
+`ScrollContainer` supports `horizontalScrollMode` and `verticalScrollMode`
+(Godot values 0–4) and `followFocus`. Scroll offsets remain native layout state.
+`TextureRect` accepts `texture`, `expandMode` (0–5), `stretchMode` (0–6),
+`flipH` and `flipV`. `Sprite2D` adds `texture`, `centered`, `offset`, `flipH`
+and `flipV` to the checked Node2D properties. Texture props accept immutable
+AssetRefs for the three listed texture types, or `null`.
+
+`ProgressBar` uses a fixed 0–100 range with `step={0}`. It supports `value`,
+`showPercentage`, `fillMode` (0–3) and `onValueChanged`. Native setter echoes
+are suppressed; actual native value changes reach the committed handler.
+Removing `value` restores the initial baseline. `minValue`, `maxValue` and
+`step` only accept the fixed values 0, 100 and 0 respectively.
+
+For browser PNG/JPEG inputs, configure an asset as
+`{ source: "assets/logo.png", type: "Texture2D" }` and select `ui-media-v1`.
+The browser compiler decodes bounded RGBA pixels and emits an ImageTexture
+text resource into the sealed pack. It needs no runtime Godot importer.
+
+```tsx
+import * as React from "react";
+import { MarginContainer, TextureRect, asset } from "@godot-js/react";
+
+export default function ImagePanel() {
+  return <React.Suspense fallback={null}>
+    <MarginContainer marginLeft={12} marginTop={12}>
+      <TextureRect texture={asset("logo", "Texture2D")}
+        customMinimumSize={{ x: 128, y: 128 }} expandMode={1} stretchMode={5} />
+    </MarginContainer>
+  </React.Suspense>;
+}
+```
+
+Profile availability describes the SDK contract. Native/browser evidence must
+match the selected engine, SDK mode and profile; a mock or another backend
+does not establish those results. The Node builder retains its own narrower
+resource-import whitelist. Text editing/IME is outside these profiles.
+
+### UI helpers
+
+`@godot-js/react/ui` provides ordinary React compositions over core hosts:
+`Stack` (`direction="row"` or `"column"`), `Row`, `Column`, `Text`,
+`ActionButton`, `Toggle`, and `useToggle`. They use the same typed host props,
+ownership rules and refs. Layout is expressed through Godot properties such
+as `customMinimumSize` and size flags.
+
+```tsx
+import { Stack, Text, Toggle, useToggle } from "@godot-js/react/ui";
+
+export default function Settings() {
+  const [enabled, , setEnabled] = useToggle(false);
+  return <Stack direction="column">
+    <Text text={enabled ? "Enabled" : "Disabled"} />
+    <Toggle text="Enable" checked={enabled} onCheckedChange={setEnabled} />
+  </Stack>;
+}
+```
 
 `useNodeRef<"Label">()` supplies a stable, frozen read facade with `isValid()`,
 `read("text")` and a two-field NativeKey. It exposes no raw native object,
@@ -67,6 +148,13 @@ the component containing the Hook remains mounted.
 `behavior-physics-v1` explicitly enables CharacterBody2D, StaticBody2D and
 CollisionShape2D. `usePhysicsProcess` permits checked `setVelocity` and
 `moveAndSlide` commands. This does not enable arbitrary Godot methods.
+Reserve `engineOwned={["position", "velocity"]}` on a moving body and declare
+the same fields in the physics hook's `writes`. Supply initial position and
+velocity through `initial`, then update them through synchronous frame commands.
+Commands expire when the callback returns. Collision behavior requires an
+engine with the real GodotPhysics2D driver; a Dummy physics engine cannot
+validate movement or collision. The full fixture is
+[`tests/react/physics`](../../tests/react/physics).
 
 `asset(id, type)` produces an immutable logical AssetRef. `useAsset(ref)` loads
 through the manifest resource table and suspends until ready; it returns no raw

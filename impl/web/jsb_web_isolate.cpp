@@ -3,6 +3,7 @@
 #include "jsb_web_catch.h"
 #include "jsb_web_handle.h"
 #include "jsb_web_context.h"
+#include "jsb_web_function_interop.h"
 
 namespace v8
 {
@@ -29,8 +30,23 @@ namespace v8
         // cleanup
         jsb_check(!handle_scope_);
 
-        // make it behave like v8, not to trigger gc callback after the isolate disposed
-        internal_data_.clear();
+        // Browser GC cannot be forced before shutdown. Release outstanding
+        // native value storage while its Environment is still alive. Object
+        // weak callbacks are deliberately skipped: Environment::dispose has
+        // already drained object_db_. Remove each slot before its callback so
+        // reentrant cleanup cannot finalize it twice.
+        while (!internal_data_.is_empty())
+        {
+            const auto index = internal_data_.get_first_index();
+            jsb::impl::InternalData data = *internal_data_.get_value_scoped(index);
+            internal_data_.remove_at(index);
+            if (data.value_type_deleter && data.weak.callback)
+            {
+                const auto callback = (WeakCallbackInfo<void>::Callback) data.weak.callback;
+                const WeakCallbackInfo<void> info(this, data.weak.parameter, data.internal_fields);
+                callback(info);
+            }
+        }
 
         // dispose the runtime
         jsbi_FreeEngine(rt_);

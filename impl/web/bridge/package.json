@@ -3,7 +3,7 @@
   "private": true,
   "scripts": {
     "build": "tsc",
-    "test": "pnpm build && node --test test/*.test.mjs"
+    "test": "tsc && node --test test/*.test.mjs"
   },
   "devDependencies": {
     "@types/emscripten": "^1.41.5",

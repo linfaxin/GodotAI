@@ -34,7 +34,8 @@ Run these commands from the GodotJS module directory:
 | Command | Scope |
 | --- | --- |
 | `pnpm build:engine-js` | The existing `jsb.runtime`, `jsb.editor`, and `web-bridge` packages |
-| `pnpm build:packages` | Ecosystem packages in `packages/` plus the existing React renderer and build tool |
+| `pnpm build:packages` | Ecosystem packages in `packages/` plus React, Node and browser build tools |
+| `pnpm build:playground` | Static Playground and its workspace dependencies; engine assets are prepared separately |
 | `pnpm typecheck:packages` | Type-check ecosystem packages without emitting files |
 | `pnpm build` | Build embedded scripts, then ecosystem packages |
 | `pnpm test` | The existing engine runtime matrix; requires its Godot build environment |

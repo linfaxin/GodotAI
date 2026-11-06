@@ -71,9 +71,9 @@ type JSWorkerLike = { onmessage: JSWorkerOnMessage };
 type GodotWorkerModule = { JSWorkerParent: JSWorkerLike };
 type GodotWorkerGlobal = { require?: (module_name: "godot.worker") => GodotWorkerModule };
 
-// Emscripten omits pthread globals entirely in threads=no builds.
-const jsbbIsPThread = typeof ENVIRONMENT_IS_PTHREAD !== "undefined" && !!ENVIRONMENT_IS_PTHREAD;
-let JSWorkerParent: null | undefined | JSWorkerLike = jsbbIsPThread ? undefined : null;
+// Emscripten omits pthread globals entirely when threads=no.
+const jsbb_is_pthread = typeof ENVIRONMENT_IS_PTHREAD !== "undefined" && ENVIRONMENT_IS_PTHREAD === true;
+let JSWorkerParent: null | undefined | JSWorkerLike = jsbb_is_pthread ? undefined : null;
 
 function getJSWorkerParent(): null | JSWorkerLike {
     if (typeof JSWorkerParent !== "undefined") {
@@ -354,6 +354,8 @@ class jsbb_Registry {
     private _count = 0;
     private engine_opaque: Pointer;
     private watcher: FinalizationRegistry<FinalizationRegistryCallbackInfo>;
+    private tokens = new Map<Pointer, object>();
+    private released = false;
 
     get count() { return this._count; }
 
@@ -361,6 +363,9 @@ class jsbb_Registry {
         const self = this;
         this.engine_opaque = engine_opaque;
         this.watcher = new FinalizationRegistry(function (internal_data) {
+            if (self.released || !self.tokens.delete(internal_data)) {
+                return;
+            }
             jsbb_console.trace("gc.dealloc", internal_data);
             --self._count;
             _jsbb_.interop.gc_callback(self.engine_opaque, internal_data);
@@ -372,8 +377,18 @@ class jsbb_Registry {
 
         // opaque saved in obj[opaque.symbol] for GetOpaque(), it's never changed.
         obj[jsbb_opaque] = internal_data;
-        this.watcher.register(obj, internal_data);
+        const token = {};
+        this.tokens.set(internal_data, token);
+        this.watcher.register(obj, internal_data, token);
         ++this._count;
+    }
+
+    Release(): void {
+        // No asynchronous finalizer may call into an already freed WASM isolate.
+        this.released = true;
+        for (const token of this.tokens.values()) this.watcher.unregister(token);
+        this.tokens.clear();
+        this._count = 0;
     }
 }
 
@@ -462,6 +477,7 @@ class jsbb_Engine {
 
     Release() {
         // this._global = <any>undefined;
+        this._registry.Release();
         this._handles = <any>undefined;
         this._stack = <any>undefined;
         this._registry = <any>undefined;
@@ -1009,12 +1025,17 @@ class jsbb_Engine {
 
     CompileFunctionSource(filename_ptr: CString, source_ptr: CString): StackPosition {
         let source = _jsbb_.wasmop.UTF8ToString(source_ptr);
+        const filename = _jsbb_.wasmop.UTF8ToString(filename_ptr);
         let rval: any = undefined;
         try {
             if (source == null) {
                 this._throw(new Error("source is null"));
                 return jsbb_StackPos.Error;
             }
+            // Name the complete native CommonJS wrapper, rather than its body.
+            // Appending on a new line preserves every existing source coordinate.
+            // Newlines in a filename must never create executable source directives.
+            if (filename) source += "\n//# sourceURL=" + filename.replace(/[\r\n\u2028\u2029]/g, "");
             jsbb_console.trace("compile function source:", source);
             rval = eval(source);
         } catch (err) {
@@ -1026,7 +1047,7 @@ class jsbb_Engine {
                     //TODO if async module is implemented, we can use dynamic scripts which support debugging in browser devtools
                     // but for now, we need a method to eval source synchronously
                     let script = document.createElement("script");
-                    script.type = "type/javascript";
+                    script.type = "text/javascript";
                     script.text = `_jsbb_.evalResult = ${source};`;
 
                     document.head.appendChild(script);
@@ -1039,7 +1060,6 @@ class jsbb_Engine {
                     return jsbb_StackPos.Error;
                 }
             } else {
-                let filename = _jsbb_.wasmop.UTF8ToString(filename_ptr);
                 jsbb_console.error(filename, err);
 
                 this._throw(err);
@@ -1919,7 +1939,7 @@ class _jsbb_ {
 
     static post_message_to_worker(pthread_id: number, data: unknown, transfer_id?: number): boolean {
         try {
-            const worker = PThread?.pthreads[pthread_id];
+            const worker = typeof PThread !== "undefined" ? PThread?.pthreads[pthread_id] : undefined;
 
             if (!worker) {
                 return false;
@@ -1944,7 +1964,7 @@ class _jsbb_ {
     }
 
     private static install_pthread_worker_listener_hook(): void {
-        if (jsbbIsPThread || typeof PThread === "undefined" || !PThread) {
+        if (jsbb_is_pthread || typeof PThread === "undefined" || !PThread) {
             return;
         }
 
@@ -1986,7 +2006,7 @@ class _jsbb_ {
     }
 
     private static dispatch_direct_worker_message(data: unknown, sender_pthread_id?: number): void {
-        if (jsbbIsPThread) {
+        if (jsbb_is_pthread) {
             const worker_parent = getJSWorkerParent();
 
             if (!worker_parent) {
@@ -2057,12 +2077,12 @@ class _jsbb_ {
                 message
             );
 
-            const is_ready_sentinel_transfer_id = jsbbIsPThread && transfer_id === 0;
+            const is_ready_sentinel_transfer_id = jsbb_is_pthread && transfer_id === 0;
             const outbound_transfer_id = (transfer_context.native_transfers_used || is_ready_sentinel_transfer_id)
                 ? transfer_id
                 : undefined;
 
-            if (jsbbIsPThread) {
+            if (jsbb_is_pthread) {
                 const payload: WorkerMessage = {
                     "__jsbMessage": true,
                     "data": rewritten,
@@ -2187,7 +2207,7 @@ declare const _free: EmscriptenModule['_free'];
 declare const PThread: undefined | EmscriptenPThread;
 declare const ENVIRONMENT_IS_PTHREAD: undefined | boolean;
 
-if (jsbbIsPThread && typeof globalThis.addEventListener === "function") {
+if (jsbb_is_pthread && typeof globalThis.addEventListener === "function") {
     globalThis.addEventListener('message', (e: MessageEvent) => {
         if (!jsbb_is_worker_message(e.data)) {
             return;
