@@ -80,6 +80,23 @@ release are separate gated operations.
 returns the local Godot Error status, never a remote return value. Identity,
 schema, argument codecs, Root lifetime and queued callback validity are checked.
 
+## Browser showcase profile
+
+`profileId: "showcase-v1"` opts into the canvas, lighting, 3D mesh/camera,
+character/rigid-body physics, ground rays and audio hosts used by the [playground](../../apps/playground/README.md).
+Vector3 values use explicit `{x,y,z}` DTOs. `setPosition3D`, `setVelocity3D`,
+`isOnFloor`, `setShaderFloat` and the other frame commands remain phase-checked
+and require matching `engineOwned` reservations for their writes. Impulses/forces
+reserve both `linearVelocity` and `sleeping`; ray refreshes reserve `rayQuery`.
+Camera projection queries return Vector3 DTOs without a write reservation. Shader floats use per-instance
+uniforms, so changing one canvas item's parameters does not mutate a shared
+ShaderMaterial. The profile's own schema descriptor includes its Vector3 codec;
+the existing default profile descriptors and hashes are unchanged.
+
+The showcase consumes trusted prebuilt assets through a dedicated application
+pipeline. It does not certify arbitrary templates, resource graphs, skeletal
+animation or additional `godot-react` CLI export targets.
+
 ## Runtime lifecycle
 
 Suspense visibility covers descendants below nonvisual Nodes and independent

@@ -1,0 +1,9 @@
+{
+  "compilerOptions": {
+    "target": "ES2022", "module": "ESNext", "moduleResolution": "Bundler",
+    "lib": ["ES2022", "DOM", "WebWorker"], "jsx": "react", "strict": true,
+    "esModuleInterop": true, "skipLibCheck": true, "noEmit": true,
+    "paths": {"@playground/api": ["./src/api.tsx"]}
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx"]
+}

@@ -194,7 +194,8 @@ namespace jsb
                 "Label", "Button", "CanvasLayer", "LineEdit", "HSlider", "Sprite2D", "CharacterBody2D",
                 "CollisionShape2D", "StaticBody2D", "RigidBody2D", "Area2D", "AnimationPlayer", "Camera2D",
                 "CharacterBody3D", "CollisionShape3D", "StaticBody3D", "RigidBody3D", "Area3D", "Camera3D",
-                "MeshInstance3D", "SubViewport", "SubViewportContainer" };
+                "MeshInstance3D", "SubViewport", "SubViewportContainer", "ColorRect", "PointLight2D",
+                "LightOccluder2D", "CanvasModulate", "DirectionalLight3D", "WorldEnvironment", "AudioStreamPlayer", "RayCast3D" };
             for (const char* type : types) if (p_type == StringName(type)) return true;
             return false;
         }
@@ -207,7 +208,12 @@ namespace jsb
                 || p_type == StringName("CapsuleShape2D") || p_type == StringName("RectangleShape2D")
                 || p_type == StringName("CircleShape2D") || p_type == StringName("Shape3D")
                 || p_type == StringName("CapsuleShape3D") || p_type == StringName("BoxShape3D")
-                || p_type == StringName("SphereShape3D") || p_type == StringName("Theme");
+                || p_type == StringName("SphereShape3D") || p_type == StringName("ConvexPolygonShape3D") || p_type == StringName("Theme")
+                || p_type == StringName("Mesh") || p_type == StringName("ArrayMesh") || p_type == StringName("BoxMesh")
+                || p_type == StringName("SphereMesh") || p_type == StringName("CylinderMesh")
+                || p_type == StringName("ShaderMaterial") || p_type == StringName("StandardMaterial3D")
+                || p_type == StringName("Environment") || p_type == StringName("OccluderPolygon2D")
+                || p_type == StringName("AudioStream") || p_type == StringName("AudioStreamOggVorbis");
         }
 
         bool mutable_property(const StringName& p_name)
@@ -224,7 +230,10 @@ namespace jsb
                 "max_length", "process_mode", "process_priority", "physics_process_priority", "up_direction",
                 "motion_mode", "floor_max_angle", "floor_snap_length", "floor_stop_on_slope", "floor_constant_speed",
                 "floor_block_on_wall", "max_slides", "wall_min_slide_angle", "safe_margin", "slide_on_ceiling",
-                "constant_linear_velocity", "constant_angular_velocity", "one_way_collision", "one_way_collision_margin" };
+                "constant_linear_velocity", "constant_angular_velocity", "one_way_collision", "one_way_collision_margin",
+                "color", "energy", "texture_scale", "shadow_enabled", "occluder", "mesh", "material_override",
+                "environment", "current", "fov", "near", "far", "light_color", "light_energy", "centered", "stream", "volume_db",
+                "projection", "mass", "linear_damp", "angular_damp", "sleeping", "target_position", "exclude_parent" };
             for (const char* candidate : names) if (name == candidate) return true;
             return false;
         }
@@ -255,6 +264,13 @@ namespace jsb
                     if (Math::is_zero_approx(expected.y)) expected.y = CMP_EPSILON;
                 }
                 return expected == Vector2(p_stored);
+            }
+            if (p_requested.get_type() == Variant::VECTOR3)
+            {
+                // Node3D reconstructs Euler angles and scale from its basis.
+                const Vector3 requested = p_requested;
+                const Vector3 stored = p_stored;
+                return requested.is_equal_approx(stored);
             }
             return p_requested == p_stored;
         }
@@ -1474,13 +1490,17 @@ namespace jsb
             const String method_text = method;
             const bool reader = method_text.begins_with("get_") || method_text.begins_with("is_") || method_text.begins_with("has_");
             const bool physics = method_text == "move_and_slide" || method_text == "set_velocity" || method_text == "apply_impulse"
-                || method_text == "apply_central_impulse" || method_text == "apply_force" || method_text == "set_linear_velocity";
+                || method_text == "apply_central_impulse" || method_text == "apply_force" || method_text == "apply_central_force"
+                || method_text == "set_linear_velocity" || method_text == "set_angular_velocity" || method_text == "force_raycast_update";
             const bool transform = method_text == "set_position" || method_text == "set_global_position" || method_text == "set_rotation" || method_text == "set_scale";
             const bool cleanup = method_text == "stop" || method_text == "pause";
             const bool focus = method_text == "grab_focus" || method_text == "release_focus";
             const bool play = method_text == "play";
-            if ((!reader && !physics && !transform && !cleanup && !focus && !play) || is_structural(method)) { fail("E_COMMAND_PROFILE: unsupported native command"); return; }
+            const bool shader = method_text == "set_instance_shader_parameter";
+            const bool projection = method_text == "project_ray_origin" || method_text == "project_ray_normal";
+            if ((!reader && !physics && !transform && !cleanup && !focus && !play && !shader && !projection) || is_structural(method)) { fail("E_COMMAND_PROFILE: unsupported native command"); return; }
             if ((physics && root->stage != "physics") || (transform && root->stage != "physics" && root->stage != "process")
+                || (shader && root->stage != "process")
                 || ((cleanup || focus || play) && root->stage.is_empty())) { fail("E_COMMAND_PHASE: command outside authorized phase"); return; }
             MethodBind* binding = ClassDB::get_method(node->get_class(), method);
             if (!binding) { fail("E_COMMAND: method not found"); return; }

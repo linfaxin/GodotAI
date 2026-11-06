@@ -1,0 +1,513 @@
+[
+  {
+    "repository": "KenneyNL/Starter-Kit-3D-Platformer",
+    "commit": "3fa8a04b1c01ab23db43123d4ce814a34c3fc7f0",
+    "path": "README.md",
+    "sha256": "d8f51d172d58e62d289105a5a1561e02e54cccc4c6d1215472169bc50ff2f91f",
+    "local": "third-party/kenney/README.md"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-3D-Platformer",
+    "commit": "3fa8a04b1c01ab23db43123d4ce814a34c3fc7f0",
+    "path": "models/character.glb",
+    "sha256": "7112f6a08400914f9da546f3e6029e947cc9eab2b4a6da5eb99776111289efb1",
+    "local": "third-party/kenney/models/character.glb"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-3D-Platformer",
+    "commit": "3fa8a04b1c01ab23db43123d4ce814a34c3fc7f0",
+    "path": "models/coin.glb",
+    "sha256": "a3fb8f779a6af1cd75e5a02da77a87546ca8a59f6fe52f79f25179c4a68fd0e5",
+    "local": "third-party/kenney/models/coin.glb"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-3D-Platformer",
+    "commit": "3fa8a04b1c01ab23db43123d4ce814a34c3fc7f0",
+    "path": "models/cloud.glb",
+    "sha256": "09c6f071d3a9ab64993248ee5c8d50debcd9c6cc4369236a01155ff7ff87f30a",
+    "local": "third-party/kenney/models/cloud.glb"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-3D-Platformer",
+    "commit": "3fa8a04b1c01ab23db43123d4ce814a34c3fc7f0",
+    "path": "models/platform.glb",
+    "sha256": "78c5ed4da30c5a97f0747a54248bc9de05ba1b3fb6b94be527dd48599f5ef44c",
+    "local": "third-party/kenney/models/platform.glb"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-3D-Platformer",
+    "commit": "3fa8a04b1c01ab23db43123d4ce814a34c3fc7f0",
+    "path": "models/platform-falling.glb",
+    "sha256": "d6dc9baba80af659e6d0fffc435bd1f08b1a7945942ccbb85dd9bb103b7a574d",
+    "local": "third-party/kenney/models/platform-falling.glb"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-3D-Platformer",
+    "commit": "3fa8a04b1c01ab23db43123d4ce814a34c3fc7f0",
+    "path": "models/platform-grass-large-round.glb",
+    "sha256": "73c2b66eca6a36df6b5c25bb2c0594cf870066627275993a3a7857acc5a844bc",
+    "local": "third-party/kenney/models/platform-grass-large-round.glb"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-3D-Platformer",
+    "commit": "3fa8a04b1c01ab23db43123d4ce814a34c3fc7f0",
+    "path": "models/flag.glb",
+    "sha256": "0ba84ff43f0fea0a9f0b080cfa1be54ebda36c8c35174d1ac2553ae6da9f65ae",
+    "local": "third-party/kenney/models/flag.glb"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-3D-Platformer",
+    "commit": "3fa8a04b1c01ab23db43123d4ce814a34c3fc7f0",
+    "path": "sounds/coin.ogg",
+    "sha256": "df55e931e6b78e5aecc015922e873a0e8bfa4e97cfb19abc64149d54afe89216",
+    "local": "third-party/kenney/sounds/coin.ogg"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-3D-Platformer",
+    "commit": "3fa8a04b1c01ab23db43123d4ce814a34c3fc7f0",
+    "path": "sounds/jump.ogg",
+    "sha256": "f090c16689e9ec04c4bef80bfcbf68bc4b63ab4ce29f7fbb5cee05a5641d5694",
+    "local": "third-party/kenney/sounds/jump.ogg"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-3D-Platformer",
+    "commit": "3fa8a04b1c01ab23db43123d4ce814a34c3fc7f0",
+    "path": "sounds/land.ogg",
+    "sha256": "145a1c17125dc4d344ac135bc5073e35ea12e19700ca30ee6e1e477010b4dca0",
+    "local": "third-party/kenney/sounds/land.ogg"
+  },
+  {
+    "repository": "godotengine/godot-demo-projects",
+    "commit": "b761b4cd5718a7118f2c95eb55f181d0a5f004f1",
+    "path": "LICENSE.md",
+    "sha256": "0339177149b474f7ff676d32218ecb3a8f2538955610023c3769763720d09e4c",
+    "local": "third-party/godot/LICENSE.md"
+  },
+  {
+    "repository": "godotengine/godot-demo-projects",
+    "commit": "b761b4cd5718a7118f2c95eb55f181d0a5f004f1",
+    "path": "2d/lights_and_shadows/light.png",
+    "sha256": "1c4f996bf321970ac2a39279b5f0590cda56c109f5185215229550464d9fa9e5",
+    "local": "third-party/godot/2d/lights_and_shadows/light.png"
+  },
+  {
+    "repository": "godotengine/godot-demo-projects",
+    "commit": "b761b4cd5718a7118f2c95eb55f181d0a5f004f1",
+    "path": "2d/lights_and_shadows/background.png",
+    "sha256": "88993c044acd718f4e701fc84258aea406f29eadafb6ffeca15c4d31bd272c77",
+    "local": "third-party/godot/2d/lights_and_shadows/background.png"
+  },
+  {
+    "repository": "godotengine/godot-demo-projects",
+    "commit": "b761b4cd5718a7118f2c95eb55f181d0a5f004f1",
+    "path": "2d/lights_and_shadows/godot.png",
+    "sha256": "343506dbbbb3bcd8258cc640e870c6adeabacdc50293904ac6c2fbda4cdff775",
+    "local": "third-party/godot/2d/lights_and_shadows/godot.png"
+  },
+  {
+    "repository": "godotengine/godot-demo-projects",
+    "commit": "b761b4cd5718a7118f2c95eb55f181d0a5f004f1",
+    "path": "2d/lights_and_shadows/godot_normal.png",
+    "sha256": "838e2d9fd029776c5d231af7a780094f01b61908c5640f214f5b368aeaa4b3ca",
+    "local": "third-party/godot/2d/lights_and_shadows/godot_normal.png"
+  },
+  {
+    "repository": "godotengine/godot-demo-projects",
+    "commit": "b761b4cd5718a7118f2c95eb55f181d0a5f004f1",
+    "path": "2d/sprite_shaders/godotea.png",
+    "sha256": "f36e9074726c505c365f8b6078c5cc6d769d3dafc9a25acc4d403bfd73034e1a",
+    "local": "third-party/godot/2d/sprite_shaders/godotea.png"
+  },
+  {
+    "repository": "godotengine/godot-demo-projects",
+    "commit": "b761b4cd5718a7118f2c95eb55f181d0a5f004f1",
+    "path": "2d/sprite_shaders/shaders/outline.gdshader",
+    "sha256": "9ac230bb1a71bc117e3bef90ee1350d47313e2b3c187e88a74caa951ce607cd9",
+    "local": "third-party/godot/2d/sprite_shaders/shaders/outline.gdshader"
+  },
+  {
+    "repository": "godotengine/godot-demo-projects",
+    "commit": "b761b4cd5718a7118f2c95eb55f181d0a5f004f1",
+    "path": "2d/sprite_shaders/shaders/aura.gdshader",
+    "sha256": "2a02c85c424d2a775be693b37e0fa3a6015817183ac86a35ac085264647a7420",
+    "local": "third-party/godot/2d/sprite_shaders/shaders/aura.gdshader"
+  },
+  {
+    "repository": "godotengine/godot-demo-projects",
+    "commit": "b761b4cd5718a7118f2c95eb55f181d0a5f004f1",
+    "path": "2d/screen_space_shaders/shaders/whirl.gdshader",
+    "sha256": "a6c2c0d7132a778fbcfbfc7598f6abfafb4b66858a6b07e22ffe94919e90ce19",
+    "local": "third-party/godot/2d/screen_space_shaders/shaders/whirl.gdshader"
+  },
+  {
+    "repository": "godotengine/godot-demo-projects",
+    "commit": "b761b4cd5718a7118f2c95eb55f181d0a5f004f1",
+    "path": "2d/screen_space_shaders/shaders/mirage.gdshader",
+    "sha256": "412601f0b591da3127ad90ae3f009c7ff65499de0e83e4439e59c42da9cc04dd",
+    "local": "third-party/godot/2d/screen_space_shaders/shaders/mirage.gdshader"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-3D-Platformer",
+    "commit": "3fa8a04b1c01ab23db43123d4ce814a34c3fc7f0",
+    "path": "models/Textures/colormap.png",
+    "sha256": "106cf02e0d6dccded6d9f90c2ae6a51eb94c6301645fea159e834c44ed4708a3",
+    "local": "third-party/kenney/models/Textures/colormap.png"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-City-Builder",
+    "commit": "4535092b740b378b700efd9df9e27a631815b84a",
+    "path": "README.md",
+    "sha256": "0d6f9a90d2177658b56c47d4cbc4d759b151f8c3a09b24586da450c969de697d",
+    "local": "third-party/city/README.md"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-City-Builder",
+    "commit": "4535092b740b378b700efd9df9e27a631815b84a",
+    "path": "LICENSE.md",
+    "sha256": "8e99e4045f71bb96d77a1765c815511c63c9f9185bfada2b8917e041ced00754",
+    "local": "third-party/city/LICENSE.md"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-City-Builder",
+    "commit": "4535092b740b378b700efd9df9e27a631815b84a",
+    "path": "scripts/builder.gd",
+    "sha256": "4fdf906ed15124c257a464b955be2d85cc99a7fa24419de094c1c775cc00bdbb",
+    "local": "third-party/city/scripts/builder.gd"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-City-Builder",
+    "commit": "4535092b740b378b700efd9df9e27a631815b84a",
+    "path": "scripts/view.gd",
+    "sha256": "c92f26e648947fefa0aa3fb7b8433b14997c63667c27566e7b744566c0f9937f",
+    "local": "third-party/city/scripts/view.gd"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-City-Builder",
+    "commit": "4535092b740b378b700efd9df9e27a631815b84a",
+    "path": "models/Textures/colormap.png",
+    "sha256": "106cf02e0d6dccded6d9f90c2ae6a51eb94c6301645fea159e834c44ed4708a3",
+    "local": "third-party/city/models/Textures/colormap.png"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-City-Builder",
+    "commit": "4535092b740b378b700efd9df9e27a631815b84a",
+    "path": "models/building-small-a.glb",
+    "sha256": "22ce989013bd16b1732e81798e343cf85f947e92b6c93825b18131feded48e07",
+    "local": "third-party/city/models/building-small-a.glb"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-City-Builder",
+    "commit": "4535092b740b378b700efd9df9e27a631815b84a",
+    "path": "models/building-small-b.glb",
+    "sha256": "0bc8459045975158524753d6b648ff77e5f91fe8c033bc4886930b6d55543a2b",
+    "local": "third-party/city/models/building-small-b.glb"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-City-Builder",
+    "commit": "4535092b740b378b700efd9df9e27a631815b84a",
+    "path": "models/building-small-c.glb",
+    "sha256": "3ea0f46fbed4e0acba7fda365cd968b3f23a6e02b9fee79dd54c99c42ffadf2f",
+    "local": "third-party/city/models/building-small-c.glb"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-City-Builder",
+    "commit": "4535092b740b378b700efd9df9e27a631815b84a",
+    "path": "models/building-garage.glb",
+    "sha256": "7373b558fc9b1e27e60b60ca1ce53000af7e132d7304eeb6d49b47528a3b6806",
+    "local": "third-party/city/models/building-garage.glb"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-City-Builder",
+    "commit": "4535092b740b378b700efd9df9e27a631815b84a",
+    "path": "models/grass.glb",
+    "sha256": "3e3ec91132ad8519967aa2e4c0bedbab2aeed39b5714d66068bb75648ae73a52",
+    "local": "third-party/city/models/grass.glb"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-City-Builder",
+    "commit": "4535092b740b378b700efd9df9e27a631815b84a",
+    "path": "models/grass-trees.glb",
+    "sha256": "cb06d03cc1c64ca7e7692c0aef3628d8e7cd4afee69093025f9ddd668653a4ce",
+    "local": "third-party/city/models/grass-trees.glb"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-City-Builder",
+    "commit": "4535092b740b378b700efd9df9e27a631815b84a",
+    "path": "models/road-straight.glb",
+    "sha256": "008a6305de778439d1a99be78a3e0945c72a9bc9cc0bade1b51a666d5db01d0b",
+    "local": "third-party/city/models/road-straight.glb"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-City-Builder",
+    "commit": "4535092b740b378b700efd9df9e27a631815b84a",
+    "path": "models/road-corner.glb",
+    "sha256": "85aec60d66c5084bb658274a1468139a5def1e9e9575c01286ed6c2069916789",
+    "local": "third-party/city/models/road-corner.glb"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-City-Builder",
+    "commit": "4535092b740b378b700efd9df9e27a631815b84a",
+    "path": "models/road-intersection.glb",
+    "sha256": "0212ffe9945b933535503372855c54dee20d54ddfc07e1c72963e67558a14183",
+    "local": "third-party/city/models/road-intersection.glb"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-City-Builder",
+    "commit": "4535092b740b378b700efd9df9e27a631815b84a",
+    "path": "models/pavement-fountain.glb",
+    "sha256": "ea2996089e90a79ba13d764106d374486bb8137666cf1cdbaebd1927ef365185",
+    "local": "third-party/city/models/pavement-fountain.glb"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-Racing",
+    "commit": "2f2e5f2646dda89cb21d4e8539bab60c6e955dc8",
+    "path": "README.md",
+    "sha256": "b37aa56ea98519356514dd0a45d86cf847d3f62144470250c174eeb44e0d9710",
+    "local": "third-party/racing/README.md"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-Racing",
+    "commit": "2f2e5f2646dda89cb21d4e8539bab60c6e955dc8",
+    "path": "LICENSE",
+    "sha256": "db2c350e96739247706b6b395aae08ac335395eda9cfe2bc80b79636934ecdc2",
+    "local": "third-party/racing/LICENSE"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-Racing",
+    "commit": "2f2e5f2646dda89cb21d4e8539bab60c6e955dc8",
+    "path": "scripts/vehicle.gd",
+    "sha256": "fd33d1bb4ed3e473cab4110d64cee0ec1112ba4cf505b0d29577a1b1719e02bb",
+    "local": "third-party/racing/scripts/vehicle.gd"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-Racing",
+    "commit": "2f2e5f2646dda89cb21d4e8539bab60c6e955dc8",
+    "path": "scripts/view.gd",
+    "sha256": "bd01a3fed163547b71e2a0820eed9729b04a5aeeef780696b7f050eb3c92483c",
+    "local": "third-party/racing/scripts/view.gd"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-Racing",
+    "commit": "2f2e5f2646dda89cb21d4e8539bab60c6e955dc8",
+    "path": "models/Textures/colormap.png",
+    "sha256": "02bb3fb87365927d16e265d27caae405aeef5819b6bde5a989ff5e435318de4d",
+    "local": "third-party/racing/models/Textures/colormap.png"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-Racing",
+    "commit": "2f2e5f2646dda89cb21d4e8539bab60c6e955dc8",
+    "path": "models/vehicle-truck-red.glb",
+    "sha256": "eca99bd9ab0a2b02125f915e65d1ec8f1c5a93be7c6d4840efdac6633f47772c",
+    "local": "third-party/racing/models/vehicle-truck-red.glb"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-Racing",
+    "commit": "2f2e5f2646dda89cb21d4e8539bab60c6e955dc8",
+    "path": "models/track-straight.glb",
+    "sha256": "2d8080df1fe27e39981480809f36eba7f239e814f96bff61bb4c99793221b701",
+    "local": "third-party/racing/models/track-straight.glb"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-Racing",
+    "commit": "2f2e5f2646dda89cb21d4e8539bab60c6e955dc8",
+    "path": "models/track-corner.glb",
+    "sha256": "0ffb3d83b60456fc5a2962447111a1a64bfe943f4ad95462e1edba107be81c80",
+    "local": "third-party/racing/models/track-corner.glb"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-Racing",
+    "commit": "2f2e5f2646dda89cb21d4e8539bab60c6e955dc8",
+    "path": "models/track-finish.glb",
+    "sha256": "2fec3b681658d6e77e20c4342d1e3ceeaab3e8d2fbf340942cde25cc2b21975b",
+    "local": "third-party/racing/models/track-finish.glb"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-Racing",
+    "commit": "2f2e5f2646dda89cb21d4e8539bab60c6e955dc8",
+    "path": "models/decoration-forest.glb",
+    "sha256": "664a53f0f709fef9096af3bbfb1aa76536527a616b05170c0cf4e27e33358a00",
+    "local": "third-party/racing/models/decoration-forest.glb"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-Racing",
+    "commit": "2f2e5f2646dda89cb21d4e8539bab60c6e955dc8",
+    "path": "scenes/vehicle.tscn",
+    "sha256": "54c20729bafb5b3ac7c436c1a2abcfea997bea8b44412a78923be098687633f6",
+    "local": "third-party/racing/scenes/vehicle.tscn"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-Match-3",
+    "commit": "4ddb3d2a50cbf247c79cafe9e7884d7d8f99c012",
+    "path": "README.md",
+    "sha256": "c1e10c2f603c7cd44180ac3a0107961b300d413c1572c0c6653a88253d1fe271",
+    "local": "third-party/match3/README.md"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-Match-3",
+    "commit": "4ddb3d2a50cbf247c79cafe9e7884d7d8f99c012",
+    "path": "LICENSE",
+    "sha256": "00e5cd803d4d48086b0e698597aa17e3cceb2020be3fe5c7baf24cb8a92d44af",
+    "local": "third-party/match3/LICENSE"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-Match-3",
+    "commit": "4ddb3d2a50cbf247c79cafe9e7884d7d8f99c012",
+    "path": "scripts/main.gd",
+    "sha256": "e6220c0651194dd8d66909ddc97c5f13d014e43de1e1a370aff8d2eb6ea2222d",
+    "local": "third-party/match3/scripts/main.gd"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-Match-3",
+    "commit": "4ddb3d2a50cbf247c79cafe9e7884d7d8f99c012",
+    "path": "scripts/tile.gd",
+    "sha256": "ff2c9f1e1033267991a19e0319e29dbec074e09bd97ec423f4c65ea2116b3f52",
+    "local": "third-party/match3/scripts/tile.gd"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-Match-3",
+    "commit": "4ddb3d2a50cbf247c79cafe9e7884d7d8f99c012",
+    "path": "sprites/tiles/tile-gem.png",
+    "sha256": "40e70dd7fd6a0a951d309bdf6a2063e6593f52e753195bde3799dce3d1e74e30",
+    "local": "third-party/match3/sprites/tiles/tile-gem.png"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-Match-3",
+    "commit": "4ddb3d2a50cbf247c79cafe9e7884d7d8f99c012",
+    "path": "sprites/tiles/tile-godot.png",
+    "sha256": "6df92d54c10c3fa0fdf036468043ff44caa099a49ec48c65fb95b52d0c07a3ae",
+    "local": "third-party/match3/sprites/tiles/tile-godot.png"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-Match-3",
+    "commit": "4ddb3d2a50cbf247c79cafe9e7884d7d8f99c012",
+    "path": "sprites/tiles/tile-grass.png",
+    "sha256": "37c55da1941948f7542a93af7c558797c7d903cb40de388f767ef76e7520e788",
+    "local": "third-party/match3/sprites/tiles/tile-grass.png"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-Match-3",
+    "commit": "4ddb3d2a50cbf247c79cafe9e7884d7d8f99c012",
+    "path": "sprites/tiles/tile-kenney.png",
+    "sha256": "834c359b0a748839c7fe517314be562d5dc52ddf5a0c750e84f1fe7a93901e9e",
+    "local": "third-party/match3/sprites/tiles/tile-kenney.png"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-Match-3",
+    "commit": "4ddb3d2a50cbf247c79cafe9e7884d7d8f99c012",
+    "path": "sprites/tiles/tile-spikes.png",
+    "sha256": "e5f29c977a98b805a8a89634080f73db985d56b103a05fe80f28f0290952f2a9",
+    "local": "third-party/match3/sprites/tiles/tile-spikes.png"
+  },
+  {
+    "repository": "KenneyNL/Starter-Kit-Match-3",
+    "commit": "4ddb3d2a50cbf247c79cafe9e7884d7d8f99c012",
+    "path": "sprites/particles/sparkle.png",
+    "sha256": "fd5fb7146720fb140237a611b41368b2a270a84964e6af0d9f7e725829794955",
+    "local": "third-party/match3/sprites/particles/sparkle.png"
+  },
+  {
+    "repository": "Jummit/godot-destruction-plugin",
+    "commit": "eb7ccb7148245f14211b3d4ccd9ec32bfbc49ca2",
+    "path": "README.md",
+    "sha256": "07339672e216527f7fa5ee0eba167065c52284b4748ffb05a83302ab47c8dcee",
+    "local": "third-party/destruction/README.md"
+  },
+  {
+    "repository": "Jummit/godot-destruction-plugin",
+    "commit": "eb7ccb7148245f14211b3d4ccd9ec32bfbc49ca2",
+    "path": "LICENSE",
+    "sha256": "13291ca3dfe6f4ff60e8f23299eafc21fa983741cda23262a52e38d3709e2b39",
+    "local": "third-party/destruction/LICENSE"
+  },
+  {
+    "repository": "Jummit/godot-destruction-plugin",
+    "commit": "eb7ccb7148245f14211b3d4ccd9ec32bfbc49ca2",
+    "path": "LICENSES/MIT.txt",
+    "sha256": "b85dcd3e453d05982552c52b5fc9e0bdd6d23c6f8e844b984a88af32570b0cc0",
+    "local": "third-party/destruction/LICENSES/MIT.txt"
+  },
+  {
+    "repository": "Jummit/godot-destruction-plugin",
+    "commit": "eb7ccb7148245f14211b3d4ccd9ec32bfbc49ca2",
+    "path": "LICENSES/CC0-1.0.txt",
+    "sha256": "f7b87b0309aa1ae9201293eaf75dd63dc928330b5d5e13d425a8bc031eedcfbb",
+    "local": "third-party/destruction/LICENSES/CC0-1.0.txt"
+  },
+  {
+    "repository": "Jummit/godot-destruction-plugin",
+    "commit": "eb7ccb7148245f14211b3d4ccd9ec32bfbc49ca2",
+    "path": "addons/destruction/destruction.gd",
+    "sha256": "f81301dd456ef657d7713553b448e5ba67b0587b7fb3c5f70e7d09fd120a032b",
+    "local": "third-party/destruction/addons/destruction/destruction.gd"
+  },
+  {
+    "repository": "Jummit/godot-destruction-plugin",
+    "commit": "eb7ccb7148245f14211b3d4ccd9ec32bfbc49ca2",
+    "path": "cube/cube_fragments.glb",
+    "sha256": "46c48929c17f18165e846507bcb3ee5b22eb85d1e400f3ecb67a1f0ab0cb5a58",
+    "local": "third-party/destruction/cube/cube_fragments.glb"
+  },
+  {
+    "repository": "Jummit/godot-destruction-plugin",
+    "commit": "eb7ccb7148245f14211b3d4ccd9ec32bfbc49ca2",
+    "path": "cube/cube_fragments.glb.license",
+    "sha256": "80cf8ed4533ad6dcd535cc7b2115b874e194da5abc16c4fabe959971bbb1a094",
+    "local": "third-party/destruction/cube/cube_fragments.glb.license"
+  },
+  {
+    "repository": "Jummit/godot-destruction-plugin",
+    "commit": "eb7ccb7148245f14211b3d4ccd9ec32bfbc49ca2",
+    "path": "cube/destructible_cube.tscn",
+    "sha256": "6228bf6b2b9247f65bc7385cbdd87b4e7c79e210bed5c1a62270db240d702e71",
+    "local": "third-party/destruction/cube/destructible_cube.tscn"
+  },
+  {
+    "repository": "Jummit/godot-destruction-plugin",
+    "commit": "eb7ccb7148245f14211b3d4ccd9ec32bfbc49ca2",
+    "path": "demo.gd",
+    "sha256": "cc9b60314a9740ff2cebfdbc92dffe63dbdc68e1422993469b3cbbd9a4b41a04",
+    "local": "third-party/destruction/demo.gd"
+  },
+  {
+    "repository": "Vincenzopaolo/BSP-Dungeon-Demo-Godot",
+    "commit": "669eb02d0048ab6f7fe102d8da8f04c981025cf3",
+    "path": "readme.md",
+    "sha256": "2c4b09e9693af52801fb2970fd2fdf373233fa7fd082cd236785c9ed3f96a2c5",
+    "local": "third-party/bsp/readme.md"
+  },
+  {
+    "repository": "Vincenzopaolo/BSP-Dungeon-Demo-Godot",
+    "commit": "669eb02d0048ab6f7fe102d8da8f04c981025cf3",
+    "path": "LICENSE",
+    "sha256": "c4e72878c00fdd541fc2bf63b2528cfbe4cd6d64f42b402d379664d3ec9c47bf",
+    "local": "third-party/bsp/LICENSE"
+  },
+  {
+    "repository": "Vincenzopaolo/BSP-Dungeon-Demo-Godot",
+    "commit": "669eb02d0048ab6f7fe102d8da8f04c981025cf3",
+    "path": "scr/generator/generator.gd",
+    "sha256": "ef52ad16b8ba6bbfbd61214daead9c35195056d0b0f3c66b0f518f23760e491b",
+    "local": "third-party/bsp/scr/generator/generator.gd"
+  },
+  {
+    "repository": "Vincenzopaolo/BSP-Dungeon-Demo-Godot",
+    "commit": "669eb02d0048ab6f7fe102d8da8f04c981025cf3",
+    "path": "scr/data_structures/room.gd",
+    "sha256": "7f52081e054c874201033592e82d5a956939147e360e07eb7dfdbeb14edebf3e",
+    "local": "third-party/bsp/scr/data_structures/room.gd"
+  },
+  {
+    "repository": "Vincenzopaolo/BSP-Dungeon-Demo-Godot",
+    "commit": "669eb02d0048ab6f7fe102d8da8f04c981025cf3",
+    "path": "scr/data_structures/leaf.gd",
+    "sha256": "a7a25e5c5e5d1ee1ace84bf4007c100e0a74997598c53a715dd0f6d496bad545",
+    "local": "third-party/bsp/scr/data_structures/leaf.gd"
+  },
+  {
+    "repository": "Vincenzopaolo/BSP-Dungeon-Demo-Godot",
+    "commit": "669eb02d0048ab6f7fe102d8da8f04c981025cf3",
+    "path": "scr/globals/message_bus.gd",
+    "sha256": "feb399b7a3977b5492f33dc8e783c06d51ccfcda71b8fd04a3b471a45c60ba1e",
+    "local": "third-party/bsp/scr/globals/message_bus.gd"
+  }
+]

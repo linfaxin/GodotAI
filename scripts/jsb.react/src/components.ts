@@ -33,3 +33,23 @@ export const CharacterBody2D=component<"CharacterBody2D",CharacterBody2DProps>("
 export const StaticBody2D=component<"StaticBody2D",StaticBody2DProps>("StaticBody2D");
 export const CollisionShape2D=component<"CollisionShape2D",CollisionShape2DProps>("CollisionShape2D");
 export const G=Object.freeze({Node,Node2D,Control,VBoxContainer,HBoxContainer,Label,Button,CanvasLayer,CharacterBody2D,StaticBody2D,CollisionShape2D});
+
+// Explicit showcase hosts. They require profileId="showcase-v1" at the Root.
+type V3=Readonly<{x:number;y:number;z:number}>;
+interface SpatialProps extends CommonProps {position?:V3;rotation?:V3;scale?:V3;visible?:boolean}
+export const Node3D=component<"Node3D",SpatialProps>("Node3D");
+export const MeshInstance3D=component<"MeshInstance3D",SpatialProps & {mesh?:AssetRef<"Mesh">|null;materialOverride?:AssetRef<"StandardMaterial3D">|null}>("MeshInstance3D");
+export const Camera3D=component<"Camera3D",SpatialProps & {current?:boolean;fov?:number;projection?:number;size?:number}>("Camera3D");
+export const DirectionalLight3D=component<"DirectionalLight3D",SpatialProps & {lightColor?:ColorValue;lightEnergy?:number;shadowEnabled?:boolean}>("DirectionalLight3D");
+export const WorldEnvironment=component<"WorldEnvironment",CommonProps & {environment?:AssetRef<"Environment">|null}>("WorldEnvironment");
+export const StaticBody3D=component<"StaticBody3D",SpatialProps>("StaticBody3D");
+export const CharacterBody3D=component<"CharacterBody3D",SpatialProps & {velocity?:V3}>("CharacterBody3D");
+export const CollisionShape3D=component<"CollisionShape3D",SpatialProps & {shape?:AssetRef<"BoxShape3D"|"CapsuleShape3D"|"SphereShape3D"|"ConvexPolygonShape3D">|null;disabled?:boolean}>("CollisionShape3D");
+export const RigidBody3D=component<"RigidBody3D",SpatialProps & {mass?:number;linearVelocity?:V3;angularVelocity?:V3;gravityScale?:number;linearDamp?:number;angularDamp?:number;freeze?:boolean;sleeping?:boolean;collisionLayer?:number;collisionMask?:number}>("RigidBody3D");
+export const RayCast3D=component<"RayCast3D",SpatialProps & {enabled?:boolean;targetPosition?:V3;excludeParent?:boolean;collisionMask?:number}>("RayCast3D");
+export const ColorRect=component<"ColorRect",Omit<ControlProps,"material"> & {material?:AssetRef<"ShaderMaterial"|"CanvasItemMaterial">|null;position?:Vector2Value;size?:Vector2Value;color?:ColorValue}>("ColorRect");
+export const Sprite2D=component<"Sprite2D",Omit<Node2DProps,"material"> & {material?:AssetRef<"ShaderMaterial"|"CanvasItemMaterial">|null;texture?:AssetRef<"Texture2D">|null;centered?:boolean}>("Sprite2D");
+export const CanvasModulate=component<"CanvasModulate",Node2DProps & {color?:ColorValue}>("CanvasModulate");
+export const PointLight2D=component<"PointLight2D",Node2DProps & {texture?:AssetRef<"Texture2D">|null;color?:ColorValue;energy?:number;textureScale?:number;shadowEnabled?:boolean}>("PointLight2D");
+export const LightOccluder2D=component<"LightOccluder2D",Node2DProps & {occluder?:AssetRef<"OccluderPolygon2D">|null}>("LightOccluder2D");
+export const AudioStreamPlayer=component<"AudioStreamPlayer",CommonProps & {stream?:AssetRef<"AudioStream">|null;volumeDb?:number}>("AudioStreamPlayer");

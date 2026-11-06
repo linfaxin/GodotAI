@@ -15,11 +15,11 @@ GodotJS combines a native Godot module with embedded JavaScript support code and
 | `impl/web/bridge/` | Private TypeScript bridge compiled into Emscripten glue |
 | `scripts/jsb.react/`, `scripts/jsb.react-build/` | Existing React renderer and scene toolchain; retained in their current locations |
 | `packages/` | Reusable libraries with their own build and package entry points |
-| `apps/` | Application consumers; currently only the playground README |
+| `apps/` | Application consumers, including the browser playground |
 | `configs/tsconfig/` | Shared checks for new TypeScript packages |
 | `tests/project/` | Independent GodotJS consumer used by engine integration tests |
 
-The active workspace contains the root orchestration package, the three embedded-script packages, the existing React renderer and build-tool packages, and `packages/tsx`. The workspace also reserves `apps/*`; a README-only directory does not become a package.
+The active workspace contains the root orchestration package, the three embedded-script packages, the existing React renderer and build-tool packages, `packages/tsx`, and `apps/playground`.
 
 ## Build boundaries
 
@@ -83,6 +83,8 @@ The current foundation is verified through embedded-script builds, the ecosystem
 
 The root package version continues to drive the existing engine version header and GitHub release flow. Private foundations are excluded from Changesets release planning. Public ecosystem packages will need independent semver and npm publication checks when enabled; do not repurpose the engine release predicate for them.
 
-## Deferred application work
+## Browser playground
 
-The [playground README](../apps/playground/README.md) records its goal and validation questions. There is no application package, browser SDK, compiler worker, CDN resolver, runner, bootstrap project, or engine asset distribution implementation in this architecture foundation.
+The [playground](../apps/playground/README.md) owns a browser editor, a TypeScript compiler worker, a sandboxed single-thread engine runner, its bootstrap project and a static asset preparation/export pipeline. It consumes the implemented React renderer through an explicit `showcase-v1` profile. Its scenes use trusted prebuilt assets and the SDK Root lifecycle; it does not expand the existing certified CLI's template/resource import profiles.
+
+The runner supports three fixed host modules and matching generated declaration snapshots. General CDN/npm resolution, a reusable browser SDK, independently published engine assets and general animation/resource support remain deferred. `pnpm build:playground` is separate from the standard workspace build because it requires a matching GodotJS editor, a glTF importer and a Web template.

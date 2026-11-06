@@ -71,7 +71,9 @@ type JSWorkerLike = { onmessage: JSWorkerOnMessage };
 type GodotWorkerModule = { JSWorkerParent: JSWorkerLike };
 type GodotWorkerGlobal = { require?: (module_name: "godot.worker") => GodotWorkerModule };
 
-let JSWorkerParent: null | undefined | JSWorkerLike = ENVIRONMENT_IS_PTHREAD ? undefined : null;
+// Emscripten omits pthread globals entirely in threads=no builds.
+const jsbbIsPThread = typeof ENVIRONMENT_IS_PTHREAD !== "undefined" && !!ENVIRONMENT_IS_PTHREAD;
+let JSWorkerParent: null | undefined | JSWorkerLike = jsbbIsPThread ? undefined : null;
 
 function getJSWorkerParent(): null | JSWorkerLike {
     if (typeof JSWorkerParent !== "undefined") {
@@ -1942,7 +1944,7 @@ class _jsbb_ {
     }
 
     private static install_pthread_worker_listener_hook(): void {
-        if (ENVIRONMENT_IS_PTHREAD || !PThread) {
+        if (jsbbIsPThread || typeof PThread === "undefined" || !PThread) {
             return;
         }
 
@@ -1984,7 +1986,7 @@ class _jsbb_ {
     }
 
     private static dispatch_direct_worker_message(data: unknown, sender_pthread_id?: number): void {
-        if (ENVIRONMENT_IS_PTHREAD) {
+        if (jsbbIsPThread) {
             const worker_parent = getJSWorkerParent();
 
             if (!worker_parent) {
@@ -2055,12 +2057,12 @@ class _jsbb_ {
                 message
             );
 
-            const is_ready_sentinel_transfer_id = ENVIRONMENT_IS_PTHREAD && transfer_id === 0;
+            const is_ready_sentinel_transfer_id = jsbbIsPThread && transfer_id === 0;
             const outbound_transfer_id = (transfer_context.native_transfers_used || is_ready_sentinel_transfer_id)
                 ? transfer_id
                 : undefined;
 
-            if (ENVIRONMENT_IS_PTHREAD) {
+            if (jsbbIsPThread) {
                 const payload: WorkerMessage = {
                     "__jsbMessage": true,
                     "data": rewritten,
@@ -2185,7 +2187,7 @@ declare const _free: EmscriptenModule['_free'];
 declare const PThread: undefined | EmscriptenPThread;
 declare const ENVIRONMENT_IS_PTHREAD: undefined | boolean;
 
-if (ENVIRONMENT_IS_PTHREAD && typeof globalThis.addEventListener === "function") {
+if (jsbbIsPThread && typeof globalThis.addEventListener === "function") {
     globalThis.addEventListener('message', (e: MessageEvent) => {
         if (!jsbb_is_worker_message(e.data)) {
             return;

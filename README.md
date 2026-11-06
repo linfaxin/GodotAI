@@ -27,7 +27,7 @@ The [implementation and support matrix](docs/react-tsx-implementation.zh-CN.md) 
 
 This repository uses a pnpm workspace for embedded engine scripts and ecosystem packages. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and build commands, [the architecture guide](docs/architecture.md) for module boundaries, and [packages/README.md](packages/README.md) for package conventions.
 
-The [TSX package](packages/tsx/README.md) currently contains a private buildable foundation, separate from the existing React renderer. The [playground](apps/playground/README.md) is a documented future direction; it has no application or runtime implementation.
+The [TSX package](packages/tsx/README.md) currently contains a private buildable foundation, separate from the existing React renderer. The [browser playground](apps/playground/README.md) provides eight editable React/TSX showcases using a single-thread GodotJS Web engine: shaders, 2D lighting, sky islands, city building, rigid-body destruction, racing, match-3 and BSP dungeons.
 
 ---
 
