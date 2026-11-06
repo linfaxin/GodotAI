@@ -117,7 +117,9 @@ jobs:
         run: |
           echo "PLAYWRIGHT_BROWSERS_PATH=$PLAYWRIGHT_BROWSERS_PATH" >> "$GITHUB_ENV"
           npm install --prefix "$RUNNER_TEMP/browser-tools" --no-audit --no-fund playwright@1.56.1
-          node "$RUNNER_TEMP/browser-tools/node_modules/playwright/cli.js" install --with-deps chromium
+          node "$RUNNER_TEMP/browser-tools/node_modules/playwright/cli.js" install --with-deps chromium firefox webkit
+          sudo apt-get update
+          sudo apt-get install -y xvfb xauth libgl1-mesa-dri libegl-mesa0
           echo "PLAYWRIGHT_MODULE=$RUNNER_TEMP/browser-tools/node_modules/playwright-core/index.mjs" >> "$GITHUB_ENV"
           node --input-type=module -e 'const {chromium}=await import(process.env.RUNNER_TEMP+"/browser-tools/node_modules/playwright-core/index.mjs"); console.log("CHROMIUM="+chromium.executablePath())' >> "$GITHUB_ENV"
       - name: Verify real main-thread compiler, revision and preview races
@@ -153,11 +155,16 @@ jobs:
           node scripts/test/browser-playground.mjs --authenticated-gate
           --site "$RUNNER_TEMP/browser-playground-site"
           --out "$RUNNER_TEMP/browser-authenticated-results"
+      - name: Verify the same candidate in Firefox and Linux Playwright WebKit
+        run: |
+          xvfb-run -a env BROWSER=firefox BROWSER_HEADLESS=0 LIBGL_ALWAYS_SOFTWARE=1 node scripts/test/browser-playground.mjs --site "$RUNNER_TEMP/browser-playground-site" --out "$RUNNER_TEMP/browser-firefox-results"
+          xvfb-run -a env BROWSER=webkit BROWSER_HEADLESS=0 LIBGL_ALWAYS_SOFTWARE=1 node scripts/test/browser-playground.mjs --site "$RUNNER_TEMP/browser-playground-site" --out "$RUNNER_TEMP/browser-webkit-results"
       - name: Verify real engine lifecycle pressure and failure cancellation
         run: >-
           node scripts/test/browser-stress.mjs
           --site "$RUNNER_TEMP/browser-playground-site"
           --out "$RUNNER_TEMP/browser-stress-results"
+          --fixture game2d --mode production
           --iterations 100 --failures 20
       - name: Join exact-release integration, source-map and lifecycle evidence
         run: >-
@@ -168,6 +175,8 @@ jobs:
           --authenticated-report "$RUNNER_TEMP/browser-authenticated-results/report.json"
           --stress "$RUNNER_TEMP/browser-stress-results/report.json"
           --source-maps "$RUNNER_TEMP/browser-source-map-results/report.json"
+          --firefox-report "$RUNNER_TEMP/browser-firefox-results/report.json"
+          --webkit-report "$RUNNER_TEMP/browser-webkit-results/report.json"
           --out "$RUNNER_TEMP/browser-acceptance.json"
       - name: Seal the validated candidate and verify its external npm consumer
         env:
@@ -191,6 +200,8 @@ jobs:
             ${{ runner.temp }}/browser-playground-results
             ${{ runner.temp }}/browser-authenticated-results
             ${{ runner.temp }}/browser-stress-results
+            ${{ runner.temp }}/browser-firefox-results
+            ${{ runner.temp }}/browser-webkit-results
             ${{ runner.temp }}/browser-acceptance.json
             ${{ runner.temp }}/browser-release-pack
             ${{ runner.temp }}/browser-release-verification.json

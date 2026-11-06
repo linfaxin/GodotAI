@@ -11,6 +11,7 @@ import { createCodeEditor } from './code-editor.js';
 import { createFileMenu } from './file-menu.js';
 import { useBuiltInDependencies, assertEditableFile } from './project-builtins.js';
 import { BUILTIN_PACKAGES } from './builtin-catalog.js';
+import { profileLabel, unsupportedProfileMessage } from './profiles.js';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const editor = createCodeEditor({
@@ -93,7 +94,23 @@ function selectFile(path: string) {
   project.selected = path; editor.show(path, project.files[path]); editor.diagnostics(state.diagnostics);
   renderFiles();
 }
-function renderProject() { renderDependencies(); $<HTMLSelectElement>('mode').value = project.config.mode; $<HTMLSelectElement>('profile').value = project.config.profileId; selectFile(Object.hasOwn(project.files, project.selected) ? project.selected : Object.keys(project.files)[0]); }
+function renderProfiles() {
+  const select = $<HTMLSelectElement>('profile'), id = project.config.profileId;
+  const ids = release ? Object.keys(release.profiles) : [id];
+  const unsupported = release && !Object.hasOwn(release.profiles, id);
+  if (unsupported) ids.push(id);
+  select.replaceChildren(...ids.map(value => {
+    const option = document.createElement('option'); option.value = value;
+    option.textContent = profileLabel(value) + (unsupported && value === id ? '（当前运行版本不支持）' : '');
+    option.title = value; option.disabled = !!unsupported && value === id; return option;
+  }));
+  select.value = id;
+}
+function requireSupportedProfile() {
+  const message = unsupportedProfileMessage(project.config.profileId, release.profiles);
+  if (message) throw Object.assign(Error(`E_PROFILE_UNSUPPORTED: ${message}`), { diagnostics: [{ stage: 'types', code: 'E_PROFILE_UNSUPPORTED', category: 'error', message }] });
+}
+function renderProject() { renderDependencies(); $<HTMLSelectElement>('mode').value = project.config.mode; renderProfiles(); selectFile(Object.hasOwn(project.files, project.selected) ? project.selected : Object.keys(project.files)[0]); }
 function diagnostics(items: TypeDiagnostic[], reveal = false) {
   editor.diagnostics(items);
   state.diagnostics = items; $('problem-count').textContent = String(items.length); $('diagnostics').replaceChildren();
@@ -112,7 +129,7 @@ async function check() {
   if (pendingCheck?.revision === revision) return pendingCheck.promise;
   const serial = ++latestCheck, rev = revision; $('type-status').textContent = '正在检查…';
   const promise = (async () => {
-    try { const result = await rpc('check', projectPayload()); if (serial !== latestCheck || rev !== revision) return; checkedRevision = rev; delete project.lock; diagnostics(result.diagnostics); await save(); return result; }
+    try { requireSupportedProfile(); const result = await rpc('check', projectPayload()); if (serial !== latestCheck || rev !== revision) return; checkedRevision = rev; delete project.lock; diagnostics(result.diagnostics); await save(); return result; }
     catch (error: any) { if (serial === latestCheck && rev === revision) { diagnostics(error.diagnostics ?? [{ stage: 'types', code: 'E_CHECK', category: 'error', message: String(error) }]); } throw error; }
   })();
   pendingCheck = { revision: rev, promise };
@@ -164,6 +181,7 @@ async function run() {
   clearTimeout(debounce); ++latestCheck; pendingCheck = undefined; checkedRevision = -1;
   const rev = revision, serial = ++runSerial, started = performance.now(); $('run').setAttribute('disabled', ''); workbench.setBuilding();
   try {
+    requireSupportedProfile();
     const artifact: BuildArtifact = await rpc('build', projectPayload());
     if (serial !== runSerial) throw new DOMException('Superseded', 'AbortError');
     if (rev !== revision) throw Error('E_STALE_BUILD: project changed while building');
@@ -206,7 +224,7 @@ $('file-form').onsubmit = event => { event.preventDefault(); try {
 function renameFile(path: string) { selectFile(path); renameFrom = path; $('submit-file').textContent = '重命名'; $('file-form').hidden = false; const input = $<HTMLInputElement>('filename'); input.value = path; input.focus(); }
 function deleteFile(path: string) { if (Object.keys(project.files).length < 2 || path === project.config.entry) { toast('入口文件不能删除'); return; } delete project.files[path]; selectFile(project.selected === path ? Object.keys(project.files)[0] : project.selected); changed(); }
 $<HTMLSelectElement>('mode').onchange = async event => { const mode = (event.target as HTMLSelectElement).value as 'development' | 'production'; await reconfigure(() => { project.config.mode = mode; changed(); }); };
-$<HTMLSelectElement>('profile').onchange = async event => { const profileId = (event.target as HTMLSelectElement).value; await reconfigure(() => { project.config.profileId = profileId; changed(); }); };
+$<HTMLSelectElement>('profile').onchange = async event => { const profileId = (event.target as HTMLSelectElement).value; await reconfigure(() => { project.config.profileId = profileId; renderProfiles(); changed(); }); };
 for (const button of document.querySelectorAll<HTMLButtonElement>('[data-example]')) button.onclick = () => { $<HTMLDetailsElement>('examples-menu').open = false; void setProject(example(button.dataset.example)).catch(error => toast(String(error))); };
 $('reset').onclick = () => { void setProject(example()).catch(error => toast(String(error))); };
 $('export').onclick = () => download('godotjs-project.json', { schemaVersion: 1, runtimeRelease: release?.id, project });
@@ -263,8 +281,7 @@ try {
   const loaded = await loadRuntimeRelease(releaseUrl, { expectedId: appConfig.expectedReleaseId, expectedDescriptorSha256: appConfig.expectedDescriptorSha256 }); release = loaded.release; state.release = release;
   $('runtime-name').textContent = `Godot ${release.engine.godotVersion.split('.').slice(0, 3).join('.')}`;
   $('runtime-meta').textContent = `${release.engine.engineTarget} · single thread`;
-  $<HTMLSelectElement>('profile').replaceChildren(...Object.keys(release.profiles).map(id => { const option = document.createElement('option'); option.value = option.textContent = id; return option; }));
-  $<HTMLSelectElement>('profile').value = project.config.profileId;
+  renderProfiles();
   const validationScope = (release.certification as { scope?: { browser?: string } } | undefined)?.scope?.browser;
   $('release-info').textContent = `Runtime ${release.id.slice(0, 10)}`; $('release-info').title = release.certified ? '已验证' + (validationScope ? ' · ' + validationScope : '') : '开发验证版本';
   await rpc('init', { releaseUrl, expectedId: release.id, expectedDescriptorSha256: appConfig.expectedDescriptorSha256 }); initialized = state.ready = true;

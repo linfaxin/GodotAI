@@ -3,5 +3,6 @@ export * from "./core";
 export * from "./validation";
 export * from "./physics";
 export * from './media';
+export * from './game-2d';
 export * from "./profiles";
 export * from "./showcase";

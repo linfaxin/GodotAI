@@ -17,7 +17,7 @@ before(async()=>{
     api.onResolve({filter:/\/release\.js$/},()=>({path:'release',namespace:'controlled'}));
     api.onLoad({filter:/.*/,namespace:'controlled'},args=>({contents:args.path==='runner'
       ?`export class PreviewRunner { subscribe(){return()=>{}} async stop(){return undefined} async dispose(){await this.stop()} async run(artifact){if(globalThis.previewFailure)throw Error(globalThis.previewFailure);(globalThis.previewStarts??=[]).push({generation:artifact.generation,buildKey:artifact.buildKey});return{state:'running'}} }`
-      :`export async function loadRuntimeRelease(){return{release:{id:'a'.repeat(64),certified:false,engine:{godotVersion:'4.6.1',engineTarget:'test-host'},profiles:{'core-ui-v1':{id:'core-ui-v1'}},files:[{kind:'engine-js',path:'godot.js',sha256:'a'.repeat(64)},{kind:'engine-wasm',path:'godot.wasm',sha256:'b'.repeat(64)}]}}}`}));
+      :`export async function loadRuntimeRelease(){return{release:{id:'a'.repeat(64),certified:false,engine:{godotVersion:'4.6.1',engineTarget:'test-host'},profiles:Object.fromEntries((globalThis.runtimeProfiles??['core-ui-v1','ui-media-v1','behavior-physics-v1','game-2d-v1']).map(id=>[id,{id}])),files:[{kind:'engine-js',path:'godot.js',sha256:'a'.repeat(64)},{kind:'engine-wasm',path:'godot.wasm',sha256:'b'.repeat(64)}]}}}`}));
   }}]});
   const html=(await readFile(resolve(app,'index.html'),'utf8')).replace(/<script\b[^>]*>[\s\S]*?<\/script>/g,'').replace('./main.css','./main-review.css')+'<script type="module" src="/main-review.js"></script>';
   const outputs=new Map(bundle.outputFiles.map(file=>['/'+file.path.split('/').at(-1),file.contents]));
@@ -58,6 +58,7 @@ async function editor(t, options = {}){
   });
   if(options.startup==='pending')await page.addInitScript(()=>{globalThis.holdAutomaticBuilds=true;});
   if(options.initFailure)await page.addInitScript(message=>{globalThis.initFailure=message;},options.initFailure);
+  if(options.profiles)await page.addInitScript(profiles=>{globalThis.runtimeProfiles=profiles;},options.profiles);
   await page.goto(url);await page.waitForFunction(()=>globalThis.playground?.ready||globalThis.playground?.errors?.length);
   if(!options.initFailure){
     await page.waitForFunction(()=>compilerHost.builds.length===1);
@@ -218,4 +219,44 @@ test('switching examples, reset and import each automatically start the selected
   await page.locator('#project-menu > summary').click();await page.click('#reset');
   await page.waitForFunction(()=>previewStarts.length===4&&!document.getElementById('run').disabled);
   assert(await page.evaluate(()=>'/src/game.ts' in playground.exportProject().files));
+});
+
+test('the combined example keeps its profile and binary assets through import and local restore',async t=>{
+  const page=await editor(t);
+  await page.locator('#examples-menu > summary').click();await page.locator('[data-example="game2d"]').click();
+  await page.waitForFunction(()=>previewStarts.length===1&&!document.getElementById('run').disabled);
+  const project=await page.evaluate(()=>playground.exportProject());
+  assert.equal(project.config.profileId,'game-2d-v1');
+  assert.deepEqual(Object.keys(project.config.assets).sort(),['actor','crystal','floor','rover','ship','wall']);
+  assert(Array.isArray(project.files['/assets/rover.png']));
+  assert.match(await page.locator('#profile option:checked').textContent(),/2D 游戏/);
+  await page.evaluate(project=>playground.importProject(JSON.parse(JSON.stringify(project))),project);
+  assert.deepEqual(await page.evaluate(()=>playground.exportProject()),project);
+  await page.waitForFunction(()=>document.getElementById('saved').textContent==='已自动保存');
+  await page.reload();await page.waitForFunction(()=>globalThis.playground?.ready&&previewStarts?.length===1);
+  assert.deepEqual(await page.evaluate(()=>playground.exportProject()),project);
+});
+
+test('an unsupported imported profile remains selected with its files and a clear diagnostic',async t=>{
+  const page=await editor(t,{profiles:['core-ui-v1','ui-media-v1','behavior-physics-v1']});
+  const result=await page.evaluate(async()=>{
+    const project=playground.exportProject();project.config.profileId='game-2d-v1';
+    project.files['/assets/preserved.png']=[137,80,78,71,0,255];
+    await playground.importProject(project);
+    return{project:playground.exportProject(),builds:compilerHost.builds.length,starts:previewStarts.length};
+  });
+  assert.equal(result.project.config.profileId,'game-2d-v1');
+  assert.deepEqual(result.project.files['/assets/preserved.png'],[137,80,78,71,0,255]);
+  assert.equal(result.builds,0);assert.equal(result.starts,0);
+  const selected=page.locator('#profile option:checked');
+  assert.equal(await selected.getAttribute('value'),'game-2d-v1');assert.equal(await selected.isDisabled(),true);
+  assert.match(await selected.textContent(),/当前运行版本不支持/);
+  assert.match(await page.locator('#diagnostics').textContent(),/game-2d-v1/);
+  assert.match(await page.locator('#preview-placeholder p').first().textContent(),/项目内容已保留/);
+  await page.locator('#settings-section > summary').click();
+  await page.locator('#profile').selectOption('ui-media-v1');
+  assert.equal(await page.evaluate(()=>previewStarts.length),0,'Changing the profile does not start a preview');
+  await page.evaluate(()=>playground.run());
+  assert.equal(await page.evaluate(()=>previewStarts.length),1);
+  assert.equal(await page.locator('#profile option[value="game-2d-v1"]').count(),0);
 });

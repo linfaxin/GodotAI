@@ -9,6 +9,7 @@ import { gzipSync } from 'node:zlib';
 import { canonical, digest, fail, options, required, json, writeJson, filesIn, relativePath, safePath, within, identity, assertCommit, assertHash, inspectRelease } from './web-release-utils.mjs';
 import { patchOptionalPwa, OPTIONAL_PWA_PATCH } from './patch-web-optional-pwa.mjs';
 import { patchAudioLifecycle, AUDIO_LIFECYCLE_PATCH } from './patch-web-audio-lifecycle.mjs';
+import { assertGame2dCertification } from './game-2d-evidence.mjs';
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 function run(command, args, extra = {}) {
@@ -158,9 +159,10 @@ export async function buildRelease(configuration) {
       const checks = validation.checks ?? validation.browserChecks;
       const covered = files.filter(file => file.kind !== 'attestation').every(file => validation.artifactHashes?.[file.path] === file.sha256);
       if (validation.runtimeRelease !== descriptor.id || validation.status !== 'passed' || !Array.isArray(checks) || !checks.length || checks.some(check => check.status !== 'passed') || !covered) fail('E_RELEASE_VALIDATION', 'Browser validation must match this exact runtimeRelease, pass and bind every engine, SDK, compiler and declaration asset hash');
+      assertGame2dCertification(descriptor, validation);
       for (const [name, hash] of Object.entries(validation.evidenceHashes ?? {})) assertHash(hash, `specialist evidence ${name}`);
       descriptor.certified = sourceCertified;
-      descriptor.certification = { status: 'passed', runtimeRelease: validation.runtimeRelease, scope: validation.scope ?? {}, checks, artifactHashes: validation.artifactHashes,
+      descriptor.certification = { status: 'passed', runtimeRelease: validation.runtimeRelease, scope: validation.scope ?? {}, coverage: validation.coverage ?? [], checks, artifactHashes: validation.artifactHashes,
         siteArtifactHashes: validation.siteArtifactHashes, generatedArtifacts: validation.generatedArtifacts,
         evidenceHashes: validation.evidenceHashes,
         evidenceSha256: digest(await readFile(resolve(configuration['validation-report']))) };

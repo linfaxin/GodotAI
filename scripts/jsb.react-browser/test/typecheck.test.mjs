@@ -7,6 +7,12 @@ import { createRequire } from 'node:module';
 import ts from 'typescript';
 import { createTypeSession, checkProjectTypes, hydrateTypeInputs } from '../dist/typecheck.js';
 import { createTypesWorkerHandler } from '../dist/types-worker.js';
+import * as esbuild from 'esbuild';
+import { createBrowserCompilerCore } from '../dist/compiler-core.js';
+import { createBuiltInResolver } from '../dist/builtins.js';
+import { createSnapshot, sha256, utf8 } from '../dist/snapshot.js';
+import { profileReference } from '../../jsb.react/dist/schema/index.js';
+import { RUNTIME_ABI, NATIVE_BRIDGE_ABI, REACT_VERSIONS } from '../../jsb.react/dist/contracts/index.js';
 
 const require = createRequire(import.meta.url);
 const repo = fileURLToPath(new URL('../../../', import.meta.url));
@@ -117,6 +123,107 @@ test('release-supplied Godot globals are opt-in and media hosts follow the selec
   const media = input('import {TextureRect,asset} from "@godot-js/react";export default function App(){return <TextureRect texture={asset("image","ImageTexture")}/>;}', {entries:{app:{module:'/src/App.tsx'}},profileId:'ui-media-v1'});
   checked(media);
   assert(checkProjectTypes(ts,{...media,profileId:'core-ui-v1'}).diagnostics.some(item=>item.code==='E_PROFILE_UNSUPPORTED'));
+});
+test('unified 2D profile accepts mixed hosts by SDK identity and preserves the old profile boundaries', () => {
+  for (const [imports, expression] of [
+    ['import {CharacterBody2D as Body,Sprite2D as Picture,CollisionShape2D,ProgressBar} from "@godot-js/react";', '<><Body><CollisionShape2D/><Picture/></Body><ProgressBar/></>'],
+    ['import * as SDK from "@godot-js/react";', '<><SDK.CharacterBody2D><SDK.CollisionShape2D/><SDK.Sprite2D/></SDK.CharacterBody2D><SDK.ProgressBar/></>'],
+    ['import {G} from "@godot-js/react";', '<><G.CharacterBody2D><G.CollisionShape2D/><G.Sprite2D/></G.CharacterBody2D><G.ProgressBar/></>'],
+  ]) {
+    const value = input(imports + 'export default function App(){return ' + expression + ';}', { entries: { app: { module: '/src/App.tsx' } }, profileId: 'game-2d-v1' });
+    for (const mode of ['production', 'development']) checked({ ...value, mode });
+    for (const profileId of ['core-ui-v1', 'ui-media-v1', 'behavior-physics-v1'])
+      assert(checkProjectTypes(ts, { ...value, profileId }).diagnostics.some(item => item.code === 'E_PROFILE_UNSUPPORTED'), profileId + ': ' + imports);
+  }
+});
+test('real combined WASM fixture type-checks against the release declarations in both modes', async () => {
+  const source = await readFile(path.join(repo, 'scripts/test/fixtures/browser-game-2d.tsx'), 'utf8');
+  const value = input(source, { entries: { app: { module: '/src/App.tsx' } }, profileId: 'game-2d-v1' });
+  value.project.files['/node_modules/@types/godot-runtime/index.d.ts'] = 'declare const console:{log(...args:unknown[]):void};';
+  for (const mode of ['production', 'development']) checked({ ...value, mode });
+});
+
+// Read the actual binary directory and payloads instead of trusting artifact.files.
+function unpackPck(pack) {
+  const view = new DataView(pack.buffer, pack.byteOffset, pack.byteLength);
+  assert.equal(view.getUint32(0, true), 0x43504447);
+  assert.equal(view.getUint32(4, true), 3);
+  const base = Number(view.getBigUint64(24, true));
+  let cursor = Number(view.getBigUint64(32, true));
+  const count = view.getUint32(cursor, true), entries = new Map(); cursor += 4;
+  for (let index = 0; index < count; index++) {
+    const length = view.getUint32(cursor, true); cursor += 4;
+    const name = new TextDecoder().decode(pack.slice(cursor, cursor + length)).replace(/\0+$/, ''); cursor += length;
+    const offset = Number(view.getBigUint64(cursor, true)) + base; cursor += 8;
+    const size = Number(view.getBigUint64(cursor, true)); cursor += 8 + 16 + 4;
+    assert(offset >= base && offset + size <= pack.length, name);
+    entries.set('res://' + name, pack.slice(offset, offset + size));
+  }
+  return entries;
+}
+async function compilerFixture() {
+  const releaseFiles = new Map(), releaseEntries = [];
+  for (const [virtualPath, source] of Object.entries(files)) {
+    const bytes = typeof source === 'string' ? utf8.encode(source) : source;
+    const path = 'types' + virtualPath;
+    releaseFiles.set(path, bytes);
+    releaseEntries.push({ path, virtualPath, sha256: await sha256(bytes), kind: 'types' });
+  }
+  // Vendor execution is exercised by the real WASM suite. This unit fixture
+  // supplies fixed vendor bytes while running the real TS, bundler and PCK code.
+  for (const sdkMode of ['production', 'development']) {
+    const path = 'sdk-' + sdkMode + '.js', bytes = utf8.encode('module.exports={};');
+    releaseFiles.set(path, bytes); releaseEntries.push({ path, sha256: await sha256(bytes), kind: 'sdk', sdkMode });
+  }
+  const release = { schemaVersion: 1, id: 'a'.repeat(64), version: 'test', certified: false,
+    engine: { godotVersion: '4.6.1', engine: 'web', engineTarget: 'template_debug', threads: false },
+    runtimeAbi: RUNTIME_ABI, nativeBridgeAbi: NATIVE_BRIDGE_ABI, react: REACT_VERSIONS,
+    profiles: Object.fromEntries(['core-ui-v1', 'ui-media-v1', 'behavior-physics-v1', 'game-2d-v1'].map(id => [id, profileReference(id)])),
+    files: releaseEntries, specifiers: {}, dependencies: {}, sdkPackageRoot: '/node_modules/@godot-js/react', typesRoot: '/node_modules/@types', libRoot: '/typescript/lib' };
+  const resolver = createBuiltInResolver({ versions: {}, modules: {}, files: {} });
+  const png = new Uint8Array(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII=', 'base64'));
+  const compiler = createBrowserCompilerCore({ bundler: esbuild, typescript: ts, release, releaseFiles, ...resolver,
+    decodeImage: async bytes => { assert.deepEqual(bytes, png); return { width: 1, height: 1, rgba: new Uint8Array([255, 0, 0, 255]) }; } });
+  return { compiler, release, png };
+}
+test('real browser compiler packs textures and collision shapes together and selects physics by capability', async () => {
+  const { compiler, png } = await compilerFixture();
+  const source = 'import {Node,CharacterBody2D,CollisionShape2D,Sprite2D,ProgressBar,asset} from "@godot-js/react"; export default function App(){return <Node><CharacterBody2D engineOwned={["position","velocity"]}><CollisionShape2D shape={asset("shape","CircleShape2D")}/><Sprite2D texture={asset("image","Texture2D")}/></CharacterBody2D><ProgressBar value={42}/></Node>;}';
+  const config = { schemaVersion: 1, entry: '/src/App.tsx', dependencies: {}, profileId: 'game-2d-v1', mode: 'production', assets: {
+    image: { source: '/assets/image.png', type: 'Texture2D' }, shape: { source: '/assets/shape.tres', type: 'CircleShape2D' } } };
+  const project = { '/src/App.tsx': source, '/assets/image.png': png, '/assets/shape.tres': '[gd_resource type="CircleShape2D" format=3]\n[resource]\nradius=12.0\n' };
+  const keys = [];
+  for (const mode of ['production', 'development']) {
+    const artifact = await compiler.build(await createSnapshot({ revision: mode, config: { ...config, mode }, files: project }));
+    const packed = unpackPck(artifact.pack), decode = uri => new TextDecoder().decode(packed.get(uri));
+    assert.deepEqual(artifact.manifest.profile, profileReference('game-2d-v1'));
+    assert.match(decode('res://project.godot'), /2d\/physics_engine="GodotPhysics2D"/);
+    assert.match(decode('res://project.godot'), /3d\/physics_engine="Dummy"/);
+    assert.match(decode(artifact.manifest.resources.image.uri), /type="ImageTexture"/);
+    assert.match(decode(artifact.manifest.resources.shape.uri), /type="CircleShape2D"/);
+    for (const resource of Object.values(artifact.manifest.resources)) assert.equal(await sha256(packed.get(resource.uri)), resource.sha256);
+    keys.push(artifact.buildKey);
+  }
+  assert.notEqual(keys[0], keys[1]);
+  for (const profileId of ['core-ui-v1', 'ui-media-v1', 'behavior-physics-v1']) {
+    const artifact = await compiler.build(await createSnapshot({ revision: profileId, config: { ...config, profileId, assets: {} }, files: { '/src/App.tsx': 'import {Label} from "@godot-js/react";export default function App(){return <Label text="old profile"/>;}' } }));
+    assert.match(new TextDecoder().decode(unpackPck(artifact.pack).get('res://project.godot')), new RegExp('2d/physics_engine="' + (profileId === 'behavior-physics-v1' ? 'GodotPhysics2D' : 'Dummy') + '"'));
+  }
+});
+test('mixed build refuses missing release profiles, changed hashes and old-profile resource widening', async () => {
+  const { compiler, release, png } = await compilerFixture();
+  const config = { schemaVersion: 1, entry: '/src/App.tsx', dependencies: {}, profileId: 'game-2d-v1', mode: 'production' };
+  const snapshot = await createSnapshot({ revision: 'negative', config, files: { '/src/App.tsx': 'export default function App(){return null;}' } });
+  const reference = release.profiles['game-2d-v1'];
+  delete release.profiles['game-2d-v1'];
+  await assert.rejects(compiler.build(snapshot), /E_PROFILE_UNSUPPORTED/);
+  release.profiles['game-2d-v1'] = { ...reference, hash: 'f'.repeat(64) };
+  await assert.rejects(compiler.build(snapshot), /E_PROFILE_UNSUPPORTED/);
+  release.profiles['game-2d-v1'] = reference;
+  for (const [profileId, assets, extra] of [
+    ['ui-media-v1', { shape: { source: '/shape.tres', type: 'CircleShape2D' } }, { '/shape.tres': '[gd_resource type="CircleShape2D" format=3]\n[resource]\nradius=12.0\n' }],
+    ['behavior-physics-v1', { image: { source: '/image.png', type: 'Texture2D' } }, { '/image.png': png }],
+  ]) await assert.rejects(compiler.build(await createSnapshot({ revision: profileId, config: { ...config, profileId, assets }, files: { '/src/App.tsx': 'export default function App(){return null;}', ...extra } })), /E_PROFILE_RESOURCE/);
 });
 test('worker serializes load/check/query/dispose and contains no runtime Node imports', async () => {
   const handle = createTypesWorkerHandler(ts);
