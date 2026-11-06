@@ -8,6 +8,7 @@ import ts from "typescript";
 import {catalog} from "../src/catalog.ts";
 import {prepareAssets} from "./prepare-assets.mjs";
 import {buildFrontend} from "./build-frontend.mjs";
+import {writeTypeSnapshot} from "./build-shell.mjs";
 
 const app=path.resolve(path.dirname(fileURLToPath(import.meta.url)),".."),repo=path.resolve(app,"../.."),project=path.join(app,"project"),dist=path.join(app,"dist");
 const sdk=path.join(repo,"scripts/jsb.react"),host=process.env.GODOT??path.join(repo,"tests/bin/godot-host-qjs");
@@ -42,13 +43,7 @@ for(const source of JSON.parse(await fs.readFile(path.join(app,"third-party/sour
 await buildFrontend(dist);
 await fs.mkdir(path.join(dist,'assets'),{recursive:true});
 for(const name of ['LICENSE','ThirdPartyNotices.txt'])await fs.copyFile(path.join(app,'node_modules/monaco-editor',name),path.join(dist,'assets','monaco-'+name+(name.endsWith('.txt')?'':'.txt')));
-const types={};
-async function collect(directory,prefix,filter){for(const entry of await fs.readdir(directory,{withFileTypes:true})){const p=path.join(directory,entry.name),key=`${prefix}/${entry.name}`;if(entry.isDirectory())await collect(p,key,filter);else if(filter(entry.name))types[key]=await fs.readFile(p,"utf8");}}
-await collect(path.join(sdk,"dist"),"/sdk",name=>name.endsWith(".d.ts"));
-await collect(path.dirname(fileURLToPath(import.meta.resolve("@types/react/package.json"))),"/react",name=>name.endsWith(".d.ts"));
-await collect(path.dirname(fileURLToPath(import.meta.resolve("typescript/lib/typescript.js"))),"/lib",name=>/^lib\..*\.d\.ts$/.test(name));
-types["/api.d.ts"]=await fs.readFile(path.join(app,"src/editor-api.d.ts"),"utf8");
-await write("types.json",JSON.stringify(types));
+await writeTypeSnapshot(dist);
 const fileSizes={};for(const name of ["game.wasm","game.pck"]){fileSizes[`engine/${name}`]=(await fs.stat(path.join(dist,"engine",name))).size;}
 await write("engine.json",JSON.stringify({executable:"engine/game",mainPack:"engine/game.pck",fileSizes,args:[]}));
 const payloads={};for(const name of ["engine/game.js","engine/game.wasm","engine/game.pck","types.json","compiler.worker.js","catalog.json"])payloads[name]={sha256:sha(await fs.readFile(path.join(dist,name))),bytes:(await fs.stat(path.join(dist,name))).size};

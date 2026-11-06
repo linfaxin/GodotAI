@@ -9,7 +9,8 @@
     "test": "node --test scripts/*.test.mjs",
     "test:browser": "node scripts/browser-test.mjs",
     "test:browser:projects": "node scripts/browser-project-test.mjs",
-    "build:conformance": "node build.mjs"
+    "build:conformance": "node build.mjs",
+    "build:frontend": "node scripts/build-shell.mjs"
   },
   "dependencies": {
     "@godot-js/react": "workspace:*",

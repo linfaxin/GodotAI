@@ -2,7 +2,8 @@ import {createWorkbench} from './workbench/workbench';
 import {createExplorer} from './workbench/explorer';
 import {createCodeEditor} from './workbench/code-editor';
 import {createFileMenu} from './workbench/file-menu';
-import {filePath,parseProject,addProjectFiles,renameProjectFile,type EditorProject} from './project-model';
+import {filePath,parseProject,addProjectFiles,renameProjectFile,MAX_PROJECT_DOCUMENT_BYTES,type EditorProject} from './project-model';
+import {createProjectStorage} from './project-storage';
 import type {TypeDiagnostic} from './compiler-types';
 import {suppressBrowserSave} from './browser-shortcuts';
 suppressBrowserSave(window);
@@ -35,17 +36,16 @@ const db=new Promise<IDBDatabase|undefined>(resolve=>{
  if(!globalThis.indexedDB){resolve(undefined);return;}
  const request=indexedDB.open('godotjs-showcase-workbench-v1',1);request.onupgradeneeded=()=>request.result.createObjectStore('projects');request.onsuccess=()=>resolve(request.result);request.onerror=()=>resolve(undefined);
 });
+const storage=createProjectStorage(db);
 let persistenceBlocked=false,recoverySnapshot:unknown;
 async function save():Promise<boolean>{
- const database=await db;if(!database||persistenceBlocked){$('saved').textContent='保存失败';return false;}
+ if(persistenceBlocked){$('saved').textContent='保存失败';return false;}
  try{
-  // An oversized edit must never replace the last restorable snapshot.
-  const snapshot={selected:selected.id,projects:[...projects].map(([id,p])=>[id,parseProject(p)])};
-  return await new Promise<boolean>(resolve=>{
-   const tx=database.transaction('projects','readwrite');tx.objectStore('projects').put(snapshot,'current');
-   tx.oncomplete=()=>{$('saved').textContent='已自动保存';resolve(true);};
-   tx.onabort=()=>{$('saved').textContent='保存失败';resolve(false);};
-  });
+  const result=await storage.save(selected.id);
+  if(result.conflicts.includes(selected.id)){$('saved').textContent='保存冲突';toast('另一个标签页已更新当前项目。本地修改尚未保存，请先导出本地修改，然后刷新页面。');return false;}
+  if(result.invalid.has(selected.id)){$('saved').textContent='保存失败';toast('未保存当前修改：'+result.invalid.get(selected.id));return false;}
+  if(storage.hasPending(selected.id)){$('saved').textContent='正在保存';return false;}
+  $('saved').textContent='已自动保存';return true;
  }catch(error){$('saved').textContent='保存失败';toast('未保存当前修改：'+String(error));return false;}
 }
 async function restore(){
@@ -56,12 +56,13 @@ async function restore(){
   const request=store.get('current');
   request.onsuccess=()=>{
    const saved=request.result;let invalid=false;
+   if(saved&&Array.isArray(saved.projects))storage.remember({...saved,projects:saved.projects.filter((row:unknown)=>Array.isArray(row)&&row.length===2)});
    if(saved===undefined){resolve(undefined);return;}
    if(!saved||!Array.isArray(saved.projects))invalid=true;
    else for(const record of saved.projects){
     if(!Array.isArray(record)||record.length!==2){invalid=true;continue;}
     const [id,p]=record;if(!demos.some(d=>d.id===id))continue;
-    try{projects.set(id,parseProject(p));}catch{invalid=true;}
+    try{projects.set(id,parseProject(p));}catch{invalid=true;const replacement=initialProject(demos.find(d=>d.id===id)!);projects.set(id,replacement);storage.stage(id,replacement);}
    }
    if(!invalid){resolve(saved.selected);return;}
    // Preserve the complete original snapshot before select() saves defaults.
@@ -73,7 +74,7 @@ async function restore(){
   request.onerror=()=>{persistenceBlocked=true;toast('无法读取本地项目，已暂停自动保存');resolve(undefined);};
  });
 }
-function changed(){revision++;$('saved').textContent='正在保存';clearTimeout(saveTimer);saveTimer=setTimeout(()=>void save(),250);clearTimeout(checkTimer);checkTimer=setTimeout(()=>void check(),1100);}
+function changed(){storage.stage(selected.id,current);revision++;$('saved').textContent='正在保存';clearTimeout(saveTimer);saveTimer=setTimeout(()=>void save(),250);clearTimeout(checkTimer);checkTimer=setTimeout(()=>void check(),1100);}
 function initialProject(demo:Demo):EditorProject{return {schemaVersion:1,demoId:demo.id,entry:'/src/'+demo.file,selected:'/src/'+demo.file,files:{['/src/'+demo.file]:demo.source,'/package.json':JSON.stringify({private:true,dependencies:{react:'19.3.1','@godot-js/react':'0.1.0'}},null,2),'/README.md':`# ${demo.name}\n\n${demo.hint}\n\n入口：src/${demo.file}\n\n内置资源由 playground 提供，见「开源鸣谢」。\n`},controls:Object.fromEntries(demo.controls.map(c=>[c.key,c.value])),mode:'production'};}
 function visibleFile(path:string){return path.split('/').at(-1)!=='package.json';}
 function renderFiles(){fileMenu.close();const paths=Object.keys(current.files).filter(visibleFile);editor.reconcile(paths);explorer.render(paths,current.selected);workbench.syncFiles(paths,current.selected);}
@@ -95,11 +96,11 @@ async function compile(){
 }
 function controls(){
  $('controls').replaceChildren();$('demo-actions').replaceChildren();$('hint').textContent=selected.hint;
- for(const c of selected.controls){const div=document.createElement('div');div.className='control';const label=document.createElement('label'),name=document.createElement('span'),output=document.createElement('output'),input=document.createElement('input');name.textContent=c.label;input.type='range';input.id=`control-${c.key}`;input.min=String(c.min);input.max=String(c.max);input.step=String(c.step);input.value=String(current.controls[c.key]??c.value);output.textContent=input.value;label.htmlFor=input.id;label.append(name,output);input.oninput=()=>{current.controls[c.key]=Number(input.value);output.textContent=input.value;send({type:'controls',controls:current.controls});void save();};div.append(label,input);$('controls').append(div);}
+ for(const c of selected.controls){const div=document.createElement('div');div.className='control';const label=document.createElement('label'),name=document.createElement('span'),output=document.createElement('output'),input=document.createElement('input');name.textContent=c.label;input.type='range';input.id=`control-${c.key}`;input.min=String(c.min);input.max=String(c.max);input.step=String(c.step);input.value=String(current.controls[c.key]??c.value);output.textContent=input.value;label.htmlFor=input.id;label.append(name,output);input.oninput=()=>{current.controls[c.key]=Number(input.value);output.textContent=input.value;send({type:'controls',controls:current.controls});storage.stage(selected.id,current);void save();};div.append(label,input);$('controls').append(div);}
  for(const action of selected.actions??[]){const button=document.createElement('button');button.dataset.action=action.key;button.textContent=action.label;button.onclick=()=>action.key==='load'?importCity():send({type:'action',action:action.key});$('demo-actions').append(button);}
 }
 function select(demo:Demo,run=true){
- clearTimeout(checkTimer);runSerial++;checking++;revision++;selected=demo;$('current-project-label').textContent=`(当前：${demo.name})`;$('project-switcher').title=`切换项目 (当前：${demo.name})`;$('project-switcher').setAttribute('aria-label',`切换项目 (当前：${demo.name})`);current=projects.get(demo.id)??initialProject(demo);projects.set(demo.id,current);workbench.resetTabs();editor.reset();explorer.reset();setDiagnostics([]);selectFile(current.selected);controls();$<HTMLSelectElement>('mode').value=current.mode;
+ clearTimeout(checkTimer);runSerial++;checking++;revision++;selected=demo;$('current-project-label').textContent=`(当前：${demo.name})`;$('project-switcher').title=`切换项目 (当前：${demo.name})`;$('project-switcher').setAttribute('aria-label',`切换项目 (当前：${demo.name})`);current=projects.get(demo.id)??initialProject(demo);if(!projects.has(demo.id))storage.stage(demo.id,current);projects.set(demo.id,current);workbench.resetTabs();editor.reset();explorer.reset();setDiagnostics([]);selectFile(current.selected);controls();$<HTMLSelectElement>('mode').value=current.mode;
  for(const tab of document.querySelectorAll<HTMLElement>('[data-demo]')){const active=tab.dataset.demo===demo.id;tab.classList.toggle('active',active);tab.setAttribute('aria-checked',String(active));}
  $('runtime-meta').textContent=demo.name;document.title=`${demo.name} · GodotAI Playground`;void save();if(run&&ready)void compile();
 }
@@ -119,17 +120,21 @@ $<HTMLInputElement>('asset-import').onchange=async event=>{
   const additions:[string,string|number[]][]=[];
   for(const file of files){if(file.size>1048576)throw Error('单个资源不能超过 1 MB');const path=filePath('assets/'+file.name);additions.push([path,file.name.endsWith('.tres')?await file.text():Array.from(new Uint8Array(await file.arrayBuffer()))]);}
   addProjectFiles(target,additions);
-  if(current===target){renderFiles();changed();}else void save();
+  if(current===target){renderFiles();changed();}else{storage.stage(target.demoId,target);void save();}
   toast('资源已添加，可在项目面板查看与导出');
  }catch(error){toast(String(error));}finally{input.value='';}
 };
 function download(name:string,value:unknown){const url=URL.createObjectURL(new Blob([JSON.stringify(value,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 $('export').onclick=()=>download('godot-playground-project.json',current);
 $('export-recovery').onclick=()=>download('godot-playground-recovery.json',recoverySnapshot);
-$<HTMLInputElement>('import').onchange=async event=>{const file=(event.target as HTMLInputElement).files?.[0];if(!file)return;try{if(file.size>12582912)throw Error('项目文件不能超过 12 MB');const project=parseProject(JSON.parse(await file.text()));const demo=demos.find(d=>d.id===project.demoId)??demos[0];project.demoId=demo.id;for(const c of demo.controls)project.controls[c.key]=Math.max(c.min,Math.min(c.max,project.controls[c.key]??c.value));projects.set(demo.id,project);select(demo);toast('项目已导入');}catch(error){toast(String(error));log(String(error),'error');}};
+$<HTMLInputElement>('import').onchange=async event=>{
+ const input=event.target as HTMLInputElement,file=input.files?.[0];if(!file)return;
+ try{if(file.size>MAX_PROJECT_DOCUMENT_BYTES)throw Error('项目文件不能超过 128 MB');const project=parseProject(JSON.parse(await file.text()));const demo=demos.find(d=>d.id===project.demoId)??demos[0];project.demoId=demo.id;for(const c of demo.controls)project.controls[c.key]=Math.max(c.min,Math.min(c.max,project.controls[c.key]??c.value));projects.set(demo.id,project);storage.stage(demo.id,project);select(demo);toast('项目已导入');}
+ catch(error){toast(String(error));log(String(error),'error');}finally{input.value='';}
+};
 $('reset').onclick=()=>{projects.delete(selected.id);select(selected);toast('已恢复当前示例');};
 $('share').onclick=async()=>{try{const json=new TextEncoder().encode(JSON.stringify(current));const compressed=new Uint8Array(await new Response(new Blob([json]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());if(compressed.length>24576)throw Error('项目较大，请改用导出项目 JSON');let binary='';for(const n of compressed)binary+=String.fromCharCode(n);const url=new URL(location.href);url.hash='project='+btoa(binary);await navigator.clipboard.writeText(url.href);toast('项目分享链接已复制');}catch(error){toast(String(error));}};
-async function importShared(){if(!location.hash.startsWith('#project='))return;try{const binary=atob(location.hash.slice(9).replace(/-/g,'+').replace(/_/g,'/'));if(binary.length>24576)throw Error('分享链接过大');const bytes=Uint8Array.from(binary,c=>c.charCodeAt(0));const text=await new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'))).text();if(text.length>8388608)throw Error('分享项目过大');const p=parseProject(JSON.parse(text));const demo=demos.find(d=>d.id===p.demoId)??demos[0];p.demoId=demo.id;for(const c of demo.controls)p.controls[c.key]=Math.max(c.min,Math.min(c.max,p.controls[c.key]??c.value));projects.set(demo.id,p);return demo.id;}catch(error){toast('无法读取分享项目：'+String(error));}}
+async function importShared(){if(!location.hash.startsWith('#project='))return;try{const binary=atob(location.hash.slice(9).replace(/-/g,'+').replace(/_/g,'/'));if(binary.length>24576)throw Error('分享链接过大');const bytes=Uint8Array.from(binary,c=>c.charCodeAt(0));const reader=new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip')).getReader(),chunks:Uint8Array<ArrayBuffer>[]=[];let size=0;try{for(;;){const {done,value}=await reader.read();if(done)break;size+=value.byteLength;if(size>MAX_PROJECT_DOCUMENT_BYTES)throw Error('分享项目过大');chunks.push(value.slice());}}finally{await reader.cancel();}const text=await new Blob(chunks).text();const p=parseProject(JSON.parse(text));const demo=demos.find(d=>d.id===p.demoId)??demos[0];p.demoId=demo.id;for(const c of demo.controls)p.controls[c.key]=Math.max(c.min,Math.min(c.max,p.controls[c.key]??c.value));projects.set(demo.id,p);storage.stage(demo.id,p);return demo.id;}catch(error){toast('无法读取分享项目：'+String(error));}}
 function importCity(){const input=document.createElement('input');input.type='file';input.accept='.json,application/json';input.onchange=async()=>{const file=input.files?.[0];if(!file)return;try{if(file.size>262144)throw Error('地图文件超过 256 KB');send({type:'import-data',data:JSON.parse(await file.text())});log(`✓ 已读取 ${file.name}`);}catch(error){log(String(error),'error');}};input.click();}
 $('run').onclick=()=>void compile();$('check').onclick=()=>void check();$('stop').onclick=()=>{runSerial++;$('run').toggleAttribute('disabled',!ready);workbench.setReady();send({type:'stop'});};
 $<HTMLSelectElement>('mode').onchange=()=>{current.mode=$<HTMLSelectElement>('mode').value==='development'?'development':'production';changed();if(ready)void compile();};

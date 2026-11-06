@@ -1,4 +1,6 @@
 export interface EditorProject {schemaVersion:1;demoId:string;entry:string;selected:string;files:Record<string,string|number[]>;controls:Record<string,number>;mode:'production'|'development'}
+// Legacy exports pretty-print byte arrays; their JSON can be much larger than decoded files.
+export const MAX_PROJECT_DOCUMENT_BYTES=128*1024*1024;
 export function filePath(value:string):string {
  const path='/'+value.replace(/^\/+/, '');
  if(path.length>180||path.split('/').slice(1).some(p=>!p||p==='.'||p==='..')||/[\x00-\x1f\\]/.test(path))throw Error('请输入有效的项目文件路径');

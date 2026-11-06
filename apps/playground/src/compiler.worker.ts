@@ -1,4 +1,5 @@
 import ts from "typescript";
+import {moduleCandidates} from "./module-resolution";
 import type {TypeDiagnostic} from './compiler-types';
 interface Request {id:number;kind?:'compile'|'check'|'completion'|'hover';source?:string;file?:string;files?:Record<string,string>;entry?:string;path?:string;offset?:number}
 let declarations:Record<string,string>;
@@ -14,8 +15,7 @@ self.onmessage=async(event:MessageEvent<Request>)=>{
   const resolve=(name:string,from:string):ts.ResolvedModule|undefined=>{
    const fixed:Record<string,string>={react:'/react/index.d.ts','@godot-js/react':'/sdk/index.d.ts','@playground/api':'/api.d.ts'};
    const base=name.startsWith('.')?normalize(from.slice(0,from.lastIndexOf('/')+1)+name):'';
-   const clean=base.replace(/\.[jt]sx?$/,'');
-   const file=fixed[name]??(base?[base,clean+'.ts',clean+'.tsx',clean+'.js',clean+'.jsx',clean+'.d.ts',base+'.d.ts',base+'/index.ts',base+'/index.tsx',base+'/index.d.ts',base+'.json'].find(p=>p in snapshot):undefined);
+   const file=fixed[name]??(base?moduleCandidates(base).find(p=>p in snapshot):undefined);
    return file&&file in snapshot?{resolvedFileName:file,isExternalLibraryImport:!(file in user)}:undefined;
   };
   const host:ts.LanguageServiceHost={getScriptFileNames:()=>roots,getScriptVersion:()=> '1',getScriptSnapshot:name=>name in snapshot?ts.ScriptSnapshot.fromString(snapshot[name]):undefined,getCompilationSettings:()=>options,getCurrentDirectory:()=> '/',getDefaultLibFileName:()=>'/lib/lib.es2022.d.ts',fileExists:name=>name in snapshot,readFile:name=>snapshot[name],readDirectory:()=>[],resolveModuleNames:(names,from)=>names.map(n=>resolve(n,from))};
@@ -50,8 +50,8 @@ self.onmessage=async(event:MessageEvent<Request>)=>{
    if(kind==='compile'&&!diagnostics.some(d=>d.category==='error')){
     const modules:Record<string,string>={};
     program.emit(undefined,(_name,text,_bom,_err,sources)=>{if(sources?.length&&sources[0].fileName in user&&/\.[jt]sx?$/.test(sources[0].fileName))modules[sources[0].fileName]=text;});
-    code=`const __external=require;const __modules={${Object.entries(modules).map(([p,c])=>JSON.stringify(p)+':function(require,module,exports){\n'+c+'\n}').join(',')}};const __json=${JSON.stringify(jsonFiles)};const __cache=Object.create(null);\n`+
-     `function __load(name,from){if(['react','@godot-js/react','@playground/api'].includes(name))return __external(name);let path=name;if(name.startsWith('.')){let parts=from.split('/');parts.pop();for(const p of name.split('/')){if(p==='..')parts.pop();else if(p&&p!=='.')parts.push(p);}path=parts.join('/');}const clean=path.replace(/\\.[jt]sx?$/,'');const id=[path,clean+'.ts',clean+'.tsx',clean+'.js',clean+'.jsx',path+'/index.ts',path+'/index.tsx',path+'.json'].find(p=>Object.hasOwn(__modules,p)||Object.hasOwn(__json,p));if(!id)throw Error('Unsupported module: '+name);if(Object.hasOwn(__json,id))return __json[id];if(__cache[id])return __cache[id].exports;const m={exports:{}};__cache[id]=m;__modules[id](n=>__load(n,id),m,m.exports);return m.exports;}module.exports=__load(${JSON.stringify(entry)},'/');`;
+    code=`const __candidates=${moduleCandidates.toString()};const __external=require;const __modules={${Object.entries(modules).map(([p,c])=>JSON.stringify(p)+':function(require,module,exports){\n'+c+'\n}').join(',')}};const __json=${JSON.stringify(jsonFiles)};const __cache=Object.create(null);\n`+
+     `function __load(name,from){if(['react','@godot-js/react','@playground/api'].includes(name))return __external(name);let path=name;if(name.startsWith('.')){let parts=from.split('/');parts.pop();for(const p of name.split('/')){if(p==='..')parts.pop();else if(p&&p!=='.')parts.push(p);}path=parts.join('/');}const id=__candidates(path).find(p=>Object.hasOwn(__modules,p)||Object.hasOwn(__json,p));if(!id)throw Error('Unsupported module: '+name);if(Object.hasOwn(__json,id))return __json[id];if(__cache[id])return __cache[id].exports;const m={exports:{}};__cache[id]=m;__modules[id](n=>__load(n,id),m,m.exports);return m.exports;}module.exports=__load(${JSON.stringify(entry)},'/');`;
    }
    self.postMessage({id,code,diagnostics});
   }finally{service.dispose();}
