@@ -48,7 +48,10 @@ export async function verifyWorkbench(page, out) {
   await page.frameLocator('#preview iframe').locator('canvas').press('Escape');
   await page.waitForFunction(()=>!document.body.classList.contains('preview-focus'));
   await page.click('#focus-preview');
-  await page.locator('#project-menu > summary').click();await page.click('#toggle-files');assert(await page.locator('#sidebar').isVisible());assert(await page.locator('#editor-panel').isVisible());
+  await page.locator('#project-menu > summary').click();await page.click('#toggle-files');
+  // A native frame may delay the click-driven parent layout update.
+  await page.locator('#sidebar').waitFor({state:'visible'});
+  assert(await page.locator('#sidebar').isVisible());assert(await page.locator('#editor-panel').isVisible());
   await sameFrame();pass('resizing-and-canvas-escape-preserve-native-frame');
 
   await page.evaluate(()=>playground.editor.focus());await page.keyboard.press('Control+b');
