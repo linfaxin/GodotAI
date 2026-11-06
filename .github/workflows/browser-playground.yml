@@ -64,6 +64,15 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - run: pnpm test:react
+      - name: Check showcase models and sources
+        run: pnpm test:playground
+      - name: Verify showcase persistence, imports and compiler regressions
+        env:
+          PLAYGROUND_TEST_SHELL: '1'
+        run: |
+          pnpm --filter @godot-js/playground exec playwright install --with-deps chromium
+          pnpm --filter @godot-js/playground build:frontend
+          pnpm --filter @godot-js/playground test:browser:projects
       - name: Release provenance, integrity, npm-pack consumer and failure gates
         run: pnpm test:browser:unit
 

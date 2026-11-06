@@ -30,6 +30,7 @@ const encode=(value:unknown):unknown=>{
  if(value&&typeof value==="object"){
   if(Array.isArray(value))return value.map(encode);
   const v=value as Record<string,unknown>;
+  if(typeof v.x==="number"&&typeof v.y==="number"&&typeof v.z==="number"&&!v.kind)return {kind:"Vector3",x:v.x,y:v.y,z:v.z};
   if(typeof v.x==="number"&&typeof v.y==="number"&&!v.kind)return {kind:"Vector2",x:v.x,y:v.y};
   if(typeof v.r==="number"&&typeof v.g==="number"&&typeof v.b==="number"&&typeof v.a==="number"&&!v.kind)return {kind:"Color",r:v.r,g:v.g,b:v.b,a:v.a};
  }return value;
@@ -39,6 +40,7 @@ const decode=(value:unknown):any=>{
   if(Array.isArray(value))return Object.freeze(value.map(decode));
   const v=value as any;
   if(v.kind==="Vector2")return Object.freeze({x:v.x,y:v.y});
+  if(v.kind==="Vector3")return Object.freeze({x:v.x,y:v.y,z:v.z});
   if(v.kind==="Color")return Object.freeze({r:v.r,g:v.g,b:v.b,a:v.a});
   if(v.kind==="AssetRef")return Object.freeze({kind:"asset",id:v.id,type:v.type,scope:"shared"});
  }return value;

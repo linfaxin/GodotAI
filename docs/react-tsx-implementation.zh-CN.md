@@ -34,6 +34,7 @@ Host profile 与模板导入 profile 是不同维度。使用一个扩展不自�
 | --- | --- | --- |
 | 默认 `profileId: "core-ui-v1"` | 上述 8 类 host；有限值 codec；只读 AssetRef；共享无 Script 的 Resource/CanvasItemMaterial 资产闭包 | 不开放 physics、portal、LineEdit/IME、任意 Script 或通用 Godot 方法 |
 | 显式 `profileId: "behavior-physics-v1"` | 保留 core 的 8 类，再增加 `CharacterBody2D`、`StaticBody2D`、`CollisionShape2D`，共 11 类；velocity/upDirection/floor/collision/shape 字段；physics phase 的 `setVelocity`、`moveAndSlide` | shape 引用限已列入的 Circle/Rectangle/CapsuleShape2D；不是完整 GodotPhysics API、3D 物理或任意刚体方法 |
+| 显式 `profileId: "showcase-v1"` | playground 使用的 Sprite/ColorRect、2D 灯光与遮挡、3D mesh/camera/角色碰撞/刚体/凸碰撞体/射线、音效和 Vector3 DTO；保留逐字段与阶段/所有权校验 | demo 专用预览能力；使用静态可信资产，不扩展下述模板导入或正式 CLI 导出认证；不包含通用骨骼动画 |
 | 默认 `template-t0` | format-3 文本 TSCN、已认证 hosts/属性、平面树、受限外部共享资源 | 拒绝嵌套/继承 PackedScene、local-to-scene、Script、持久连接、嵌入资源和未知构造语义 |
 | 显式 `template-local-v1` | 平面模板中的受限 Resource/CanvasItemMaterial local-to-scene；每实例原生克隆、同实例别名、`get_local_scene()`、owner 和释放作用域 | 只允许平面模板；local shape 与其他复杂资源类型不在该 profile 的构建白名单 |
 | 显式 `template-structural-v1` | 共享资源的有界 nested/inherited PackedScene 展开、已支持的属性 override；完整 host Plan | 仅 shared 资源；32 层场景依赖深度、10,000 个节点上限；不支持任意 index 重排、未知继承/实例编辑语义 |

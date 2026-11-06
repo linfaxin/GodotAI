@@ -1,5 +1,5 @@
 import type { NativeKey } from "./contracts";
-import { GAME_2D_HOST_SCHEMA } from "./schema";
+import { GAME_2D_HOST_SCHEMA, SHOWCASE_HOST_SCHEMA } from "./schema";
 import type { NativePort, NativeInfo, RuntimePhase, NativeInvalidation } from "./native-port";
 import { nativeKeyId } from "./native-port";
 interface MockNode {key:NativeKey;type:string;name:string;parent:MockNode|null;children:MockNode[];owner:MockNode|null;props:Record<string,unknown>;alive:boolean;signals:Map<string,Set<(...args:unknown[])=>void>>}
@@ -15,7 +15,7 @@ export class MockNativePort implements NativePort {
   releaseAssetScope(instance:string):void{this.requireStage();for(const id of this.localAssets.keys())if(id.startsWith(`${instance}:`))this.localAssets.delete(id);this.calls.push({op:"releaseScope",phase:this.stage,value:instance});}
   createContainer(name="App"):NativeKey{const key=this.allocate("Node");this.node(key).name=name;this.foundations.add(nativeKeyId(key));return key;}
   private allocate(type:string):NativeKey{
-    const key=Object.freeze({slot:++this.serial,revision:1});const schema=(GAME_2D_HOST_SCHEMA as Record<string,any>)[type];
+    const key=Object.freeze({slot:++this.serial,revision:1});const schema=(GAME_2D_HOST_SCHEMA as Record<string,any>)[type]??SHOWCASE_HOST_SCHEMA[type];
     const props:Record<string,unknown>={};if(schema)for(const value of Object.values(schema.properties) as any[])props[value.nativeName]=value.defaultValue;
     this.nodes.set(nativeKeyId(key),{key,type,name:type,parent:null,children:[],owner:null,props,alive:true,signals:new Map()});return key;
   }

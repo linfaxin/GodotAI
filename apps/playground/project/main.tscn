@@ -1,0 +1,8 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://host.ts" id="1"]
+[ext_resource type="Resource" path="res://asset-hub.tres" id="2"]
+
+[node name="Playground" type="Node"]
+script = ExtResource("1")
+metadata/assets = ExtResource("2")

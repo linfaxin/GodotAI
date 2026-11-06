@@ -35,7 +35,7 @@ pnpm install --frozen-lockfile
 | --- | --- |
 | `pnpm build:engine-js` | Build only `@godot-js/jsb-runtime`, `@godot-js/jsb-editor`, and `@godot-js/web-bridge` |
 | `pnpm build:packages` | Build packages selected by their `packages/` location, React renderer, Node compiler and browser compiler |
-| `pnpm build:playground` | Build the static Playground and its workspace dependencies; engine release assets are prepared separately |
+| `pnpm build:playground` | Build the eight-demo showcase using a matching GodotJS editor and single-thread Web template |
 | `pnpm typecheck:packages` | Check ecosystem package types without emitting files |
 | `pnpm build` | Build embedded scripts followed by ecosystem packages |
 | `pnpm test` | Run the existing engine runtime matrix |
@@ -90,4 +90,4 @@ The root package version continues to drive the existing engine version header a
 
 The [Playground](../apps/playground/README.md) is an implemented static application. It compiles TSX, checks types, builds PCK artifacts and runs the single-threaded Godot Web engine in a separate origin without a runtime Node.js service or WebContainers. Its default dependency path uses fixed, prebundled React, Godot SDK, scheduler and clsx; the dependency list is read-only. Generic npm resolution remains a separate browser-library adapter.
 
-`pnpm build:playground` builds the application with its workspace dependencies. The browser workflow separately builds the engine, prepares and verifies its versioned release, then exercises actual canvas input, source maps, lifecycle pressure and same-origin authentication. Browser assets and engine release files remain outside the embedded-script build boundary. [Implementation and local operation](browser-playground.zh-CN.md) describe the supported profiles and static deployment.
+`pnpm build:playground` builds the default eight-demo showcase (`apps/playground/src`, `web`, and `scripts`). The original browser SDK workbench remains a conformance fixture, built separately by `pnpm --filter @godot-js/playground build:conformance` into `dist-conformance/`. The browser workflow separately builds the engine, prepares and verifies its versioned release, then exercises actual canvas input, source maps, lifecycle pressure and same-origin authentication. Browser assets and engine release files remain outside the embedded-script build boundary. [Implementation and local operation](browser-playground.zh-CN.md) describe the supported profiles and static deployment.

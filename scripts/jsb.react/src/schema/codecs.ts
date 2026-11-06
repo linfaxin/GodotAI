@@ -1,7 +1,8 @@
 import { ERROR_CODES, exact, fail, invariant, type AssetRef, type ColorValue, type Vector2Value } from "../contracts";
 
-export type CodecName = "boolean" | "number" | "integer" | "string" | "stringName" | "vector2" | "color" | "assetRef" | "stringArray" | "nodeRef";
-export type CodecValue = null | boolean | number | string | Vector2Value | ColorValue | AssetRef | readonly string[];
+export type CodecName = "boolean" | "number" | "integer" | "string" | "stringName" | "vector2" | "vector3" | "color" | "assetRef" | "stringArray" | "nodeRef";
+export type Vector3Value = Readonly<{x:number;y:number;z:number}>;
+export type CodecValue = null | boolean | number | string | Vector2Value | Vector3Value | ColorValue | AssetRef | readonly string[];
 export const MAX_NATIVE_REAL = 3.4028234663852886e38;
 /** Conservative wire profile valid for both single- and double-precision Godot builds. */
 export const CODEC_DEFINITIONS = Object.freeze({
@@ -37,6 +38,10 @@ export function validateValue(codec: CodecName, value: unknown, path = "$", opti
     case "vector2": {
       const vector = exact(value, ["x", "y"], [], path);
       return Object.freeze({ x: validateValue("number", vector.x, `${path}.x`) as number, y: validateValue("number", vector.y, `${path}.y`) as number });
+    }
+    case "vector3": {
+      const v = exact(value, ["x", "y", "z"], [], path);
+      return Object.freeze({x:validateValue("number",v.x,`${path}.x`) as number,y:validateValue("number",v.y,`${path}.y`) as number,z:validateValue("number",v.z,`${path}.z`) as number});
     }
     case "color": {
       const c = exact(value, ["r", "g", "b", "a"], [], path);

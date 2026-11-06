@@ -1,2 +1,15 @@
 dist/
+project/.godot/
+project/generated/
+project/gen/
+project/imported/
+project/assets/derived/
+project/host.ts
+project/host.ts.uid
+project/asset-hub.tres
+project/asset-hub.tres.uid
+project/export_presets.cfg
+project/*.log
+project/**/*.uid
 node_modules/
+dist-conformance/

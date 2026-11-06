@@ -50,7 +50,9 @@ See [Breaking Changes](https://godotjs.github.io/misc/breaking-changes/) if upgr
 
 ## Examples
 
-The pure-browser TSX Playground lives in [`apps/playground`](apps/playground).
+The default Playground in [`apps/playground`](apps/playground) contains eight interactive Godot showcase demos in the original IDE layout. Its build uses a matching GodotJS editor and Web template; see its README for commands.
+
+The browser SDK conformance workbench is also retained in that directory for the release and browser CI gates. It builds separately with `pnpm --filter @godot-js/playground build:conformance` into `dist-conformance/`.
 It compiles and type-checks projects in browser Workers and runs the generated
 PCK in actual Godot WASM. See the [implementation and local verification guide](docs/browser-playground.zh-CN.md)
 and [engine release workflow](scripts/release/README.web.md).

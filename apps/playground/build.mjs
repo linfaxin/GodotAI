@@ -6,7 +6,7 @@ import { builtInLibrariesPlugin } from './build-builtins.mjs';
 const here = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(resolve(here, '../../scripts/jsb.react-build/package.json'));
 const { build } = require('esbuild');
-export async function buildPlayground({ out = resolve(here, 'dist'), config = {} } = {}) {
+export async function buildPlayground({ out = resolve(here, 'dist-conformance'), config = {} } = {}) {
   await mkdir(out, { recursive: true });
   await build({ entryPoints: { main: resolve(here, 'main.ts'), preview: resolve(here, 'preview.ts'), 'compiler-worker': resolve(here, 'compiler-worker.ts'), 'types-worker': resolve(here, '../../scripts/jsb.react-browser/src/types-worker.ts'), 'monaco-editor-worker': resolve(here, 'editor.worker.ts') },
     outdir: out, bundle: true, platform: 'browser', format: 'esm', target: 'es2022', sourcemap: true,

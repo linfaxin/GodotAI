@@ -21,6 +21,14 @@ jobs:
         run: pnpm typecheck:packages
         shell: bash
 
+      - name: Check playground sources and pinned assets
+        run: pnpm test:playground
+        shell: bash
+
+      - name: Check single-thread Web bridge bootstrap
+        run: pnpm --filter @godot-js/web-bridge test
+        shell: bash
+
       - name: React contracts, renderer and compiler tests
         run: pnpm test:react
         shell: bash
