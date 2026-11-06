@@ -1,6 +1,6 @@
 {
   "name": "@godot-js/react",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "React renderer for React-owned Godot node trees",
   "type": "commonjs",
   "main": "dist/index.js",
