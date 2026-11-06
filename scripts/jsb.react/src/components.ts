@@ -38,7 +38,7 @@ export interface ScrollContainerProps extends ControlProps {horizontalScrollMode
 export interface TextureRectProps extends ControlProps {texture?:TextureAssetRef|null;expandMode?:0|1|2|3|4|5;stretchMode?:0|1|2|3|4|5|6;flipH?:boolean;flipV?:boolean}
 /** ProgressBar uses a fixed 0..100 range with unquantized values. */
 export interface ProgressBarProps extends ControlProps {value?:number;minValue?:0;maxValue?:100;step?:0;showPercentage?:boolean;fillMode?:0|1|2|3;onValueChanged?:(value:number)=>void}
-export interface Sprite2DProps extends Node2DProps {texture?:TextureAssetRef|null;centered?:boolean;offset?:Vector2Value;flipH?:boolean;flipV?:boolean}
+export interface Sprite2DProps extends Omit<Node2DProps,"material"> {material?:AssetRef<"ShaderMaterial"|"CanvasItemMaterial">|null;texture?:TextureAssetRef|null;centered?:boolean;offset?:Vector2Value;flipH?:boolean;flipV?:boolean}
 export const PanelContainer=component<'PanelContainer',ControlProps>('PanelContainer');
 export const MarginContainer=component<'MarginContainer',MarginContainerProps>('MarginContainer');
 export const ScrollContainer=component<'ScrollContainer',ScrollContainerProps>('ScrollContainer');
@@ -46,3 +46,22 @@ export const TextureRect=component<'TextureRect',TextureRectProps>('TextureRect'
 export const ProgressBar=component<'ProgressBar',ProgressBarProps>('ProgressBar');
 export const Sprite2D=component<'Sprite2D',Sprite2DProps>('Sprite2D');
 export const G=Object.freeze({Node,Node2D,Control,VBoxContainer,HBoxContainer,Label,Button,CanvasLayer,CharacterBody2D,StaticBody2D,CollisionShape2D,PanelContainer,MarginContainer,ScrollContainer,TextureRect,ProgressBar,Sprite2D});
+
+// Explicit showcase hosts. They require profileId="showcase-v1" at the Root.
+type V3=Readonly<{x:number;y:number;z:number}>;
+interface SpatialProps extends CommonProps {position?:V3;rotation?:V3;scale?:V3;visible?:boolean}
+export const Node3D=component<"Node3D",SpatialProps>("Node3D");
+export const MeshInstance3D=component<"MeshInstance3D",SpatialProps & {mesh?:AssetRef<"Mesh">|null;materialOverride?:AssetRef<"StandardMaterial3D">|null}>("MeshInstance3D");
+export const Camera3D=component<"Camera3D",SpatialProps & {current?:boolean;fov?:number;projection?:number;size?:number}>("Camera3D");
+export const DirectionalLight3D=component<"DirectionalLight3D",SpatialProps & {lightColor?:ColorValue;lightEnergy?:number;shadowEnabled?:boolean}>("DirectionalLight3D");
+export const WorldEnvironment=component<"WorldEnvironment",CommonProps & {environment?:AssetRef<"Environment">|null}>("WorldEnvironment");
+export const StaticBody3D=component<"StaticBody3D",SpatialProps>("StaticBody3D");
+export const CharacterBody3D=component<"CharacterBody3D",SpatialProps & {velocity?:V3}>("CharacterBody3D");
+export const CollisionShape3D=component<"CollisionShape3D",SpatialProps & {shape?:AssetRef<"BoxShape3D"|"CapsuleShape3D"|"SphereShape3D"|"ConvexPolygonShape3D">|null;disabled?:boolean}>("CollisionShape3D");
+export const RigidBody3D=component<"RigidBody3D",SpatialProps & {mass?:number;linearVelocity?:V3;angularVelocity?:V3;gravityScale?:number;linearDamp?:number;angularDamp?:number;freeze?:boolean;sleeping?:boolean;collisionLayer?:number;collisionMask?:number}>("RigidBody3D");
+export const RayCast3D=component<"RayCast3D",SpatialProps & {enabled?:boolean;targetPosition?:V3;excludeParent?:boolean;collisionMask?:number}>("RayCast3D");
+export const ColorRect=component<"ColorRect",Omit<ControlProps,"material"> & {material?:AssetRef<"ShaderMaterial"|"CanvasItemMaterial">|null;position?:Vector2Value;size?:Vector2Value;color?:ColorValue}>("ColorRect");
+export const CanvasModulate=component<"CanvasModulate",Node2DProps & {color?:ColorValue}>("CanvasModulate");
+export const PointLight2D=component<"PointLight2D",Node2DProps & {texture?:AssetRef<"Texture2D">|null;color?:ColorValue;energy?:number;textureScale?:number;shadowEnabled?:boolean}>("PointLight2D");
+export const LightOccluder2D=component<"LightOccluder2D",Node2DProps & {occluder?:AssetRef<"OccluderPolygon2D">|null}>("LightOccluder2D");
+export const AudioStreamPlayer=component<"AudioStreamPlayer",CommonProps & {stream?:AssetRef<"AudioStream">|null;volumeDb?:number}>("AudioStreamPlayer");
