@@ -6,6 +6,7 @@ import game from './examples/station/game.ts.txt';
 import squad from './examples/squad/App.tsx.txt';
 import media from './examples/media/App.tsx.txt';
 import physics from './examples/physics/App.tsx.txt';
+import game2d from './examples/game2d/App.tsx.txt';
 import art from './examples/art.json';
 
 type Project = EditorProject;
@@ -19,6 +20,16 @@ const baseConfig: BrowserProjectConfig = { schemaVersion: 1, entry: '/src/App.ts
 const bytes = (name: keyof typeof art) => Array.from(atob(art[name]), char => char.charCodeAt(0));
 function notes(title: string, body: string): string { return '# ' + title + '\n\n' + body + '\n'; }
 export function createExample(name = 'starter'): Project {
+  if (name === 'game2d') return { config: { ...baseConfig, profileId: 'game-2d-v1', dependencies: {}, assets: {
+    rover: { source: '/assets/rover.png', type: 'Texture2D' }, ship: { source: '/assets/ship.png', type: 'Texture2D' }, crystal: { source: '/assets/crystal.png', type: 'Texture2D' },
+    floor: { source: '/assets/floor.tres', type: 'RectangleShape2D' }, wall: { source: '/assets/wall.tres', type: 'RectangleShape2D' }, actor: { source: '/assets/actor.tres', type: 'CircleShape2D' },
+  } }, selected: '/src/App.tsx', files: {
+    '/src/App.tsx': game2d, '/assets/rover.png': bytes('rover'), '/assets/ship.png': bytes('ship'), '/assets/crystal.png': bytes('crystal'),
+    '/assets/floor.tres': '[gd_resource type="RectangleShape2D" format=3]\n[resource]\nsize = Vector2(528, 16)\n',
+    '/assets/wall.tres': '[gd_resource type="RectangleShape2D" format=3]\n[resource]\nsize = Vector2(12, 180)\n',
+    '/assets/actor.tres': '[gd_resource type="CircleShape2D" format=3]\n[resource]\nradius = 12.0\n',
+    '/README.md': notes('贴图碰撞实验场', '小车贴图跟随真实 CharacterBody2D 在封闭场地内运动。Launch 向上发射，Pause/Resume 暂停或继续运动，Reset 重建角色，Rover/Ship 切换预加载贴图而不重建碰撞体。\n\nReact 管理 HUD 和场景结构，usePhysicsProcess 独占角色的位置与速度，Sprite2D 通过原生父子关系跟随。全部贴图和形状在 World 发布前加载完成。\n\n练习：更换 PNG、调整重力、初速度或形状大小。此示例使用 game-2d-v1，将 UI、图片与 2D 物理放在同一个能力范围中。'),
+  } };
   if (name === 'counter') return { config: structuredClone(baseConfig), files: { ...counterFiles }, selected: '/src/Counter.tsx' };
   if (name === 'state') return { config: { ...baseConfig, dependencies: {} }, selected: '/src/App.tsx', files: {
     '/src/App.tsx': squad,

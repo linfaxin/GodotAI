@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { readFile, readdir, lstat, mkdir, writeFile } from 'node:fs/promises';
 import { resolve, relative, dirname, sep } from 'node:path';
 import { gunzipSync } from 'node:zlib';
+import { assertGame2dCertification } from './game-2d-evidence.mjs';
 
 export const digest = value => createHash('sha256').update(value).digest('hex');
 export function canonical(value) {
@@ -127,6 +128,7 @@ export async function inspectRelease(directory, { requireCertified = false } = {
   if (descriptor.certified) {
     if (!descriptor.sourceCertified || descriptor.certification?.status !== 'passed' || descriptor.certification.runtimeRelease !== descriptor.id) fail('E_RELEASE_CERTIFICATION', 'Missing source or exact-release browser certification');
     const evidence = descriptor.certification;
+    assertGame2dCertification(descriptor, evidence);
     const requiredKinds = ['engine-js', 'engine-wasm', 'contracts', 'bootstrap', 'compiler-js', 'compiler-wasm', 'typescript', 'typescript-module', 'type'];
     for (const kind of requiredKinds) if (!descriptor.files.some(file => file.kind === kind)) fail('E_RELEASE_CERTIFICATION', `Missing certified ${kind} asset`);
     for (const mode of ['development', 'production']) if (!descriptor.files.some(file => file.kind === 'sdk' && file.sdkMode === mode)) fail('E_RELEASE_CERTIFICATION', `Missing certified ${mode} SDK`);

@@ -10,7 +10,7 @@ pnpm test:browser:unit
 pnpm browser:prepare --engine-report /artifacts/browser-engine-report.json --out /artifacts/playground
 PLAYWRIGHT_MODULE=/path/to/playwright-core/index.mjs CHROMIUM=/path/to/chromium pnpm test:browser:real --site /artifacts/playground --out /artifacts/browser-results
 PLAYWRIGHT_MODULE=/path/to/playwright-core/index.mjs CHROMIUM=/path/to/chromium pnpm test:browser:real --authenticated-gate --site /artifacts/playground --out /artifacts/authenticated-results
-PLAYWRIGHT_MODULE=/path/to/playwright-core/index.mjs CHROMIUM=/path/to/chromium pnpm test:browser:stress --site /artifacts/playground --out /artifacts/browser-stress --iterations 100 --failures 20
+PLAYWRIGHT_MODULE=/path/to/playwright-core/index.mjs CHROMIUM=/path/to/chromium pnpm test:browser:stress --site /artifacts/playground --out /artifacts/browser-stress --fixture game2d --mode production --iterations 100 --failures 20
 ```
 
 `test:browser:unit` checks the bridge, compiler/resolver/types/runner contracts,
@@ -22,7 +22,7 @@ reuses a compiled artifact for 100 actual engine lifetimes, checks native label
 behavior after a code edit, then exercises failed compilation and startup
 cancellation. Its heap/DOM samples cover the parent page; they do not certify a
 zero-leak native allocator. The CI workflow pins and installs Playwright and its
-Chromium, so it does not depend on a developer's global browser tool directory.
+Chromium, Firefox and Linux Playwright WebKit, so it does not depend on a developer's global browser tool directory.
 
 Build from real source trees in an independent directory. Build the workspace
 first so the bridge's generated JavaScript is present. Source commits, actual
@@ -37,10 +37,12 @@ node scripts/test/build-browser-engine.mjs --godot-source /path/to/godot --build
 node scripts/test/prepare-browser-playground.mjs --engine-report /artifacts/browser-engine-report.json --out /artifacts/playground
 node scripts/test/browser-playground.mjs --site /artifacts/playground --out /artifacts/browser-results
 node scripts/test/browser-playground.mjs --authenticated-gate --site /artifacts/playground --out /artifacts/authenticated-results
-node scripts/test/browser-stress.mjs --site /artifacts/playground --out /artifacts/browser-stress --iterations 100 --failures 20
+xvfb-run -a env BROWSER=firefox BROWSER_HEADLESS=0 LIBGL_ALWAYS_SOFTWARE=1 node scripts/test/browser-playground.mjs --site /artifacts/playground --out /artifacts/firefox-results
+xvfb-run -a env BROWSER=webkit BROWSER_HEADLESS=0 LIBGL_ALWAYS_SOFTWARE=1 node scripts/test/browser-playground.mjs --site /artifacts/playground --out /artifacts/webkit-results
+node scripts/test/browser-stress.mjs --site /artifacts/playground --out /artifacts/browser-stress --fixture game2d --mode production --iterations 100 --failures 20
 GODOT_SOURCE=/independent/browser-build GODOT_WEB_TEMPLATE=/independent/browser-build/bin/godot.web.template_debug.wasm32.nothreads.zip node tests/browser-preflight/prepare.mjs /artifacts/native-site
 ENGINE_BUILD_REPORT=/artifacts/browser-engine-report.json node tests/browser-preflight/verify-source-maps.mjs /artifacts/native-site /artifacts/native-source-maps
-node scripts/release/collect-browser-evidence.mjs --site /artifacts/playground --engine-report /artifacts/browser-engine-report.json --integration /artifacts/browser-results/report.json --authenticated-report /artifacts/authenticated-results/report.json --stress /artifacts/browser-stress/report.json --source-maps /artifacts/native-source-maps/report.json --out /artifacts/acceptance.json
+node scripts/release/collect-browser-evidence.mjs --site /artifacts/playground --engine-report /artifacts/browser-engine-report.json --integration /artifacts/browser-results/report.json --authenticated-report /artifacts/authenticated-results/report.json --stress /artifacts/browser-stress/report.json --source-maps /artifacts/native-source-maps/report.json --firefox-report /artifacts/firefox-results/report.json --webkit-report /artifacts/webkit-results/report.json --out /artifacts/acceptance.json
 node scripts/release/build-web-release.mjs --engine-report /artifacts/browser-engine-report.json --assets /artifacts/playground/release-assets.json --out scripts/jsb.web-engine/dist --validation-report /artifacts/acceptance.json --version 0.1.0
 node scripts/release/pin-web-release.mjs --site /artifacts/playground --release scripts/jsb.web-engine/dist
 node scripts/release/verify-web-release.mjs --dir scripts/jsb.web-engine/dist --require-certified --pack-out /artifacts/npm --report /artifacts/pack-report.json
@@ -138,3 +140,49 @@ audio or physics certification.
 ```sh
 node scripts/release/verify-web-release.mjs --dir scripts/jsb.web-engine/dist --require-certified --cdn-base https://cdn.jsdelivr.net/npm/@godot-js/web-engine@0.1.0/dist/
 ```
+
+A candidate advertising `game-2d-v1` has an additional mandatory certification
+policy. Its combination fixture must pass in development and production SDK
+modes in Chromium, Firefox, and Linux Playwright WebKit. Reports carry explicit
+`coverage` tuples (`profileId`, `sdkMode`, `browserFamily`, `browserVersion`,
+`status`, and referenced checks); separate lists of modes and profiles do not
+prove their cross product. The native-composition check also identifies its
+profile, SDK mode, browser family and exact browser version. Aggregation stamps
+both checks and coverage with `sourceReport`; collection, sealing and inspection
+require references to match all of those identities. Firefox/WebKit tuples
+cannot reuse Chromium checks, even if the tuple labels claim another browser.
+Each primary browser report must also retain the production core counter,
+media controls and physics collision regressions, with the same identity fields.
+
+The authenticated-origin CI run remains a full integration run; do not add
+`--smoke-only`. When authenticated evidence is supplied, combined-profile
+certification also requires its two SDK modes, all three legacy regressions,
+the cookie checks, IndexedDB recovery and shared-project manual execution.
+Reports lacking the per-check identities must be regenerated by the harness;
+do not infer or retrofit successful browser checks from coverage labels.
+
+The Chromium lifecycle invocation uses `--fixture game2d --mode production`.
+It first keeps the existing counter code-edit regression, then compiles the
+selected fixture and reuses that artifact for 100 normal and 20 failure/cancel
+cycles. Every normal combination run waits for the example's `GAME2D_READY`
+collision/texture-ready marker before stopping. Each cycle records the fixture,
+profile, SDK mode, generation, build key and run/exit identities. The default
+`--fixture counter` remains useful for regression work but cannot certify the
+combined profile.
+
+Pass the extra integration reports through `--firefox-report` and
+`--webkit-report` to the evidence collector. They must bind the same immutable
+release and static app/preview/worker bytes. Their functional coverage is recorded
+separately; the Chromium source-map and lifecycle evidence does not become
+Firefox/WebKit lifecycle certification. Linux Playwright WebKit is not macOS or
+iOS Safari. Missing browser/mode tuples, counter-only pressure or mismatched
+artifacts reject combined-profile certification at collection, sealing and
+inspection. This policy does not turn diagnostic logs or heap samples into a
+native memory leak certificate.
+
+Linux Firefox and Playwright WebKit integration runs use headed browsers under
+Xvfb with Mesa software rendering (`BROWSER_HEADLESS=0`,
+`LIBGL_ALWAYS_SOFTWARE=1`). CI explicitly installs `xvfb`, `xauth`,
+`libgl1-mesa-dri` and `libegl-mesa0` in addition to Playwright's browser
+dependencies. Do not substitute a headless run and assume equivalent WebGL2
+availability. Chromium uses the existing ANGLE/SwiftShader launch configuration.

@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { transform } from 'esbuild';
+import { gzipSync } from 'node:zlib';
+import { fileURLToPath } from 'node:url';
+import { build, transform } from 'esbuild';
 
 const source = await readFile(new URL('../examples/station/game.ts.txt', import.meta.url), 'utf8');
 const { code } = await transform(source, { loader: 'ts', format: 'esm' });
@@ -31,4 +33,27 @@ test('outpost completion clamps progress and prevents further mining or spending
   const complete = update({ ...INITIAL_STATE, ore: 50, mined: MISSION_TARGET - 1, drill: 10 }, { type: 'mine' });
   assert.equal(complete.mined, MISSION_TARGET); assert.equal(complete.ore, 51);
   for (const type of ['mine', 'tick', 'drill', 'drone']) assert.deepEqual(update(complete, { type }), complete);
+});
+
+const bundle = await build({ entryPoints: [fileURLToPath(new URL('../examples.ts', import.meta.url))], bundle: true, write: false, platform: 'node', format: 'esm' });
+const { createExample } = await import('data:text/javascript;base64,' + Buffer.from(bundle.outputFiles[0].contents).toString('base64'));
+
+test('the unified example has a closed resource set and fits the existing URL share limits', () => {
+  const project = createExample('game2d');
+  assert.equal(project.config.profileId, 'game-2d-v1');
+  for (const asset of Object.values(project.config.assets)) assert(Object.hasOwn(project.files, asset.source));
+  assert.deepEqual(Object.keys(project.config.assets).sort(), ['actor', 'crystal', 'floor', 'rover', 'ship', 'wall']);
+  const serialized = Buffer.from(JSON.stringify({ schemaVersion: 1, project }));
+  assert(serialized.byteLength <= 1024 * 1024);
+  assert(gzipSync(serialized).toString('base64url').length <= 24000);
+});
+
+test('adding the unified example leaves existing example profiles and default unchanged', () => {
+  assert.equal(createExample().config.profileId, 'ui-media-v1');
+  assert.equal(createExample('media').config.profileId, 'ui-media-v1');
+  assert.equal(createExample('physics').config.profileId, 'behavior-physics-v1');
+  assert.equal(createExample('counter').config.profileId, 'core-ui-v1');
+  assert.deepEqual(createExample(), createExample('starter'));
+  const first = createExample('game2d');first.files['/assets/rover.png'][0] = 0;
+  assert.equal(createExample('game2d').files['/assets/rover.png'][0], 137);
 });

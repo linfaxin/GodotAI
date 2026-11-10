@@ -169,10 +169,13 @@ the sealed manifest. Profiles bind an exact schema hash and resource whitelist.
 | `core-ui-v1` (default) | The eight core hosts listed above | `Resource`, `CanvasItemMaterial` |
 | `ui-media-v1` | `PanelContainer`, `MarginContainer`, `ScrollContainer`, `TextureRect`, `ProgressBar`, `Sprite2D` | Core plus `Texture2D`, `ImageTexture`, `CompressedTexture2D` |
 | `behavior-physics-v1` | `CharacterBody2D`, `StaticBody2D`, `CollisionShape2D` | Core plus `CircleShape2D`, `RectangleShape2D`, `CapsuleShape2D` |
+| `game-2d-v1` | All six media and three physics hosts, 17 hosts including core | The union of core, media and physics resources |
 
 The two extension profiles each include core. Selecting `ui-media-v1` does not
 enable physics hosts, and selecting `behavior-physics-v1` does not enable media
-hosts. `G.TextureRect` and named `TextureRect` imports refer to the same host and
+hosts. Select `game-2d-v1` to combine both extensions in one root. Its protocol
+`version` remains 1; capability revisions use a new profile ID. Existing profile
+descriptors and hashes remain unchanged. `G.TextureRect` and named `TextureRect` imports refer to the same host and
 have the same profile checks. The renderer validates the active profile even
 when author code is JavaScript or casts away TypeScript types.
 
@@ -270,7 +273,7 @@ active writing frame registration; additional read-only registrations are allowe
 `useNativeReady` cleans up a retired target before native free, including when
 the component containing the Hook remains mounted.
 
-`behavior-physics-v1` explicitly enables CharacterBody2D, StaticBody2D and
+`behavior-physics-v1` and `game-2d-v1` explicitly enable CharacterBody2D, StaticBody2D and
 CollisionShape2D. `usePhysicsProcess` permits checked `setVelocity` and
 `moveAndSlide` commands. This does not enable arbitrary Godot methods.
 Reserve `engineOwned={["position", "velocity"]}` on a moving body and declare
@@ -286,6 +289,21 @@ through the manifest resource table and suspends until ready; it returns no raw
 Resource. Compiled `template-local-v1` plans can request per-instance native
 local-to-scene copies. Source load, detached-root cloning, setup, publication and
 release are separate gated operations.
+
+In a browser `game-2d-v1` project, put `CollisionShape2D` and `Sprite2D` under a
+`CharacterBody2D`; the native scene tree makes the sprite inherit the body's
+transform. Preload the textures and shapes with `useAsset` before mounting the
+world, and switch textures without changing the body's key. PNG/JPEG config and
+AssetRefs both use `Texture2D`, even though the browser emits an ImageTexture.
+Suspense hiding changes visibility; it does not disable collisions. Skipping a
+motion callback pauses authored movement, not the entire Godot SceneTree.
+Shared assets stay cached until root shutdown; resetting a keyed actor releases
+its nodes and callbacks but reuses those assets.
+
+The Node builder recognizes the same host profile, but its existing resource
+pipeline still accepts only the documented `.tres` subset. Browser PNG/JPEG
+compilation is not a new Node image-import capability. `CompressedTexture2D`
+remains an accepted SDK resource type, not a browser source-file format.
 
 `defineNativeInterface` declares a static certified NativeScript/RPC schema;
 `nativeInterface={token}` selects construction before the Node enters the tree.

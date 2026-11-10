@@ -4,7 +4,7 @@ import { CORE_SCHEMA_DESCRIPTOR, CORE_PROFILE_HASH, type HostSchema } from "./co
 import { BEHAVIOR_PHYSICS_SCHEMA_DESCRIPTOR, BEHAVIOR_PHYSICS_PROFILE_HASH } from "./physics";
 import { SHOWCASE_SCHEMA_DESCRIPTOR, SHOWCASE_PROFILE_HASH } from "./showcase";
 import { UI_MEDIA_SCHEMA_DESCRIPTOR, UI_MEDIA_PROFILE_HASH } from './media';
-
+import { GAME_2D_SCHEMA_DESCRIPTOR, GAME_2D_PROFILE_HASH } from './game-2d';
 export interface ProfileSchema {
   readonly profile: CapabilityProfileV1;
   readonly hash: string;
@@ -16,7 +16,7 @@ const profiles: Readonly<Record<string, ProfileSchema>> = Object.freeze({
   "behavior-physics-v1": Object.freeze({ ...BEHAVIOR_PHYSICS_SCHEMA_DESCRIPTOR, hash: BEHAVIOR_PHYSICS_PROFILE_HASH }),
   "showcase-v1": Object.freeze({ ...SHOWCASE_SCHEMA_DESCRIPTOR, hash: SHOWCASE_PROFILE_HASH }),
   'ui-media-v1': Object.freeze({ ...UI_MEDIA_SCHEMA_DESCRIPTOR, hash: UI_MEDIA_PROFILE_HASH }),
-
+  'game-2d-v1': Object.freeze({ ...GAME_2D_SCHEMA_DESCRIPTOR, hash: GAME_2D_PROFILE_HASH }),
 });
 /** Selection is explicit: a host certified in an extension remains unavailable in the default profile. */
 export function getProfileSchema(profileId = "core-ui-v1"): ProfileSchema {

@@ -14,6 +14,8 @@
 
 ## 可用资产
 
+`game-2d-v1` 将现有 core、media 与 physics 宿主和资源白名单组合到同一 root，不新增资产语法或预算。PNG/JPEG 的配置类型和 `useAsset(asset(id, type))` 的 type 都必须使用 `Texture2D`；生成的原生资源为 ImageTexture。`CompressedTexture2D` 的 SDK 类型兼容不代表浏览器可导入任意压缩纹理源文件。
+
 `compileAssets(snapshot, { generation, signal?, decodeImage?, budgets? })` 返回 `files`、`resources`、`sourceOrigins` 和 `sourceHashes`。
 
 - PNG/JPEG 在浏览器中通过 `createImageBitmap` 和 `OffscreenCanvas` 解码成 RGBA8，生成封闭的 `ImageTexture` `.tres`。原始图片不交给 Godot import pipeline。
