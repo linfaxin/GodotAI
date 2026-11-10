@@ -4,11 +4,23 @@
 #include "jsb_callable.h"
 #include "jsb_object_bindings.h"
 #include "jsb_react_bridge.h"
+#include "jsb_engine_api.h"
+#include "core/io/json.h"
 
 namespace jsb
 {
     namespace
     {
+        void _get_engine_api(const v8::FunctionCallbackInfo<v8::Value>& info)
+        {
+            const auto context = info.GetIsolate()->GetCurrentContext();
+            const String json = JSON::stringify(describe_engine_api(), String(), true, true);
+            const CharString utf8 = json.utf8();
+            v8::Local<v8::Value> value;
+            if (!impl::Helper::parse_json(info.GetIsolate(), context, reinterpret_cast<const uint8_t *>(utf8.get_data()), utf8.length()).ToLocal(&value)) return;
+            info.GetReturnValue().Set(value);
+        }
+
         jsb_deprecated(
             "free function '_to_array_buffer' is deprecated and will be removed in a future version, "
             "use 'PackedByteArray.to_array_buffer()' instead")
@@ -595,6 +607,7 @@ namespace jsb
 
                 jsb_obj->Set(context, impl::Helper::new_string_ascii(isolate, "internal"), internal_obj).Check();
                 p_env->get_react_bridge().install(context, internal_obj);
+                internal_obj->Set(context, impl::Helper::new_string_ascii(isolate, "get_engine_api"), JSB_NEW_FUNCTION(context, _get_engine_api, {})).Check();
 
                 internal_obj->Set(context, impl::Helper::new_string_ascii(isolate, "find_module"), JSB_NEW_FUNCTION(context, _find_module, {})).Check();
                 internal_obj->Set(context, impl::Helper::new_string_ascii(isolate, "add_module"), JSB_NEW_FUNCTION(context, _add_module, {})).Check();

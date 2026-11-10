@@ -17,3 +17,17 @@ test('foreign native ownership faults invoke forced close only after the cleanup
 test('rejecting a second application closes its preopened empty native scope',()=>{
  const Module=require('node:module');const SDK=require('../dist');const {startApplication}=require('../dist/godot');const firstPort=new MockNativePort();const first=SDK.createRoot(firstPort,firstPort.createContainer(),{generation:'single'});const b=backend();const originalLoad=Module._load;first.render(React.createElement(Label,{text:'active'}));try{Module._load=function(id,...rest){if(id==='godot-jsb')return {internal:{react:b.bridge}};return originalLoad.call(this,id,...rest);};assert.throws(()=>startApplication({}, {entryId:'second',generation:'single',runtimeAbi:'godot-react/1',nativeBridgeAbi:'godot-react-native/1'},()=>React.createElement(Label,{text:'never'}),{}, {nativeOpenedRoot:{cap:b.cap,key:b.container}}),/E_MULTIPLE_ROOTS_UNSUPPORTED/);assert.equal(b.closed(),true);assert.equal(b.opened(),0);assert.equal(b.calls.some(x=>x.op==='quiesce'),true);assert.equal(b.mock.calls.some(x=>x.op==='create'),false);assert.equal(first.state,'running');}finally{Module._load=originalLoad;first.shutdown();}
 });
+
+test('input snapshots copy keyboard, pointer, touch and gamepad values without native objects',()=>{
+ const {snapshotInputEvent}=require('../dist/godot');
+ const position={x:4,y:8,privateNative:true};
+ const result=snapshotInputEvent({get_class:()=> 'InputEventScreenTouch',index:2,pressed:true,position,privateNative:{}});
+ assert.deepEqual(result,{type:'InputEventScreenTouch',index:2,pressed:true,position:{x:4,y:8}});
+ position.x=99;assert.equal(result.position.x,4);assert.equal(Object.isFrozen(result.position),true);
+ assert.equal(snapshotInputEvent({getClass:()=> 'InputEventJoypadMotion',axis:1,axis_value:.5}).axis_value,.5);
+});
+
+
+test('nested native signal DTOs decode vectors recursively and preserve managed node identities',()=>{
+ const b=backend(),native=createGodotPort({}, {rootId:'nested',rootInstance:'nested',bridge:b.bridge});let received;try{native.port.beginStage('initial');native.port.connect(b.container,'waypoint_reached',value=>received=value);native.port.endStage();b.mock.emit(b.container,'waypoint_reached',{position:{kind:'Vector3',x:1,y:2,z:3},linkExitPosition:{kind:'Vector2',x:4,y:5},owner:{kind:'NodeId',key:{slot:3,revision:1},type:'NavigationLink3D'}});assert.deepEqual(received.position,{x:1,y:2,z:3});assert.deepEqual(received.linkExitPosition,{x:4,y:5});assert.equal(received.owner.kind,'NodeId');assert.ok(Object.isFrozen(received.position));}finally{native.port.quiesce();native.port.close();}
+});

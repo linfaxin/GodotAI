@@ -1,0 +1,340 @@
+{
+  "sourceSha256": "46e8983be587672d11d073dc65eee0bf89cb6b43acf612de1eb16f17abb1849e",
+  "edits": [
+    {
+      "offset": 31977,
+      "delete": 0,
+      "insert": ".catch(function (error) {\n      // Only a canceled/retired context makes this optional continuation obsolete.\n      if (GodotAudio.ctx !== ctx || ctx.state === 'closed') return;\n      throw error;\n    })"
+    },
+    {
+      "offset": 51707,
+      "delete": 0,
+      "insert": "const lifecycleContext = GodotAudio.ctx; /* godotjs-audio-lifecycle-v1 */\n      GodotAudioWorklet.context = lifecycleContext;\n      GodotAudioWorklet.closing = false;\n      "
+    },
+    {
+      "offset": 51735,
+      "delete": 1,
+      "insert": "lifecycleC"
+    },
+    {
+      "offset": 51737,
+      "delete": 2,
+      "insert": "n"
+    },
+    {
+      "offset": 51740,
+      "delete": 7,
+      "insert": "ex"
+    },
+    {
+      "offset": 51748,
+      "delete": 1,
+      "insert": ""
+    },
+    {
+      "offset": 51762,
+      "delete": 5,
+      "insert": ""
+    },
+    {
+      "offset": 51783,
+      "delete": 5,
+      "insert": ""
+    },
+    {
+      "offset": 51808,
+      "delete": 5,
+      "insert": "        if (GodotAudioWorklet.closing || GodotAudio.ctx !== lifecycleContext || lifecycleContext.state === 'closed') return;\n        "
+    },
+    {
+      "offset": 51862,
+      "delete": 8,
+      "insert": "lifecycleC"
+    },
+    {
+      "offset": 51871,
+      "delete": 2,
+      "insert": "n"
+    },
+    {
+      "offset": 51874,
+      "delete": 7,
+      "insert": "ex"
+    },
+    {
+      "offset": 51882,
+      "delete": 1,
+      "insert": ""
+    },
+    {
+      "offset": 52195,
+      "delete": 0,
+      "insert": ";\nif (!node || !GodotAudio.ctx || GodotAudioWorklet.closing) return"
+    },
+    {
+      "offset": 54212,
+      "delete": 0,
+      "insert": "if (!node || !GodotAudio.ctx || GodotAudioWorklet.closing) return;\n"
+    },
+    {
+      "offset": 55145,
+      "delete": 9,
+      "insert": ""
+    },
+    {
+      "offset": 55155,
+      "delete": 3,
+      "insert": ""
+    },
+    {
+      "offset": 55159,
+      "delete": 16,
+      "insert": ""
+    },
+    {
+      "offset": 55176,
+      "delete": 9,
+      "insert": ""
+    },
+    {
+      "offset": 55186,
+      "delete": 18,
+      "insert": ""
+    },
+    {
+      "offset": 55222,
+      "delete": 2,
+      "insert": "cl"
+    },
+    {
+      "offset": 55225,
+      "delete": 1,
+      "insert": "s"
+    },
+    {
+      "offset": 55227,
+      "delete": 2,
+      "insert": "ng"
+    },
+    {
+      "offset": 55231,
+      "delete": 2,
+      "insert": ""
+    },
+    {
+      "offset": 55234,
+      "delete": 1,
+      "insert": "tr"
+    },
+    {
+      "offset": 55236,
+      "delete": 12,
+      "insert": ""
+    },
+    {
+      "offset": 55249,
+      "delete": 4,
+      "insert": ""
+    },
+    {
+      "offset": 55255,
+      "delete": 10,
+      "insert": "    "
+    },
+    {
+      "offset": 55272,
+      "delete": 0,
+      "insert": "ending"
+    },
+    {
+      "offset": 55302,
+      "delete": 11,
+      "insert": "    "
+    },
+    {
+      "offset": 55322,
+      "delete": 0,
+      "insert": "finish"
+    },
+    {
+      "offset": 55327,
+      "delete": 5,
+      "insert": "      const node = "
+    },
+    {
+      "offset": 55357,
+      "delete": 0,
+      "insert": ";\n      try {\n        if (node) { node"
+    },
+    {
+      "offset": 55376,
+      "delete": 8,
+      "insert": " "
+    },
+    {
+      "offset": 55387,
+      "delete": 1,
+      "insert": ""
+    },
+    {
+      "offset": 55397,
+      "delete": 8,
+      "insert": " "
+    },
+    {
+      "offset": 55409,
+      "delete": 1,
+      "insert": ""
+    },
+    {
+      "offset": 55416,
+      "delete": 7,
+      "insert": " "
+    },
+    {
+      "offset": 55426,
+      "delete": 7,
+      "insert": " n"
+    },
+    {
+      "offset": 55435,
+      "delete": 12,
+      "insert": ""
+    },
+    {
+      "offset": 55448,
+      "delete": 9,
+      "insert": ""
+    },
+    {
+      "offset": 55471,
+      "delete": 0,
+      "insert": " }"
+    },
+    {
+      "offset": 55472,
+      "delete": 6,
+      "insert": "      } finally {\n        if (n"
+    },
+    {
+      "offset": 55480,
+      "delete": 0,
+      "insert": "e) { n"
+    },
+    {
+      "offset": 55481,
+      "delete": 3,
+      "insert": ""
+    },
+    {
+      "offset": 55485,
+      "delete": 7,
+      "insert": ""
+    },
+    {
+      "offset": 55493,
+      "delete": 9,
+      "insert": ""
+    },
+    {
+      "offset": 55525,
+      "delete": 0,
+      "insert": " node.port.close(); }"
+    },
+    {
+      "offset": 55526,
+      "delete": 5,
+      "insert": "        "
+    },
+    {
+      "offset": 55565,
+      "delete": 5,
+      "insert": "        "
+    },
+    {
+      "offset": 55604,
+      "delete": 5,
+      "insert": "        GodotAudioWorklet.ring_buffer = null;\n        GodotAudioWorklet.context = null;\n      }\n    }\n    if (pending === null) { finish(); return Promise."
+    },
+    {
+      "offset": 55619,
+      "delete": 0,
+      "insert": " }"
+    },
+    {
+      "offset": 55620,
+      "delete": 6,
+      "insert": "    return pending"
+    },
+    {
+      "offset": 55627,
+      "delete": 2,
+      "insert": ""
+    },
+    {
+      "offset": 55630,
+      "delete": 1,
+      "insert": ""
+    },
+    {
+      "offset": 55632,
+      "delete": 0,
+      "insert": "en"
+    },
+    {
+      "offset": 55633,
+      "delete": 0,
+      "insert": "finish, "
+    },
+    {
+      "offset": 55646,
+      "delete": 0,
+      "insert": "or"
+    },
+    {
+      "offset": 55650,
+      "delete": 7,
+      "insert": ""
+    },
+    {
+      "offset": 55658,
+      "delete": 0,
+      "insert": "     const context = GodotAudioWorklet.context;\n      if (!(error && error.name === '"
+    },
+    {
+      "offset": 55663,
+      "delete": 0,
+      "insert": "Error' && context && context.state === 'clos"
+    },
+    {
+      "offset": 55665,
+      "delete": 1,
+      "insert": "')) {"
+    },
+    {
+      "offset": 55667,
+      "delete": 5,
+      "insert": "        "
+    },
+    {
+      "offset": 55691,
+      "delete": 0,
+      "insert": "'Error loading AudioWorklet during shutdown', "
+    },
+    {
+      "offset": 55693,
+      "delete": 0,
+      "insert": "ro"
+    },
+    {
+      "offset": 55697,
+      "delete": 4,
+      "insert": "      }\n      finish();\n    "
+    },
+    {
+      "offset": 55705,
+      "delete": 9,
+      "insert": "  "
+    }
+  ]
+}

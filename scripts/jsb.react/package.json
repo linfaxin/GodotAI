@@ -6,6 +6,7 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
+    "./engine-modules": {"types":"./dist/contracts/engine-modules.d.ts","default":"./engine-modules.cjs"},
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
@@ -22,6 +23,10 @@
       "types": "./dist/godot.d.ts",
       "default": "./dist/godot.js"
     },
+    "./engine": {
+      "types": "./dist/engine.d.ts",
+      "default": "./dist/engine.js"
+    },
     "./scheduler": {
       "types": "./dist/scheduler.d.ts",
       "default": "./dist/scheduler.js"
@@ -37,9 +42,14 @@
     "./ui": {
       "types": "./dist/ui.d.ts",
       "default": "./dist/ui.js"
+    },
+    "./legacy": {
+      "types": "./dist/legacy.d.ts",
+      "default": "./dist/legacy.js"
     }
   },
   "files": [
+    "engine-modules.cjs",
     "dist",
     "README.md"
   ],

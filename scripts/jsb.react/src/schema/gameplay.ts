@@ -1,0 +1,44 @@
+import type {HostSchema,PropertySchema,CommandSchema,SignalSchema} from './core';
+import type {CodecName} from './codecs';
+const p=(name:string,native:string,codec:CodecName,value:any,extra:Partial<PropertySchema>={}):PropertySchema=>({publicName:name,nativeName:native,accessName:native,codec,defaultValue:value,aliases:[name],...extra});
+const n=(name:string,native:string,value:number,min=-1e6,max=1e6)=>p(name,native,'number',value,{minimum:min,maximum:max});
+const i=(name:string,native:string,value:number,min=0,max=4096)=>p(name,native,'integer',value,{minimum:min,maximum:max});
+const b=(name:string,native:string,value:boolean)=>p(name,native,'boolean',value);
+const c=(name:string,native:string,args:CodecName[]=[],effects:string[]=[],phase:CommandSchema['phase']='process',result?:CodecName):CommandSchema=>({publicName:name,nativeName:native,arguments:args,effects,phase,...(result?{result}:{})});
+const sig=(name:string,native:string):SignalSchema=>({publicName:name,nativeName:native,parameters:[],echo:'deliver'});
+const tex=(name='texture')=>p(name,name,'assetRef',null,{resourceTypes:['Texture2D','ImageTexture','CompressedTexture2D','ViewportTexture','AtlasTexture']});
+function host(type:string,base:HostSchema,props:Record<string,PropertySchema>={},commands:Record<string,CommandSchema>={},signals:Record<string,SignalSchema>={}):HostSchema{return {...base,type,nativeType:type,properties:{...base.properties,...props},commands:{...base.commands,...commands},signals:{...base.signals,...signals}};}
+export function extendGameplay(base:Readonly<Record<string,HostSchema>>):Readonly<Record<string,HostSchema>>{
+ const out:Record<string,HostSchema>={...base};
+ for(const [type,s]of Object.entries(base)){
+  const dimension=s.properties.position?.codec==='vector3'?3:s.properties.position?.codec==='vector2'&&s.properties.rotation?2:0;
+  if(dimension){const vector=dimension===2?'vector2':'vector3',transform=dimension===2?'transform2d':'transform3d',phase=/^(?:CharacterBody|RigidBody|StaticBody)/.test(type)?'physics':'process';out[type]=host(type,s,{}, {
+   getGlobalPosition:c('getGlobalPosition','__react_gameplay_global_position',[],[],phase,vector),getGlobalTransform:c('getGlobalTransform','__react_gameplay_global_transform',[],[],phase,transform),getTransform:c('getTransform','__react_gameplay_transform',[],[],phase,transform),
+   toGlobal:c('toGlobal','__react_gameplay_to_global',[vector],[],phase,vector),toLocal:c('toLocal','__react_gameplay_to_local',[vector],[],phase,vector),lookAt:c('lookAt','__react_gameplay_look_at',dimension===2?[vector]:[vector,'vector3'],[transform],phase),
+  });}
+  if(s.properties.customMinimumSize)out[type]=host(type,out[type]!,{focusMode:i('focusMode','focus_mode',0,0,3)},{releaseFocus:c('releaseFocus','release_focus',[],['focus'],'input'),hasFocus:c('hasFocus','has_focus',[],[],'process','boolean')},{onMouseEntered:sig('onMouseEntered','mouse_entered'),onMouseExited:sig('onMouseExited','mouse_exited')});
+  if(s.properties.texture)out[type]=host(type,out[type]!,{texture:tex()});
+ }
+ for(const type of ['Button','CheckBox','OptionButton','LineEdit','HSlider','SpinBox'])out[type]=host(type,out[type]!,{focusMode:i('focusMode','focus_mode',2,0,3)});
+ out.Sprite2D=host('Sprite2D',out.Sprite2D!,{hframes:i('hframes','hframes',1,1,16384),vframes:i('vframes','vframes',1,1,16384),frame:i('frame','frame',0,0,268435455),regionEnabled:b('regionEnabled','region_enabled',false),regionRect:p('regionRect','region_rect','rect2',{position:{x:0,y:0},size:{x:0,y:0}}),regionFilterClipEnabled:b('regionFilterClipEnabled','region_filter_clip_enabled',false)});
+ // Native resets the frame when changing the atlas grid.
+ out.Sprite2D={...out.Sprite2D,properties:{...out.Sprite2D.properties,hframes:{...out.Sprite2D.properties.hframes!,writeOrder:10},vframes:{...out.Sprite2D.properties.vframes!,writeOrder:10},frame:{...out.Sprite2D.properties.frame!,writeOrder:20}}};
+ out.Line2D=host('Line2D',out.Node2D!,{points:p('points','points','vector2Array',[]),width:n('width','width',10,0,65535),defaultColor:p('defaultColor','default_color','color',{r:1,g:1,b:1,a:1}),closed:b('closed','closed',false),antialiased:b('antialiased','antialiased',false),jointMode:i('jointMode','joint_mode',0,0,2),beginCapMode:i('beginCapMode','begin_cap_mode',0,0,2),endCapMode:i('endCapMode','end_cap_mode',0,0,2),texture:tex(),textureMode:i('textureMode','texture_mode',0,0,2)});
+ out.Polygon2D=host('Polygon2D',out.Node2D!,{polygon:p('polygon','polygon','vector2Array',[]),uv:p('uv','uv','vector2Array',[]),color:p('color','color','color',{r:1,g:1,b:1,a:1}),texture:tex(),antialiased:b('antialiased','antialiased',false)});
+ out.CollisionPolygon2D=host('CollisionPolygon2D',out.Node2D!,{polygon:p('polygon','polygon','vector2Array',[]),buildMode:i('buildMode','build_mode',0,0,1),disabled:b('disabled','disabled',false),oneWayCollision:b('oneWayCollision','one_way_collision',false),oneWayCollisionMargin:n('oneWayCollisionMargin','one_way_collision_margin',1,0,65535)});
+ out.NinePatchRect=host('NinePatchRect',out.Control!,{texture:tex(),regionRect:p('regionRect','region_rect','rect2',{position:{x:0,y:0},size:{x:0,y:0}}),patchMarginLeft:i('patchMarginLeft','patch_margin_left',0),patchMarginTop:i('patchMarginTop','patch_margin_top',0),patchMarginRight:i('patchMarginRight','patch_margin_right',0),patchMarginBottom:i('patchMarginBottom','patch_margin_bottom',0),drawCenter:b('drawCenter','draw_center',true),axisStretchHorizontal:i('axisStretchHorizontal','axis_stretch_horizontal',0,0,2),axisStretchVertical:i('axisStretchVertical','axis_stretch_vertical',0,0,2)});
+ out.ScrollContainer=host('ScrollContainer',out.ScrollContainer!,{}, {getScroll:c('getScroll','__react_gameplay_scroll_get',[],[],'process','vector2i'),setScroll:c('setScroll','__react_gameplay_scroll_set',['vector2i'],['scroll'])});
+ out.ProgressBar=host('ProgressBar',out.ProgressBar!,{minValue:p('minValue','min_value','number',0,{minimum:-1e9,maximum:1e9,writeOrder:10}),maxValue:p('maxValue','max_value','number',100,{minimum:-1e9,maximum:1e9,writeOrder:20}),step:p('step','step','number',0,{minimum:0,maximum:1e6,writeOrder:30}),value:p('value','value','number',0,{aliases:['range.value'],writeOrder:40})});
+ for(const d of [2,3]as const){const vector=d===2?'vector2':'vector3',transform=d===2?'transform2d':'transform3d';
+  const body='CharacterBody'+d+'D';out[body]=host(body,out[body]!,{}, {getSlideCollisionCount:c('getSlideCollisionCount','__react_gameplay_slide_count',[],[],'physics','integer'),getSlideCollision:c('getSlideCollision','__react_gameplay_slide_collision',['integer'],[],'physics'),moveAndCollide:c('moveAndCollide','__react_gameplay_move_collide',[vector,'boolean','number'],[transform],'physics'),testMove:c('testMove','__react_gameplay_test_move',[transform,vector,'number'],[],'physics')});
+  const area='Area'+d+'D';out[area]=host(area,out[area]!,{}, {getOverlappingBodies:c('getOverlappingBodies','get_overlapping_bodies',[],[],'physics'),getOverlappingAreas:c('getOverlappingAreas','get_overlapping_areas',[],[],'physics')});
+  const rigid='RigidBody'+d+'D';out[rigid]=host(rigid,out[rigid]!,{continuousCd:d===2?i('continuousCd','continuous_cd',0,0,2):b('continuousCd','continuous_cd',false)});
+  const shape='CollisionShape'+d+'D';out[shape]=host(shape,out[shape]!,{shape:{...out[shape]!.properties.shape!,resourceTypes:[...out[shape]!.properties.shape!.resourceTypes!,'ConvexPolygonShape'+d+'D','ConcavePolygonShape'+d+'D','SeparationRayShape'+d+'D','WorldBoundaryShape'+d+'D']}});
+ }
+ out.Camera3D=host('Camera3D',out.Camera3D!,{}, {unprojectPosition:c('unprojectPosition','unproject_position',['vector3'],[],'process','vector2'),isPositionBehind:c('isPositionBehind','is_position_behind',['vector3'],[],'process','boolean'),isPositionInFrustum:c('isPositionInFrustum','is_position_in_frustum',['vector3'],[],'process','boolean')});
+ out.MeshInstance3D=host('MeshInstance3D',out.MeshInstance3D!,{surfaceMaterials:p('surfaceMaterials','__react_surface_materials','materialArray',[])},{getSurfaceCount:c('getSurfaceCount','__react_gameplay_surface_count',[],[],'process','integer'),getSurfaceMaterial:c('getSurfaceMaterial','__react_gameplay_surface_material',['integer'],[],'process','assetRef')});
+ out.Node=host('Node',out.Node!,{}, {setBusEffectParameter:c('setBusEffectParameter','__react_audio_effect_set',['integer','string','number'],['audioBus']),getBusEffectParameter:c('getBusEffectParameter','__react_audio_effect_get',['integer','string'],[],'process','number')});
+ // Standard containers own input forwarding and target sizing; textured consumers remain displays.
+ out.SubViewport=host('SubViewport',out.SubViewport!,{guiDisableInput:b('guiDisableInput','gui_disable_input',true)});
+ const freeze=(v:any):any=>{if(v&&typeof v==='object'&&!Object.isFrozen(v)){Object.values(v).forEach(freeze);Object.freeze(v);}return v;};return freeze(out);
+}

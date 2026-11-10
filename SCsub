@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 import io
+import json
 import os
 import re
 import shutil
@@ -399,6 +400,7 @@ def generate_jsb_gen_header():
         output.write(f"#define JSB_MODULE_NAME {module_name}\n")
         output.write(f"#define jsb_initialize_module initialize_{module_name}_module\n")
         output.write(f"#define jsb_uninitialize_module uninitialize_{module_name}_module\n")
+        output.write('#define JSB_ENGINE_MODULES_JSON R"jsb_modules(' + json.dumps(sorted(env.module_list)) + ')jsb_modules"\n')
         output.write("\n")
         first_define = True
         for t in jsb_defines:

@@ -295,7 +295,9 @@ declare module "godot" {
         (typeof __PathMappableDummyKeys)["AnimationLibrary" | "AnimationMixer"]
     >;
 
-    type GArrayElement<T extends GAny | GAny[], I extends int64 = int64> = T extends any[] ? T[I] : T;
+    type GArrayElement<T extends GAny | GAny[], I extends int64 = int64> = T extends any[]
+        ? T[I extends number ? I : `${I}` extends `${infer N extends number}` ? N : number]
+        : T;
 
     /**
      * GArray elements are exposed with a subset of JavaScript's standard Array API. Array indexes are exposed as

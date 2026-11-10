@@ -9,14 +9,19 @@ if [ "$(realpath "$GODOT_SOURCE/modules/GodotJS/bridge")" != "$task_repo/bridge"
   echo "GODOT_SOURCE/modules/GodotJS must reference this checkout" >&2
   exit 1
 fi
+node "$task_repo/scripts/release/patch-web-engine.mjs" "$GODOT_SOURCE"
 cd "$task_repo"
 pnpm build:engine-js
 cd "$GODOT_SOURCE"
 scons -j"${JOBS:-4}" platform=web target=template_debug \
   threads=no dlink_enabled=no use_closure_compiler=no optimize=speed debug_symbols=no \
-  skip_js_runtime=yes modules_enabled_by_default=no module_GodotJS_enabled=yes \
-  module_regex_enabled=yes module_gdscript_enabled=yes module_freetype_enabled=yes \
-  module_svg_enabled=yes module_text_server_fb_enabled=yes module_gltf_enabled=yes \
-  module_ogg_enabled=yes module_vorbis_enabled=yes \
-  module_godot_physics_2d_enabled=yes module_godot_physics_3d_enabled=yes
-echo "Template: $GODOT_SOURCE/bin/godot.web.template_debug.wasm32.nothreads.zip"
+  skip_js_runtime=yes use_quickjs_ng=no modules_enabled_by_default=yes \
+  module_GodotJS_enabled=yes module_text_server_fb_enabled=yes \
+  module_godotai_api_probe_enabled=no tests=no
+# Export only the completed archive. Intermediate SDK bin files are never the
+# default template selected by the playground pipeline.
+task_template_out="${WEB_TEMPLATE_OUT:-$task_repo/work/playground/engine-template/full-engine.zip}"
+mkdir -p "$(dirname "$task_template_out")"
+cp "$GODOT_SOURCE/bin/godot.web.template_debug.wasm32.nothreads.zip" "$task_template_out.tmp"
+mv "$task_template_out.tmp" "$task_template_out"
+echo "Full engine template: $task_template_out"

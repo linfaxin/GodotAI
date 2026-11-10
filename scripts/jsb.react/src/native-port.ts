@@ -7,6 +7,7 @@ export interface NativeInfo {
   parent: NativeKey | null;
   alive: boolean;
   insideTree?: boolean;
+  canProcess?: boolean;
   ready?: boolean;
 }
 export interface NativeInvalidation { key: NativeKey; expected?: boolean; reason?: string; retirementBatch?: string }

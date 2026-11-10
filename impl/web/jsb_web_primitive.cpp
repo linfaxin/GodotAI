@@ -109,10 +109,9 @@ namespace v8
 
     int64_t BigInt::Int64Value(bool* lossless) const
     {
-        int64_t rval;
+        int64_t rval = 0;
         const bool res = jsbi_Int64Value(isolate_->rt(), stack_pos_, &rval);
-        jsb_unused(res);
-        jsb_check(res);
+        if (lossless) *lossless = res;
         return rval;
     }
 

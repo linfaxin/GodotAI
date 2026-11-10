@@ -146,11 +146,29 @@ const key_only_handler = {
             return Reflect.get(target, p);
         }
 
-        return key_only_proxy(Reflect.get(target, p !== "toString" ? get_member(p) : p));
+        let key = p;
+        if (!Reflect.has(target, key) && p !== "toString") {
+            const public_name = get_member(p);
+            if (Reflect.has(target, public_name)) {
+                key = public_name;
+            } else {
+                // Library-owned objects retain their declared source keys.
+                // A caller may use either those keys or the active binding
+                // spelling; resolve against the target rather than assuming
+                // that every JS object was created by the native binder.
+                const source_key = Reflect.ownKeys(target).find(
+                    candidate => typeof candidate === "string" && get_member(candidate) === p,
+                );
+                if (typeof source_key === "string") key = source_key;
+            }
+        }
+        return key_only_proxy(Reflect.get(target, key));
     },
 } satisfies ProxyHandler<any>;
 
-function key_only_proxy<T extends object | ((...args: any[]) => any)>(target: T) {
+function key_only_proxy<T>(target: T): T {
+    // Missing properties and primitive metadata are values, never Proxy targets.
+    if (target === null || (typeof target !== "object" && typeof target !== "function")) return target;
     return new Proxy(target, key_only_handler);
 }
 

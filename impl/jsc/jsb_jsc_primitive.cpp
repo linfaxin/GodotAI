@@ -138,7 +138,16 @@ namespace v8
 
     int64_t BigInt::Int64Value(bool* lossless) const
     {
-        return JSValueToInt64(isolate_->ctx(), (JSValueRef) *this, nullptr);
+        JSValueRef exception = nullptr;
+        const int64_t value = JSValueToInt64(isolate_->ctx(), (JSValueRef) *this, &exception);
+        if (exception)
+        {
+            jsb::impl::JavaScriptCore::MarkExceptionAsTrivial(isolate_->ctx(), exception);
+            if (lossless) *lossless = false;
+            return 0;
+        }
+        if (lossless) *lossless = jsb::impl::JavaScriptCore::GetString(isolate_->ctx(), (JSValueRef) *this) == ::String::num_int64(value);
+        return value;
     }
 
     Local<BigInt> BigInt::New(Isolate* isolate, int64_t value)

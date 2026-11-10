@@ -1,6 +1,8 @@
 import { RUNTIME_ABI, NATIVE_BRIDGE_ABI, REACT_VERSIONS, validateRuntimeManifest, type RuntimeManifestV1, type ManifestModule } from '@godot-js/react/contracts';
 import { profileReference, getProfileSchema } from '@godot-js/react/schema';
-import { bootstrapSource, CANONICAL_IMPORTS, bundleClosedModulesWith } from '@godot-js/react-build/core';
+import { bootstrapSource } from '@godot-js/react-build/bootstrap';
+import { CANONICAL_IMPORTS } from '@godot-js/react-build/imports';
+import { bundleClosedModulesWith } from '@godot-js/react-build/module-loading';
 import type * as Esbuild from 'esbuild';
 import type * as TS from 'typescript';
 import { BrowserBuildError, type ProjectSnapshot, type RuntimeRelease, type BuildArtifact, type Diagnostic } from './contracts.js';

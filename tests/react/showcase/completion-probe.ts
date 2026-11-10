@@ -1,0 +1,20 @@
+declare const require:(id:string)=>any;const G=require('godot');
+import * as React from '../../../scripts/jsb.react/node_modules/react';
+import * as SDK from '../../../scripts/jsb.react/dist';
+import {createGodotPort} from '../../../scripts/jsb.react/dist/godot';
+import {emptyResourcePlan} from '../../../apps/playground/src/project-resources';
+import {installProjectResources} from '../../../apps/playground/src/native-project-resources';
+import {Services} from '../../../apps/playground/src/api';
+import App from '../../../apps/playground/examples/completion-engine';
+import project from '../../../apps/playground/examples/completion-engine.project.json';
+const invoke=(o:any,n:string,...a:any[])=>(o[n]??o[n.replace(/_([a-z])/g,(_:string,c:string)=>c.toUpperCase())]).apply(o,a);
+export default class CompletionProbe extends G.Node{
+ private tick:(()=>void)|undefined;_process(){this.tick?.();}
+ _ready(){let root:any,installed:any;const stop=(code:number)=>{try{root?.shutdown();}finally{if(installed){const result=installed.dispose();if(result.failures)throw Error('Cleanup failed');}}invoke(invoke(this,'get_tree'),'quit',code);};try{
+ const files:any=project.files,plan=emptyResourcePlan('completion_probe');plan.definitions=JSON.parse(files['/assets/demo.resources.json']).assets;plan.definitions['/assets/ui.ttf']={type:'FontFile',data:files['/assets/ui.ttf']};plan.ogg!['/assets/tone.ogg']=files['/assets/tone.ogg'];plan.images['/assets/normal.png']={width:1,height:1,rgba:[128,128,255,255]};plan.scenes['/assets/rig.scene.json']=JSON.parse(files['/assets/rig.scene.json']);installed=installProjectResources(G,plan);const native=createGodotPort(this,{rootId:'completion',rootInstance:'completion'});root=SDK.createRoot(native.port,native.containerKey,{generation:'completion',profileId:'showcase-v1',assets:installed.assets,onError:(e:any)=>console.error('COMPLETION_DIAG',String(e),e.stack)});let stats:any={},ticks=0;const services:any={scenes:installed.scenes,models:{},controls:{},input:{},sound:()=>{},exportJSON:()=>{},stats:(s:any)=>stats=s};root.preloadAssets(Object.keys(installed.assets));root.pump();root.render(React.createElement(Services.Provider,{value:services},React.createElement(App)));root.pump();root.input({type:'InputEventKey',physical_keycode:74,pressed:true});
+ this.tick=()=>{try{if(ticks===2)root.input({type:'InputEventKey',physical_keycode:74,pressed:false});root.pump(.016);root.physics(.016);root.process(.016);if(++ticks<12)return;const failed=Object.entries(stats).filter(([key,value])=>key!=='kind'&&value!==true);if(failed.length||root.getErrors().length)throw Error(JSON.stringify({failed,errors:root.getErrors().map(String),stats}));root.audit();const byType=(type:string)=>root.getHostGraph().find((n:any)=>n.type===type).key;const rejected=(code:string,run:()=>void)=>{let okay=false;try{run();}catch(error){okay=String(error).includes(code);}if(!okay)throw Error('Expected '+code);};
+ native.port.beginStage('process');try{rejected('E_TAB_INDEX',()=>native.port.command(byType('TabContainer'),'set_current_tab',[-1]));rejected('E_EXTENSION_COMMAND',()=>native.port.command(byType('MultiMeshInstance3D'),'__react_multimesh_position',[Number.MAX_SAFE_INTEGER]));}finally{native.port.endStage();}
+ native.port.beginStage('physics');try{rejected('E_SHAPE_INDEX',()=>native.port.command(byType('ShapeCast2D'),'get_collider',[1000]));const shape=native.port.read(byType('CollisionShape2D'),'shape');rejected('E_QUERY',()=>native.port.command(byType('Node2D'),'__react_query_shape2',[shape,{x:400,y:0},1,false,true,Number.MAX_SAFE_INTEGER]));}finally{native.port.endStage();}
+ native.port.beginStage('safe');try{rejected('E_JOINT_PATH',()=>native.port.set(byType('PinJoint3D'),'node_a','../../Foreign'));}finally{native.port.endStage();}root.audit();this.tick=undefined;stop(0);console.log('SHOWCASE_COMPLETION_OK '+JSON.stringify(stats));}catch(error){this.tick=undefined;console.error('SHOWCASE_COMPLETION_FAILED',String(error),(error as any).stack);stop(1);}};
+ }catch(error){console.error('SHOWCASE_COMPLETION_FAILED',String(error),(error as any).stack);stop(1);}}
+}

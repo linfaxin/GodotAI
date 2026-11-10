@@ -10,4 +10,5 @@ export * from './resolve.js';
 export * from './transport.js';
 export * from './typecheck.js';
 export * from './assets.js';
+export * from './engine-api.js';
 export { parseEditorProject, type EditorProject } from './project-document.js';

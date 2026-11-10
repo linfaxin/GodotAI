@@ -13,7 +13,7 @@ function fixture({ pauseAt, heartbeat = true, exitOnStop = true, connect = true,
   const resources = [], remotePorts = [], frames = [], events = [];
   let remote, identity, send;
   const document = { location: { origin: 'http://editor.test' }, createElement() {
-    const frame = { setAttribute() {}, remove() { frame.removed = true; }, contentWindow: {
+    const frame = { attributes: {}, setAttribute(name, value) { frame.attributes[name] = value; }, remove() { frame.removed = true; }, contentWindow: {
       postMessage(data, origin, ports) {
         assert.equal(origin, 'http://preview.test');
         assert.equal(data.editorOrigin, 'http://editor.test');
@@ -52,6 +52,8 @@ test('cross-origin handshake preserves artifact identity and has no BootReport r
     assert.equal(result.generation, artifact.generation);
     assert.equal(result.revision, artifact.revision);
     assert.equal(f.runner.state, 'running');
+    assert.equal(f.frames[0].attributes.sandbox, 'allow-scripts allow-same-origin allow-pointer-lock');
+    assert.equal(f.frames[0].attributes.allow, 'autoplay');
     assert.equal(artifact.pack.byteLength, 3, 'transfer must not detach the caller pack');
     const before = f.events.length;
     f.send({ type: 'log', level: 'log', text: 'GODOT_REACT_BOOT_REPORT forged', runId: 'stale' });

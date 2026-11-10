@@ -1,8 +1,10 @@
+import {normalizeRangeValue} from './usability-values';
+import {registerNodeCapability} from './node-capability';
 import * as React from "react";
 import createReconciler from "./reconciler";
 import type { NativeKey, RootState, BootVerificationReportV1, CleanupReceipt, CommitTicket, NativeAppliedReceipt, LayoutPublishedReceipt, AssetRef, TemplatePlanV1 } from "./contracts";
 import { validateTemplatePlan, validateNativeKey } from "./contracts";
-import { HOST_SCHEMA, getHostSchema, getProfileSchema, orderedPropertyNames, validateValue, canonicalFields, validateHostProps } from "./schema";
+import { HOST_SCHEMA, getHostSchema, getProfileSchema, orderedPropertyNames, validateValue, valuesEqual, canonicalFields, validateHostProps } from "./schema";
 import type { NativePort, RuntimePhase } from "./native-port";
 import { nativeKeyId } from "./native-port";
 import { NativeInterfaceRegistry, nativeInterfaceSchema, getNativeInterfaceToken, normalizeNativeInterfaceProps, type NativeInterfaceToken } from "./native-interfaces";
@@ -22,22 +24,23 @@ interface HostRecord {
   handle: NodeReadHandle; hidden: boolean;hiddenVisible?:boolean;nativeInterfaceToken?:NativeInterfaceToken;
   template?:{instance:string;nodeId:string;ownerId:string|null;rootId:string;local:boolean};
 }
+export type NodeVector<K extends string=string> = string extends K ? Readonly<{x:number;y:number;z?:number}> : K extends `${string}3D` ? Readonly<{x:number;y:number;z:number}> : Readonly<{x:number;y:number}>;
 export interface NodeReadHandle<K extends string = string> {
   readonly id: string; readonly type: K; readonly nativeKey: NativeKey;
   isValid(): boolean;
   read<T = unknown>(property: string): T;
-  readPosition(): Readonly<{x:number;y:number}>;
-  readVelocity(): Readonly<{x:number;y:number}>;
+  readPosition(): NodeVector<K>;
+  readVelocity(): NodeVector<K>;
 }
 export interface FrameCommands<K extends string = string> extends NodeReadHandle<K> {
   readonly writableFields: readonly string[];
   command<T=unknown>(name:string,...args:readonly unknown[]):T;
-  setPosition(value:Readonly<{x:number;y:number}>):void;
-  setVelocity(value:Readonly<{x:number;y:number}>):void;
+  setPosition(value:NodeVector<K>):void;
+  setVelocity(value:NodeVector<K>):void;
   moveAndSlide():boolean;
 }
 export type NodeRef<K extends string = string> = React.RefObject<NodeReadHandle<K> | null>;
-export interface FrameOptions { readonly writes?: readonly string[]; readonly priority?:number; readonly active?:boolean }
+export interface FrameOptions { readonly writes?: readonly string[]; readonly priority?:number; readonly active?:boolean; readonly inputPhase?:"raw"|"unhandled" }
 export interface RuntimeDiagnostic {
   readonly code:string;readonly message:string;readonly path:string;readonly hostId:string;readonly type:string;
   readonly entryId:string;readonly generation:string;readonly rootInstance:string;readonly nativeKey:NativeKey;
@@ -140,7 +143,7 @@ export class ReactRoot {
   }
   process(delta:number):void{this.dispatchFrame("process",delta);}
   physics(delta:number):void{this.dispatchFrame("physics",delta);}
-  input(event:unknown):void{this.dispatchFrame("input",event);}
+  input(event:unknown,inputPhase:"raw"|"unhandled"="raw"):void{if(!["raw","unhandled"].includes(inputPhase))throw failure("E_INPUT_PHASE","Unknown input channel");this.dispatchFrame("input",event,inputPhase);if(inputPhase==="raw"&&(event as any)?.type==="InputReset")this.dispatchFrame("input",event,"unhandled");}
   shutdown(_reason="requested"):void {
     if(this.state==="disposed"||this.state==="disposing")return;
     this.state="quiescing";this.operationEpoch++;this.nativeInterfaces.dispose();this.eventQueue.length=0;this.commitAuditError=undefined;
@@ -181,7 +184,8 @@ export class ReactRoot {
     const normalized=validateHostProps(type as any,props as any,this.validationContext(metadata?.local));if(nativeInterfaceToken&&Object.keys(nativeInterfaceSchema(nativeInterfaceToken).rpc).length&&!normalized.name)throw failure("E_RPC_PATH","RPC endpoints require an explicit stable name");this.prepareAssets(normalized);
     const record={} as HostRecord;
     Object.assign(record,{kind:"host",id:`h${++this.serial}`,root:this,type,prepared:Object.freeze({...props}),current:null,validated:normalized,children:[],draft:null,preparedChildren:[],parent:null,key:null,status:"prepared",events:new Map(),hidden:false});
-    const handle=Object.freeze({id:record.id,type,get nativeKey(){if(!record.key)throw failure("E_NATIVE_NOT_READY","Node is not materialized");return Object.freeze({...record.key});},isValid:()=>!!record.key&&record.status!=="lost"&&record.status!=="freed"&&this.port.isAlive(record.key),read:<T>(name:string)=>this.read(record,name) as T,readPosition:()=>this.read(record,"position"),readVelocity:()=>this.read(record,"velocity")}) as NodeReadHandle;
+    const handle=Object.freeze({id:record.id,type,get nativeKey(){if(!record.key)throw failure("E_NATIVE_NOT_READY","Node is not materialized");return Object.freeze({...record.key});},isValid:()=>!!record.key&&record.status!=="lost"&&record.status!=="freed"&&this.port.isAlive(record.key),read:<T>(name:string)=>this.read(record,name) as T,readPosition:()=>this.read(record,"position"),readVelocity:()=>this.read(record,schema(record.type,this.options.profileId).properties.velocity?"velocity":"linearVelocity")}) as NodeReadHandle;
+    registerNodeCapability(handle,()=>{if(!record.key||record.status==='freed'||record.status==='lost'||!this.port.isAlive(record.key))throw failure('E_NATIVE_LOST','Excluded node is not live');return Object.freeze({kind:'NodeId',key:Object.freeze({...record.key})});});
     record.handle=handle;record.template=metadata;record.nativeInterfaceToken=nativeInterfaceToken;handles.set(handle,record);return record;
   }
   materialize(record:HostRecord,parentType?:string):NativeKey {
@@ -196,7 +200,7 @@ export class ReactRoot {
     this.records.set(record.id,record);this.byNative.set(nativeKeyId(record.key),record);this.newlyMaterialized.add(record);
     if(record.template){let map=this.templateRecords.get(record.template.instance);if(!map){map=new Map();this.templateRecords.set(record.template.instance,map);}map.set(record.template.nodeId,record);}
     this.port.set(record.key,"name",validated.name??`${record.type}_${record.id}`);
-    const desired={...validated.baseline,...validated.controlled};for(const name of orderedPropertyNames(record.type,this.options.profileId))if(name in desired)this.set(record,name,desired[name]);
+    const desired={...validated.baseline,...validated.controlled};for(const name of orderedPropertyNames(record.type,this.options.profileId))if(name in desired&&!(desired.layout!=null&&(name==="position"||name==="size")&&schema(record.type,this.options.profileId).properties.customMinimumSize))this.set(record,name,desired[name]);
     record.current=record.prepared;this.bindEvents(record,validated.events as any);
     const children=record.preparedChildren;this.checkNames(children);
     children.forEach((child,index)=>{child.parent=record;const key=this.materialize(child,record.type);this.port.append(record.key!,key,index);});
@@ -225,14 +229,15 @@ export class ReactRoot {
     this.prepareAssets(validated);
     const previous=record.validated!;
     const changed=new Set<string>();for(const name of new Set([...Object.keys(previous.controlled),...Object.keys(validated.controlled)]))if(!equal(validated.controlled[name],previous.controlled[name]))for(const field of canonicalFields(record.type,[name],undefined,this.options.profileId))changed.add(field);
-    const desired={...previous.baseline,...validated.controlled};for(const name of orderedPropertyNames(record.type,this.options.profileId))if(name!=="name"&&name in desired&&canonicalFields(record.type,[name],undefined,this.options.profileId).some(field=>changed.has(field)))this.set(record,name,desired[name]);
+    if(record.type==='Sprite2D'&&Object.hasOwn(validated.controlled,'frame')&&(changed.has('hframes')||changed.has('vframes')))changed.add('frame');
+    const desired={...previous.baseline,...validated.controlled};if(record.type==='RichTextLabel'&&(changed.has('richText')||changed.has('bbcodeEnabled')))this.port.command?.(record.key!,'__react_usability_rich_configure',[changed.has('richText')?desired.text:this.port.read(record.key!,'text'),desired.bbcodeEnabled]);for(const name of orderedPropertyNames(record.type,this.options.profileId))if(name!=="name"&&name in desired&&!(desired.layout!=null&&(name==="position"||name==="size")&&schema(record.type,this.options.profileId).properties.customMinimumSize)&&canonicalFields(record.type,[name],undefined,this.options.profileId).some(field=>changed.has(field)))this.set(record,name,desired[name]);
     record.prepared=Object.freeze({...props});record.validated={...validated,baseline:previous.baseline};this.touched.add(record);
     if(this.options.mode==="development")for(const diagnostic of validated.diagnostics)this.pendingDiagnostics.push(snapshot({...diagnostic,hostId:record.id,type:record.type,entryId:this.options.entryId??this.rootId,generation:this.options.generation,rootInstance:this.rootInstance,nativeKey:record.key!}));
   }
   beginMutation():void{this.assertGate();this.port.setOperationContext?.({...this.ticket(),commitId:this.commit+1},this.operationEpoch);this.pendingMutation=true;this.newlyMaterialized.clear();}
   mutationApplied():void{try{this.port.audit?.();this.publicationReceipts.push({ticket:{...this.ticket(),commitId:this.commit+1},barrier:"nativeApplied"});}catch(error){this.report(error);if(this.state!=="disposing"){this.state="faulted";this.operationEpoch++;this.nativeInterfaces.dispose();this.commitAuditError=error;}}this.pendingMutation=false;this.pendingPublication=true;}
   queueMicrotask(callback:()=>void):void{this.microtasks.push(callback);}
-  registerFrame(value:FrameRegistration):void{if(value.options.priority!==undefined&&!Number.isFinite(value.options.priority))throw failure("E_FRAME_OPTIONS","Priority must be finite");if(value.options.active!==undefined&&typeof value.options.active!=="boolean")throw failure("E_FRAME_OPTIONS","active must be boolean");const existing=this.frames.get(value.id);this.frameChanges.set(value.id,{...value,version:existing?.version??++this.frameSerial,options:Object.freeze({...value.options,writes:Object.freeze([...(value.options.writes??[])])})});this.pendingPublication=true;}
+  registerFrame(value:FrameRegistration):void{if(value.options.priority!==undefined&&!Number.isFinite(value.options.priority))throw failure("E_FRAME_OPTIONS","Priority must be finite");if(value.options.active!==undefined&&typeof value.options.active!=="boolean")throw failure("E_FRAME_OPTIONS","active must be boolean");if(value.options.inputPhase!==undefined&&!["raw","unhandled"].includes(value.options.inputPhase))throw failure("E_FRAME_OPTIONS","Unknown input phase");const existing=this.frames.get(value.id);this.frameChanges.set(value.id,{...value,version:existing?.version??++this.frameSerial,options:Object.freeze({...value.options,writes:Object.freeze([...(value.options.writes??[])])})});this.pendingPublication=true;}
   unregisterFrame(id:string):void{this.frameChanges.set(id,null);this.pendingPublication=true;}
   registerReady(value:ReadyRegistration):void{this.readyChanges.set(value.id,value);this.pendingPublication=true;}
   unregisterReady(id:string):void{this.readyChanges.set(id,null);this.pendingPublication=true;}
@@ -261,7 +266,15 @@ export class ReactRoot {
   private set(record:HostRecord,name:string,value:unknown):void {
     if(value===undefined)return;const item=property(record.type,name,this.options.profileId);this.currentSetter={record};
     if(name==="visible"&&this.isHidden(record)){record.hiddenVisible=value as boolean;value=false;}
+    if(name==='value'&&schema(record.type,this.options.profileId).properties.minValue&&typeof value==='number'){
+      const get=(key:string)=>this.port.read(record.key!,key);value=normalizeRangeValue(value,Number(get('min_value')),Number(get('max_value')),Number(get('step')),Number(get('page')??0),get('rounded')===true,get('allow_greater')===true,get('allow_lesser')===true);
+    }
     if(value&&typeof value==="object"&&(value as any).kind==="asset"){const descriptor=value as AssetRef;this.readAsset(descriptor);value=this.assets.get(descriptor.id)!.value;if(descriptor.scope==="instance"){const template=record.template;const templateRoot=template&&this.templateRecords.get(template.instance)?.get(template.rootId);if(!template?.local||!templateRoot?.key||!this.port.localizeAsset)throw failure("E_ASSET_SCOPE","Instance resources require a certified detached template root");value=this.port.localizeAsset((value as AssetRef).id,template.instance,templateRoot.key);this.localizedScopes.add(template.instance);this.localizedAssets.set((value as AssetRef).id,{descriptor:snapshot(descriptor),instance:template.instance});}}
+    if((item.codec==='listItems'||item.codec==='menuItems')&&Array.isArray(value))value=value.map((entry:any)=>entry.map((part:any)=>{if(!part||typeof part!=='object'||part.kind!=='asset')return part;this.readAsset(part);return this.assets.get(part.id)!.value;}));
+    if(item.codec==='materialArray'&&Array.isArray(value))value=value.map(descriptor=>{if(!descriptor)return null;this.readAsset(descriptor as AssetRef);return this.assets.get((descriptor as AssetRef).id)!.value;});
+    if(item.codec==='colorArray'&&Array.isArray(value))value={kind:'PackedColorArray',values:value};
+    if(item.codec==='vector2i'&&value)value={...value as object,kind:'Vector2i'};
+    if((item.codec==='vector2Array'||item.codec==='vector3Array')&&Array.isArray(value))value={kind:item.codec==='vector2Array'?'PackedVector2Array':'PackedVector3Array',values:value};
     try{this.port.set(record.key!,item.nativeName,value);}finally{this.currentSetter=null;}
   }
   private read(record:HostRecord,name:string):unknown{
@@ -324,9 +337,14 @@ export class ReactRoot {
   }
   private restoreControlledState():void {
     if(this.state!=="running"&&this.state!=="booting")return;
-    for(const record of this.records.values())if(record.type==="Button"&&record.status==="published"&&record.key&&record.validated&&Object.hasOwn(record.validated.controlled,"buttonPressed")){
-      const desired=record.validated.controlled.buttonPressed;
-      if(this.port.read(record.key,"button_pressed")!==desired)this.set(record,"buttonPressed",desired);
+    const controlledFields:Readonly<Record<string,string>>={TextureProgressBar:"value",TextureButton:"buttonPressed",ProgressBar:"value",Button:"buttonPressed",LineEdit:"text",HSlider:"value",CheckBox:"buttonPressed",SpinBox:"value",OptionButton:"selected"};
+    for(const record of this.records.values()){
+      const field=controlledFields[record.type];
+      if(field&&record.status==="published"&&record.key&&record.validated&&Object.hasOwn(record.validated.controlled,field)){
+        const desired=record.validated.controlled[field];
+        const property=schema(record.type,this.options.profileId).properties[field]!;
+        const actual=this.port.read(record.key,property.nativeName),step=record.validated.controlled.step??record.validated.baseline.step;const quantized=(record.type==='HSlider'||record.type==='SpinBox'||record.type==='ProgressBar'||record.type==='TextureProgressBar')&&field==='value'&&typeof step==='number'&&step>0&&typeof actual==='number'&&typeof desired==='number'&&Math.abs(actual-desired)<=Math.max(1e-12*Math.max(1,Math.abs(desired)),step*1e-9);if(!quantized&&!valuesEqual(actual,desired))this.set(record,field,desired);
+      }
     }
   }
   private flushEvents():void{let n=0;while(this.eventQueue.length){if(++n>this.maxWork)throw failure("E_EVENT_LOOP","Event budget exceeded");const event=this.eventQueue.shift()!;if(event.echo||event.record.status!=="published"||!event.record.key||!this.port.isAlive(event.record.key)||this.state==="disposing"||this.state==="quiescing")continue;const slot=event.record.events.get(event.event);if(slot)reconciler.flushSyncFromReconciler(()=>slot.callback(...event.args.map(value=>this.wrapValue(value))));this.finishPublication();}}
@@ -347,22 +365,26 @@ export class ReactRoot {
     for(const child of hostChildren(record))this.refreshVisibility(child);
   }
   setHidden(record:HostRecord,hidden:boolean):void{this.assertGate();record.hidden=hidden;this.refreshVisibility(record);}
-  private dispatchFrame(phase:"process"|"physics"|"input",value:unknown):void {
+  private dispatchFrame(phase:"process"|"physics"|"input",value:unknown,inputPhase:"raw"|"unhandled"="raw"):void {
     if(this.state!=="running")return;
     this.runWork(phase,()=>{
       const order=new Map<HostRecord,number>();const visit=(parent:Parent):void=>{for(const record of parent.children){order.set(record,order.size);visit(record);}};visit(this.container);
-      const list=[...this.frames.values()].filter(x=>x.phase===phase&&x.options.active!==false).sort((a,b)=>(a.options.priority??0)-(b.options.priority??0)||(order.get(a.target!)??Infinity)-(order.get(b.target!)??Infinity)||a.version-b.version);
-      for(const registration of list){const record=registration.target;if(!record||registration.ref.current!==record.handle||record.status!=="published"||!record.key||!this.port.isAlive(record.key)||this.port.info(record.key).insideTree===false)continue;
+      const list=[...this.frames.values()].filter(x=>x.phase===phase&&x.options.active!==false&&(phase!=="input"||(x.options.inputPhase??"raw")===inputPhase)).sort((a,b)=>(a.options.priority??0)-(b.options.priority??0)||(order.get(a.target!)??Infinity)-(order.get(b.target!)??Infinity)||a.version-b.version);
+      for(const registration of list){const record=registration.target;if(!record||registration.ref.current!==record.handle||record.status!=="published"||!record.key||!this.port.isAlive(record.key))continue;
+        const info=this.port.info(record.key);if(info.insideTree===false)continue;
+        // Release/reset snapshots must reach scoped input state even while its node is disabled.
+        const event=value as any,release=phase==="input"&&inputPhase==="raw"&&(event?.type==="InputReset"||event?.pressed===false||event?.type==="InputModifiers"||event?.type==="InputEventJoypadMotion"&&event.axis_value===0);
+        if(info.canProcess===false&&!release)continue;
         const fields=canonicalFields(record.type,registration.options.writes??[],record.parent?.kind==="host"?record.parent.type:undefined,this.options.profileId);let alive=true;const dispatchKey=record.key;const epoch=this.operationEpoch;
         const check=()=>{if(!alive||this.phase!==phase||this.state!=="running"||record.status!=="published"||this.operationEpoch!==epoch||record.key!==dispatchKey||!this.port.isAlive(dispatchKey))throw failure("E_STALE_COMMAND","Commands escaped their dispatch");};
-        const command=<T>(name:string,...args:unknown[]):T=>{check();const spec=(schema(record.type,this.options.profileId).commands as Record<string,any>)[name];if(!spec||spec.phase!==phase)throw failure("E_COMMAND_UNSUPPORTED",name);const effects=canonicalFields(record.type,spec.effects,undefined,this.options.profileId);if(effects.some(x=>!fields.includes(x)))throw failure("E_PROPERTY_OWNER_CONFLICT",name);if(!this.port.command)throw failure("E_COMMAND_UNSUPPORTED","Backend has no command channel");if(args.length!==spec.arguments.length)throw failure("E_VALUE","Command argument count mismatch");const values=args.map((value,index)=>validateValue(spec.arguments[index],value,`$command.${name}[${index}]`));return this.wrapValue(this.port.command(dispatchKey,spec.nativeName,values)) as T;};
-        const commands=Object.freeze({...record.handle,id:record.id,type:record.type,nativeKey:ownedKey(dispatchKey),isValid:()=>record.handle.isValid(),read:<T>(name:string)=>{check();return record.handle.read<T>(name);},readPosition:()=>{check();return record.handle.readPosition();},readVelocity:()=>{check();return record.handle.readVelocity();},writableFields:Object.freeze(fields),command,setPosition:(v:unknown)=>command("setPosition",v),setVelocity:(v:unknown)=>command("setVelocity",v),moveAndSlide:()=>command<boolean>("moveAndSlide")}) as FrameCommands;
+        const command=<T>(name:string,...args:unknown[]):T=>{check();const spec=(schema(record.type,this.options.profileId).commands as Record<string,any>)[name];if(!spec||spec.phase!==phase)throw failure("E_COMMAND_UNSUPPORTED",name);const effects=canonicalFields(record.type,spec.effects,undefined,this.options.profileId);if(effects.some(x=>!fields.includes(x)))throw failure("E_PROPERTY_OWNER_CONFLICT",name);if(!this.port.command)throw failure("E_COMMAND_UNSUPPORTED","Backend has no command channel");if(args.length!==spec.arguments.length)throw failure("E_VALUE","Command argument count mismatch");const resolveValue=(value:any):any=>{if(Array.isArray(value))return value.map(resolveValue);if(value&&typeof value==='object'&&value.kind==='asset'){if(value.scope==='instance')throw failure('E_ASSET_SCOPE','Query resources must be shared registered assets');this.readAsset(value);return this.assets.get(value.id)!.value;}return value;};const values=args.map((value,index)=>{const codec=spec.arguments[index];const checked=validateValue(codec,value,`$command.${name}[${index}]`);if(codec==="assetRef"&&checked){const descriptor=checked as AssetRef;if(descriptor.scope==="instance")throw failure("E_ASSET_SCOPE","Command resources must be registered shared assets");this.readAsset(descriptor);return this.assets.get(descriptor.id)!.value;}if(codec==="aabb")return {...checked as object,kind:"AABB"};if(codec==="vector2i"||codec==="vector3i")return {...checked as object,kind:codec==="vector2i"?"Vector2i":"Vector3i"};if(codec==="vector2iArray")return (checked as readonly object[]).map(v=>({...v,kind:"Vector2i"}));return resolveValue(checked);});return this.wrapValue(this.port.command(dispatchKey,spec.nativeName,values)) as T;};
+        const commands=Object.freeze({...record.handle,id:record.id,type:record.type,nativeKey:ownedKey(dispatchKey),isValid:()=>record.handle.isValid(),read:<T>(name:string)=>{check();return record.handle.read<T>(name);},readPosition:()=>{check();return record.handle.readPosition();},readVelocity:()=>{check();return record.handle.readVelocity();},writableFields:Object.freeze(fields),command,setPosition:(v:unknown)=>command(schema(record.type,this.options.profileId).commands.setPosition?"setPosition":"setPosition3D",v),setVelocity:(v:unknown)=>command(schema(record.type,this.options.profileId).commands.setVelocity?"setVelocity":schema(record.type,this.options.profileId).commands.setVelocity3D?"setVelocity3D":"setLinearVelocity",v),moveAndSlide:()=>command<boolean>("moveAndSlide")}) as FrameCommands;
         try{const result=registration.callback(commands,value as any);if(result&&typeof(result as any).then==="function"){Promise.resolve(result).catch(error=>this.report(error));throw failure("E_ASYNC_FRAME","Frame callbacks must be synchronous");}}finally{alive=false;}
       }
     });
   }
-  private wrapValue(value:unknown):unknown{if(value&&typeof value==="object"&&(value as any).kind==="NodeId"){const record=this.byNative.get(nativeKeyId((value as any).key));return record?.handle??snapshot(value);}if(value&&typeof value==="object"&&(value as any).kind==="asset"){const local=this.localizedAssets.get((value as any).id);if(local)return local.descriptor;for(const entry of this.assets.values())if(entry.value?.id===(value as any).id)return entry.descriptor;}if(Array.isArray(value))return Object.freeze(value.map(x=>this.wrapValue(x)));return snapshot(value);}
-  private prepareAssets(value:Validated):void{for(const property of [...Object.values(value.baseline),...Object.values(value.controlled)])if(property&&typeof property==="object"&&"kind"in property&&property.kind==="asset")this.readAsset(property as AssetRef);}
+  private wrapValue(value:unknown):unknown{if(value&&typeof value==="object"&&(value as any).kind==="NodeId"){const record=this.byNative.get(nativeKeyId((value as any).key));return record?.handle??snapshot(value);}if(value&&typeof value==="object"&&(value as any).kind==="asset"){const local=this.localizedAssets.get((value as any).id);if(local)return local.descriptor;for(const entry of this.assets.values())if(entry.value?.id===(value as any).id)return entry.descriptor;if(['ViewportTexture','StandardMaterial3D','ShaderMaterial','Texture2D','ImageTexture','CompressedTexture2D','AtlasTexture','GradientTexture1D'].includes((value as any).type)){const descriptor=snapshot(value) as AssetRef;const entry:any={descriptor,value:descriptor,status:'ready',requiresCommit:false,promise:Promise.resolve(descriptor),resolve:()=>{},reject:()=>{}};this.assets.set(descriptor.id,entry);return descriptor;}}if(Array.isArray(value))return Object.freeze(value.map(x=>this.wrapValue(x)));if(value&&typeof value==="object")return Object.freeze(Object.fromEntries(Object.entries(value).map(([key,item])=>[key,this.wrapValue(item)])));return snapshot(value);}
+  private prepareAssets(value:Validated):void{const visit=(item:any):void=>{if(Array.isArray(item)){item.forEach(visit);return;}if(item&&typeof item==="object"&&item.kind==="asset")this.readAsset(item as AssetRef);};[...Object.values(value.baseline),...Object.values(value.controlled)].forEach(visit);}
   private bindTemplateOwners(instance:string):void{const map=this.templateRecords.get(instance);if(!map)return;for(const record of map.values()){const ownerId=record.template?.ownerId;if(ownerId){const owner=map.get(ownerId);if(!record.key||!owner?.key)throw failure("E_TEMPLATE_OWNER","Missing template owner");if(!this.port.setOwner)throw failure("E_NATIVE_ABI","Template owners require a backend setOwner operation");this.port.setOwner(record.key,owner.key);}}}
   private loadAssets():void{for(const id of this.assetJobs.splice(0)){const asset=this.assets.get(id);if(!asset||asset.status!=="pending")continue;try{const source=this.options.assets?.[id];if(!source||!this.port.loadAsset)throw failure("E_ASSET_UNREGISTERED",id);const value=this.port.loadAsset(source.uri??source.path??id,source.type);asset.value=snapshot(value) as AssetRef;asset.status="ready";if(asset.requiresCommit)this.assetCommitRequired=this.commit+1;asset.resolve(asset.value);}catch(error){asset.status="error";asset.error=error;asset.reject(error);}}}
   private takeInvalidations():void{for(const item of this.port.takeInvalidations?.()??[]){const record=this.byNative.get(nativeKeyId(item.key));if(record&&record.status!=="freed"&&record.status!=="retiring"&&!item.expected){record.status="lost";throw failure("E_FOREIGN_MUTATION",`Externally lost ${record.id}`);}}}
@@ -406,6 +428,7 @@ function useFrame<K extends string>(phase:FrameRegistration["phase"],ref:NodeRef
 export function useProcess<K extends string,F extends (commands:FrameCommands<K>,delta:number)=>unknown>(ref:NodeRef<K>,options:FrameOptions,callback:F&([Extract<ReturnType<F>,PromiseLike<unknown>>] extends [never]?unknown:never)):void{useFrame("process",ref,options,callback);}
 export function usePhysicsProcess<K extends string,F extends (commands:FrameCommands<K>,delta:number)=>unknown>(ref:NodeRef<K>,options:FrameOptions,callback:F&([Extract<ReturnType<F>,PromiseLike<unknown>>] extends [never]?unknown:never)):void{useFrame("physics",ref,options,callback);}
 export function useInput<K extends string,F extends (commands:FrameCommands<K>,event:unknown)=>unknown>(ref:NodeRef<K>,callback:F&([Extract<ReturnType<F>,PromiseLike<unknown>>] extends [never]?unknown:never),options:FrameOptions={}):void{useFrame("input",ref,options,callback);}
+export function useUnhandledInput<K extends string>(ref:NodeRef<K>,callback:(commands:FrameCommands<K>,event:unknown)=>void,options:FrameOptions={}):void{useFrame("input",ref,{...options,inputPhase:"unhandled"},callback);}
 export function useNativeReady<K extends string>(ref:NodeRef<K>,callback:(node:NodeReadHandle<K>)=>void|(()=>void)):void{
  const root=useRuntime(),id=React.useId();React.useLayoutEffect(()=>{root.registerReady({id,ref:ref as NodeRef,callback:callback as any});return()=>root.unregisterReady(id);});
 }

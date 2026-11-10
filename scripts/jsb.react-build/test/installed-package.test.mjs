@@ -13,6 +13,8 @@ test('a package-shaped SDK with hoisted React types checks and builds outside th
   const installed = path.join(root, 'node_modules/@godot-js/react');
   await fs.mkdir(installed, { recursive: true });
   await fs.cp(path.join(runtime, 'dist'), path.join(installed, 'dist'), { recursive: true });
+  const metadata=JSON.parse(await fs.readFile(path.join(runtime,'package.json'),'utf8'));
+  for(const name of metadata.files.filter(name=>name!=='dist'))await fs.cp(path.join(runtime,name),path.join(installed,name),{recursive:true});
   await fs.copyFile(path.join(runtime, 'package.json'), path.join(installed, 'package.json'));
   for (const dependency of ['react', 'react-reconciler', 'scheduler', '@types/react']) {
     const target = path.join(root, 'node_modules', dependency);

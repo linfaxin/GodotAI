@@ -1,0 +1,36 @@
+import {promises as fs} from 'node:fs';
+import path from 'node:path';
+import {fileURLToPath} from 'node:url';
+import {spawnSync} from 'node:child_process';
+import {createRequire} from 'node:module';
+const repo=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../..');
+const require=createRequire(path.join(repo,'scripts/jsb.react/package.json'));
+const {build}=require('esbuild');
+await fs.mkdir(path.join(repo,'work'),{recursive:true});
+const refinementsProbe=process.argv.includes('--refinements');
+const workflowsProbe=process.argv.includes('--workflows');
+const compositionProbe=process.argv.includes('--composition');
+const usabilityProbe=process.argv.includes('--usability');
+const fidelityProbe=process.argv.includes('--fidelity');
+const precisionProbe=process.argv.includes('--precision');
+const detailsProbe=process.argv.includes('--details');
+const presentationProbe=process.argv.includes('--presentation');
+const interactionsProbe=process.argv.includes('--interactions');
+const essentialsProbe=process.argv.includes('--essentials');
+const behaviorsProbe=process.argv.includes('--behaviors');
+const gameplayProbe=process.argv.includes('--gameplay');
+const parityProbe=process.argv.includes('--parity');
+const completionProbe=process.argv.includes('--completion');
+const ownershipProbe=process.argv.includes('--ownership');
+const resourceProbe=process.argv.includes('--resources'),advancedProbe=process.argv.includes('--advanced'),sentinel=refinementsProbe?'SHOWCASE_REFINEMENTS':workflowsProbe?'SHOWCASE_WORKFLOWS':compositionProbe?'SHOWCASE_COMPOSITION':usabilityProbe?'SHOWCASE_USABILITY':fidelityProbe?'SHOWCASE_FIDELITY':precisionProbe?'SHOWCASE_PRECISION':detailsProbe?'SHOWCASE_DETAILS':presentationProbe?'SHOWCASE_PRESENTATION':interactionsProbe?'SHOWCASE_INTERACTIONS':essentialsProbe?'SHOWCASE_ESSENTIALS':behaviorsProbe?'SHOWCASE_BEHAVIORS':gameplayProbe?'SHOWCASE_GAMEPLAY':parityProbe?'SHOWCASE_PARITY':completionProbe?'SHOWCASE_COMPLETION':ownershipProbe?'SHOWCASE_OWNERSHIP':advancedProbe?'SHOWCASE_ADVANCED':resourceProbe?'SHOWCASE_RESOURCES':'SHOWCASE_NATIVE';
+const project=await fs.mkdtemp(path.join(repo,'work/showcase-native-'));
+try{
+ await fs.mkdir(path.join(project,'.godot/GodotJS'),{recursive:true});
+ await fs.writeFile(path.join(project,'project.godot'),'config_version=5\n[application]\nconfig/name="Showcase native probe"\nrun/main_scene="res://main.tscn"\n[GodotJS]\nruntime/debugger/debugger_port=0\n');
+ await fs.writeFile(path.join(project,'probe.ts'),'// Compiled native conformance probe.\n');
+ await fs.writeFile(path.join(project,'main.tscn'),'[gd_scene load_steps=2 format=3]\n[ext_resource type="Script" path="res://probe.ts" id="1"]\n[node name="Probe" type="Node"]\nscript = ExtResource("1")\n');
+ await build({entryPoints:[path.join(repo,'tests/react/showcase',refinementsProbe?'refinements-probe.ts':workflowsProbe?'workflows-probe.ts':compositionProbe?'composition-probe.ts':usabilityProbe?'usability-probe.ts':fidelityProbe?'fidelity-probe.ts':precisionProbe?'precision-probe.ts':detailsProbe?'details-probe.ts':presentationProbe?'presentation-probe.ts':interactionsProbe?'interactions-probe.ts':essentialsProbe?'essentials-probe.ts':behaviorsProbe?'behaviors-probe.ts':gameplayProbe?'gameplay-probe.ts':parityProbe?'parity-probe.ts':completionProbe?'completion-probe.ts':ownershipProbe?'ownership-probe.ts':advancedProbe?'advanced-probe.ts':resourceProbe?'resources-probe.ts':'probe.ts')],outfile:path.join(project,'.godot/GodotJS/probe.js'),bundle:true,loader:{'.glb':'binary','.ogg':'binary','.ttf':'binary'},platform:'neutral',format:'cjs',target:'es2022',external:['godot','godot-jsb'],define:{'process.env.NODE_ENV':'"production"'},inject:[path.join(repo,'scripts/jsb.react/dist/internal/performance.mjs')]});
+ const result=spawnSync(process.env.GODOT??path.join(repo,'tests/bin/godot-host-qjs'),['--headless',...(process.env.SHOWCASE_VERBOSE?['--verbose']:[]),'--path',project,'--quit-after','600','--fixed-fps','60'],{encoding:'utf8',timeout:60000});
+ const output=(result.stdout??'')+(result.stderr??'');process.stdout.write(output);
+ if(result.error||result.status!==0||!output.includes(sentinel+'_OK')||/SHOWCASE_(?:NATIVE|RESOURCES|ADVANCED|OWNERSHIP|COMPLETION|PARITY|GAMEPLAY|BEHAVIORS|ESSENTIALS|INTERACTIONS|PRESENTATION|DETAILS|PRECISION|FIDELITY|USABILITY|COMPOSITION|WORKFLOWS|REFINEMENTS)_FAILED|SCRIPT ERROR:|^ERROR:/m.test(output))throw Error(`Native showcase probe failed (${result.status}): ${result.error??''}`);
+}finally{await fs.rm(project,{recursive:true,force:true});}

@@ -6,3 +6,5 @@ export * from './media';
 export * from './game-2d';
 export * from "./profiles";
 export * from "./showcase";
+
+export {validateSimplePolygon} from '../geometry-values';

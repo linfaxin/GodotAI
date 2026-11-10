@@ -1,6 +1,7 @@
 #ifndef GODOTJS_JSC_HELPER_H
 #define GODOTJS_JSC_HELPER_H
 #include "jsb_jsc_catch.h"
+#include "../shared/jsb_integer.h"
 #include "jsb_jsc_pch.h"
 #include "jsb_jsc_isolate.h"
 #include "jsb_jsc_context.h"
@@ -160,9 +161,9 @@ namespace jsb::impl
         jsb_force_inline static bool to_int64(const v8::Local<v8::Value> p_val, int64_t& r_val)
         {
             if (p_val->IsInt32()) { r_val = p_val.As<v8::Int32>()->Value(); return true; }
-            if (p_val->IsNumber()) { r_val = (int64_t) p_val.As<v8::Number>()->Value(); return true; }
+            if (p_val->IsNumber()) { return number_to_int64(p_val.As<v8::Number>()->Value(), r_val, JSB_MAX_SAFE_INTEGER); }
 #if JSB_WITH_BIGINT
-            if (p_val->IsBigInt()) { r_val = p_val.As<v8::BigInt>()->Int64Value(); return true; }
+            if (p_val->IsBigInt()) { bool lossless = false; r_val = p_val.As<v8::BigInt>()->Int64Value(&lossless); return lossless; }
 #endif
             return false;
         }
@@ -175,7 +176,7 @@ namespace jsb::impl
                 return v8::Int32::New(isolate, downscale);
             }
 #if JSB_WITH_BIGINT
-            if (p_val > JSB_MAX_SAFE_INTEGER)
+            if (p_val > JSB_MAX_SAFE_INTEGER || p_val < -JSB_MAX_SAFE_INTEGER)
             {
                 JSB_JSC_LOG(VeryVerbose, "represented as bigint %d", p_val);
                 return v8::BigInt::New(isolate, p_val);

@@ -1,0 +1,23 @@
+import assert from 'node:assert/strict';
+import {mkdir,writeFile,rm} from 'node:fs/promises';
+import {resolve,dirname} from 'node:path';
+import {fileURLToPath} from 'node:url';
+import {spawnSync} from 'node:child_process';
+
+const repo=resolve(dirname(fileURLToPath(import.meta.url)),'../../../..'),directory=resolve(repo,'work/playground/p0/boot-config-precedence');
+const godot=process.env.GODOT??resolve(repo,'tests/bin/godot-host-qjs');await mkdir(resolve(directory,'.godot/GodotJS'),{recursive:true});
+const config=marker=>`config_version=5\n[application]\nconfig/name="P0 configuration precedence"\nrun/main_scene="res://main.tscn"\n[p0]\nmarker="${marker}"\n[GodotJS]\nruntime/debugger/debugger_port=0\n`;
+await rm(resolve(directory,'project.binary'),{force:true});await writeFile(resolve(directory,'project.godot'),config('binary-original'));
+await writeFile(resolve(directory,'save.gd'),'extends SceneTree\nfunc _initialize():\n var code=ProjectSettings.save_custom("res://project.binary")\n print("P0_CONFIG_BINARY_WRITTEN ",code)\n quit(code)\n');
+const run=args=>{const result=spawnSync(godot,['--headless','--path',directory,...args],{encoding:'utf8',timeout:30000});const output=(result.stdout??'')+(result.stderr??'');assert.equal(result.status,0,output);assert(!/^ERROR:|SCRIPT ERROR:/m.test(output),output);return output;};
+const generation=run(['--script','res://save.gd']);assert(generation.includes('P0_CONFIG_BINARY_WRITTEN 0'),generation);
+await writeFile(resolve(directory,'probe.ts'),'// Native config probe.\n');
+await writeFile(resolve(directory,'.godot/GodotJS/probe.js'),'const G=require("godot");exports.default=class ConfigProbe extends G.Node{_ready(){console.log("P0_CONFIG_REPORT "+JSON.stringify({marker:G.ProjectSettings.get_setting("p0/marker")}));this.get_tree().quit(0);}};\n');
+await writeFile(resolve(directory,'main.tscn'),'[gd_scene load_steps=2 format=3]\n[ext_resource type="Script" path="res://probe.ts" id="1"]\n[node name="ConfigProbe" type="Node"]\nscript = ExtResource("1")\n');
+await writeFile(resolve(directory,'project.godot'),config('text-replacement'));
+const withBinary=run(['--quit-after','20']),readReport=output=>{const line=output.split('\n').find(v=>v.includes('P0_CONFIG_REPORT '));assert(line,output);return JSON.parse(line.slice(line.indexOf('P0_CONFIG_REPORT ')+17));};
+assert.equal(readReport(withBinary).marker,'binary-original');await rm(resolve(directory,'project.binary'));
+const withoutBinary=run(['--quit-after','20']);assert.equal(readReport(withoutBinary).marker,'text-replacement');
+await writeFile(resolve(directory,'run.log'),generation+'\nWITH BINARY\n'+withBinary+'\nWITHOUT BINARY\n'+withoutBinary);
+const report={status:'passed',target:'native',withBinary:readReport(withBinary),withoutBinary:readReport(withoutBinary),conclusion:'The final PCK must not retain a stale project.binary when project.godot is authoritative.'};
+await writeFile(resolve(directory,'report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report,null,2));

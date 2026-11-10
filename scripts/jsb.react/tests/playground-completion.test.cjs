@@ -1,0 +1,27 @@
+const test=require('node:test');const assert=require('node:assert/strict');const React=require('react');const SDK=require('../dist');const {MockNativePort}=require('../dist/testing');const {validateHostProps,validateValue,getHostSchema}=require('../dist/schema');
+test('input maps retain independent process/physics edges, combine held bindings and release on reset',()=>{
+ const a=SDK.createInputActions({jump:{bindings:[{key:74},{joyButton:0}]},right:{deadzone:.25,bindings:[{axis:0,direction:1}]},left:{bindings:[{key:65}]},up:{bindings:[{key:87}]},down:{bindings:[{key:83}]}});
+ a.feed({type:'InputEventKey',physical_keycode:74,pressed:true});a.beginFrame();assert.ok(a.isJustPressed('jump'));a.beginFrame('physics');assert.ok(a.isJustPressed('jump'));a.beginFrame();assert.equal(a.isJustPressed('jump'),false);
+ a.feed({type:'InputEventJoypadButton',button_index:0,pressed:true});a.feed({type:'InputEventKey',physical_keycode:74,pressed:false});assert.ok(a.isPressed('jump'));a.feed({type:'InputEventJoypadButton',button_index:0,pressed:false});a.beginFrame();assert.ok(a.isJustReleased('jump'));
+ a.feed({type:'InputEventJoypadMotion',axis:0,axis_value:.625});assert.equal(a.getStrength('right'),.5);assert.ok(Math.abs(a.getVector('left','right','up','down').x-(.625-.2125)/(1-.2125))<1e-12);a.feed({type:'InputReset'});a.beginFrame();assert.ok(a.isJustReleased('right'));assert.equal(a.getStrength('right'),0);a.dispose();a.feed({type:'InputEventKey',physical_keycode:74,pressed:true});assert.equal(a.isPressed('jump'),false);
+ const b=SDK.createInputActions({jump:{bindings:[{key:74}]}});assert.equal(b.isPressed('jump'),false);b.dispose();
+});
+test('input maps reject ambiguous bindings, nonfinite deadzones and unknown action queries',()=>{
+ for(const map of [{x:{bindings:[{key:1,axis:0}]}},{x:{deadzone:NaN,bindings:[]}},{x:{deadzone:1,bindings:[]}},{x:{bindings:[{axis:1,direction:0}]}}])assert.throws(()=>SDK.createInputActions(map),/E_INPUT_ACTION/);
+ const a=SDK.createInputActions({});assert.throws(()=>a.getStrength('missing'),/unknown action/);
+});
+test('completion hosts are opt-in and reject invalid resource, range, path and transform ownership',()=>{
+ for(const type of ['CheckBox','OptionButton','SpinBox','GridContainer','TabContainer','Path2D','Path3D','PathFollow2D','PathFollow3D','MultiMeshInstance2D','MultiMeshInstance3D','ShapeCast2D','ShapeCast3D','PinJoint2D','PinJoint3D','DampedSpringJoint2D','HingeJoint3D','SliderJoint3D']){assert.ok(SDK[type]);assert.throws(()=>getHostSchema(type),/E_HOST_UNSUPPORTED/);validateHostProps(type,{}, {profileId:'showcase-v1'});}
+ for(const [type,props]of [['SpinBox',{minValue:200,maxValue:300,value:1}],['PinJoint3D',{nodeA:'../../Foreign'}],['PathFollow2D',{position:{x:1,y:2}}],['Label',{font:SDK.asset('bad','Mesh')}]])assert.throws(()=>validateHostProps(type,props,{profileId:'showcase-v1'}),/E_PROPERTY/);
+ assert.ok(Object.isFrozen(getHostSchema('MultiMeshInstance3D','showcase-v1').commands.setInstances));
+});
+test('Tween plans reject arbitrary properties, zero-time loops and bad durations before native dispatch',()=>{
+ for(const plan of [{steps:[]},{steps:[{property:'script',to:1,duration:1}]},{steps:[{property:'position',to:{x:1,y:0},duration:0}],loops:0},{steps:[{property:'position',to:{x:1,y:0},duration:-1}]}])assert.throws(()=>validateValue('tweenPlan',plan),/E_PROPERTY_VALUE/);
+ const plan=validateValue('tweenPlan',{steps:[{property:'position',to:{x:1,y:2},duration:1},{property:'scale',to:{x:2,y:2},duration:1,parallel:true}],loops:2});assert.ok(Object.isFrozen(plan[1]));assert.equal(plan[0][0],2);
+ const port=new MockNativePort(),root=SDK.createRoot(port,port.createContainer(),{generation:'tween',profileId:'showcase-v1'});let ran=false;port.command=(_key,name,args)=>{assert.equal(name,'__react_tween_start');assert.equal(args[0][1][0],'position');ran=true;};function App(){const ref=SDK.useNodeRef();SDK.useProcess(ref,{writes:['transform2d']},c=>c.command('startTween',{steps:[{property:'position',to:{x:1,y:0},duration:1}]}));return React.createElement(SDK.Node2D,{ref,engineOwned:['transform2d']});}try{root.render(React.createElement(App));root.process(.016);assert.ok(ran);}finally{root.shutdown();}
+});
+test('native CheckBox, OptionButton and SpinBox edits restore controlled values without dropping user events',()=>{
+ const port=new MockNativePort(),root=SDK.createRoot(port,port.createContainer(),{generation:'completion-controls',profileId:'showcase-v1'}),events=[];let check,option,spin;
+ try{root.render(React.createElement(SDK.VBoxContainer,null,React.createElement(SDK.CheckBox,{ref:r=>check=r,buttonPressed:true,onToggled:v=>events.push(v)}),React.createElement(SDK.OptionButton,{ref:r=>option=r,items:['A','B'],selected:0,onItemSelected:v=>events.push(v)}),React.createElement(SDK.SpinBox,{ref:r=>spin=r,value:25,onValueChanged:v=>events.push(v)})));port.beginStage('safe');port.set(check.nativeKey,'button_pressed',false);port.set(option.nativeKey,'selected',1);port.set(spin.nativeKey,'value',70);port.endStage();port.emit(option.nativeKey,'item_selected',1);port.emit(spin.nativeKey,'value_changed',70);root.pump();assert.deepEqual(events,[false,1,70]);assert.equal(port.read(check.nativeKey,'button_pressed'),true);assert.equal(port.read(option.nativeKey,'selected'),0);assert.equal(port.read(spin.nativeKey,'value'),25);}finally{root.shutdown();}
+ assert.throws(()=>validateHostProps('OptionButton',{items:['A'],selected:2},{profileId:'showcase-v1'}),/E_PROPERTY_VALUE/);
+});

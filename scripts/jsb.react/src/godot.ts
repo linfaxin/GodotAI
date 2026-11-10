@@ -30,6 +30,9 @@ const encode=(value:unknown):unknown=>{
  if(value&&typeof value==="object"){
   if(Array.isArray(value))return value.map(encode);
   const v=value as Record<string,unknown>;
+  if(v.position&&v.size&&!v.kind)return {kind:(v.position as any).z===undefined?"Rect2":"AABB",position:encode(v.position),size:encode(v.size)};
+  if(v.basis&&v.origin&&!v.kind)return {kind:(v.origin as any).z===undefined?"Transform2D":"Transform3D",basis:Object.fromEntries(Object.entries(v.basis as object).map(([k,v])=>[k,encode(v)])),origin:encode(v.origin)};
+  if(typeof v.w==="number"&&typeof v.x==="number"&&!v.kind)return {kind:"Quaternion",x:v.x,y:v.y,z:v.z,w:v.w};
   if(typeof v.x==="number"&&typeof v.y==="number"&&typeof v.z==="number"&&!v.kind)return {kind:"Vector3",x:v.x,y:v.y,z:v.z};
   if(typeof v.x==="number"&&typeof v.y==="number"&&!v.kind)return {kind:"Vector2",x:v.x,y:v.y};
   if(typeof v.r==="number"&&typeof v.g==="number"&&typeof v.b==="number"&&typeof v.a==="number"&&!v.kind)return {kind:"Color",r:v.r,g:v.g,b:v.b,a:v.a};
@@ -39,10 +42,15 @@ const decode=(value:unknown):any=>{
  if(value&&typeof value==="object"){
   if(Array.isArray(value))return Object.freeze(value.map(decode));
   const v=value as any;
-  if(v.kind==="Vector2")return Object.freeze({x:v.x,y:v.y});
-  if(v.kind==="Vector3")return Object.freeze({x:v.x,y:v.y,z:v.z});
+  if(v.kind==="Rect2"||v.kind==="AABB")return Object.freeze({position:decode(v.position),size:decode(v.size)});
+  if(v.kind==="Vector2"||v.kind==="Vector2i")return Object.freeze({x:v.x,y:v.y});
+  if(v.kind==="Vector3"||v.kind==="Vector3i")return Object.freeze({x:v.x,y:v.y,z:v.z});
+  if(v.kind==="Quaternion")return Object.freeze({x:v.x,y:v.y,z:v.z,w:v.w});
+  if(v.kind==="Transform2D")return Object.freeze({origin:decode(v.origin),basis:Object.freeze({x:decode(v.basis.x),y:decode(v.basis.y)})});
+  if(v.kind==="Transform3D")return Object.freeze({origin:decode(v.origin),basis:Object.freeze({x:decode(v.basis.x),y:decode(v.basis.y),z:decode(v.basis.z)})});
   if(v.kind==="Color")return Object.freeze({r:v.r,g:v.g,b:v.b,a:v.a});
   if(v.kind==="AssetRef")return Object.freeze({kind:"asset",id:v.id,type:v.type,scope:"shared"});
+  return Object.freeze(Object.fromEntries(Object.entries(v).map(([key,item])=>[key,decode(item)])));
  }return value;
 };
 export function createGodotPort(nativeRoot:unknown,options:{rootId:string;rootInstance:string;generation?:string;bridge?:Bridge;openedRoot?:{cap:unknown;key:NativeKey}}):{port:NativePort;containerKey:NativeKey;shutdownRequested:()=>boolean}{
@@ -93,16 +101,16 @@ export function startApplication<P extends object>(nativeRoot:unknown,ticket:App
  if(root.state==="faulted")throw root.getErrors()[0]??new Error("E_ROOT_FAULT");
  }catch(error){try{if(root)root.shutdown("startup-failure");else{native.port.quiesce?.();native.port.close?.();}}catch{}throw error;}
  const appRoot=root;
- const controller={root:appRoot,pump:(dt?:number)=>{if(native.shutdownRequested())controller.shutdown("publisher");else appRoot.pump(dt);},process:(dt:number)=>appRoot.process(dt),physics:(dt:number)=>appRoot.physics(dt),input:(event:unknown)=>appRoot.input(inputSnapshot(event)),render:(next:P)=>appRoot.render(React.createElement(Component,next)),shutdown:(reason?:string)=>appRoot.shutdown(reason)};
+ const controller={root:appRoot,pump:(dt?:number)=>{if(native.shutdownRequested())controller.shutdown("publisher");else appRoot.pump(dt);},process:(dt:number)=>appRoot.process(dt),physics:(dt:number)=>appRoot.physics(dt),input:(event:unknown)=>appRoot.input(snapshotInputEvent(event)),render:(next:P)=>appRoot.render(React.createElement(Component,next)),shutdown:(reason?:string)=>appRoot.shutdown(reason)};
  return controller;
 }
 
 /** Reduces native InputEvent objects to immutable value data at the private adapter boundary. */
-function inputSnapshot(event:unknown):unknown {
+export function snapshotInputEvent(event:unknown):unknown {
  if(!event||typeof event!=="object")return event;
  const item=event as Record<string,any>;const dto:Record<string,unknown>={};
  const invoke=(name:string)=>{const camel=name.replace(/_([a-z])/g,(_,c:string)=>c.toUpperCase());const fn=item[name]??item[camel];return typeof fn==="function"?fn.call(item):undefined;};
  dto.type=invoke("get_class")??"InputEvent";
- for(const name of ["device","pressed","echo","keycode","physical_keycode","unicode","button_index","button_mask","factor","axis","axis_value","action","strength","position","global_position","relative","velocity","shift_pressed","alt_pressed","ctrl_pressed","meta_pressed"]){let value;try{value=item[name]??item[name.replace(/_([a-z])/g,(_,c:string)=>c.toUpperCase())];}catch{continue;}if(typeof value==="number"&&Number.isFinite(value)||typeof value==="string"||typeof value==="boolean")dto[name]=value;else if(value&&typeof value.x==="number"&&typeof value.y==="number")dto[name]=Object.freeze({x:value.x,y:value.y});}
+ for(const name of ["device","index","pressure","double_click","pressed","echo","keycode","physical_keycode","unicode","button_index","button_mask","factor","axis","axis_value","action","strength","position","global_position","relative","velocity","shift_pressed","alt_pressed","ctrl_pressed","meta_pressed"]){let value;try{value=item[name]??item[name.replace(/_([a-z])/g,(_,c:string)=>c.toUpperCase())];}catch{continue;}if(typeof value==="number"&&Number.isFinite(value)||typeof value==="string"||typeof value==="boolean")dto[name]=value;else if(value&&typeof value.x==="number"&&typeof value.y==="number")dto[name]=Object.freeze({x:value.x,y:value.y});}
  return Object.freeze(dto);
 }

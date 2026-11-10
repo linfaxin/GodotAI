@@ -2,6 +2,7 @@
 #define GODOTJS_OBJECT_HANDLE_H
 
 #include "jsb_bridge_pch.h"
+#include <atomic>
 
 namespace jsb
 {
@@ -12,6 +13,22 @@ namespace jsb
 
         IF_VariantFieldCount = 1,
         IF_ObjectFieldCount = 2,
+    };
+
+    // Stable for one binding, independently of ObjectDB slot relocation and native
+    // address reuse. Native callbacks/queued work own shared references; only the
+    // Environment's thread may touch reference or gc_lease.
+    struct ObjectBindingTicket : std::enable_shared_from_this<ObjectBindingTicket>
+    {
+        void* pointer = nullptr;
+        NativeObjectID id;
+        ObjectID godot_id;
+        uint64_t environment_epoch = 0;
+        uint64_t generation = 0;
+        bool godot_object = false;
+        std::atomic<bool> active{true};
+        v8::Global<v8::Object> reference;
+        std::shared_ptr<ObjectBindingTicket> gc_lease;
     };
 
     // godot Object classes or c++ native wrapped classes are registered in an object registry in Environment.
@@ -45,7 +62,7 @@ namespace jsb
 
         // this reference is initially weak and hooked on v8 gc callback.
         // it becomes a strong reference after the `ref_count_` explicitly increased.
-        v8::Global<v8::Object> ref_;
+        std::shared_ptr<ObjectBindingTicket> binding;
     };
 
 }

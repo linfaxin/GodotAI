@@ -34,7 +34,7 @@ export class MockNativePort implements NativePort {
   private freeNode(n:MockNode,expected:boolean):void{for(const c of [...n.children])this.freeNode(c,expected);if(n.parent)n.parent.children.splice(n.parent.children.indexOf(n),1);n.alive=false;n.signals.clear();this.invalidations.push({key:n.key,expected,reason:expected?"expected-free":"external-free"});this.calls.push({op:"free",key:n.key,phase:this.stage});}
   setOwner(key:NativeKey,owner:NativeKey|null):void{this.requireStage();this.node(key).owner=owner?this.node(owner):null;}
   children(key:NativeKey):readonly NativeKey[]{return this.node(key).children.map(x=>x.key);}
-  info(key:NativeKey):NativeInfo{const n=this.node(key);return {type:n.type,name:n.name,parent:n.parent?.key??null,alive:n.alive,insideTree:true,ready:true};}
+  info(key:NativeKey):NativeInfo{const n=this.node(key);return {type:n.type,name:n.name,parent:n.parent?.key??null,alive:n.alive,insideTree:true,ready:true,canProcess:(()=>{let current:MockNode|null=n;while(current){const mode=current.props.process_mode;if(mode&&mode!==0)return mode===1||mode===3;current=current.parent;}return true;})()};}
   nativeIdentity(key:NativeKey):string{return String(this.node(key).key.slot);}
   nativeRpc(key:NativeKey,method:string,args:readonly unknown[],peerId?:number):number{this.requireStage();this.node(key);this.calls.push({op:"rpc",key,phase:this.stage,value:{method,args,peerId}});return 0;}
   isAlive(key:NativeKey):boolean{return this.nodes.get(nativeKeyId(key))?.alive===true;}

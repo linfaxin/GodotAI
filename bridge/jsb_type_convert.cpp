@@ -200,7 +200,7 @@ namespace jsb
                 }
 
                 void* pointer = self->GetAlignedPointerFromInternalField(IF_Pointer);
-                r_cvar = Environment::wrap(isolate)->verify_object(pointer) ? (Object*) pointer : nullptr;
+                r_cvar = Environment::wrap(isolate)->verify_object(pointer, self) ? (Object*) pointer : nullptr;
                 return true;
             }
         case Variant::BOOL:
@@ -321,7 +321,10 @@ namespace jsb
             }
         case Variant::OBJECT:
             {
-                Object* gd_obj = (Object*) p_cvar;
+                // Containers can retain an OBJECT Variant after its native
+                // object died. The cast only reads its historical address;
+                // resolve the stored ObjectID before exposing any wrapper.
+                Object* gd_obj = p_cvar.get_validated_object();
                 if (unlikely(!gd_obj))
                 {
                     r_jval = v8::Null(isolate);
@@ -547,7 +550,7 @@ namespace jsb
                         return false;
                     }
                     void* pointer = self->GetAlignedPointerFromInternalField(IF_Pointer);
-                    r_cvar = Environment::wrap(isolate)->verify_object(pointer) ? (Object*) pointer : nullptr;
+                    r_cvar = Environment::wrap(isolate)->verify_object(pointer, self) ? (Object*) pointer : nullptr;
                     return true;
                 }
             default: return false;
@@ -556,7 +559,9 @@ namespace jsb
 #if JSB_WITH_BIGINT
         if (p_jval->IsBigInt())
         {
-            r_cvar = p_jval.As<v8::BigInt>()->Int64Value();
+            int64_t integer;
+            if (!impl::Helper::to_int64(p_jval, integer)) return false;
+            r_cvar = integer;
             return true;
         }
 #endif
@@ -694,7 +699,7 @@ namespace jsb
 
         // dead objects return true with a nullptr
         void* pointer = self->GetAlignedPointerFromInternalField(IF_Pointer);
-        r_godot_obj = Environment::wrap(isolate)->verify_object(pointer) ? (Object*) pointer : nullptr;
+        r_godot_obj = Environment::wrap(isolate)->verify_object(pointer, self) ? (Object*) pointer : nullptr;
         return true;
     }
 

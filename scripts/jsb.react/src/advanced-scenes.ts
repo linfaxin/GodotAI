@@ -1,0 +1,11 @@
+import * as React from 'react';
+import {component} from './host-component';
+import {Node2D,Node3D,type CommonProps,type SpatialProps,type Node2DProps} from './components';
+import type {AssetRef} from './contracts';
+export const BoneAttachment3D=component<'BoneAttachment3D',SpatialProps & {boneName?:string}>('BoneAttachment3D');
+export const Skeleton3D=component<'Skeleton3D',SpatialProps & {profile?:AssetRef<'SkeletonProfile'>|null;showRestOnly?:boolean}>('Skeleton3D');
+export const AnimationTree=component<'AnimationTree',CommonProps & {treeRoot?:AssetRef<'AnimationNodeBlendTree'|'AnimationNodeStateMachine'|'AnimationNodeBlendSpace1D'|'AnimationNodeBlendSpace2D'>|null;animPlayer?:string;active?:boolean;callbackModeProcess?:0|1|2}>('AnimationTree');
+export const NativeScene=React.forwardRef<import('./runtime').NodeReadHandle<'Node3D'>,SpatialProps & {scene:AssetRef<'PackedScene'>|null}>(({scene,...props},ref)=>React.createElement(Node3D,{...props,packedScene:scene,ref}));
+NativeScene.displayName='NativeScene';
+export const NativeScene2D=React.forwardRef<import('./runtime').NodeReadHandle<'Node2D'>,Node2DProps & {scene:AssetRef<'PackedScene'>|null}>(({scene,...props},ref)=>React.createElement(Node2D,{...props,packedScene:scene,ref}));
+NativeScene2D.displayName='NativeScene2D';

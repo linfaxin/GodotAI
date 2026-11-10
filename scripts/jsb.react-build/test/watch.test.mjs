@@ -57,13 +57,13 @@ test('watch shuts down before rebuilding, waits through a failed build and resta
 });
 
 for (const selectedEntry of [undefined, 'app']) test(`${selectedEntry ? 'watch --entry' : 'plain watch'} resumes an existing SDK preview without duplicating it`, async t => {
-  const { root, config, processes } = await project(t), abort = new AbortController();
+  const { root, config, processes } = await project(t), abort = new AbortController(),events=[];
   const build = await buildProject({ projectRoot: root });
   const preview = await startManagedPreview(config, build.generation, 'app', { headless: true });
   await waitFor(async () => (await processes()).length === 1);
-  const watching = watchProject({ projectRoot: root, entry: selectedEntry, skipInitial: true, signal: abort.signal, pollMs: 25, onEvent() {} });
+  const watching = watchProject({ projectRoot: root, entry: selectedEntry, skipInitial: true, signal: abort.signal, pollMs: 25, onEvent:event=>events.push(event) });
   try {
-    await new Promise(r => setTimeout(r, 100));
+    await waitFor(()=>events.some(event=>event.event==='watching'));
     await fs.writeFile(path.join(root, 'src/App.tsx'), source('two'));
     await waitFor(async () => (await processes()).length === 2);
     assert.equal((await preview.result).code, 0);
@@ -80,7 +80,7 @@ test('watch refuses to stop or adopt an external application with no SDK preview
   await fs.writeFile(lease, JSON.stringify({ schemaVersion: 1, pid: process.pid, rootId: 'app', rootInstance: 'external', createdAtMs: Date.now() }));
   const watching = watchProject({ projectRoot: root, skipInitial: true, signal: abort.signal, pollMs: 25, onEvent: e => events.push(e) });
   try {
-    await new Promise(r => setTimeout(r, 100)); await fs.writeFile(path.join(root, 'src/App.tsx'), source('changed'));
+    await waitFor(()=>events.some(event=>event.event==='watching')); await fs.writeFile(path.join(root, 'src/App.tsx'), source('changed'));
     await waitFor(() => events.some(e => e.event === 'error' && e.error.includes('E_RUN_ACTIVE')));
     await fs.access(lease); await assert.rejects(fs.access(`${lease}.shutdown`));
   } finally { abort.abort(); await watching; }

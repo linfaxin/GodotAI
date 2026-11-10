@@ -141,6 +141,7 @@ namespace v8
     template <typename T>
     class Global
     {
+        template<typename S> friend class Global;
         enum WeakType { kStrong, kWeak, kWeakCallback, };
 
         // clear all fields silently after moved
@@ -149,6 +150,7 @@ namespace v8
             isolate_ = nullptr;
             value_ = -1;
             weak_type_ = WeakType::kStrong;
+            weak_callback_id_ = 0;
         }
 
     public:
@@ -167,20 +169,22 @@ namespace v8
             isolate_ = other.isolate_;
             weak_type_ = other.weak_type_;
             value_ = other.value_;
+            weak_callback_id_ = other.weak_callback_id_;
             other._clear();
         }
 
         template <typename S>
         Global& operator=(Global<S>&& other)
         {
-            if (this != &other)
+            if (static_cast<const void*>(this) != static_cast<const void*>(&other))
             {
                 Reset();
-                if (!other.IsEmpty())
+                if (other.isolate_)
                 {
                     isolate_ = other.isolate_;
-                    weak_type_ = other.weak_type_;
+                    weak_type_ = static_cast<WeakType>(other.weak_type_);
                     value_ = other.value_;
+                    weak_callback_id_ = other.weak_callback_id_;
                     other._clear();
                 }
             }
@@ -191,31 +195,18 @@ namespace v8
         {
             if (!isolate_) return;
 
-            switch (weak_type_)
+            if (weak_type_ == WeakType::kStrong)
             {
-            case WeakType::kStrong:
-                {
-                    // release if strong referenced
-                    jsb_check(is_alive());
-                    jsbi_handle_Reset(jsb::impl::Broker::get_engine(isolate_), value_);
-                    break;
-                }
-            case WeakType::kWeakCallback:
-                {
-                    // clear callback
-                    if (is_alive())
-                    {
-                        jsb::impl::Broker::SetWeakCallback(isolate_, value_, nullptr, nullptr);
-                        jsbi_handle_Reset(jsb::impl::Broker::get_engine(isolate_), value_);
-                    }
-                    break;
-                }
-            default: break;
+                jsb_check(is_alive());
             }
-
-            isolate_ = nullptr;
-            value_ = -1;
-            weak_type_ = WeakType::kStrong;
+            else if (weak_type_ == WeakType::kWeakCallback)
+            {
+                jsb::impl::Broker::CancelWeakCallback(isolate_, weak_callback_id_);
+            }
+            // Remove also dead and callback-free weak handles. Removal is
+            // idempotent if a preceding IsValid already discarded the entry.
+            jsbi_handle_Reset(jsb::impl::Broker::get_engine(isolate_), value_);
+            _clear();
         }
 
         void Reset(Isolate* isolate, Local<T> value)
@@ -244,7 +235,8 @@ namespace v8
             if (weak_type_ == WeakType::kWeakCallback)
             {
                 // clear callback
-                jsb::impl::Broker::SetWeakCallback(isolate_, value_, nullptr, nullptr);
+                jsb::impl::Broker::CancelWeakCallback(isolate_, weak_callback_id_);
+                weak_callback_id_ = 0;
             }
             weak_type_ = WeakType::kStrong;
             jsbi_handle_ClearWeak(jsb::impl::Broker::get_engine(isolate_), value_);
@@ -264,7 +256,7 @@ namespace v8
         {
             jsb_check(isolate_ && weak_type_ == WeakType::kStrong && is_alive());
 
-            jsb::impl::Broker::SetWeakCallback(isolate_, value_, parameter, (void*) callback);
+            weak_callback_id_ = jsb::impl::Broker::SetWeakCallback(isolate_, value_, parameter, (void*) callback);
             weak_type_ = WeakType::kWeakCallback;
             jsbi_handle_SetWeak(jsb::impl::Broker::get_engine(isolate_), value_);
         }
@@ -311,6 +303,8 @@ namespace v8
         jsb::impl::HandleID value_ = -1;
 
         WeakType weak_type_ = WeakType::kStrong;
+
+        uintptr_t weak_callback_id_ = 0;
     };
 
     template <typename T>

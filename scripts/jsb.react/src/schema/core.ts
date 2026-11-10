@@ -8,7 +8,7 @@ export interface PropertySchema {
   readonly construction?: boolean; readonly layoutOutput?: boolean;
   /** Setter dependencies are explicit and included in the schema digest. */
   readonly writeOrder?: number;
-  readonly minimum?: number; readonly maximum?: number; readonly resourceTypes?: readonly string[]; readonly normalize?: "unitVector2";
+  readonly minimum?: number; readonly maximum?: number; readonly resourceTypes?: readonly string[]; readonly normalize?: "unitVector2" | "unitVector3";
 }
 export interface SignalSchema { readonly publicName: string; readonly nativeName: string; readonly parameters: readonly CodecName[]; readonly echo: "suppress" | "deliver"; }
 export interface CommandSchema { readonly publicName: string; readonly nativeName: string; readonly arguments: readonly CodecName[]; readonly result?: CodecName; readonly effects: readonly string[]; readonly phase: "process" | "physics" | "input" | "cleanup"; }

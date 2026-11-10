@@ -1,5 +1,9 @@
 # GodotJS React build
 
+Full-engine Web projects use the shared `prepareEngineProject({files, runtime, ...})` API from `@godot-js/react-build/core`. It returns project bytes, a manifest and diagnostics for the browser PCK adapter or Node tooling. Native main scenes, autoloads, UID metadata and imported resource caches are preserved; the browser does not run Godot editor importers.
+
+The commands and managed-entry policies documented below describe the legacy React CLI pipeline. Its unmanaged-main-scene and business-autoload restrictions do not apply to full-engine projects prepared through the shared core API.
+
 `@godot-js/react-build` compiles ordinary React TSX components into a single canonical React runtime, application modules, genuine entry/native interface scripts, resource hubs and a sealed manifest. Godot editor/export integration consumes the manifest. Application modules never receive fake `.ts` files.
 
 ```js

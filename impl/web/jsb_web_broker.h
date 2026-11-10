@@ -13,7 +13,8 @@ namespace jsb::impl
     class Broker
     {
     public:
-        static void SetWeakCallback(v8::Isolate* isolate, HandleID value, void* parameter, void* callback);
+        static uintptr_t SetWeakCallback(v8::Isolate* isolate, HandleID value, void* parameter, void* callback);
+        static void CancelWeakCallback(v8::Isolate* isolate, uintptr_t p_internal_data_id);
 
         static JSRuntime get_engine(v8::Isolate* isolate);
     };

@@ -28,7 +28,8 @@
     "ci:should-publish": "node scripts/release/should-publish.js",
     "ci:publish": "node scripts/release/publish.js",
     "ci:test-project": "node scripts/release/test-project.js",
-    "ci:version": "changeset version && node scripts/release/version.js"
+    "ci:version": "changeset version && node scripts/release/version.js",
+    "test:showcase:native": "node scripts/test/showcase-native.mjs"
   },
   "devDependencies": {
     "@changesets/cli": "^2.29.4",

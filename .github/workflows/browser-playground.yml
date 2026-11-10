@@ -79,7 +79,7 @@ jobs:
   browser:
     needs: contracts
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
         with:
@@ -137,7 +137,59 @@ jobs:
         env:
           ENGINE_BUILD_REPORT: ${{ runner.temp }}/browser-engine-report.json
         run: node tests/browser-preflight/verify-source-maps.mjs "$RUNNER_TEMP/browser-preflight-site" "$RUNNER_TEMP/browser-source-map-results"
-      - name: Prepare the complete static Playground candidate
+      - name: Build the headless GodotJS editor for native project and legacy asset export
+        working-directory: ${{ runner.temp }}/godot-browser-build
+        run: >-
+          scons -j4 platform=linuxbsd target=editor arch=x86_64
+          skip_js_runtime=yes use_quickjs_ng=yes tests=no optimize=speed debug_symbols=no
+          vulkan=no opengl3=no x11=no wayland=no alsa=no pulseaudio=no
+          dbus=no speechd=no udev=no sdl=no fontconfig=no accesskit=no
+          modules_enabled_by_default=no module_GodotJS_enabled=yes
+          module_regex_enabled=yes module_gdscript_enabled=yes module_freetype_enabled=yes
+          module_svg_enabled=yes module_text_server_fb_enabled=yes module_gridmap_enabled=yes
+          module_navigation_2d_enabled=yes module_navigation_3d_enabled=yes
+          module_godot_physics_2d_enabled=yes module_godot_physics_3d_enabled=yes
+          module_ogg_enabled=yes module_vorbis_enabled=yes module_gltf_enabled=yes module_jpg_enabled=yes
+      - name: Build the default full-engine product candidate
+        env:
+          GODOT: ${{ runner.temp }}/godot-browser-build/bin/godot.linuxbsd.editor.x86_64
+          GODOT_IMPORTER: ${{ runner.temp }}/godot-browser-build/bin/godot.linuxbsd.editor.x86_64
+        run: >-
+          node apps/playground/scripts/build.mjs
+          --engine-report "$RUNNER_TEMP/browser-engine-report.json"
+          --out "$RUNNER_TEMP/default-playground-site"
+      - name: Accept the exact default product candidate
+        env:
+          PLAYGROUND_TEST_DIRECTORY: ${{ runner.temp }}/default-playground-site
+          PLAYWRIGHT_CHROMIUM_EXECUTABLE: ${{ env.CHROMIUM }}
+          PLAYGROUND_FULL_ENGINE_LOOPS: '50'
+          PLAYGROUND_FULL_ENGINE_REPORT: ${{ runner.temp }}/default-playground-results/runtime.json
+          PLAYGROUND_EDITOR_REPORT: ${{ runner.temp }}/default-playground-results/editor.json
+          PLAYGROUND_BRIDGE_REPORT: ${{ runner.temp }}/default-playground-results/bridge.json
+          PLAYGROUND_SCREENSHOTS: ${{ runner.temp }}/default-playground-results/screenshots
+        run: |
+          node apps/playground/scripts/seal-site-acceptance.mjs "$PLAYGROUND_TEST_DIRECTORY" "$RUNNER_TEMP/default-playground-results" --begin
+          pnpm --filter @godot-js/playground test:browser:full
+          pnpm --filter @godot-js/playground test:browser:editor
+          pnpm --filter @godot-js/playground test:browser:bridge
+          PLAYGROUND_TEST_SHELL=1 node apps/playground/scripts/browser-project-test.mjs > "$RUNNER_TEMP/default-playground-results/projects.json"
+          node apps/playground/scripts/browser-test.mjs > "$RUNNER_TEMP/default-playground-results/legacy.json"
+          node apps/playground/scripts/browser-resource-test.mjs --usability > "$RUNNER_TEMP/default-playground-results/usability.json"
+          node apps/playground/scripts/browser-resource-test.mjs --refinements > "$RUNNER_TEMP/default-playground-results/refinements.json"
+          node apps/playground/scripts/seal-site-acceptance.mjs "$PLAYGROUND_TEST_DIRECTORY" "$RUNNER_TEMP/default-playground-results"
+          node apps/playground/scripts/seal-site-acceptance.mjs "$PLAYGROUND_TEST_DIRECTORY" "$RUNNER_TEMP/default-playground-results" --verify
+      - name: Keep the default product candidate and its exact-site acceptance
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-playground-candidate-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            ${{ runner.temp }}/default-playground-site
+            ${{ runner.temp }}/default-playground-results
+            ${{ runner.temp }}/browser-engine-report.json
+      - name: Prepare the compatibility conformance candidate
         env:
           RELEASE_VERSION: ${{ inputs.release_version || '0.1.0' }}
         run: >-
@@ -189,7 +241,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: browser-playground-candidate-${{ github.sha }}
+          name: browser-conformance-candidate-${{ github.sha }}
           if-no-files-found: warn
           retention-days: 14
           path: |

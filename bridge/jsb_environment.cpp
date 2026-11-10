@@ -172,36 +172,45 @@ namespace jsb
     private:
         static void* create_callback(void* p_token, void* p_instance)
         {
-            return p_instance;
+            if (const auto env = EnvironmentStore::get_shared().access(p_token))
+            {
+                if (auto ticket = env->get_binding_ticket(p_instance))
+                    return memnew(std::shared_ptr<ObjectBindingTicket>(std::move(ticket)));
+            }
+            return nullptr;
         }
 
         static void free_callback(void* p_token, void* p_instance, void* p_binding)
         {
+            auto* payload = static_cast<std::shared_ptr<ObjectBindingTicket>*>(p_binding);
+            if (!payload) return;
+            const auto ticket = *payload;
+            memdelete(payload);
             if (const std::shared_ptr<Environment> env = EnvironmentStore::get_shared().access(p_token))
             {
-                // p_binding must equal to the return value of `create_callback`
-                jsb_check(p_instance == p_binding);
-
                 // must check before async, InstanceBindingCallback need to know whether the object should die or not if it's a ref-counted object.
-                if (env->verify_object(p_binding))
+                if (ticket->pointer == p_instance && env->verify_binding(ticket))
                 {
                     // Note: Our pointer to the native Godot object is about to become invalid. We must IMMEDIATELY
                     //       remove this pointer/address from our data structures. It's not safe to post a message and
                     //       do this work on the environment's thread, because another Godot object may be allocated at
                     //       the same address before our message is handled. This is not hypothetical, it was observed
                     //       in practice several times.
-                    env->free_object(p_binding, FinalizationType::None);
+                    env->free_object(p_instance, FinalizationType::None, ticket, true);
                 }
             }
         }
 
         static GDExtensionBool reference_callback(void* p_token, void* p_binding, GDExtensionBool p_reference)
         {
+            const auto* payload = static_cast<const std::shared_ptr<ObjectBindingTicket>*>(p_binding);
+            if (!payload) return true;
+            const auto ticket = *payload;
             if (const std::shared_ptr<Environment> env = EnvironmentStore::get_shared().access(p_token))
             {
-                if (env->verify_object(p_binding) && env->add_async_call(
+                if (env->verify_binding(ticket) && env->add_async_call(
                     p_reference ? Environment::AsyncCall::TYPE_REF : Environment::AsyncCall::TYPE_DEREF,
-                    p_binding))
+                    ticket->pointer, ticket))
                 {
                     //NOTE Always return false to avoid `delete` in godot unreference() call,
                     //     object_gc_callback would eventually delete the RefCounted Object.
@@ -253,6 +262,7 @@ namespace jsb
 
     Environment::Environment(const CreateParams& p_params)
         : thread_id_(p_params.thread_id)
+        , binding_epoch_([] { static std::atomic<uint64_t> next{0}; return ++next; }())
         , object_db_(p_params.initial_object_slots)
     {
         JSB_BENCHMARK_SCOPE(JSEnvironment, Construct);
@@ -323,9 +333,17 @@ namespace jsb
                 // Populate StringNames replacement list so that classes can be lazily loaded by their exposed class name.
                 if (internal::Settings::get_camel_case_bindings_enabled())
                 {
-                    List<StringName> exposed_class_list = internal::NamingUtil::get_exposed_original_class_list();
+                    // Lazy loading accepts every ClassDB class, including
+                    // internal classes omitted from generated public types.
+#if GODOT_4_6_OR_NEWER
+                    LocalVector<StringName> registered_class_list;
+                    ClassDB::get_class_list(registered_class_list);
+#else
+                    List<StringName> registered_class_list;
+                    ClassDB::get_class_list(&registered_class_list);
+#endif
 
-                    for (auto it = exposed_class_list.begin(); it != exposed_class_list.end(); ++it)
+                    for (auto it = registered_class_list.begin(); it != registered_class_list.end(); ++it)
                     {
                         String exposed_name = internal::NamingUtil::get_class_name(*it);
 
@@ -532,6 +550,17 @@ namespace jsb
         }
 
         variant_allocator_.drain();
+        // A background native free can have retired its DB entry just before
+        // dispose began. Reset every outstanding stable reference on this
+        // owning thread, even if its release message arrives after this drain.
+        for (auto& pair : binding_records_)
+        {
+            pair.second->active.store(false, std::memory_order_release);
+            pair.second->reference.Reset();
+            pair.second->gc_lease.reset();
+        }
+        binding_records_.clear();
+        exec_async_calls();
         flags_ |= EF_PostDispose;
         EnvironmentStore::get_shared().remove(this);
     }
@@ -606,27 +635,28 @@ namespace jsb
         {
             for (const AsyncCall& call : calls)
             {
-                exec_async_call(call.type_, call.binding_);
+                exec_async_call(call.type_, call.binding_, call.ticket_);
             }
             calls.clear();
         }
 #endif
     }
 
-    void Environment::exec_async_call(AsyncCall::Type p_type, void* p_binding)
+    void Environment::exec_async_call(AsyncCall::Type p_type, void* p_binding, const std::shared_ptr<ObjectBindingTicket>& p_ticket)
     {
         switch (p_type)
         {
-        case AsyncCall::TYPE_REF:       reference_object(p_binding, true); break;
-        case AsyncCall::TYPE_DEREF:     reference_object(p_binding, false); break;
-        case AsyncCall::TYPE_GC_FREE:   free_object(p_binding, FinalizationType::Default); break;
+        case AsyncCall::TYPE_REF:       reference_object(p_binding, true, p_ticket); break;
+        case AsyncCall::TYPE_DEREF:     reference_object(p_binding, false, p_ticket); break;
+        case AsyncCall::TYPE_GC_FREE:
+            free_object(p_binding, FinalizationType::Default, p_ticket);
+            if (p_ticket && !p_ticket->active.load(std::memory_order_acquire)) release_binding_reference(p_ticket);
+            break;
         case AsyncCall::TYPE_RELEASE_BINDING_REF:
         {
             // The native pointer was already atomically retired on its freeing
             // thread. Only JS handle disposal belongs to this environment.
-            auto* reference = static_cast<v8::Global<v8::Object>*>(p_binding);
-            reference->Reset();
-            memdelete(reference);
+            release_binding_reference(p_ticket);
             break;
         }
         case AsyncCall::TYPE_TRANSFER_:
@@ -648,16 +678,16 @@ namespace jsb
         }
     }
 
-    bool Environment::add_async_call(AsyncCall::Type p_type, void* p_binding)
+    bool Environment::add_async_call(AsyncCall::Type p_type, void* p_binding, const std::shared_ptr<ObjectBindingTicket>& p_ticket)
     {
 #if JSB_THREADING
         if (Thread::get_caller_id() != thread_id_)
         {
-            async_calls_.add(AsyncCall(p_type, p_binding));
+            async_calls_.add(AsyncCall(p_type, p_binding, p_ticket));
             return true;
         }
 #endif
-        exec_async_call(p_type, p_binding);
+        exec_async_call(p_type, p_binding, p_ticket);
         return true;
     }
 
@@ -682,7 +712,7 @@ namespace jsb
         // call 'ontransfer'
         {
             ObjectHandleConstPtr handle = object_db_.try_get_object(p_data->source_worker_id);
-            const v8::Local<v8::Object> worker = handle->ref_.Get(isolate_).As<v8::Object>();
+            const v8::Local<v8::Object> worker = handle->binding->reference.Get(isolate_).As<v8::Object>();
             jsb_check(!worker.IsEmpty());
             handle = nullptr;
 
@@ -781,7 +811,7 @@ namespace jsb
             JSB_LOG(Error, "invalid worker");
             return;
         }
-        const v8::Local<v8::Object> obj = handle->ref_.Get(isolate_).As<v8::Object>();
+        const v8::Local<v8::Object> obj = handle->binding->reference.Get(isolate_).As<v8::Object>();
         jsb_check(!obj.IsEmpty());
         handle = nullptr;
 
@@ -864,6 +894,8 @@ namespace jsb
             }
         }
 
+        const auto previous_binding = get_binding_ticket(p_pointer);
+        const bool replaces_collected_wrapper = previous_binding && previous_binding->reference.IsEmpty();
         // We need to increase the refcount because Godot Objects are bound as external pointer with a strong JS reference,
         // and unreference() will always be called on gc callbacks.
         int external_rc = 1;
@@ -878,11 +910,28 @@ namespace jsb
             // for a ref-counted object which instantiated by GodotJS, the external_rc will be 0.
             // then, the object will behave like a managed JS object.
             // otherwise, it will be strongly referenced in JS until all external references are released (unreference).
-            external_rc = ref_counted->get_reference_count() - 1;
+            // Godot reports only transitions across the last external owner,
+            // not every native ref/unref. Also exclude the collected wrapper's
+            // still-held native contribution until it is balanced below.
+            const int wrapper_references = replaces_collected_wrapper ? 2 : 1;
+            external_rc = ref_counted->get_reference_count() > wrapper_references ? 1 : 0;
         }
         const NativeObjectID object_id = bind_pointer(p_class_id, NativeClassType::GodotObject, (void*) p_pointer, p_object, external_rc, p_js_owned_non_ref);
         if (!object_id) return {};
 
+        auto* previous_payload = static_cast<std::shared_ptr<ObjectBindingTicket>*>(p_pointer->get_instance_binding(this, nullptr));
+        const auto current_ticket = get_binding_ticket(p_pointer);
+        if (previous_payload && *previous_payload != current_ticket)
+            p_pointer->free_instance_binding(this);
+        if (replaces_collected_wrapper && previous_binding != current_ticket && p_pointer->is_ref_counted())
+        {
+            // The old wrapper's native reference is replaced by the newly
+            // initialized one. Its late GC message must not release it again.
+            static_cast<RefCounted*>(p_pointer)->unreference();
+        }
+        // Balance the retired wrapper while this Environment has no native
+        // payload. Its threshold notification must not decrement the new
+        // binding's already-computed external-owner state.
         p_pointer->get_instance_binding(this, gd_instance_binding_callbacks);
         return object_id;
     }
@@ -898,11 +947,19 @@ namespace jsb
         }
         jsb_checkf(native_classes_.is_valid_index(p_class_id), "bad class_id");
 
+        const auto previous_ticket = get_binding_ticket(p_pointer);
         ObjectHandlePtr handle;
         const NativeObjectID object_id = object_db_.add_object(p_pointer, &handle);
         if (!object_id || !handle)
         {
             impl::Helper::throw_error(isolate_, "E_NATIVE_REBIND: cannot replace an owned native lifetime");
+            return {};
+        }
+        if (handle->binding)
+        {
+            const auto previous = handle->binding;
+            if (!previous->reference.IsEmpty() && previous->reference.Get(isolate_) == p_object) return object_id;
+            impl::Helper::throw_error(isolate_, "E_NATIVE_REBIND: cannot replace a live native wrapper");
             return {};
         }
         jsb_check(p_object->InternalFieldCount() == IF_ObjectFieldCount);
@@ -913,16 +970,27 @@ namespace jsb
         p_object->SetAlignedPointerInInternalFields(IF_ObjectFieldCount, indices, internal_fields);
 
         handle->class_id = p_class_id;
+        handle->binding = std::make_shared<ObjectBindingTicket>();
+        if (previous_ticket && !previous_ticket->active.load(std::memory_order_acquire) && !previous_ticket->gc_lease)
+            binding_records_.erase(previous_ticket->generation);
+        const auto ticket = handle->binding;
+        ticket->pointer = p_pointer;
+        ticket->id = object_id;
+        ticket->environment_epoch = binding_epoch_;
+        ticket->generation = ++next_binding_generation_;
+        ticket->godot_object = p_type == NativeClassType::GodotObject;
+        if (ticket->godot_object) ticket->godot_id = static_cast<Object*>(p_pointer)->get_instance_id();
+        binding_records_[ticket->generation] = ticket;
         handle->js_owned_non_ref_ = p_js_owned_non_ref;
 #if JSB_DEBUG
         handle->pointer = p_pointer;
 #endif
 
         jsb_v8_check(native_classes_.get_value(p_class_id).type == p_type);
-        handle->ref_.Reset(isolate_, p_object);
+        ticket->reference.Reset(isolate_, p_object);
         if (p_external_rc == 0)
         {
-            handle->ref_.SetWeak(p_pointer, &object_gc_callback, v8::WeakCallbackType::kInternalFields);
+            ticket->reference.SetWeak(static_cast<void*>(ticket.get()), &object_gc_callback, v8::WeakCallbackType::kInternalFields);
         }
         else
         {
@@ -953,14 +1021,48 @@ namespace jsb
             return nullptr;
         }
         void* pointer = p_obj->GetAlignedPointerFromInternalField(IF_Pointer);
-        return verify_object(pointer) ? pointer : nullptr;
+        return verify_object(pointer, p_obj) ? pointer : nullptr;
     }
 
-    bool Environment::reference_object(void* p_pointer, bool p_is_inc)
+    std::shared_ptr<ObjectBindingTicket> Environment::get_binding_ticket(void* p_pointer) const
+    {
+        const ObjectHandleConstPtr handle = object_db_.try_get_object(p_pointer);
+        return handle ? handle->binding : std::shared_ptr<ObjectBindingTicket>();
+    }
+
+    bool Environment::verify_binding(const std::shared_ptr<ObjectBindingTicket>& p_ticket) const
+    {
+        if (!p_ticket || p_ticket->environment_epoch != binding_epoch_ || !p_ticket->active.load(std::memory_order_acquire)) return false;
+        const ObjectHandleConstPtr handle = object_db_.try_get_object(p_ticket->id);
+        return handle && handle->binding == p_ticket;
+    }
+
+    bool Environment::verify_object(void* p_pointer, const v8::Local<v8::Object>& p_wrapper) const
+    {
+        check_internal_state();
+        if (!p_pointer || p_wrapper.IsEmpty()) return false;
+        const auto ticket = get_binding_ticket(p_pointer);
+        if (!verify_binding(ticket) || ticket->reference.IsEmpty()) return false;
+        if (ticket->godot_object && compat::ObjectDB::get_instance(ticket->godot_id) != p_pointer) return false;
+        return ticket->reference.Get(isolate_) == p_wrapper;
+    }
+
+    void Environment::release_binding_reference(const std::shared_ptr<ObjectBindingTicket>& p_ticket)
+    {
+        check_internal_state();
+        if (!p_ticket || p_ticket->environment_epoch != binding_epoch_) return;
+        p_ticket->reference.Reset();
+        // Keep records awaiting V8's second pass discoverable by dispose().
+        // Otherwise a canceled second pass could strand the self-owned lease.
+        if (!p_ticket->active.load(std::memory_order_acquire) && !p_ticket->gc_lease)
+            binding_records_.erase(p_ticket->generation);
+    }
+
+    bool Environment::reference_object(void* p_pointer, bool p_is_inc, const std::shared_ptr<ObjectBindingTicket>& p_ticket)
     {
         check_internal_state();
         const ObjectHandlePtr object_handle = object_db_.try_get_object(p_pointer);
-        if (jsb_unlikely(!object_handle))
+        if (jsb_unlikely(!object_handle || (p_ticket && object_handle->binding != p_ticket)))
         {
             JSB_LOG(Verbose, "UNEXPECTED bad pointer %d", (uintptr_t) p_pointer);
             return false;
@@ -976,19 +1078,19 @@ namespace jsb
             {
                 // A first-pass GC callback may already have reset `ref_` while second-pass free
                 // is still pending. Treat this as a stale/dead binding instead of crashing.
-                if (jsb_unlikely(object_handle->ref_.IsEmpty()))
+                if (jsb_unlikely(!object_handle->binding || object_handle->binding->reference.IsEmpty()))
                 {
                     JSB_LOG(Warning, "UNEXPECTED inc reference on dead value %d", (uintptr_t) p_pointer);
                     return false;
                 }
-                object_handle->ref_.ClearWeak();
+                object_handle->binding->reference.ClearWeak();
             }
             ++object_handle->ref_count_;
             return true;
         }
 
         // removing references
-        if (jsb_unlikely(object_handle->ref_.IsEmpty()))
+        if (jsb_unlikely(!object_handle->binding || object_handle->binding->reference.IsEmpty()))
         {
             JSB_LOG(Warning, "UNEXPECTED dec reference on dead value %d", (uintptr_t) p_pointer);
             return false;
@@ -999,7 +1101,7 @@ namespace jsb
         --object_handle->ref_count_;
         if (object_handle->ref_count_ == 0)
         {
-            object_handle->ref_.SetWeak(p_pointer, &object_gc_callback, v8::WeakCallbackType::kInternalFields);
+            object_handle->binding->reference.SetWeak(static_cast<void*>(object_handle->binding.get()), &object_gc_callback, v8::WeakCallbackType::kInternalFields);
         }
         return true;
     }
@@ -1015,7 +1117,7 @@ namespace jsb
     // in this case, the only modified state is object_db_ (p_finalize is FinalizationType::None)
     // ---
     // whether the ObjectHandlePtr lock satisfies the requirement of thread safety is still unknown
-    void Environment::free_object(void* p_pointer, FinalizationType p_finalize)
+    void Environment::free_object(void* p_pointer, FinalizationType p_finalize, const std::shared_ptr<ObjectBindingTicket>& p_ticket, bool p_native_free)
     {
         if (p_finalize != FinalizationType::None)
         {
@@ -1025,7 +1127,7 @@ namespace jsb
 
         // avoid crash in the situation that `InstanceBindingCallbacks::free_callback` is called before JS object gc callback is called,
         // which makes the pointer already erased in `object_gc_callback`
-        if (jsb_unlikely(!object_handle))
+        if (jsb_unlikely(!object_handle || (p_ticket && object_handle->binding != p_ticket)))
         {
             return;
         }
@@ -1035,8 +1137,7 @@ namespace jsb
 #endif
         const NativeClassID class_id = object_handle->class_id;
         const bool js_owned_non_ref = object_handle->js_owned_non_ref_;
-        // hold it in a local variable to avoid gc too early
-        v8::Global<v8::Object> obj_ref = std::move(object_handle->ref_);
+        const auto ticket = object_handle->binding;
 
         // erase from ObjectDB before clearing the ref to avoid exposing a transient state
         // with an empty `ref_` in the ObjectDB, which can race with reference callbacks.
@@ -1046,25 +1147,20 @@ namespace jsb
         if (removed.react_owner_token && react_bridge_)
             react_bridge_->notify_removed(removed.id, removed.react_owner_token, removed.react_object_id, removed.expected_release, removed.retirement_batch);
 
-        // TODO: Look into if we ought to be calling obj->free_instance_binding(this)
-
-        //TODO do not clear the internal field if calling from JS GC
-        // if (p_finalize != FinalizationType::None)
-        // {
-        //     //NOTE if we clear the internal field here,
-        //     //     only null check is required when reading this value later
-        //     //     (like the usage in '_godot_object_method')
-        //     clear_internal_field(isolate_, obj_ref);
-        // }
-
         if (!is_caller_thread())
         {
-            // Reset may touch engine-specific JS handle registries. Moving a
-            // handle is passive; do all actual JS cleanup on the owning thread.
-            auto* reference = memnew(v8::Global<v8::Object>(std::move(obj_ref)));
-            add_async_call(AsyncCall::TYPE_RELEASE_BINDING_REF, reference);
+            // Reset may touch engine-specific JS handle registries. The stable
+            // ticket stays in binding_records_ until owner-thread cleanup.
+            add_async_call(AsyncCall::TYPE_RELEASE_BINDING_REF, nullptr, ticket);
         }
-        else obj_ref.Reset();
+        else release_binding_reference(ticket);
+
+        if (ticket && ticket->godot_object && !p_native_free)
+        {
+            // A surviving engine-owned object must not retain an obsolete
+            // Environment binding (including when that Environment is gone).
+            static_cast<Object*>(p_pointer)->free_instance_binding(this);
+        }
 
         if (p_finalize != FinalizationType::None)
         {
@@ -1621,6 +1717,29 @@ namespace jsb
         DeferredClassRegister* class_register = class_register_map_.getptr(p_type_name);
         if (jsb_unlikely(!class_register))
         {
+            // Some engine classes are registered after Environment creation.
+            // Resolve their advertised alias against the current ClassDB on
+            // the first miss, then retain the normal reverse-name mapping.
+            internal::StringNames& names = internal::StringNames::get_singleton();
+            if (internal::Settings::get_camel_case_bindings_enabled()
+                && !ClassDB::classes.has(names.get_original_name(p_type_name)))
+            {
+#if GODOT_4_6_OR_NEWER
+                LocalVector<StringName> registered_class_list;
+                ClassDB::get_class_list(registered_class_list);
+#else
+                List<StringName> registered_class_list;
+                ClassDB::get_class_list(&registered_class_list);
+#endif
+                for (const StringName& original_name : registered_class_list)
+                {
+                    if (internal::NamingUtil::get_class_name(original_name) == p_type_name)
+                    {
+                        names.add_replacement(original_name, p_type_name);
+                        return expose_godot_object_class(ClassDB::classes.getptr(original_name), r_class_id);
+                    }
+                }
+            }
             if (r_class_id) *r_class_id = {};
             return nullptr;
         }
@@ -2233,7 +2352,13 @@ namespace jsb
 
     bool Environment::prepare_transfer_out(NativeObjectID p_worker_handle_id, int transfer_index, const Variant& p_variant, TransferData& r_transfer_data)
     {
-        if (p_variant.get_type() == Variant::OBJECT && ReactBridge::protects_structure(p_variant))
+        Object* object = p_variant.get_type() == Variant::OBJECT ? p_variant.get_validated_object() : nullptr;
+        if (p_variant.get_type() == Variant::OBJECT && !object)
+        {
+            impl::Helper::throw_error(isolate_, "E_NATIVE_TRANSFER: cannot transfer an invalid Object");
+            return false;
+        }
+        if (object && ReactBridge::protects_structure(object))
         {
             impl::Helper::throw_error(isolate_, "E_NATIVE_TRANSFER: a React-owned Node cannot leave its root environment");
             return false;
@@ -2244,7 +2369,7 @@ namespace jsb
 
         if (p_variant.get_type() == Variant::OBJECT)
         {
-            Object* obj = p_variant;
+            Object* obj = object;
             jsb_check(obj && object_db_.has_object(obj) && jsb::compat::ObjectDB::get_instance(p_variant));
 
             if (ScriptInstance* script_instance = obj->get_script_instance())
@@ -2266,7 +2391,12 @@ namespace jsb
 
         if (variant.get_type() == Variant::OBJECT)
         {
-            Object* obj = variant;
+            Object* obj = variant.get_validated_object();
+            if (!obj)
+            {
+                impl::Helper::throw_error(isolate_, "E_NATIVE_TRANSFER: transferred Object is no longer valid");
+                return;
+            }
             if (ReactBridge::protects_structure(obj))
             {
                 impl::Helper::throw_error(isolate_, "E_NATIVE_TRANSFER: a React-owned Node cannot be transferred");

@@ -1,0 +1,16 @@
+import {promises as fs} from 'node:fs';
+import path from 'node:path';
+import assert from 'node:assert/strict';
+import {spawnSync} from 'node:child_process';
+import {chromium} from 'playwright';
+import {createStaticServer} from './serve.mjs';
+const repo=new URL('../../../',import.meta.url).pathname,host=process.env.GODOT??path.join(repo,'tests/bin/godot-host-qjs'),template=process.env.GODOT_WEB_TEMPLATE;
+if(!template||!path.isAbsolute(template))throw Error('Set GODOT_WEB_TEMPLATE to the matching absolute Web template ZIP');
+const project=path.join(repo,'work/gpu-engine-probe'),dist=path.join(project,'web');await fs.mkdir(dist,{recursive:true});
+await fs.copyFile(path.join(repo,'tests/react/showcase/gpu-probe.gd'),path.join(project,'probe.gd'));
+await fs.writeFile(path.join(project,'project.godot'),'config_version=5\n[application]\nconfig/name="GPU engine probe"\nrun/main_scene="res://main.tscn"\n[display]\nwindow/size/viewport_width=256\nwindow/size/viewport_height=128\n[rendering]\nrenderer/rendering_method="gl_compatibility"\n');
+await fs.writeFile(path.join(project,'main.tscn'),'[gd_scene load_steps=2 format=3]\n[ext_resource type="Script" path="res://probe.gd" id="1"]\n[node name="GPUProbe" type="Node"]\nscript = ExtResource("1")\n');
+await fs.writeFile(path.join(project,'export_presets.cfg'),`[preset.0]\nname="GPU Web"\nplatform="Web"\nrunnable=true\nexport_filter="all_resources"\nexclude_filter="web/*"\n[preset.0.options]\ncustom_template/debug=${JSON.stringify(template)}\ncustom_template/release=${JSON.stringify(template)}\nvariant/thread_support=false\nvariant/extensions_support=false\n`);
+for(const args of [['--headless','--editor','--path',project,'--import'],['--headless','--path',project,'--export-debug','GPU Web',path.join(dist,'game.html')]]){const result=spawnSync(host,args,{encoding:'utf8',timeout:120000,maxBuffer:16*1024*1024});if(result.status!==0||/SCRIPT ERROR:|Parse Error/.test(result.stdout+result.stderr))throw Error('GPU probe export failed: '+result.stdout+result.stderr);}
+const server=createStaticServer(dist);await new Promise(r=>server.listen(0,'127.0.0.1',r));const browser=await chromium.launch({headless:true,executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE||undefined,args:['--no-sandbox','--enable-webgl','--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader','--disable-dev-shm-usage']});
+try{const page=await browser.newPage(),logs=[],errors=[];page.on('console',message=>logs.push(message.text()));page.on('pageerror',e=>errors.push(String(e)));await page.goto(`http://127.0.0.1:${server.address().port}/game.html`);await page.waitForFunction(()=>!!document.querySelector('canvas'),null,{timeout:120000});const end=Date.now()+120000;while(!logs.some(l=>/GPU_PROBE_(OK|FAILED)|SCRIPT ERROR:/.test(l))&&Date.now()<end)await page.waitForTimeout(250);assert.ok(logs.some(l=>l.includes('GPU_PROBE_OK')),logs.join('\n'));assert.ok(!logs.some(l=>/GPU_PROBE_FAILED|SCRIPT ERROR:/.test(l)),logs.join('\n'));assert.deepEqual(errors,[]);console.log(JSON.stringify({status:'passed',scope:'native engine capability, separate from TSX allowlist',evidence:logs.find(l=>l.includes('GPU_PROBE_OK'))},null,2));}finally{await browser.close();await new Promise(r=>server.close(r));}

@@ -1,0 +1,17 @@
+import assert from 'node:assert/strict';
+import {mkdir,writeFile} from 'node:fs/promises';
+import {resolve,dirname} from 'node:path';
+import {fileURLToPath} from 'node:url';
+import {spawnSync} from 'node:child_process';
+import {writeBootProject} from './boot-fixture.mjs';
+const repo=resolve(dirname(fileURLToPath(import.meta.url)),'../../../..');
+const directory=resolve(repo,'work/playground/p0/boot-native'+(process.argv.includes('--uid-main')?'-uid':''));await mkdir(directory,{recursive:true});
+const fixture=await writeBootProject(directory,{uidMain:process.argv.includes('--uid-main')});
+const result=spawnSync(process.env.GODOT??resolve(repo,'tests/bin/godot-host-qjs'),['--headless','--path',directory,'--quit-after','700','--fixed-fps','60'],{encoding:'utf8',timeout:90000});
+const output=(result.stdout??'')+(result.stderr??'');await writeFile(resolve(directory,'run.log'),output);process.stdout.write(output);
+assert.equal(result.status,0,'Native process must exit zero');assert(!output.includes(fixture.failureMarker),'Native boot assertions failed');
+assert(!/^ERROR:|SCRIPT ERROR:/m.test(output),'Native engine emitted an error');
+const line=output.split('\n').find(v=>v.startsWith('[JS] '+fixture.marker)||v.startsWith(fixture.marker));assert(line,'Native boot report missing');
+const report=JSON.parse(line.slice(line.indexOf(fixture.marker)+fixture.marker.length));assert.equal(report.sceneLoads,2);for(const name of fixture.expectedEntries)assert(report.entries[name].ready,name);
+await writeFile(resolve(directory,'report.json'),JSON.stringify({status:'passed',target:'native',uidMain:process.argv.includes('--uid-main'),report},null,2));
+console.log('P0_BOOT_NATIVE_OK');

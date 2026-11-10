@@ -12,13 +12,15 @@ import { pinRelease } from '../pin-web-release.mjs';
 import { collectBrowserEvidence } from '../collect-browser-evidence.mjs';
 import { buildBrowserEngine, snapshotBrowserSources } from '../../test/build-browser-engine.mjs';
 import { canonical, digest, inspectRelease, json, writeJson, identity, hashSiteRuntimeFiles } from '../web-release-utils.mjs';
+import { patchAudioLifecycle } from '../patch-web-audio-lifecycle.mjs';
 
 async function fixture(t, certifiedSource = false) {
   const root = await mkdtemp(resolve(tmpdir(), 'web-release-test-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   async function file(path, contents) { const target = resolve(root, path); await mkdir(dirname(target), { recursive: true }); await writeFile(target, contents); return target; }
   const engine = resolve(root, 'engine'); await mkdir(engine);
-  await file('engine/godot.js', '/* fixture engine, already-patched audio: godotjs-audio-lifecycle-v1 */ navigator.serviceWorker.getRegistration().then(GodotPWA.updateState.bind(null, cb));');
+  const audioFixture = await readFile(new URL('../../jsb.react-browser/test/fixtures/godot-4.6.1-audio.js',import.meta.url),'utf8');
+  await file('engine/godot.js', patchAudioLifecycle(audioFixture).code+'\nnavigator.serviceWorker.getRegistration().then(GodotPWA.updateState.bind(null, cb));');
   for (const name of ['godot.audio.worklet.js', 'godot.audio.position.worklet.js']) await file(`engine/${name}`, '/* fixture engine */');
   await file('engine/godot.wasm', Buffer.from([0, 97, 115, 109, 1, 0, 0, 0]));
   const archive = resolve(root, 'engine.zip');

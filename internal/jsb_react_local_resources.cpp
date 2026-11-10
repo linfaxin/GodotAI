@@ -36,7 +36,7 @@ namespace jsb::internal
                 return true;
             }
             if (p_value.get_type() != Variant::OBJECT) return true;
-            Object* object = p_value;
+            Object* object = p_value.get_validated_object();
             if (!object) return true;
             Resource* resource = Object::cast_to<Resource>(object);
             if (!resource)
