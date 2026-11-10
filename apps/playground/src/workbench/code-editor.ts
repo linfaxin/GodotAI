@@ -47,7 +47,7 @@ export function createCodeEditor(options: Options) {
   const models = new Map<string, monaco.editor.ITextModel>();
   const views = new Map<string, monaco.editor.ICodeEditorViewState>();
   let suppress = false;
-  const languageFor = (path: string) => /\.[cm]?tsx?$/.test(path) ? 'typescript' : /\.[cm]?jsx?$/.test(path) ? 'javascript' : path.endsWith('.json') ? 'json' : path.endsWith('.tres') ? 'godot-resource' : 'plaintext';
+  const languageFor = (path: string) => /\.[cm]?tsx?$/.test(path) ? 'typescript' : /\.[cm]?jsx?$/.test(path) ? 'javascript' : path.endsWith('.json') ? 'json' : /\.(?:tres|tscn|godot|cfg|gdshader|gdshaderinc|import|uid)$/.test(path) ? 'godot-resource' : 'plaintext';
   const saveView = () => { const model = instance.getModel(), view = instance.saveViewState(); if (model && view) views.set(model.uri.path, view); };
   instance.onDidChangeModelContent(() => { const model = instance.getModel(); if (!suppress && model) options.changed(model.uri.path, model.getValue()); });
   instance.onDidChangeCursorPosition(event => options.position(event.position.lineNumber, event.position.column));

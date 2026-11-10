@@ -22,6 +22,8 @@ namespace jsb
             if (TypeConvert::is_object(self))
             {
                 void* pointer = self->GetAlignedPointerFromInternalField(IF_Pointer);
+                if (!environment->verify_object(pointer, self))
+                    return jsb_format("[dead_object @%s]", (uint64_t) pointer);
                 const NativeClassInfo* class_info = environment->find_object_class(pointer);
                 if (jsb_unlikely(!class_info))
                 {

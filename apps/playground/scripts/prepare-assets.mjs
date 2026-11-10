@@ -5,7 +5,7 @@ import {spawnSync} from "node:child_process";
 import {createHash} from "node:crypto";
 const app=path.resolve(path.dirname(fileURLToPath(import.meta.url)),"..");
 const repo=path.resolve(app,"../.."),project=path.join(app,"project");
-const run=(bin,args)=>{const r=spawnSync(bin,args,{encoding:"utf8",maxBuffer:16*1024*1024});if(r.status!==0||/^(?:ERROR|SCRIPT ERROR):/m.test(r.stderr??""))throw Error(`${bin} failed (${r.status})\n${r.stdout}\n${r.stderr}`);return r.stdout;};
+const run=(bin,args)=>{const r=spawnSync(bin,args,{encoding:"utf8",maxBuffer:16*1024*1024});const errors=(r.stderr??'').split('\n').filter(line=>/^(?:ERROR|SCRIPT ERROR):/.test(line)&&line!=='ERROR: Godot was compiled without fontconfig, system font support is disabled.');if(r.status!==0||errors.length)throw Error(`${bin} failed (${r.status})\n${r.stdout}\n${r.stderr}`);return r.stdout;};
 export async function prepareAssets(){
   const sources=JSON.parse(await fs.readFile(path.join(app,"third-party/sources.json"),"utf8"));
   for(const source of sources){const data=await fs.readFile(path.join(app,source.local));if(createHash("sha256").update(data).digest("hex")!==source.sha256)throw Error(`Upstream asset checksum mismatch: ${source.local}`);}

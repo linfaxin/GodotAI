@@ -250,7 +250,7 @@ namespace jsb
                 const NativeObjectID existing_object_id = *existing_object_id_ptr;
                 ObjectHandle& existing_handle = objects_.get_value(existing_object_id);
 
-                if (existing_handle.ref_.IsEmpty())
+                if (!existing_handle.binding || existing_handle.binding->reference.IsEmpty())
                 {
                     // Replacing the lifetime of a published React object would
                     // invalidate its facade without an authorized retirement.
@@ -259,6 +259,7 @@ namespace jsb
                         JSB_OBJECT_DB_STATEMENT(lock_.write_unlock());
                         return {};
                     }
+                    if (existing_handle.binding) existing_handle.binding->active.store(false, std::memory_order_release);
                     objects_.remove_at_checked(existing_object_id);
                     objects_index_.erase(p_pointer);
                 }
@@ -291,6 +292,7 @@ namespace jsb
             removed.react_object_id = p_handle->react_object_id;
             removed.expected_release = p_handle->react_expected_release;
             removed.retirement_batch = p_handle->react_retirement_batch;
+            if (p_handle->binding) p_handle->binding->active.store(false, std::memory_order_release);
             JSB_OBJECT_DB_PREPARE_FOR_REMOVAL(p_handle);
             remove_object_internal(p_pointer);
             p_handle = nullptr;

@@ -6,77 +6,11 @@ import { command, fromRes, sha256, slash, toRes, within, write, type Snapshot,ty
 import { extractorSource } from "./extractor.js";
 import { fail, type ProjectConfig } from "./types.js";
 
-interface Token { kind: "word" | "string" | "number" | "punct" | "newline" | "end"; value: string; line: number; column: number; }
-interface Section { name: string; attributes: Record<string, unknown>; properties: Record<string, unknown>; line: number; }
+import { parseSceneText, type Section } from "./core/scene-text.js";
+export { parseSceneText } from "./core/scene-text.js";
 interface ResourceReference { kind: "external-resource"; id: string; }
 const reference = (value: unknown): value is ResourceReference => !!value && typeof value === "object" && (value as ResourceReference).kind === "external-resource";
 
-/** Strict text grammar. No eval, user scripts, native load or permissive fallback. */
-export function parseSceneText(text: string): Section[] {
-  const tokens: Token[] = []; let offset = 0, line = 1, column = 0;
-  while (offset < text.length) {
-    const c = text[offset];
-    if (c === "\r" || c === " " || c === "\t") { offset++; column++; continue; }
-    if (c === "\n") { tokens.push({ kind: "newline", value: c, line, column }); offset++; line++; column = 0; continue; }
-    if (c === ";") { while (offset < text.length && text[offset] !== "\n") { offset++; column++; } continue; }
-    if (c === '"') {
-      const start = offset, startColumn = column; offset++; column++; let escaped = false;
-      while (offset < text.length) {
-        const next = text[offset++]; column++;
-        if (next === "\n" || next === "\r") fail("E_IMPORT_SYNTAX", `Multiline string at ${line}:${startColumn}`);
-        if (next === '"' && !escaped) break;
-        if (next === "\\" && !escaped) escaped = true; else escaped = false;
-      }
-      if (text[offset - 1] !== '"') fail("E_IMPORT_SYNTAX", `Unterminated string at ${line}:${startColumn}`);
-      const raw = text.slice(start, offset); let value: string;
-      try { value = JSON.parse(raw) as string; } catch { fail("E_IMPORT_SYNTAX", `Unsupported string escape at ${line}:${startColumn}`); }
-      tokens.push({ kind: "string", value, line, column: startColumn }); continue;
-    }
-    const number = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?/.exec(text.slice(offset));
-    if (number) { tokens.push({ kind: "number", value: number[0], line, column }); offset += number[0].length; column += number[0].length; continue; }
-    const word = /^[A-Za-z_][A-Za-z_0-9/]*\b/.exec(text.slice(offset));
-    if (word) { tokens.push({ kind: "word", value: word[0], line, column }); offset += word[0].length; column += word[0].length; continue; }
-    if ("[]=(),".includes(c)) { tokens.push({ kind: "punct", value: c, line, column }); offset++; column++; continue; }
-    fail("E_IMPORT_SYNTAX", `Unsupported token ${JSON.stringify(c)} at ${line}:${column}`);
-  }
-  tokens.push({ kind: "end", value: "", line, column }); let index = 0;
-  const peek = () => tokens[index]; const take = () => tokens[index++];
-  const expect = (value: string) => { const t = take(); if (t.value !== value) fail("E_IMPORT_SYNTAX", `Expected ${value} at ${t.line}:${t.column}`); };
-  const word = () => { const t = take(); if (t.kind !== "word") fail("E_IMPORT_SYNTAX", `Expected identifier at ${t.line}:${t.column}`); return t; };
-  function value(): unknown {
-    const t = take();
-    if (t.kind === "string") return t.value;
-    if (t.kind === "number") { const n = Number(t.value); if (!Number.isFinite(n)) fail("E_IMPORT_VALUE", "Nonfinite value"); return n; }
-    if (t.kind !== "word") fail("E_IMPORT_VALUE", `Expected value at ${t.line}:${t.column}`);
-    if (t.value === "true" || t.value === "false") return t.value === "true";
-    if (t.value === "null") return null;
-    if (!["Vector2", "Color", "ExtResource"].includes(t.value)) fail("E_IMPORT_VALUE", `Unsupported constructor ${t.value}`);
-    expect("("); const values: unknown[] = [];
-    if (peek().value !== ")") { values.push(value()); while (peek().value === ",") { take(); values.push(value()); } }
-    expect(")");
-    if (t.value === "ExtResource") { if (values.length !== 1 || typeof values[0] !== "string") fail("E_IMPORT_VALUE", "ExtResource needs one string id"); return { kind: "external-resource", id: values[0] }; }
-    if (values.some(v => typeof v !== "number")) fail("E_IMPORT_VALUE", `Invalid ${t.value}`);
-    if (t.value === "Vector2" && values.length === 2) return { x: values[0], y: values[1] };
-    if (t.value === "Color" && (values.length === 3 || values.length === 4)) return { r: values[0], g: values[1], b: values[2], a: values[3] ?? 1 };
-    return fail("E_IMPORT_VALUE", `Invalid ${t.value} arity`);
-  }
-  const sections: Section[] = []; let current: Section | undefined;
-  while (peek().kind !== "end") {
-    if (peek().kind === "newline") { take(); continue; }
-    if (peek().value === "[") {
-      take(); const type = word(); const attributes: Record<string, unknown> = {};
-      while (peek().value !== "]") {
-        const key = word().value; expect("="); if (Object.hasOwn(attributes, key)) fail("E_IMPORT_SYNTAX", `Duplicate header ${key}`); attributes[key] = value();
-      }
-      take(); current = { name: type.value, attributes, properties: {}, line: type.line }; sections.push(current);
-    } else {
-      if (!current) fail("E_IMPORT_SYNTAX", "Property before header");
-      const key = word().value; expect("="); if (Object.hasOwn(current.properties, key)) fail("E_IMPORT_SYNTAX", `Duplicate property ${key}`); current.properties[key] = value();
-    }
-    if (peek().kind !== "newline" && peek().kind !== "end") fail("E_IMPORT_SYNTAX", `Unexpected trailing token at ${peek().line}`);
-  }
-  return sections;
-}
 
 function headerKeys(section: Section, required: string[], optional: string[] = []): void {
   for (const key of required) if (!Object.hasOwn(section.attributes, key)) fail("E_IMPORT_HEADER", `Missing ${section.name}.${key}`);

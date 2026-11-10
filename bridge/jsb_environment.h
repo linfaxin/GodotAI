@@ -63,6 +63,9 @@ namespace jsb
     // Environment it-self is NOT thread-safe.
     class Environment : public std::enable_shared_from_this<Environment>
     {
+#ifdef TESTS_ENABLED
+        friend struct BindingIdentityTestAccess;
+#endif
     private:
         struct AsyncCall
         {
@@ -87,9 +90,10 @@ namespace jsb
             Type type_;
 
             void* binding_;
+            std::shared_ptr<ObjectBindingTicket> ticket_;
 
-            AsyncCall(Type p_type, void* p_binding)
-                : type_(p_type), binding_(p_binding)
+            AsyncCall(Type p_type, void* p_binding, const std::shared_ptr<ObjectBindingTicket>& p_ticket = {})
+                : type_(p_type), binding_(p_binding), ticket_(p_ticket)
             {}
             ~AsyncCall() = default;
 
@@ -120,6 +124,11 @@ namespace jsb
 
         /*volatile*/
         Thread::ID thread_id_;
+        const uint64_t binding_epoch_;
+        uint64_t next_binding_generation_ = 0;
+        // Owner-thread registry also covers bindings retired by a background
+        // callback before its handle-reset message reaches this thread.
+        std::unordered_map<uint64_t, std::shared_ptr<ObjectBindingTicket>> binding_records_;
 
         v8::Isolate* isolate_;
         v8::Global<v8::Context> context_;
@@ -475,11 +484,11 @@ namespace jsb
         {
             if (const ObjectHandleConstPtr ptr = object_db_.try_get_object(p_key))
             {
-                if (jsb_unlikely(ptr->ref_.IsEmpty()))
+                if (jsb_unlikely(!ptr->binding || ptr->binding->reference.IsEmpty()))
                 {
                     return false;
                 }
-                r_unwrap = ptr->ref_.Get(isolate_);
+                r_unwrap = ptr->binding->reference.Get(isolate_);
                 return !r_unwrap.IsEmpty();
             }
             return false;
@@ -490,7 +499,7 @@ namespace jsb
         {
             const ObjectHandleConstPtr ptr = object_db_.get_object(p_object_id);
             jsb_check(native_classes_.get_value(ptr->class_id).type != NativeClassType::GodotPrimitive);
-            return ptr->ref_.Get(isolate_);
+            return ptr->binding->reference.Get(isolate_);
         }
 
         jsb_force_inline const NativeClassInfo* find_object_class(void* p_pointer) const
@@ -507,11 +516,16 @@ namespace jsb
         {
             return jsb_likely(p_pointer) && object_db_.has_object(p_pointer);
         }
+        // JS wrappers must match the current binding, not only an address that
+        // may already have been recycled by Object's allocator.
+        bool verify_object(void* p_pointer, const v8::Local<v8::Object>& p_wrapper) const;
+        std::shared_ptr<ObjectBindingTicket> get_binding_ticket(void* p_pointer) const;
+        bool verify_binding(const std::shared_ptr<ObjectBindingTicket>& p_ticket) const;
 
         void* get_verified_object(const v8::Local<v8::Object>& p_obj, NativeClassType::Type p_type) const;
 
         // return true if operation is successful
-        bool reference_object(void* p_pointer, bool p_is_inc);
+        bool reference_object(void* p_pointer, bool p_is_inc, const std::shared_ptr<ObjectBindingTicket>& p_ticket = {});
         void mark_as_persistent_object(void* p_pointer);
 
         // request a full garbage collection
@@ -641,14 +655,15 @@ namespace jsb
 
     private:
         void exec_async_calls();
-        void exec_async_call(AsyncCall::Type p_type, void* p_binding);
+        void exec_async_call(AsyncCall::Type p_type, void* p_binding, const std::shared_ptr<ObjectBindingTicket>& p_ticket = {});
 
         void _on_gc_request();
 
         /**
          * @note execution order is not guaranteed
          */
-        bool add_async_call(AsyncCall::Type p_type, void* p_binding);
+        bool add_async_call(AsyncCall::Type p_type, void* p_binding, const std::shared_ptr<ObjectBindingTicket>& p_ticket = {});
+        void release_binding_reference(const std::shared_ptr<ObjectBindingTicket>& p_ticket);
 
         void _on_worker_transfer(const v8::Local<v8::Context>& p_context, const struct TransferData* p_data);
 #if !JSB_WITH_WEB
@@ -672,13 +687,16 @@ namespace jsb
         // NOTE: First-pass weak callbacks are very restricted in V8. Do not do heavy work there.
         jsb_force_inline static void object_gc_callback(const v8::WeakCallbackInfo<void>& info)
         {
+            auto* raw = static_cast<ObjectBindingTicket*>(info.GetParameter());
+            if (!raw) return;
+            const std::shared_ptr<ObjectBindingTicket> ticket = raw->shared_from_this();
             if (Environment* env = wrap(info.GetIsolate()))
             {
-                // V8 requires clearing the weak handle in first-pass callbacks.
-                if (ObjectHandlePtr object_handle = env->object_db_.try_get_object(info.GetParameter()))
-                {
-                    object_handle->ref_.Reset();
-                }
+                if (ticket->environment_epoch != env->binding_epoch_) return;
+                // Keep this exact record alive through V8's second pass, even
+                // if native destruction retires it in between callbacks.
+                ticket->gc_lease = ticket;
+                ticket->reference.Reset();
 
                 if (!env->is_disposing())
                 {
@@ -688,20 +706,26 @@ namespace jsb
                     object_gc_callback_second_pass(info);
 #endif
                 }
+                else ticket->gc_lease.reset();
             }
         }
 
         static void object_gc_callback_second_pass(const v8::WeakCallbackInfo<void>& info)
         {
+            auto* raw = static_cast<ObjectBindingTicket*>(info.GetParameter());
+            if (!raw) return;
+            const std::shared_ptr<ObjectBindingTicket> ticket = raw->gc_lease;
+            if (!ticket) return;
+            raw->gc_lease.reset();
             if (Environment* env = wrap(info.GetIsolate()))
             {
                 // During shutdown we explicitly drain object_db_ in dispose(); skip GC callback work.
-                if (env->is_disposing())
+                if (env->is_disposing() || ticket->environment_epoch != env->binding_epoch_)
                 {
                     return;
                 }
 
-                env->add_async_call(AsyncCall::TYPE_GC_FREE, info.GetParameter());
+                env->add_async_call(AsyncCall::TYPE_GC_FREE, ticket->pointer, ticket);
             }
         }
 
@@ -742,7 +766,7 @@ namespace jsb
             env->dealloc_variant(variant);
         }
 
-        void free_object(void* p_pointer, FinalizationType p_finalize);
+        void free_object(void* p_pointer, FinalizationType p_finalize, const std::shared_ptr<ObjectBindingTicket>& p_ticket = {}, bool p_native_free = false);
     };
 
 #if !JSB_WITH_WEB

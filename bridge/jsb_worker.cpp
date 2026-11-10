@@ -1186,7 +1186,7 @@ namespace jsb
             return;
         }
 
-        const Worker* worker = (Worker*) self->GetAlignedPointerFromInternalField(IF_Pointer);
+        const Worker* worker = static_cast<const Worker*>(from_env->get_verified_object(self, NativeClassType::Worker));
 
         if (!worker || !Worker::is_valid(worker->id_))
         {
@@ -1309,8 +1309,8 @@ namespace jsb
             jsb_throw(isolate, "bad this");
             return;
         }
-        const Worker* worker = (Worker*) self->GetAlignedPointerFromInternalField(IF_Pointer);
-        if (!Worker::terminate(worker->id_))
+        const Worker* worker = static_cast<const Worker*>(Environment::wrap(isolate)->get_verified_object(self, NativeClassType::Worker));
+        if (!worker || !Worker::terminate(worker->id_))
         {
             JSB_WORKER_LOG(Warning, "can not terminate a dead worker");
         }

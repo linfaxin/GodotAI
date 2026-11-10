@@ -9,6 +9,8 @@ import { gzipSync } from 'node:zlib';
 import { canonical, digest, fail, options, required, json, writeJson, filesIn, relativePath, safePath, within, identity, assertCommit, assertHash, inspectRelease } from './web-release-utils.mjs';
 import { patchOptionalPwa, OPTIONAL_PWA_PATCH } from './patch-web-optional-pwa.mjs';
 import { patchAudioLifecycle, AUDIO_LIFECYCLE_PATCH } from './patch-web-audio-lifecycle.mjs';
+import {loadProductionApiProfiles,buildEngineVendor,assembleFullEngineRelease} from '../../apps/playground/scripts/full-engine-release.mjs';
+import {createTypeSnapshot} from '../../apps/playground/scripts/build-shell.mjs';
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 function run(command, args, extra = {}) {
@@ -16,7 +18,7 @@ function run(command, args, extra = {}) {
   if (result.error || result.status !== 0) fail('E_RELEASE_COMMAND', `${command} failed: ${result.error?.message ?? result.stderr}`);
   return result.stdout;
 }
-function isSourceCertified(report) {
+export function isSourceCertified(report) {
   if (report.kind !== 'godot-js-browser-engine-build' || report.status !== 'built') return false;
   try {
     assertCommit(report.source?.commit, 'GodotJS commit'); assertHash(report.source?.snapshotHash, 'GodotJS snapshot');
@@ -31,13 +33,15 @@ export async function buildRelease(configuration) {
   const reportPath = resolve(required(configuration['engine-report'], '--engine-report'));
   const configPath = resolve(required(configuration.assets, '--assets'));
   const config = await json(configPath), report = await json(reportPath);
+  const fullEngine = config.runtimeProfile === 'full-engine-v1' || report.runtimeProfile === 'full-engine-v1' || report.recipe?.args?.includes('modules_enabled_by_default=yes');
+  if (fullEngine && report.kind === 'godot-js-browser-engine-build' && report.status === 'built' && !report.recipe?.args?.includes('modules_enabled_by_default=yes')) fail('E_RELEASE_PROFILE', 'Full engine source report must build default modules');
   const root = dirname(configPath), output = resolve(configuration.out ?? 'scripts/jsb.web-engine/dist');
   const sourceCertified = !configuration.development && !!isSourceCertified(report);
   if (configuration['raw-wasm'] && !configuration.development) fail('E_RELEASE_ENCODING', '--raw-wasm is reserved for development compatibility');
   if (!sourceCertified && !configuration.development) fail('E_RELEASE_SOURCE', 'A source-certified engine build report is required; use --development for an explicitly uncertified local template');
   if (!report.template?.path || !report.template?.sha256) fail('E_RELEASE_ENGINE', 'Engine report must identify actual template bytes');
   const archive = resolve(dirname(reportPath), report.template.path), archiveBytes = await readFile(archive);
-  for (const input of [reportPath, configPath, archive, ...Object.values(config.sdk ?? {}), ...Object.values(config.compiler ?? {}), config.types, config.contracts, config.bootstrap].filter(Boolean).map(path => resolve(root, path))) {
+  for (const input of [reportPath, configPath, archive, ...Object.values(config.sdk ?? {}), ...Object.values(config.compiler ?? {}), config.types, config.contracts, config.bootstrap, config.engineApi?.ir, config.engineApi?.captureReport, ...Object.values(config.engineApi?.namingProfiles ?? {}).flatMap(profile => [profile.ir, profile.captureReport])].filter(Boolean).map(path => resolve(root, path))) {
     if (input === output || input.startsWith(`${output}/`)) fail('E_RELEASE_OUTPUT', 'Output directory must not contain release inputs');
   }
   if (output === repository || repository.startsWith(`${output}/`) || output === '/') fail('E_RELEASE_OUTPUT', 'Output must be a dedicated release directory');
@@ -58,6 +62,7 @@ export async function buildRelease(configuration) {
       const matches = entries.filter(path => path === name || path.endsWith(`/${name}`));
       if (matches.length !== 1) fail('E_RELEASE_ENGINE', `Template must contain exactly one ${name}`);
       let bytes = run('unzip', ['-p', archive, matches[0]], { encoding: null });
+      if (fullEngine && name === 'godot.wasm') { await mkdir(resolve(staging, '.production-capture'), { recursive: true }); await writeFile(resolve(staging, '.production-capture/godot.wasm'), bytes); }
       if (name === 'godot.wasm' && !Buffer.from(bytes).subarray(0, 8).equals(Buffer.from([0, 97, 115, 109, 1, 0, 0, 0]))) fail('E_RELEASE_ENGINE', 'Template does not contain a WebAssembly module');
       if (name === 'godot.js') {
         for (const [apply, patchId] of [[patchOptionalPwa, OPTIONAL_PWA_PATCH], [patchAudioLifecycle, AUDIO_LIFECYCLE_PATCH]]) {
@@ -120,6 +125,31 @@ export async function buildRelease(configuration) {
     const dependencies = { react: metadata.react.react, 'react-reconciler': metadata.react.reconciler, scheduler: metadata.react.scheduler };
     for (const [name, version] of Object.entries(dependencies)) if (!/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(version ?? '')) fail('E_RELEASE_METADATA', `React tuple must be exact: ${name}`);
     if (metadata.dependencies && canonical(metadata.dependencies) !== canonical(dependencies)) fail('E_RELEASE_METADATA', 'Dependencies and canonical React tuple differ');
+    let fullRelease;
+    if (fullEngine) {
+      const captureDirectory = resolve(staging, '.production-capture');
+      const captureInputs = Object.fromEntries(['snake', 'camel'].map(naming => {
+        const source = config.engineApi?.namingProfiles?.[naming] ?? (naming === 'snake' ? config.engineApi : undefined);
+        return [naming, source?.ir ? { irPath: resolve(root, source.ir), reportPath: source.captureReport && resolve(root, source.captureReport) } : {}];
+      }));
+      const namingProfiles = await loadProductionApiProfiles({ engineJs: resolve(staging, 'assets/godot.js'), engineWasm: resolve(captureDirectory, 'godot.wasm'), captureDirectory, namingProfiles: captureInputs });
+      await Promise.all(Object.values(namingProfiles).map(async profile => { profile.typeSnapshot = await createTypeSnapshot({ engineFiles: profile.declarations.files }); }));
+      const api = namingProfiles.snake;
+      const engine = { javascript: files.find(file => file.kind === 'engine-js'), wasm: files.find(file => file.kind === 'engine-wasm'), worklets: files.filter(file => file.kind === 'engine-worklet') };
+      if (report.modules && canonical([...report.modules].sort()) !== canonical([...api.ir.modules].sort())) fail('E_RELEASE_MODULES', 'Built module header and production native API disagree');
+      const [vendor, developmentVendor] = await Promise.all([buildEngineVendor(), buildEngineVendor({ mode: 'development' })]);
+      const prepared = assembleFullEngineRelease({ ...api, namingProfiles, engine, sdkVersion: metadata.sdkVersion ?? createRequire(resolve(repository, 'scripts/jsb.react/package.json'))('./package.json').version,
+        vendor, developmentVendor, build: { actualAPIHash: api.actualAPIHash, sourceCertified, engineReportSha256: digest(await readFile(reportPath)), engineTemplateSha256: report.template.sha256, recipeSha256: report.recipeSha256 } });
+      fullRelease = prepared.manifest;
+      for (const [path, bytes] of prepared.outputs) {
+        const declaration = Object.entries(fullRelease.api.declarations).find(([, item]) => item.path === path);
+        const camelDeclaration = Object.entries(fullRelease.api.namingProfiles.camel.declarations).find(([, item]) => item.path === path);
+        await asset(path, bytes, declaration ? 'type' : camelDeclaration ? 'engine-declaration' : path === 'engine-release.json' ? 'full-engine-descriptor' : path.startsWith('.playground/vendor') ? 'engine-sdk' : 'full-engine-asset', declaration ? { virtualPath: declaration[0], naming: 'snake' } : camelDeclaration ? { virtualPath: camelDeclaration[0], naming: 'camel' } : {});
+        if (declaration) typePaths.push(path);
+      }
+      metadata = { ...metadata, profiles: [...metadata.profiles.filter(profile => profile.id !== 'full-engine-v1'), { id: 'full-engine-v1', version: 1, hash: api.actualAPIHash }] };
+      await rm(captureDirectory, { recursive: true, force: true });
+    }
     const attestation = {
       schemaVersion: 1, kind: 'godot-js-web-release-attestation', status: report.status,
       source: report.source, godotSource: report.godotSource, recipe: report.recipe,
@@ -137,10 +167,14 @@ export async function buildRelease(configuration) {
     }
     if (sourceCertified) Object.assign(buildFlags, { godot_source_commit: report.godotSource.commit, godot_source_snapshot_sha256: report.godotSource.snapshotHash, godot_build_recipe_sha256: report.recipeSha256 });
     else Object.assign(buildFlags, { threads: false, development_template: true });
+    // Schema 1 consumers still interpret target.godotSchemaHash as their legacy
+    // React capability schema. Native API identity lives in schema 2's api.
     const defaultProfile = metadata.profiles.find(profile => profile.id === 'core-ui-v1') ?? metadata.profiles[0];
     const descriptor = {
       ...metadata, schemaVersion: 1, version: configuration.version ?? metadata.version ?? '0.1.0', sourceCertified,
-      engine: { backend: 'browser', godotVersion: report.godotVersion ?? 'unknown', target: report.engineTarget ?? 'unknown', threads: false, dlink: false, pckVersion: report.pckVersion ?? 3, archiveSha256: report.template.sha256 },
+      runtimeProfile: fullEngine ? 'full-engine-v1' : 'legacy-profiles-v1', legacy: !fullEngine,
+      ...(fullRelease ? { engineRelease: 'engine-release.json', engineReleaseId: fullRelease.id, engineApi: fullRelease.api } : {}),
+      engine: { backend: 'browser', godotVersion: report.godotVersion ?? 'unknown', target: report.engineTarget ?? 'unknown', threads: false, dlink: false, pckVersion: report.pckVersion ?? 3, archiveSha256: report.template.sha256, ...(fullRelease ? { modules: fullRelease.modules } : {}) },
       dependencies, sdkPackageRoot: metadata.sdkPackageRoot ?? '/node_modules/@godot-js/react',
       target: { sourceCommit: sourceCertified ? report.source.commit : 'unknown', sourceDiffHash: sourceCertified ? report.source.snapshotHash : '0'.repeat(64), godotVersion: report.godotVersion ?? 'unknown',
         buildFlags, platform: 'web', arch: 'wasm32', engine: 'web', godotSchemaHash: defaultProfile.hash },

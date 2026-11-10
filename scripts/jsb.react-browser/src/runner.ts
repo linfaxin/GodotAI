@@ -1,5 +1,5 @@
 import { DEFAULT_DEADLINES, PREVIEW_PROTOCOL, RUN_PHASES, isPreviewEnvelope, normalizedOrigin, sameRun,
-  type BrowserArtifact, type ExitReport, type PhaseDeadlines, type RunIdentity, type RunnerEvent, type RunnerState } from './protocol.js';
+  type BrowserArtifact, type ExitReport, type PhaseDeadlines, type PreviewDiagnostic, type RunIdentity, type RunnerEvent, type RunnerState } from './protocol.js';
 import { validateRelease, type VerifiedRelease } from './verified-loader.js';
 
 export interface PreviewRunnerOptions {
@@ -14,7 +14,9 @@ interface Session {
   identity: RunIdentity;
   frame: HTMLIFrameElement;
   port: MessagePort;
+  peer?: MessagePort;
   state: RunnerState;
+  transitionEpoch: number;
   lastHeartbeat: number;
   phaseTimer?: ReturnType<typeof setTimeout>;
   heartbeatTimer?: ReturnType<typeof setInterval>;
@@ -24,6 +26,7 @@ interface Session {
   exitPromise: Promise<ExitReport>;
   resolveExit: (report: ExitReport) => void;
   settled: boolean;
+  exitReport?: ExitReport;
   logCount: number;
   logBytes: number;
 }
@@ -54,29 +57,42 @@ export class PreviewRunner {
   }
   get state(): RunnerState { return this.currentState; }
   subscribe(listener: (event: RunnerEvent) => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
-  private emit(event: RunnerEvent): void { for (const listener of this.listeners) { try { listener(event); } catch { /* UI listeners cannot break disposal. */ } } }
-  private transition(session: Session, state: RunnerState): void {
-    if (this.active !== session || session.settled) return;
+  private emit(event: RunnerEvent): void { for (const listener of [...this.listeners]) { try { listener(event); } catch { /* UI listeners cannot break disposal. */ } } }
+  private current(session: Session, state = session.state, epoch = session.transitionEpoch): boolean {
+    return this.active === session && !session.settled && session.state === state && session.transitionEpoch === epoch;
+  }
+  private transition(session: Session, state: RunnerState): boolean {
+    if (!this.current(session)) return false;
     clearTimeout(session.phaseTimer);
+    session.phaseTimer = undefined;
+    const epoch = ++session.transitionEpoch;
     session.state = this.currentState = state;
     if (state === 'running') session.lastHeartbeat = Date.now();
     this.emit({ type: 'state', state, ...session.identity });
+    // State listeners may synchronously stop, replace, or dispose this run.
+    if (!this.current(session, state, epoch)) return false;
     const timeout = state === 'idle' || state === 'exited' ? 0 : this.deadlines[state];
     if (timeout) session.phaseTimer = setTimeout(() => {
+      if (!this.current(session, state, epoch)) return;
       if (state === 'stopping') {
         const responsive = Date.now() - session.lastHeartbeat < this.deadlines.heartbeat;
         this.finish(session, responsive ? 'forced-frame-disposal' : 'unresponsive', undefined, 'Cooperative stop timed out; frame removed.');
       } else this.finish(session, 'unresponsive', undefined, `Deadline exceeded during ${state}; frame removed.`);
     }, timeout);
+    return true;
   }
-  private finish(session: Session, reason: ExitReport['reason'], code?: number, detail?: string): ExitReport {
-    const report: ExitReport = { ...session.identity, reason, ...(code === undefined ? {} : { code }), ...(detail ? { detail: detail.slice(0, 4096) } : {}) };
-    if (session.settled) return report;
+  private finish(session: Session, reason: ExitReport['reason'], code?: number, detail?: string, diagnostic?: PreviewDiagnostic): ExitReport {
+    if (session.exitReport) return session.exitReport;
+    const report: ExitReport = { ...session.identity, reason, ...(code === undefined ? {} : { code }), ...(detail ? { detail: detail.slice(0, 4096) } : {}), ...(diagnostic ? { diagnostic } : {}) };
+    session.exitReport = report;
     session.settled = true;
+    ++session.transitionEpoch;
     clearTimeout(session.phaseTimer);
     clearInterval(session.heartbeatTimer);
     session.port.onmessage = null;
     session.port.close();
+    session.peer?.close();
+    session.peer = undefined;
     session.frame.onload = session.frame.onerror = null;
     session.frame.remove();
     if (this.active === session) { this.active = undefined; this.currentState = 'exited'; }
@@ -99,7 +115,8 @@ export class PreviewRunner {
     if (!isPreviewEnvelope({ protocolVersion: PREVIEW_PROTOCOL, type: 'connected', ...identity })) throw new Error('E_ARTIFACT_IDENTITY');
     const frame = this.options.container.ownerDocument.createElement('iframe');
     frame.title = 'Godot preview';
-    frame.setAttribute('sandbox', 'allow-scripts allow-same-origin');
+    frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-pointer-lock');
+    frame.setAttribute('allow', 'autoplay');
     frame.setAttribute('referrerpolicy', 'no-referrer');
     const url = new URL(this.options.previewUrl);
     url.searchParams.set('editorOrigin', this.editorOrigin);
@@ -110,7 +127,7 @@ export class PreviewRunner {
     // A cancellation during iframe loading must not create an unhandled rejection.
     void runPromise.catch(() => {});
     const exitPromise = new Promise<ExitReport>(resolve => { resolveExit = resolve; });
-    const session: Session = { identity, frame, port: channel.port1, state: 'loading-frame', lastHeartbeat: Date.now(),
+    const session: Session = { identity, frame, port: channel.port1, peer: channel.port2, state: 'loading-frame', transitionEpoch: 0, lastHeartbeat: Date.now(),
       runPromise, resolveRun, rejectRun, exitPromise, resolveExit, settled: false, logCount: 0, logBytes: 0 };
     this.active = session;
     channel.port1.onmessage = event => {
@@ -119,36 +136,44 @@ export class PreviewRunner {
       if (message.type === 'heartbeat') { session.lastHeartbeat = Date.now(); return; }
       if (message.type === 'connected' && session.state === 'handshaking') {
         session.lastHeartbeat = Date.now();
-        this.transition(session, 'downloading');
+        if (!this.transition(session, 'downloading')) return;
         // Transfer a private snapshot so compiling/saving cannot mutate an active pack.
-        channel.port1.postMessage({ protocolVersion: PREVIEW_PROTOCOL, type: 'run', ...identity, release: this.options.release,
-          artifact: snapshot }, [snapshot.pack.buffer]);
+        try { channel.port1.postMessage({ protocolVersion: PREVIEW_PROTOCOL, type: 'run', ...identity, release: this.options.release,
+          artifact: snapshot }, [snapshot.pack.buffer]); }
+        catch { this.finish(session, 'crashed', undefined, 'Could not send the project to the preview.'); }
       } else if (message.type === 'phase' && session.state !== 'stopping') {
         const current = RUN_PHASES.indexOf(session.state as typeof RUN_PHASES[number]);
         const next = RUN_PHASES.indexOf(message.phase!);
         if (next !== current + 1) return;
-        this.transition(session, message.phase!);
+        if (!this.transition(session, message.phase!)) return;
         if (message.phase === 'running') {
+          const epoch = session.transitionEpoch;
           session.heartbeatTimer = setInterval(() => {
-            if (session.state === 'running' && Date.now() - session.lastHeartbeat > this.deadlines.heartbeat) this.finish(session, 'unresponsive', undefined, 'Preview heartbeat stopped; frame removed.');
+            if (this.current(session, 'running', epoch) && Date.now() - session.lastHeartbeat > this.deadlines.heartbeat) this.finish(session, 'unresponsive', undefined, 'Preview heartbeat stopped; frame removed.');
           }, Math.max(10, Math.min(500, this.deadlines.heartbeat / 2)));
           session.resolveRun({ ...identity, state: 'running', releaseId: this.options.release.releaseId });
         }
       } else if (message.type === 'log') {
         if (++session.logCount > 1000 || (session.logBytes += message.text!.length) > 256_000) return;
         this.emit({ type: 'log', ...identity, level: message.level!, text: message.text!, untrusted: true });
-      } else if (message.type === 'fatal') this.finish(session, 'crashed', undefined, message.text);
+      } else if (message.type === 'fatal') this.finish(session, 'crashed', undefined, message.text, message.diagnostic);
       else if (message.type === 'exited') this.finish(session, message.code === 0 ? 'clean-exit' : 'crashed', message.code);
     };
     channel.port1.start();
     frame.onload = () => {
       if (this.active !== session || session.settled || session.state !== 'loading-frame') return;
-      this.transition(session, 'handshaking');
-      frame.contentWindow?.postMessage({ protocolVersion: PREVIEW_PROTOCOL, type: 'connect', ...identity, editorOrigin: this.editorOrigin }, this.previewOrigin, [channel.port2]);
+      if (!this.transition(session, 'handshaking')) return;
+      try {
+        if (!frame.contentWindow || !session.peer) throw new Error('Missing preview window');
+        frame.contentWindow.postMessage({ protocolVersion: PREVIEW_PROTOCOL, type: 'connect', ...identity, editorOrigin: this.editorOrigin }, this.previewOrigin, [session.peer]);
+        session.peer = undefined; // Transferred to the preview; no longer ours.
+      } catch { this.finish(session, 'crashed', undefined, 'Could not connect to the preview.'); }
     };
     frame.onerror = () => this.finish(session, 'crashed', undefined, 'Preview document failed to load.');
-    this.transition(session, 'loading-frame');
-    this.options.container.append(frame);
+    if (this.transition(session, 'loading-frame')) {
+      try { this.options.container.append(frame); }
+      catch { this.finish(session, 'crashed', undefined, 'Could not attach the preview.'); }
+    }
     return runPromise;
   }
   private stopActive(): Promise<ExitReport | undefined> {
@@ -156,10 +181,13 @@ export class PreviewRunner {
     if (!session) return Promise.resolve(undefined);
     if (session.state !== 'stopping') {
       const priorState = session.state;
-      this.transition(session, 'stopping');
+      if (!this.transition(session, 'stopping')) return session.exitPromise;
       if (priorState === 'loading-frame' || priorState === 'handshaking') {
         this.finish(session, 'forced-frame-disposal', undefined, 'Cancelled before engine startup.');
-      } else session.port.postMessage({ protocolVersion: PREVIEW_PROTOCOL, type: 'stop', ...session.identity });
+      } else {
+        try { session.port.postMessage({ protocolVersion: PREVIEW_PROTOCOL, type: 'stop', ...session.identity }); }
+        catch { this.finish(session, 'forced-frame-disposal', undefined, 'Preview stop channel was unavailable.'); }
+      }
     }
     return session.exitPromise;
   }

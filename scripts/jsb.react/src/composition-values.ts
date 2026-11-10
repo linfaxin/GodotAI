@@ -1,0 +1,6 @@
+import {ERROR_CODES,exact,invariant} from './contracts';
+import {validateValue} from './schema/codecs';
+export function listItemsValue(value:unknown,path:string):readonly unknown[] {
+ invariant(Array.isArray(value)&&value.length<=1024,ERROR_CODES.VALUE,'Expected up to 1024 list items',path);
+ return Object.freeze(value.map((input,index)=>{const item=exact(typeof input==='string'?{text:input}:input,['text'],['icon','disabled','selectable','metadata'],path+'['+index+']');const text=validateValue('string',item.text),metadata=validateValue('string',item.metadata===undefined?'':item.metadata);invariant(Array.from(text as string).length<=256&&(metadata as string).length<=256,ERROR_CODES.VALUE,'List text/metadata exceeds 256',path);const icon=validateValue('assetRef',item.icon??null,path,{resourceTypes:['Texture2D','ImageTexture','CompressedTexture2D','AtlasTexture','GradientTexture1D','GradientTexture2D','CurveTexture']});invariant(!icon||(icon as any).scope!=='instance',ERROR_CODES.VALUE,'List icons require shared resources',path);return Object.freeze([text,icon,validateValue('boolean',item.disabled===undefined?false:item.disabled),validateValue('boolean',item.selectable===undefined?true:item.selectable),metadata]);}));
+}

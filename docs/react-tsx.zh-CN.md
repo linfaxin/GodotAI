@@ -1,8 +1,90 @@
 # React / TSX 使用指南
 
-`@godot-js/react` 是 GodotJS 的 React renderer，`@godot-js/react-build` 负责 TSX 编译、模板导入、代际发布和 PCK 导出。TSX 位于现有 TypeScript 和 Godot 场景资源机制之上，使用真实的 React 和 react-reconciler。
+`@godot-js/react` 默认直接渲染到 GodotJS 原生引擎。React 提供组件、Hooks、Context、Suspense 和节点协调；GodotJS 提供原生构造器、方法、信号、Resource 和引擎系统。新增引擎类不需要在 React 中登记能力白名单或增加逐类 C++ 桥接；后续 React 扩展集中在语法糖和生命周期集成。
 
-业务代码只编写 React 组件。一份应用入口建立一个 React Root，普通组件组合就能表达多个场景。提交后的 React host graph 决定全部业务 Node 的存在、父子关系和顺序；生成的 TSCN 只承载启动脚本、代际票据与资源依赖。
+## 默认用法：原生构造器与 React 组件
+
+```tsx
+import * as React from "react";
+import * as G from "godot";
+import { EngineNode, createNativeComponent } from "@godot-js/react";
+
+const VBox = createNativeComponent(G.VBoxContainer);
+
+export default function App() {
+  const [count, setCount] = React.useState(0);
+  return <VBox native={{ name: "Counter" }}>
+    <EngineNode ctor={G.Label} native={{ text: `Count: ${count}` }} />
+    <EngineNode ctor={G.Button} native={{ text: "+1" }}
+      on={{ pressed: () => setCount(value => value + 1) }} />
+  </VBox>;
+}
+```
+
+`EngineNode` 的 `ctor` 接受原生 Node 构造器，`args` 是可选构造参数，`native` 是受控原生属性，`on` 是原生信号处理函数，`children` 表达 React 管理的子节点。`createNativeComponent(ctor)` 固定构造器，并保留属性、信号参数和 ref 的类型推断。Resource 等非 Node 对象直接通过 `godot` 构造或加载后传入原生属性，保持同一个资源的身份；Vector2 等值类型使用原生值并按捕获的分量比较。
+
+属性与信号在运行时接受原生名称及当前绑定导出的名称，TypeScript 代码按所用 Godot 类型声明编写。原生属性只要出现在 `native` 中就持续受 React 控制；移除属性或设为 `undefined` 会恢复该字段首次受控前捕获的原生值。需要交给物理、动画或逐帧原生命令更新的字段，留在 `native` 之外。移除 `on` 中的处理函数会断开连接；重新渲染会使用最新已提交的回调。改变原生构造器或被接管的对象时使用新的 React key。
+
+## 原生 ref 与帧回调
+
+```tsx
+import * as React from "react";
+import * as G from "godot";
+import { EngineNode, useFrame } from "@godot-js/react/engine";
+
+function Spinner() {
+  const ref = React.useRef<G.Node2D>(null);
+  useFrame("process", delta => {
+    const node = ref.current;
+    if (node && G.is_instance_valid(node)) node.rotation += delta;
+  });
+  return <EngineNode ctor={G.Node2D} ref={ref} />;
+}
+```
+
+ref 指向真实 GodotJS 原生对象，可以直接调用原生方法。`useFrame("process", callback)` 与 `useFrame("physics", callback)` 在对应帧阶段同步执行并传入 delta；物理查询和移动使用原生引擎 API。物理回调中的 React 状态更新与结构更新等到下一次安全 pump 提交。异步工作由 effect cleanup 取消，React 不等待异步 cleanup。跨组件生命周期保存的原生对象需要通过 Godot 的有效性 API 检查。
+
+## Root 生命周期与所有权
+
+默认入口是 `createRoot(nativeContainer, options?)`。挂载容器是已经存在的原生 Node，默认要求它已进入 SceneTree；root 自动连接 `process_frame` 和 `physics_frame`。如果原生启动脚本负责帧转发，则使用 `autoProcess: false`：
+
+```tsx
+import * as G from "godot";
+import { createRoot, type EngineRoot } from "@godot-js/react/engine";
+import App from "./App";
+
+export default class ReactMount extends G.Node {
+  private reactRoot?: EngineRoot;
+  _ready() {
+    this.reactRoot = createRoot(this, { autoProcess: false });
+    this.reactRoot.render(<App />);
+  }
+  _process(delta: number) { this.reactRoot?.process(delta); }
+  _physics_process(delta: number) { this.reactRoot?.physics(delta); }
+  _exit_tree() { this.reactRoot?.shutdown(); this.reactRoot = undefined; }
+}
+```
+
+| 方法 | 行为 |
+| --- | --- |
+| `render(element)` | 协调 React 树，在提交阶段创建原生 Node。 |
+| `pump()` | 推进 React 调度和延后的信号回调。 |
+| `process(delta)` / `physics(delta)` | 转发帧回调；`process` 也执行 pump。 |
+| `unmount()` | 移除已渲染子树，保留可再次使用的 root。 |
+| `shutdown()` | 卸载、释放自有节点与订阅、关闭 root；重复调用安全。 |
+| `portal(element, nativeTarget, key?)` | 将 React 子树挂载到借用的原生容器。 |
+| `getStats()` / `getErrors()` | 读取生命周期计数和捕获的错误。 |
+
+root 和 portal 的挂载容器属于借用对象，卸载时保留容器及其外部子节点。`EngineNode` 创建的节点归 React 所有，移除时释放。显式接管已脱离父节点的原生对象使用 `<EngineNode object={existingNode} ownership="adopt" />`，它同样会在卸载时被释放。原生对象只在 commit 时创建，StrictMode 或被取消的 Suspense render 不会提前分配业务节点。外部删除、重设父节点或身份替换会使对应记录失效，避免后续协调写入或释放外部对象。
+
+同一 JavaScript realm 可以有多个直接原生 root，分别使用不同的挂载容器，并独立管理所有权和订阅。`@godot-js/react/engine` 只导出这套通用渲染器；包根入口也导出相同 API，并保留旧 API 的兼容导出。Node 测试可通过 `options.godot` 注入原生实现。
+
+## 旧版 API 与构建流程
+
+已有的 `Label`、`Button` 等命名宿主、`useNodeRef` 只读句柄、`initial`、`engineOwned`、能力 profile、模板和命令 DTO 属于 legacy API。现有应用可显式改为从 `@godot-js/react/legacy` 导入，继续使用三参数 `createRoot(port, containerKey, options)`。包根入口同样保留这套三参数分发；一参数或二参数调用始终选择直接原生渲染器。
+
+下文第 1–6 节记录现有 `godot-react` CLI 与 legacy renderer 的配置、模板、代际发布和 PCK 导出流程。它们的 profile、单活动 root、私有原生 ABI 和 facade 限制只属于这条兼容链路。默认直接原生 API 不使用这些能力 profile。
+旧版 CLI 示例保留包根兼容导入，与现有 vendor 别名一致；生成的 bootstrap 通过三参数 `createRoot` 选择 legacy renderer。
 
 ## 1. 从源码使用
 
@@ -84,7 +166,7 @@ function App() {
 
 相同组件类型和 key 保留 React 状态；改变 key 只重建对应子树。HUD、全局 Context 和其他兄弟场景可以继续存活。应用内切场景使用状态与组件组合，避免调用原生 `change_scene_to_*`。项目可以配置多个独立入口，但一个运行中的应用只使用一个 Root。
 
-首版在同一 GodotJS Environment / JavaScript realm 中只允许一个活动 Root。关闭当前 Root 后可以启动新入口；并发的第二个 Root 会明确报错。场景、HUD 和 Provider 都放在这棵 React 树内。
+legacy renderer 在同一 GodotJS Environment / JavaScript realm 中只允许一个活动 Root。关闭当前 Root 后可以启动新入口；并发的第二个 legacy Root 会明确报错。场景、HUD 和 Provider 都放在这棵 React 树内。前述直接原生 renderer 支持不同挂载容器上的多个 Root。
 
 ## 3. 属性与原生命令
 

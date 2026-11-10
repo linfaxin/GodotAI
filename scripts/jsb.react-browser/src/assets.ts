@@ -281,3 +281,5 @@ export async function compileAssets(snapshot: ProjectSnapshot, options: {
   for (const [id, asset] of configured) { const loaded = await load(asset.source, asset.type); result.resources[id] = loaded.resource; }
   return result;
 }
+
+export { parseSceneText } from "@godot-js/react-build/scene-text";

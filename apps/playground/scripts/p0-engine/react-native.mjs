@@ -1,0 +1,20 @@
+import {createReactFixture} from './react-fixture.mjs';
+import {mkdir,writeFile,readFile,realpath} from 'node:fs/promises';
+import {spawnSync} from 'node:child_process';
+import {createHash} from 'node:crypto';
+import path from 'node:path';
+import {fileURLToPath} from 'node:url';
+const repo=fileURLToPath(new URL('../../../../',import.meta.url));
+const fixture=process.argv.includes('--aba')?await(await import('./react-aba-fixture.mjs')).createReactAbaFixture():await createReactFixture();
+const directory=path.join(repo,'work/playground/p0',fixture.name+'-native');
+for(const [uri,bytes]of fixture.files){const file=path.join(directory,uri.slice('res://'.length));await mkdir(path.dirname(file),{recursive:true});await writeFile(file,bytes);}
+const engine=await realpath(process.env.GODOT??path.join(repo,'tests/bin/godot-host-qjs'));
+const run=spawnSync(engine,['--headless','--path',directory],{encoding:'utf8',timeout:30000,maxBuffer:8*1024*1024});
+const text=(run.stdout??'')+(run.stderr??'');await writeFile(path.join(repo,'work/playground/p0',fixture.name+'-native.log'),text);process.stdout.write(text);
+const marker=text.split('\n').find(line=>line.includes(fixture.marker+' '));const report=marker?JSON.parse(marker.slice(marker.indexOf(fixture.marker+' ')+fixture.marker.length+1)):undefined;
+const errors=text.split('\n').filter(line=>/^(ERROR:|SCRIPT ERROR:)/.test(line));
+const sha=value=>createHash('sha256').update(value).digest('hex');
+const fixtureHashes=Object.fromEntries([...fixture.files].map(([uri,bytes])=>[uri,sha(bytes)]));
+const passed=run.status===0&&report?.status==='passed'&&errors.length===0;
+await writeFile(path.join(repo,'work/playground/p0',fixture.name+'-native.json'),JSON.stringify({status:passed?'passed':'failed',exitCode:run.status,engine:{path:engine,sha256:sha(await readFile(engine))},fixtureHashes,report,errors},null,2));
+if(!passed)process.exitCode=1;

@@ -1,6 +1,7 @@
 interface Options {
   select(path: string): void;
   canDelete(path: string): boolean;
+  canRename?(path: string): boolean;
   rename(path: string): void;
   remove(path: string): void;
   toast(message: string): void;
@@ -20,12 +21,13 @@ export function createFileMenu(options: Options) {
     options.select(file); path = file;
     document.getElementById('file-menu-path')!.textContent = file.split('/').at(-1)!;
     remove.disabled = !options.canDelete(file); remove.title = remove.disabled ? '入口文件或最后一个文件不能删除' : '删除此文件';
+    rename.disabled = options.canRename?.(file)===false;rename.title=rename.disabled?'框架阶段暂只支持普通脚本和文本场景改名':'重命名此文件';
     menu.hidden = false; const bounds = menu.getBoundingClientRect();
     menu.style.left = Math.max(6, Math.min(x, innerWidth - bounds.width - 6)) + 'px';
     menu.style.top = Math.max(6, Math.min(y, innerHeight - bounds.height - 6)) + 'px';
-    rename.focus();
+    (rename.disabled?document.getElementById('copy-file-path')!:rename).focus();
   }
-  rename.onclick = () => { close(); options.rename(path); };
+  rename.onclick = () => { if(options.canRename?.(path)===false)return;close(); options.rename(path); };
   remove.onclick = () => { if (options.canDelete(path)) { close(); options.remove(path); } };
   document.getElementById('copy-file-path')!.onclick = async () => { const file = path; close(true); try { await navigator.clipboard.writeText(file); options.toast('文件路径已复制'); } catch { options.toast('无法访问剪贴板'); } };
   menu.onkeydown = event => {

@@ -12,6 +12,7 @@ export interface VerifiedRelease {
   profile: string;
   engineJs: VerifiedAsset;
   engineWasm: VerifiedAsset;
+  worklets?: Array<VerifiedAsset & { name?: string }>;
   releaseCertified?: boolean;
   allowedOrigins?: string[];
   maxAssetBytes?: number;
@@ -26,11 +27,30 @@ export interface GodotConstructor {
   new(config: Record<string, unknown>): GodotInstance;
   load(basePath: string, size?: number): Promise<unknown>;
 }
-export interface LoadedEngine { Engine: GodotConstructor; basePath: string; wasmSha256: string; dispose(): void }
+export interface LoadedEngine {
+  Engine: GodotConstructor;
+  basePath: string;
+  wasmSha256: string;
+  /** Install on this instance before init(), using Godot 4.6.1's module-config hook. */
+  installWorklets(instance: GodotInstance): void;
+  dispose(): void;
+}
 
 function abort(signal?: AbortSignal): void { if (signal?.aborted) throw signal.reason ?? new DOMException('Cancelled', 'AbortError'); }
 const DEFAULT_ASSET_LIMIT = 128 * 1024 * 1024;
 const validDigest = (digest: unknown): digest is string => typeof digest === 'string' && /^[a-fA-F0-9]{64}$/.test(digest);
+type WorkletKind = 'audio.worklet.js' | 'audio.position.worklet.js';
+function workletKind(name: string): WorkletKind | undefined {
+  for (const kind of ['audio.worklet.js', 'audio.position.worklet.js'] as const) {
+    if (name === kind || name.endsWith(`.${kind}`)) return kind;
+  }
+}
+function declaredWorkletKind(asset: VerifiedAsset & { name?: string }, base?: string): WorkletKind {
+  const name = asset.name ?? new URL(asset.url, base).pathname.split('/').pop()!.replace(/\.gz$/, '');
+  const kind = typeof name === 'string' ? workletKind(name) : undefined;
+  if (!kind || name.includes('/') || name.includes('\\')) throw new Error('E_RELEASE_WORKLET_NAME');
+  return kind;
+}
 function assetMetadata(asset: VerifiedAsset): void {
   if (!asset || !validDigest(asset.sha256)) throw new Error('E_RELEASE_DIGEST');
   if (asset.encoding !== undefined && asset.encoding !== 'gzip') throw new Error('E_RELEASE_ENCODING');
@@ -75,11 +95,18 @@ async function readLimited(stream: ReadableStream<Uint8Array>, max: number, erro
 }
 export function validateRelease(release: VerifiedRelease, base = globalThis.location?.href): void {
   if (!release || typeof release.releaseId !== 'string' || !release.releaseId || typeof release.profile !== 'string' || !release.profile) throw new Error('E_RELEASE_DESCRIPTOR');
-  for (const asset of [release.engineJs, release.engineWasm]) {
+  if (release.worklets !== undefined && !Array.isArray(release.worklets)) throw new Error('E_RELEASE_WORKLETS');
+  const kinds = new Set<WorkletKind>();
+  for (const asset of [release.engineJs, release.engineWasm, ...release.worklets ?? []]) {
     assetMetadata(asset);
     const url = new URL(asset.url, base);
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('E_RELEASE_URL');
     if (release.allowedOrigins && !release.allowedOrigins.includes(url.origin)) throw new Error('E_RELEASE_ORIGIN');
+  }
+  for (const asset of release.worklets ?? []) {
+    const kind = declaredWorkletKind(asset, base);
+    if (kinds.has(kind)) throw new Error('E_RELEASE_WORKLET_DUPLICATE');
+    kinds.add(kind);
   }
 }
 export async function fetchVerifiedAsset(asset: VerifiedAsset, options: { signal?: AbortSignal; maxBytes?: number; maxDecodedBytes?: number; fetch?: typeof fetch } = {}): Promise<Uint8Array> {
@@ -143,29 +170,94 @@ export async function injectVerifiedWasm(Engine: GodotConstructor, wasmUrl: stri
 
 export async function loadVerifiedEngine(release: VerifiedRelease, options: { signal?: AbortSignal; document?: Document } = {}): Promise<LoadedEngine> {
   validateRelease(release);
-  const [js, wasm] = await Promise.all([
+  const [js, wasm, ...worklets] = await Promise.all([
     fetchVerifiedAsset(release.engineJs, { signal: options.signal, maxBytes: release.maxAssetBytes }),
     fetchVerifiedAsset(release.engineWasm, { signal: options.signal, maxBytes: release.maxAssetBytes }),
+    ...(release.worklets ?? []).map(asset => fetchVerifiedAsset(asset, { signal: options.signal, maxBytes: release.maxAssetBytes })),
   ]);
   abort(options.signal);
   const doc = options.document ?? document;
   const script = doc.createElement('script');
-  const blobUrl = URL.createObjectURL(new Blob([js.slice().buffer], { type: 'text/javascript' }));
+  const urls: string[] = [];
+  const verifiedWorklets = new Map<WorkletKind, string>();
+  type ModuleConfig = { locateFile?: (path: string, ...args: unknown[]) => string };
+  type Config = { getModuleConfig: (...args: unknown[]) => ModuleConfig };
+  const installed = new Map<Config, { wrapper: Config['getModuleConfig']; own?: PropertyDescriptor }>();
+  let disposed = false;
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    options.signal?.removeEventListener('abort', dispose);
+    script.onload = null; script.onerror = null;
+    script.remove();
+    for (const [config, hook] of installed) {
+      if (config.getModuleConfig !== hook.wrapper) continue;
+      if (hook.own) Object.defineProperty(config, 'getModuleConfig', hook.own);
+      else delete (config as Partial<Config>).getModuleConfig;
+    }
+    installed.clear();
+    for (const url of urls) URL.revokeObjectURL(url);
+    urls.length = 0;
+  };
+  const blob = (bytes: Uint8Array) => {
+    const url = URL.createObjectURL(new Blob([bytes.slice().buffer], { type: 'text/javascript' }));
+    urls.push(url);
+    return url;
+  };
+  const installWorklets = (instance: GodotInstance) => {
+    if (disposed) throw new Error('E_ENGINE_DISPOSED');
+    if (verifiedWorklets.size === 0) return;
+    // This is the instance config used by the unmodified Godot 4.6.1 Engine.init.
+    // Patching its factory leaves the SDK and other engine instances untouched.
+    const config = (instance as unknown as { config?: Config }).config;
+    if (!config || typeof config.getModuleConfig !== 'function') throw new Error('E_ENGINE_WORKLET_API');
+    if (installed.has(config)) return;
+    const original = config.getModuleConfig;
+    const wrapper: Config['getModuleConfig'] = function (this: Config, ...args) {
+      if (disposed) throw new Error('E_ENGINE_DISPOSED');
+      const module = original.apply(this, args);
+      const locateFile = module?.locateFile;
+      if (typeof locateFile !== 'function') throw new Error('E_ENGINE_WORKLET_API');
+      return { ...module, locateFile(path: string, ...rest: unknown[]) {
+        if (disposed) throw new Error('E_ENGINE_DISPOSED');
+        const kind = workletKind(path);
+        if (kind) {
+          const url = verifiedWorklets.get(kind);
+          if (!url) throw new Error('E_ENGINE_WORKLET_MISSING');
+          return url;
+        }
+        return locateFile.call(module, path, ...rest);
+      } };
+    };
+    const own = Object.getOwnPropertyDescriptor(config, 'getModuleConfig');
+    config.getModuleConfig = wrapper;
+    installed.set(config, { wrapper, own });
+  };
   try {
+    options.signal?.addEventListener('abort', dispose, { once: true });
+    abort(options.signal);
+    for (let index = 0; index < worklets.length; index++) {
+      verifiedWorklets.set(declaredWorkletKind(release.worklets![index], globalThis.location?.href), blob(worklets[index]));
+    }
+    const blobUrl = blob(js);
     await new Promise<void>((resolve, reject) => {
-      const cancelled = () => reject(options.signal?.reason ?? new DOMException('Cancelled', 'AbortError'));
-      script.onload = () => { options.signal?.removeEventListener('abort', cancelled); resolve(); };
-      script.onerror = () => { options.signal?.removeEventListener('abort', cancelled); reject(new Error('E_ENGINE_SCRIPT')); };
+      const cleanup = () => {
+        options.signal?.removeEventListener('abort', cancelled);
+        script.onload = null; script.onerror = null;
+      };
+      const cancelled = () => { cleanup(); reject(options.signal?.reason ?? new DOMException('Cancelled', 'AbortError')); };
+      script.onload = () => { cleanup(); resolve(); };
+      script.onerror = () => { cleanup(); reject(new Error('E_ENGINE_SCRIPT')); };
       options.signal?.addEventListener('abort', cancelled, { once: true });
       script.src = blobUrl;
-      doc.head.append(script);
+      try { doc.head.append(script); }
+      catch (error) { cleanup(); reject(error); }
     });
     abort(options.signal);
     const Engine = (doc.defaultView as unknown as { Engine?: GodotConstructor })?.Engine;
     if (!Engine || typeof Engine.load !== 'function') throw new Error('E_ENGINE_API');
     const basePath = await injectVerifiedWasm(Engine, release.engineWasm.url, wasm);
     abort(options.signal);
-    return { Engine, basePath, wasmSha256: release.engineWasm.decodedSha256 ?? release.engineWasm.sha256, dispose: () => script.remove() };
-  } catch (error) { script.remove(); throw error; }
-  finally { URL.revokeObjectURL(blobUrl); }
+    return { Engine, basePath, wasmSha256: release.engineWasm.decodedSha256 ?? release.engineWasm.sha256, installWorklets, dispose };
+  } catch (error) { dispose(); throw error; }
 }

@@ -1,0 +1,16 @@
+from pathlib import Path
+import json,struct,zlib,binascii
+root=Path(__file__).resolve().parents[3];dest=root/'apps/playground/examples';base=json.loads((dest/'interactions-engine.project.json').read_text());assets=json.loads(base['files']['/assets/gameplay.resources.json'])['assets']
+def png(width,height,pixel):
+ def chunk(kind,data):return struct.pack('>I',len(data))+kind+data+struct.pack('>I',binascii.crc32(kind+data)&0xffffffff)
+ return list(b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',width,height,8,6,0,0,0))+chunk(b'IDAT',zlib.compress(b''.join(b'\0'+b''.join(bytes(pixel(x,y)) for x in range(width)) for y in range(height))))+chunk(b'IEND',b''))
+base['files']['/assets/green.png']=png(32,32,lambda x,y:(0,255,0,255));base['files']['/assets/parallax.png']=png(16,16,lambda x,y:(255,0,0,255) if x<8 else (0,0,255,255))
+assets['displayFrames']={'type':'SpriteFrames','animations':{'default':{'fps':8,'loop':True,'frames':['/assets/green.png','/assets/green.png']}}}
+assets['shadowStyle']={'type':'StyleBoxFlat','properties':{'bg_color':dict(r=0,g=0,b=0,a=1),'draw_center':False,'shadow_color':dict(r=0,g=0,b=1,a=1),'shadow_size':8,'shadow_offset':dict(x=8,y=0),'expand_margin_right':4,'anti_aliasing':True,'anti_aliasing_size':1}}
+base['files']['/assets/curve.tres']='[gd_resource type="Curve" format=3]\n[resource]\n_limits = [0.0,1.0,0.0,1.0]\n_data = [\nVector2(0,1),0.0,0.0,1,1,\nVector2(1,1),0.0,0.0,1,1,\n]\n'
+base['files']['/assets/curve-texture.tres']='[gd_resource type="CurveTexture" format=3]\n[ext_resource type="Curve" path="res://assets/curve.tres" id="1"]\n[resource]\ncurve = ExtResource("1")\nwidth = 32\n'
+base['files']['/assets/gradient.tres']='[gd_resource type="GradientTexture1D" format=3]\n[sub_resource type="Gradient" id="ramp"]\noffsets = PackedFloat32Array(0,1)\ncolors = PackedColorArray(1,0,0,1,1,0,0,1)\n[resource]\ngradient = SubResource("ramp")\nwidth = 32\n'
+base['files']['/assets/particles.tres']='[gd_resource type="ParticleProcessMaterial" format=3]\n[ext_resource type="CurveTexture" path="res://assets/curve-texture.tres" id="1"]\n[ext_resource type="GradientTexture1D" path="res://assets/gradient.tres" id="2"]\n[resource]\nresource_local_to_scene = true\ngravity = Vector3(0,0,0)\nscale_curve = ExtResource("1")\ncolor_ramp = ExtResource("2")\n'
+base['files']['/assets/text-particles.tscn']='[gd_scene format=3]\n[ext_resource type="ParticleProcessMaterial" path="res://assets/particles.tres" id="1"]\n[node name="ImportedEmitter" type="GPUParticles2D"]\nprocess_material = ExtResource("1")\namount = 1\nemitting = false\n'
+base['files']['/src/App.tsx']=(dest/'presentation-engine.tsx').read_text();base['files']['/assets/gameplay.resources.json']=json.dumps({'version':1,'assets':assets},indent=2);base['files']['/README.md']='Click the input, type abc, select all, erase and type go. Checks cover imported Godot particle resource graphs, AnimatedSprite3D display/tween pixels, Unicode text selection/editing and limits, textured progress and panel shadow pixels, native parallax/camera/autoscroll and CanvasLayer viewport following, GPU emission ratios and timing controls. Text Curve import accepts normalized linear tangents.'
+(dest/'presentation-engine.project.json').write_text(json.dumps(base,indent=2)+'\n')

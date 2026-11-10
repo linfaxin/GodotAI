@@ -62,6 +62,7 @@ export async function watchProject(options:WatchOptions = {}):Promise<void> {
       if (!current.ok) fail("E_BUILD_NOT_READY","--skip-initial requires an existing READY generation",current);
       await resume(current.generation!);
     }
+    emit({event:'watching'});
     while (!options.signal?.aborted) {
       await new Promise<void>(resolve => {
         const done=() => {clearTimeout(timer);options.signal?.removeEventListener("abort",done);resolve();};

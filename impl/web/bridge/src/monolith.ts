@@ -642,7 +642,9 @@ class jsbb_Engine {
 
     Int64Value(stack_pos: StackPosition, o_value_ptr: Pointer): boolean {
         const val = this._stack.GetValue(stack_pos);
-        _jsbb_.i64[o_value_ptr >> 3] = val;
+        if (typeof val !== 'bigint' || val < -9223372036854775808n || val > 9223372036854775807n) return false;
+        const index = _jsbb_.int64_index(o_value_ptr);
+        _jsbb_.i64[index] = val;
         return true;
     }
 
@@ -707,7 +709,8 @@ class jsbb_Engine {
     }
 
     NewBigInt64(val_ptr: Pointer): StackPosition {
-        const val = _jsbb_.i64[val_ptr >> 3];
+        const index = _jsbb_.int64_index(val_ptr);
+        const val = _jsbb_.i64[index];
         return this._stack.Push(val);
     }
 
@@ -1481,13 +1484,23 @@ class _jsbb_ {
         return HEAP32;
     }
 
-    //TODO may not be supported?
     static get i64(): BigInt64Array {
         if (wasmMemory.buffer != HEAP8.buffer) {
             updateMemoryViews();
+        }
+        if (!this._i64 || this._i64.buffer !== wasmMemory.buffer) {
             this._i64 = new BigInt64Array(wasmMemory.buffer);
         }
         return this._i64;
+    }
+
+    static int64_index(pointer: Pointer): number {
+        // Emscripten can pass a WASM32 pointer with its high bit set as signed i32.
+        // Do not use >>, which turns addresses above 2 GiB into negative indices.
+        if (!Number.isInteger(pointer) || pointer < -2147483648 || pointer > 4294967295) throw new RangeError('Invalid WASM32 int64 pointer');
+        const address = pointer >>> 0;
+        if ((address & 7) !== 0 || address > wasmMemory.buffer.byteLength - 8) throw new RangeError('Unaligned or out-of-bounds int64 pointer');
+        return address >>> 3;
     }
 
     static init(interop: InitOptions) {

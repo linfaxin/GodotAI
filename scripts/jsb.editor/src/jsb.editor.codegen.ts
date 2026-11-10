@@ -21,7 +21,7 @@ const jsb: typeof GodotJsb = require("godot.lib.api").jsb;
 const gd_to_string = godot.str;
 const names = jsb.internal.names;
 
-const js_object_key_types = new Set(["string", "byte", "int32", "int64", "float32", "float64", "uint32"]);
+const js_object_key_types = new Set(["string", "byte", "int32", "float32", "float64", "uint32"]);
 
 function camel_property_overrides(overrides: undefined | Record<string, string[] | ((line: string) => string)>) {
     const get_member = jsb.internal.names.get_member;
@@ -801,7 +801,7 @@ class CodegenTasks {
 const PredefinedLines = [
     "type byte = number",
     "type int32 = number",
-    "type int64 = number /* || bigint */",
+    "type int64 = number | bigint",
     "type float32 = number",
     "type float64 = number",
     "type uint32 = number",

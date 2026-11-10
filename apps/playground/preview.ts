@@ -1,4 +1,4 @@
-import { PREVIEW_PROTOCOL, RUN_PHASES, isIdentity, normalizedOrigin, sameRun, type RunIdentity, type RunPhase } from '../../scripts/jsb.react-browser/src/protocol.js';
+import { PREVIEW_PROTOCOL, RUN_PHASES, isIdentity, normalizedOrigin, previewDiagnostic, sameRun, type RunIdentity, type RunPhase } from '../../scripts/jsb.react-browser/src/protocol.js';
 import { loadVerifiedEngine, type GodotInstance, type LoadedEngine, type VerifiedRelease } from '../../scripts/jsb.react-browser/src/verified-loader.js';
 
 // The parent is on a different origin. Its origin is configured in this fixed
@@ -21,11 +21,11 @@ addEventListener('message', event => {
 
 function startSession(identity: RunIdentity, port: MessagePort): void {
   let engine: GodotInstance | undefined, loaded: LoadedEngine | undefined;
-  let started = false, exited = false;
+  let started = false, exited = false, cleaned = false, quitRequested = false;
   const aborter = new AbortController();
   const post = port.postMessage.bind(port);
   const send = (data: object) => { if (!exited) post({ ...identity, protocolVersion: PREVIEW_PROTOCOL, ...data }); };
-  const phase = (value: RunPhase) => send({ type: 'phase', phase: value });
+  const phase = (value: RunPhase) => { if (!aborter.signal.aborted) send({ type: 'phase', phase: value }); };
   const check = () => { if (aborter.signal.aborted) throw aborter.signal.reason; };
   let logs = 0, logBytes = 0;
   // Never stringify arbitrary user objects: getters/toJSON may throw or loop.
@@ -41,23 +41,57 @@ function startSession(identity: RunIdentity, port: MessagePort): void {
   const originalConsole = { log: console.log, warn: console.warn, error: console.error };
   for (const level of ['log', 'warn', 'error'] as const) console[level] = (...args: unknown[]) => { originalConsole[level](...args); log(level, args); };
   const heartbeat = setInterval(() => send({ type: 'heartbeat' }), 250);
-  const cleanup = () => { clearInterval(heartbeat); loaded?.dispose(); for (const level of ['log', 'warn', 'error'] as const) console[level] = originalConsole[level]; };
-  const fatal = (error: unknown) => {
+  const cleanup = () => {
+    if (cleaned) return; cleaned = true;
+    clearInterval(heartbeat); loaded?.dispose(); loaded = undefined;
+    port.onmessage = null;
+    removeEventListener('error', onBrowserError); removeEventListener('unhandledrejection', onRejectedPromise);
+    for (const level of ['log', 'warn', 'error'] as const) console[level] = originalConsole[level];
+    if ((globalThis as any).__godotjsReportReactError === onReactError) delete (globalThis as any).__godotjsReportReactError;
+  };
+  const requestQuit = () => { if (engine && !quitRequested) { quitRequested = true; engine.requestQuit(); } };
+  const fatal = (error: unknown, location?: { message?: string; filename?: string; line?: number; column?: number }, source:'browser'|'godotjs'='browser') => {
     if (exited) return;
-    send({ type: 'fatal', text: error instanceof Error ? error.message.slice(0, 4096) : text([error]) });
+    const diagnostic = previewDiagnostic(error, location);
+    diagnostic.source=source;
+    send({ type: 'fatal', text: diagnostic.message, diagnostic });
     exited = true;
     aborter.abort(new DOMException('Preview failed', 'AbortError'));
-    try { engine?.requestQuit(); } catch { /* Parent always disposes the frame. */ }
+    try { requestQuit(); } catch { /* Parent always disposes the frame. */ }
     cleanup();
   };
-  addEventListener('error', event => fatal(event.message));
-  addEventListener('unhandledrejection', event => { if (!aborter.signal.aborted) fatal(event.reason); });
+  const onBrowserError = (event: ErrorEvent) => {
+    if (exited) return;
+    fatal(event.error, { message: event.message, filename: event.filename, line: event.lineno, column: event.colno });
+    // The parent now owns this failure and its original stack. Consume the
+    // browser default report, rather than emitting a second unhandled error.
+    event.preventDefault();
+  };
+  const onRejectedPromise = (event: PromiseRejectionEvent) => {
+    if (aborter.signal.aborted) return;
+    fatal(event.reason);
+    event.preventDefault();
+  };
+  const onReactError = (raw: unknown): boolean => {
+    if (exited || cleaned || typeof raw !== 'string' || raw.length > 65536) return false;
+    let value: {kind?:string;message?:string;stack?:string;componentStack?:string};
+    try { value=JSON.parse(raw); } catch { return false; }
+    if (!value || typeof value.message !== 'string') return false;
+    const error={message:value.message,stack:typeof value.stack==='string'&&value.stack?value.stack:typeof value.componentStack==='string'?value.componentStack:''};
+    if(value.kind==='caught'||value.kind==='recoverable')log('warn',[error.message,error.stack]);
+    else queueMicrotask(()=>{if(!exited&&!cleaned)fatal(error,undefined,'godotjs');});
+    return true;
+  };
+  (globalThis as any).__godotjsReportReactError=onReactError;
+  addEventListener('error', onBrowserError);
+  addEventListener('unhandledrejection', onRejectedPromise);
   port.onmessage = event => {
     const data = event.data;
     if (!isIdentity(data) || !sameRun(data, identity) || data.protocolVersion !== PREVIEW_PROTOCOL) return;
     if (data.type === 'stop') {
       aborter.abort(new DOMException('Stopped', 'AbortError'));
-      try { engine?.requestQuit(); } catch (error) { fatal(error); }
+      try { requestQuit(); } catch (error) { fatal(error); }
+      if (!engine) cleanup();
       // No synthetic exited=0: only Engine.onExit proves a cooperative exit.
       return;
     }
@@ -71,17 +105,24 @@ function startSession(identity: RunIdentity, port: MessagePort): void {
     try {
       if (!(pack instanceof Uint8Array) || !pack.byteLength || pack.byteLength > 64 * 1024 * 1024) throw new Error('E_ARTIFACT_PACK');
       phase(RUN_PHASES[0]); check();
-      loaded = await loadVerifiedEngine(release, { signal: aborter.signal }); check();
+      const result = await loadVerifiedEngine(release, { signal: aborter.signal });
+      // A cooperative stop may precede the loader resolving; release late assets.
+      if (aborter.signal.aborted || exited) { result.dispose(); return; }
+      loaded = result; check();
       engine = new loaded.Engine({ canvas: document.getElementById('canvas'), executable: loaded.basePath,
-        persistentPaths: [], persistentDrops: false, serviceWorker: '',
+        persistentPaths: [], persistentDrops: false, serviceWorker: '', focusCanvas: false,
         onPrint: (...args: unknown[]) => log('log', args), onPrintError: (...args: unknown[]) => log('error', args),
         onExit: (code: number) => {
+          if (exited) return;
           send({ type: 'exited', code }); exited = true; cleanup();
         },
       });
+      loaded.installWorklets(engine);
       phase('preloading'); await engine.preloadFile(pack, '/application.pck'); check();
       phase('initializing'); await engine.init(); check();
-      phase('starting'); await engine.start({ args: ['--main-pack', '/application.pck', '--rendering-method', 'gl_compatibility', '--audio-driver', 'Dummy'] }); check();
+      phase('starting'); await engine.start({ args: release.profile==='full-engine-v1'
+        ? ['--main-pack', '/application.pck', '--rendering-method', 'gl_compatibility']
+        : ['--main-pack', '/application.pck', '--rendering-method', 'gl_compatibility', '--audio-driver', 'Dummy'] }); check();
       if (exited) return;
       phase('waiting-ready');
       await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))); check();

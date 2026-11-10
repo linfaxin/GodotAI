@@ -6,7 +6,7 @@
   "description": "Browser compiler, package resolution and preview integration for GodotJS React",
   "exports": { ".": "./dist/index.js", "./*": "./dist/*.js" },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "node scripts/snapshot-runtime.mjs && tsc -p tsconfig.json",
     "test": "pnpm build && node --test test/*.test.mjs"
   },
   "dependencies": {

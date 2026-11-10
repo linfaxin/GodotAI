@@ -1,8 +1,13 @@
-export * from "./components";
-export { createRoot, ReactRoot, useNodeRef, useProcess, usePhysicsProcess, useInput, useNativeReady, useAsset, asset, vec2, color, createTemplateComponent } from "./runtime";
-export type { NodeReadHandle, NodeRef, FrameCommands, FrameOptions, ReactRootOptions, RuntimeDiagnostic } from "./runtime";
-export type { NativePort, NativeInfo, RuntimePhase, NativeInvalidation } from "./native-port";
-export type { AssetRef, Vector2Value, ColorValue } from "./contracts";
-
-export { defineNativeInterface, useNativeInterface } from "./native-interfaces";
-export type { NativeInterfaceToken, NativeInterfaceSchema, NativeInterfaceHandlers, NativeRpcSchema, NativeRpcCodec, NativeDTO, NativeRpcContext, SynchronousNativeHandlers } from "./native-interfaces";
+// The default root renders directly into the native GodotJS engine.
+// The explicit three-argument NativePort overload retains existing projects.
+export * from "./legacy";
+export {EngineNode, EngineRoot, createNativeComponent, useFrame} from "./engine";
+export type {EngineNodeProps, AdoptedNodeProps, EngineRootOptions, EngineErrorInfo, EngineStats, NativeProperties, NativeEvents, NativeConstructor} from "./engine";
+import {createRoot as nativeRoot} from "./engine";
+import {createRoot as legacyRoot} from "./runtime";
+export function createRoot(...args:Parameters<typeof nativeRoot>):ReturnType<typeof nativeRoot>;
+export function createRoot(...args:Parameters<typeof legacyRoot>):ReturnType<typeof legacyRoot>;
+export function createRoot(first:object,second?:unknown,third?:unknown):ReturnType<typeof nativeRoot>|ReturnType<typeof legacyRoot>{
+ if(third!==undefined)return legacyRoot(first as Parameters<typeof legacyRoot>[0],second as Parameters<typeof legacyRoot>[1],third as Parameters<typeof legacyRoot>[2]);
+ return nativeRoot(first,second as Parameters<typeof nativeRoot>[1]);
+}

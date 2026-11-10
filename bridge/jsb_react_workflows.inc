@@ -1,0 +1,54 @@
+        bool workflow_property(Node* node,const String& name,const Variant& value){
+            if(name=="grow_horizontal"||name=="grow_vertical")return value.get_type()==Variant::INT&&int64_t(value)>=0&&int64_t(value)<=2;
+            if(name=="indent_size")return value.get_type()==Variant::INT&&int64_t(value)>=1&&int64_t(value)<=16;
+            return true;
+        }
+        bool workflow_highlighter(const Ref<CodeHighlighter>& source){
+            if(source.is_null())return true;
+            return source->get_keyword_colors().size()<=256&&source->get_member_keyword_colors().size()<=256&&source->get_color_regions().size()<=32;
+        }
+        bool workflow_special(Owned& owned,Node* node,const String& name,const Variant& value,bool set,Variant& result){
+            if(name=="__react_workflows_highlighter"){
+                CodeEdit* edit=Object::cast_to<CodeEdit>(node);if(!edit)return false;
+                if(set){Ref<CodeHighlighter> source=value;if((!value.is_null()&&source.is_null())||!workflow_highlighter(source))return false;owned.highlighter_source=source;Ref<CodeHighlighter> copy=source.is_valid()?Ref<CodeHighlighter>(source->duplicate()):Ref<CodeHighlighter>();edit->set_syntax_highlighter(copy);}
+                result=owned.highlighter_source;return true;
+            }
+            MenuButton* button=Object::cast_to<MenuButton>(node);if(!button||name!="__react_workflows_menu")return false;PopupMenu* menu=button->get_popup();
+            if(set){if(value.get_type()!=Variant::ARRAY)return false;const Array rows=value;if(rows.size()>256)return false;HashSet<int> ids;
+                for(int j=0;j<rows.size();++j){if(rows[j].get_type()!=Variant::ARRAY)return false;Array row=rows[j];if(row.size()!=7||row[0].get_type()!=Variant::FLOAT||double(row[0])!=Math::floor(double(row[0]))||double(row[0])<0||double(row[0])>65535||ids.has(int(row[0]))||row[1].get_type()!=Variant::STRING||String(row[1]).length()>256)return false;ids.insert(int(row[0]));for(int k=3;k<7;++k)if(row[k].get_type()!=Variant::BOOL)return false;if(bool(row[5])&&!bool(row[4]))return false;if(!row[2].is_null()){Ref<Texture2D> texture=row[2];if(texture.is_null()||texture->is_class("ViewportTexture"))return false;}if(bool(row[6])&&(bool(row[4])||!row[2].is_null()))return false;}
+                menu->clear();for(int j=0;j<rows.size();++j){const Array row=rows[j];const int id=int(row[0]);if(bool(row[6]))menu->add_separator(row[1],id);else{menu->add_item(row[1],id);if(!row[2].is_null())menu->set_item_icon(j,row[2]);menu->set_item_as_checkable(j,row[4]);menu->set_item_checked(j,row[5]);}menu->set_item_disabled(j,row[3]);}
+            }
+            Array rows;for(int j=0;j<menu->get_item_count();++j){Array row;row.push_back(menu->get_item_id(j));row.push_back(menu->get_item_text(j));row.push_back(menu->get_item_icon(j));row.push_back(menu->is_item_disabled(j));row.push_back(menu->is_item_checkable(j));row.push_back(menu->is_item_checked(j));row.push_back(menu->is_item_separator(j));rows.push_back(row);}result=rows;return true;
+        }
+        bool workflow_pattern(const Variant& value,TileMapLayer* map,Ref<TileMapPattern>& pattern){
+            if(value.get_type()!=Variant::ARRAY||map->get_tile_set().is_null())return false;const Array rows=value;if(rows.size()>4096)return false;Ref<TileSet> tiles=map->get_tile_set();HashSet<Vector2i> seen;
+            pattern.instantiate();for(int j=0;j<rows.size();++j){if(rows[j].get_type()!=Variant::ARRAY)return false;Array row=rows[j];if(row.size()!=6)return false;for(int k=0;k<6;++k)if(row[k].get_type()!=Variant::FLOAT||double(row[k])!=Math::floor(double(row[k]))||double(row[k])<(k==2?-1:0)||double(row[k])>(k<2?4095:65535))return false;Vector2i at{int(row[0]),int(row[1])};if(seen.has(at))return false;seen.insert(at);const int source=int(row[2]),alternative=int(row[5]);if(source<0)continue;if(!tiles->has_source(source))return false;Ref<TileSetSource> tile_source=tiles->get_source(source);Vector2i atlas{int(row[3]),int(row[4])};if(!tile_source->has_tile(atlas)||!tile_source->has_alternative_tile(atlas,alternative&TileSetAtlasSource::UNTRANSFORM_MASK))return false;pattern->set_cell(at,source,atlas,alternative);}return true;
+        }
+        bool workflow_command(Owned& owned,Node* node,const String& op,const Array& args,Variant& result){
+            if(CodeEdit* edit=Object::cast_to<CodeEdit>(node)){if((op=="indentLines"||op=="unindentLines")&&args.is_empty()&&edit->is_editable()){if(op=="indentLines"){if(edit->get_text().length()+edit->get_line_count()*edit->get_indent_size()>65536)return false;edit->indent_lines();}else edit->unindent_lines();return true;}}
+            if(MenuButton* button=Object::cast_to<MenuButton>(node)){PopupMenu* menu=button->get_popup();if(op=="getMenuRect"&&args.is_empty()){result=Rect2(menu->get_position(),menu->get_size());return true;}if(op=="isMenuOpen"&&args.is_empty()){result=menu->is_visible();return true;}
+                if(args.is_empty()||args[0].get_type()!=Variant::FLOAT||double(args[0])!=Math::floor(double(args[0]))||double(args[0])<0||double(args[0])>65535)return false;const int index=menu->get_item_index(int(args[0]));if(index<0||menu->is_item_separator(index))return false;if(op=="isMenuItemChecked"&&args.size()==1){result=menu->is_item_checked(index);return true;}if(args.size()!=2||args[1].get_type()!=Variant::BOOL)return false;if(op=="setMenuItemChecked"&&menu->is_item_checkable(index)){menu->set_item_checked(index,args[1]);return true;}if(op=="setMenuItemDisabled"){menu->set_item_disabled(index,args[1]);return true;}return false;
+            }
+            if(AnimationTree* tree=Object::cast_to<AnimationTree>(node)){
+                if(args.size()!=1||args[0].get_type()!=Variant::STRING)return false;const String path=args[0];if(path.length()>256||!path.begins_with("parameters/")||!path.ends_with("/playback")||path.contains(".."))return false;bool valid=false;Ref<AnimationNodeStateMachinePlayback> play=tree->get(path,&valid);if(!valid||play.is_null())return false;
+                if(op=="stopState")play->stop();else if(op=="nextState")play->next();else if(op=="isStatePlaying")result=play->is_playing();else if(op=="getStatePosition")result=play->get_current_play_pos();else if(op=="getStateLength")result=play->get_current_length();else if(op=="getFadingFromState")result=String(play->get_fading_from_node());else if(op=="getFadingPosition")result=play->get_fading_pos();else if(op=="getFadingLength")result=play->get_fading_time();else if(op=="getTravelPath"){const Vector<StringName> route=play->get_travel_path();if(route.size()>64)return false;Array out;for(int j=0;j<route.size();++j)out.push_back(String(route[j]));result=out;}else return false;return true;
+            }
+            TileMapLayer* map=Object::cast_to<TileMapLayer>(node);if(!map)return false;
+            const auto point_ok=[](const Vector2i& p){return p.x>=-32768&&p.x<=32767&&p.y>=-32768&&p.y<=32767;};
+            if(op=="getPattern"){
+                if(args.size()!=1||args[0].get_type()!=Variant::ARRAY)return false;const Array points=args[0];if(points.size()>4096)return false;TypedArray<Vector2i> cells;for(int j=0;j<points.size();++j){if(points[j].get_type()!=Variant::VECTOR2I||!point_ok(points[j]))return false;cells.push_back(points[j]);}Array out;if(points.is_empty()){result=out;return true;}if(map->get_tile_set().is_null())return false;Ref<TileMapPattern> pattern=map->get_pattern(cells);if(pattern.is_null())return false;if(pattern->get_size().x>4096||pattern->get_size().y>4096)return false;const TypedArray<Vector2i> used=pattern->get_used_cells();for(int j=0;j<used.size();++j){const Vector2i at=used[j],atlas=pattern->get_cell_atlas_coords(at);Array row;row.push_back(at.x);row.push_back(at.y);row.push_back(pattern->get_cell_source_id(at));row.push_back(atlas.x);row.push_back(atlas.y);row.push_back(pattern->get_cell_alternative_tile(at));out.push_back(row);}result=out;return true;
+            }
+            if(op=="setPattern"||op=="mapPattern"){
+                const bool query=op=="mapPattern";if(args.size()!=(query?3:2)||args[0].get_type()!=Variant::VECTOR2I||!point_ok(args[0]))return false;Ref<TileMapPattern> pattern;if(!workflow_pattern(args[query?2:1],map,pattern))return false;const Vector2i origin=args[0];if(query){if(args[1].get_type()!=Variant::VECTOR2I)return false;const Vector2i at=args[1];if(at.x<0||at.y<0||at.x>=pattern->get_size().x||at.y>=pattern->get_size().y)return false;const Vector2i mapped=map->map_pattern(origin,at,pattern);if(!point_ok(mapped))return false;result=mapped;return true;}
+                if(map->get_used_cells().size()+pattern->get_used_cells().size()>65536)return false;const auto used=pattern->get_used_cells();for(int j=0;j<used.size();++j)if(!point_ok(map->map_pattern(origin,used[j],pattern)))return false;map->set_pattern(origin,pattern);return true;
+            }
+            if(op=="setCellsTerrainPath"){
+                if(args.size()!=4||args[0].get_type()!=Variant::ARRAY||args[1].get_type()!=Variant::FLOAT||args[2].get_type()!=Variant::FLOAT||args[3].get_type()!=Variant::BOOL)return false;const Array cells=args[0];const double set=args[1],terrain=args[2];const Ref<TileSet> tiles=map->get_tile_set();if(tiles.is_null()||cells.size()>4096||map->get_used_cells().size()+cells.size()*9>65536||set!=Math::floor(set)||set<0||set>=tiles->get_terrain_sets_count()||terrain!=Math::floor(terrain)||terrain<-1||terrain>=tiles->get_terrains_count(int(set)))return false;TypedArray<Vector2i> path;for(int j=0;j<cells.size();++j){if(cells[j].get_type()!=Variant::VECTOR2I||!point_ok(cells[j]))return false;const Vector2i at=cells[j];if(at.x<=-32768||at.x>=32767||at.y<=-32768||at.y>=32767)return false;if(j>0){const Vector2i previous=path[j-1];bool neighbor=false;for(int k=0;k<TileSet::CELL_NEIGHBOR_MAX;++k){const auto bit=TileSet::CellNeighbor(k);if(tiles->is_existing_neighbor(bit)&&tiles->get_neighbor_cell(previous,bit)==at){neighbor=true;break;}}if(!neighbor)return false;}path.push_back(at);}if(!path.is_empty())map->set_cells_terrain_path(path,int(set),int(terrain),args[3]);return true;
+            }
+            return false;
+        }
+        bool prepare_workflow_prefab(Node* node){
+            if(MenuButton* button=Object::cast_to<MenuButton>(node)){PopupMenu* menu=button->get_popup();if(menu->get_item_count()>256)return false;HashSet<int> ids;for(int j=0;j<menu->get_item_count();++j){const int id=menu->get_item_id(j);if(id<0||id>65535||ids.has(id)||menu->get_item_text(j).length()>256)return false;ids.insert(id);}}
+            if(CodeEdit* edit=Object::cast_to<CodeEdit>(node)){Ref<CodeHighlighter> source=edit->get_syntax_highlighter();if(!workflow_highlighter(source))return false;if(source.is_valid())edit->set_syntax_highlighter(source->duplicate());}
+            return true;
+        }

@@ -158,11 +158,14 @@ namespace v8
     int64_t BigInt::Int64Value(bool* lossless) const
     {
         const JSValue val = (JSValue) *this;
-        int64_t rval;
+        int64_t rval = 0;
         if (JS_ToBigInt64(isolate_->ctx(), &rval, val) == -1)
         {
             jsb::impl::QuickJS::MarkExceptionAsTrivial(isolate_->ctx());
+            if (lossless) *lossless = false;
+            return 0;
         }
+        if (lossless) *lossless = jsb::impl::QuickJS::GetString(isolate_->ctx(), val) == ::String::num_int64(rval);
         return rval;
     }
 

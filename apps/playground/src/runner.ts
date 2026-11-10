@@ -12,10 +12,10 @@ globals.__playgroundNotify=(event:Record<string,unknown>)=>send(event);
 let ready=false;
 addEventListener("message",event=>{
   if(event.source!==parent||event.data?.token!==token)return;
-  const {type,code,controls,action,data,mode}=event.data;
+  const {type,code,controls,action,data,mode,resources,focusPreview}=event.data;
   try{
     const api=globals.__godotPlayground;
-    if(type==="run"&&ready){api.run(code,controls,mode);canvas.focus();}
+    if(type==="run"&&ready){api.run(code,controls,mode,resources);if(focusPreview===true)canvas.focus();}
     if(type==="stop"&&ready)api.stop();
     if(type==="controls"&&ready)api.controls(controls);
     if(type==="action"&&ready&&typeof action==="string")api.action(action);

@@ -1,0 +1,10 @@
+import {ERROR_CODES,exact,invariant} from './contracts';
+import {validateValue} from './schema/codecs';
+export function workflowValue(codec:string,value:unknown,path:string):readonly unknown[]{
+ if(codec==='menuItems'){
+  invariant(Array.isArray(value)&&value.length<=256,ERROR_CODES.VALUE,'Expected up to 256 menu items',path);const ids=new Set<number>();
+  return Object.freeze(value.map((raw,index)=>{const v=exact(raw,['text'],['id','icon','disabled','checkable','checked','separator'],path+'['+index+']'),id=validateValue('integer',v.id??index,path,{minimum:0,maximum:65535}) as number,text=validateValue('string',v.text,path) as string;invariant(!ids.has(id)&&Array.from(text).length<=256,ERROR_CODES.VALUE,'Duplicate menu id or oversized text',path);ids.add(id);const icon=validateValue('assetRef',v.icon??null,path,{resourceTypes:['Texture2D','ImageTexture','CompressedTexture2D','AtlasTexture','GradientTexture1D','GradientTexture2D','CurveTexture']});invariant(!icon||(icon as any).scope!=='instance',ERROR_CODES.VALUE,'Menu icons must be shared',path);const flag=(k:string)=>validateValue('boolean',v[k]===undefined?false:v[k],path);const checkable=flag('checkable'),checked=flag('checked'),separator=flag('separator');invariant(!checked||checkable,ERROR_CODES.VALUE,'Checked item must be checkable',path);invariant(!separator||(!checkable&&!icon),ERROR_CODES.VALUE,'Separator cannot have a check or icon',path);return Object.freeze([id,text,icon,flag('disabled'),checkable,checked,separator]);}));
+ }
+ invariant(Array.isArray(value)&&value.length<=4096,ERROR_CODES.VALUE,'Expected up to 4096 pattern cells',path);const seen=new Set<string>();
+ return Object.freeze(value.map((raw,index)=>{invariant(Array.isArray(raw)&&raw.length===6,ERROR_CODES.VALUE,'Expected [x,y,source,atlasX,atlasY,alternative]',path);const row=raw.map((n,i)=>validateValue('integer',n,path,{minimum:i===2?-1:0,maximum:i<2?4095:65535}) as number),key=row[0]+','+row[1];invariant(!seen.has(key),ERROR_CODES.VALUE,'Duplicate pattern cell',path);seen.add(key);return Object.freeze(row);}));
+}
