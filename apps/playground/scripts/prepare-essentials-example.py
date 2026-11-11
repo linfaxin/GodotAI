@@ -1,6 +1,6 @@
 from pathlib import Path
 import json,struct,zlib,binascii,math
-root=Path(__file__).resolve().parents[3];dest=root/'apps/playground/examples';base=json.loads((dest/'behaviors-engine.project.json').read_text());assets=json.loads(base['files']['/assets/gameplay.resources.json'])['assets'];completion=json.loads((dest/'completion-engine.project.json').read_text());base['files']['/assets/ui.ttf']=completion['files']['/assets/ui.ttf'];base['files']['/DejaVu-LICENSE.txt']=completion['files']['/DejaVu-LICENSE.txt']
+root=Path(__file__).resolve().parents[3];dest=root/'tests/react/showcase/projects';base=json.loads((dest/'behaviors-engine.project.json').read_text());assets=json.loads(base['files']['/assets/gameplay.resources.json'])['assets'];completion=json.loads((dest/'completion-engine.project.json').read_text());base['files']['/assets/ui.ttf']=completion['files']['/assets/ui.ttf'];base['files']['/DejaVu-LICENSE.txt']=completion['files']['/DejaVu-LICENSE.txt']
 def chunk(kind,data):return struct.pack('>I',len(data))+kind+data+struct.pack('>I',binascii.crc32(kind+data)&0xffffffff)
 png=b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',16,16,8,6,0,0,0))+chunk(b'IDAT',zlib.compress(b''.join(b'\x00'+b'\xff'*64 for _ in range(16))))+chunk(b'IEND',b'');base['files']['/assets/white.png']=list(png)
 assets['flatCurve']={'type':'Curve','points':[{'x':0,'y':1},{'x':1,'y':1}]}

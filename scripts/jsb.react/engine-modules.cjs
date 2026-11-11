@@ -20,7 +20,6 @@ const ENGINE_SDK_MODULES = {
 for(const entry of Object.values(ENGINE_SDK_MODULES))Object.freeze(entry);
 Object.freeze(ENGINE_SDK_MODULES);
 function engineModuleDeclaration(specifier,runtime){
- if(specifier==='@godot-js/react'&&runtime==='legacy-react')return '/sdk/index.d.ts';
  return ENGINE_SDK_MODULES[specifier]?.declaration;
 }
 module.exports={ENGINE_SDK_MODULES,engineModuleDeclaration};

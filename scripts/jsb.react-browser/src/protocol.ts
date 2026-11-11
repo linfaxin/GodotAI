@@ -53,7 +53,8 @@ export const DEFAULT_DEADLINES: PhaseDeadlines = {
 export const RUN_PHASES: readonly RunPhase[] = ['downloading', 'preloading', 'initializing', 'starting', 'waiting-ready', 'running'];
 export interface PreviewEnvelope extends RunIdentity {
   protocolVersion: typeof PREVIEW_PROTOCOL;
-  type: 'connected' | 'phase' | 'heartbeat' | 'log' | 'fatal' | 'exited';
+  type: 'connected' | 'phase' | 'heartbeat' | 'log' | 'fatal' | 'exited' | 'project';
+  data?: Record<string,unknown>;
   phase?: RunPhase;
   level?: 'log' | 'warn' | 'error';
   text?: string;
@@ -63,6 +64,7 @@ export interface PreviewEnvelope extends RunIdentity {
 export type RunnerEvent =
   | ({ type: 'state'; state: RunnerState } & RunIdentity)
   | ({ type: 'log'; level: 'log' | 'warn' | 'error'; text: string; untrusted: true } & RunIdentity)
+  | ({ type: 'project'; data: Record<string,unknown> } & RunIdentity)
   | ({ type: 'exit'; report: ExitReport });
 
 const boundedString = (value: unknown, max = 256): value is string => typeof value === 'string' && value.length > 0 && value.length <= max;
@@ -115,12 +117,19 @@ export function isPreviewEnvelope(value: unknown): value is PreviewEnvelope {
   if (v.protocolVersion !== PREVIEW_PROTOCOL) return false;
   switch (v.type) {
     case 'connected': case 'heartbeat': return true;
+    case 'project': return isProjectData(v.data);
     case 'phase': return RUN_PHASES.includes(v.phase as RunPhase);
     case 'log': return ['log', 'warn', 'error'].includes(v.level as string) && typeof v.text === 'string' && v.text.length <= 4096;
     case 'fatal': return typeof v.text === 'string' && v.text.length <= 4096 && (v.diagnostic === undefined || isPreviewDiagnostic(v.diagnostic));
     case 'exited': return typeof v.code === 'number' && Number.isSafeInteger(v.code);
     default: return false;
   }
+}
+
+/** Only plain bounded JSON crosses the optional project UI channel. */
+export function isProjectData(value:unknown):value is Record<string,unknown>{
+ if(!value||typeof value!=='object'||Array.isArray(value))return false;
+ try{let size=0;const inspect=(item:unknown,depth=0):boolean=>{if(depth>16)return false;if(item===null||typeof item==='boolean')return true;if(typeof item==='number')return Number.isFinite(item);if(typeof item==='string'){size+=item.length;return size<=262144;}if(!item||typeof item!=='object')return false;const proto=Object.getPrototypeOf(item);if(!Array.isArray(item)&&proto!==Object.prototype&&proto!==null)return false;return Object.entries(Object.getOwnPropertyDescriptors(item)).every(([key,d])=>{size+=key.length+8;return size<=262144&&'value'in d&&inspect(d.value,depth+1);});};return inspect(value);}catch{return false;}
 }
 
 export function normalizedOrigin(value: string): string {

@@ -1,6 +1,6 @@
 from pathlib import Path
 import json, struct, zlib
-root=Path(__file__).resolve().parents[3];dest=root/'apps/playground/examples'
+root=Path(__file__).resolve().parents[3];dest=root/'tests/react/showcase/projects'
 def v(x,y,z=0):return dict(x=x,y=y,z=z)
 def chunk(name,data):return struct.pack('>I',len(data))+name+data+struct.pack('>I',zlib.crc32(name+data)&0xffffffff)
 row=bytes([0])+bytes([255,0,0,255])*3+bytes([0,255,0,255])*3

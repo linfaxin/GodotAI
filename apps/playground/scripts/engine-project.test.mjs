@@ -315,12 +315,12 @@ export default function App(){
  }finally{await rm(directory,{recursive:true,force:true});}
 });
 
-test('the actual legacy Godot vendor stays compiler-free under the production neutral bundler',async()=>{
+test('the native demo API stays compiler-free under the production neutral bundler',async()=>{
  const {build}=await import('esbuild');
- const vendor=fileURLToPath(new URL('../src/vendor.ts',import.meta.url));
+ const vendor=fileURLToPath(new URL('../src/api.tsx',import.meta.url));
  const performance=fileURLToPath(new URL('../../../scripts/jsb.react/dist/internal/performance.mjs',import.meta.url));
  const result=await build({entryPoints:[vendor],bundle:true,write:false,platform:'neutral',format:'cjs',target:'es2022',metafile:true,
-  define:{'process.env.NODE_ENV':'"production"'},external:['godot','godot-jsb'],inject:[performance]});
+  define:{'process.env.NODE_ENV':'"production"'},external:['godot','godot-jsb','res://*'],inject:[performance]});
  const inputs=Object.keys(result.metafile.inputs);
  assert.ok(!inputs.some(name=>/typescript|core\/engine-project|resource-uids/.test(name)),inputs.join('\n'));
  assert.ok(!Object.values(result.metafile.outputs).some(output=>output.imports.some(item=>item.path==='typescript')));

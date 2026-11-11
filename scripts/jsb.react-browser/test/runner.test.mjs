@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { gzipSync } from 'node:zlib';
 import { PreviewRunner } from '../dist/runner.js';
-import { PREVIEW_PROTOCOL, isPreviewEnvelope } from '../dist/protocol.js';
+import { PREVIEW_PROTOCOL, isPreviewEnvelope, isProjectData } from '../dist/protocol.js';
 import { fetchVerifiedAsset, injectVerifiedWasm } from '../dist/verified-loader.js';
 import { patchOptionalPwa } from '../../release/patch-web-optional-pwa.mjs';
 
@@ -10,7 +10,7 @@ const release = { releaseId: 'test', profile: 'core-ui-v1', engineJs: { url: 'ht
 const artifact = { revision: 'revision-1', buildKey: 'build-1', generation: 42, pack: new Uint8Array([1, 2, 3]), manifest: { generation: 42 } };
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 function fixture({ pauseAt, heartbeat = true, exitOnStop = true, connect = true, frameLoad = true, deadlines = {} } = {}) {
-  const resources = [], remotePorts = [], frames = [], events = [];
+  const resources = [], remotePorts = [], frames = [], events = [], messages = [];
   let remote, identity, send;
   const document = { location: { origin: 'http://editor.test' }, createElement() {
     const frame = { attributes: {}, setAttribute(name, value) { frame.attributes[name] = value; }, remove() { frame.removed = true; }, contentWindow: {
@@ -20,6 +20,7 @@ function fixture({ pauseAt, heartbeat = true, exitOnStop = true, connect = true,
         remote = ports[0]; remotePorts.push(remote); remote.unref?.(); identity = data;
         send = fields => remote.postMessage({ ...identity, ...fields, protocolVersion: PREVIEW_PROTOCOL });
         remote.onmessage = event => {
+          messages.push(event.data);
           if (event.data.type === 'stop') { if (exitOnStop) send({ type: 'exited', code: 0 }); return; }
           if (event.data.type !== 'run') return;
           assert.equal(event.data.artifact.manifest.generation, event.data.generation);
@@ -41,9 +42,26 @@ function fixture({ pauseAt, heartbeat = true, exitOnStop = true, connect = true,
     deadlines: { 'loading-frame': 100, handshaking: 100, downloading: 200, preloading: 200, initializing: 200,
       starting: 200, 'waiting-ready': 200, running: 0, heartbeat: 100, stopping: 30, ...deadlines } });
   runner.subscribe(event => events.push(event));
-  return { runner, frames, events, send: (...args) => send(...args), get identity() { return identity; },
+  return { runner, frames, events, messages, send: (...args) => send(...args), get identity() { return identity; },
     async cleanup() { resources.forEach(clearInterval); await runner.dispose(); remotePorts.forEach(port => port.close()); } };
 }
+
+test('project UI commands and telemetry stay on the live run and accept only bounded plain data',async()=>{
+ const f=fixture();let reads=0;
+ try{
+  assert.equal(f.runner.command({type:'action',action:'reset'}),false);
+  await f.runner.run(artifact);
+  assert.equal(f.runner.command({type:'controls',controls:{speed:2}}),true);await pause(10);
+  const command=f.messages.find(message=>message.type==='project-command');assert.equal(command.runId,f.identity.runId);assert.equal(command.data.controls.speed,2);
+  f.send({type:'project',data:{type:'stats',frames:2,stats:{coins:1}}});
+  f.send({type:'project',runId:'stale',data:{type:'stats',frames:100}});
+  f.send({type:'project',data:{text:'x'.repeat(262145)}});await pause(10);
+  assert.equal(f.events.filter(event=>event.type==='project').length,1);
+  assert.equal(isProjectData({get secret(){reads++;throw Error('must not read');}}),false);assert.equal(reads,0);
+  assert.equal(f.runner.command({callback(){}}),false);assert.equal(isProjectData({invalid:Infinity}),false);
+  await f.runner.stop();assert.equal(f.runner.command({type:'action',action:'reset'}),false);
+ }finally{await f.cleanup();}
+});
 
 test('cross-origin handshake preserves artifact identity and has no BootReport readiness dependency', async () => {
   const f = fixture();

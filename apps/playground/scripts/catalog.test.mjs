@@ -13,5 +13,5 @@ test("all upstream inputs are pinned and retain their recorded checksums",async(
 });
 test("every catalog demo has source and bounded default controls",async()=>{
  assert.equal(new Set(catalog.map(d=>d.id)).size,8);
- for(const demo of catalog){assert.match(await fs.readFile(path.join(app,"src/demos",demo.file),"utf8"),/export default function/);for(const control of demo.controls)assert.ok(control.min<=control.value&&control.value<=control.max&&control.step>0);}
+ for(const demo of catalog){assert.match(await fs.readFile(path.join(app,"src/demos",demo.file),"utf8"),/export default (?:function|withDemo)/);for(const control of demo.controls)assert.ok(control.min<=control.value&&control.value<=control.max&&control.step>0);}
 });

@@ -4,15 +4,16 @@ import {fileURLToPath} from 'node:url';
 import {createHash} from 'node:crypto';
 import {catalog} from '../src/catalog.ts';
 import {buildFrontend} from './build-frontend.mjs';
+import {buildDemoRuntime} from './build-demo-runtime.mjs';
 const app=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
-export async function createTypeSnapshot({engineFiles,legacy=true}={}){
+/** Engine/SDK types are release inputs; demo helper types have their own descriptor. */
+export async function createTypeSnapshot({engineFiles}={}){
  const types={};
  async function collect(directory,prefix,filter){for(const entry of (await fs.readdir(directory,{withFileTypes:true})).sort((a,b)=>a.name<b.name?-1:a.name>b.name?1:0)){const p=path.join(directory,entry.name),key=`${prefix}/${entry.name}`;if(entry.isDirectory())await collect(p,key,filter);else if(filter(entry.name))types[key]=await fs.readFile(p,'utf8');}}
  await collect(path.resolve(app,'../../scripts/jsb.react/dist'),'/sdk',name=>name.endsWith('.d.ts'));
  if(engineFiles)await collect(path.resolve(app,'../../scripts/jsb.react/dist'),'/engine-sdk',name=>name.endsWith('.d.ts'));
  await collect(path.dirname(fileURLToPath(import.meta.resolve('@types/react/package.json'))),'/react',name=>name.endsWith('.d.ts'));
  await collect(path.dirname(fileURLToPath(import.meta.resolve('typescript/lib/typescript.js'))),'/lib',name=>/^lib\..*\.d\.ts$/.test(name));
- if(legacy)types['/api.d.ts']=await fs.readFile(path.join(app,'src/editor-api.d.ts'),'utf8');
  if(engineFiles){
   for(const [name,source]of Object.entries(engineFiles)){
    if(!name.startsWith('/')||name.includes('..')||typeof source!=='string')throw Error('Invalid generated engine declaration '+name);
@@ -47,7 +48,7 @@ export async function writeTypeSnapshot(dist,options){
  await fs.writeFile(path.join(dist,'types.json'),snapshot);return snapshot;
 }
 async function refreshSiteManifests(dist){
- for(const name of ['manifest.json','legacy-manifest.json']){
+ for(const name of ['manifest.json']){
   let manifest;
   try{manifest=JSON.parse(await fs.readFile(path.join(dist,name),'utf8'));}catch(error){if(error.code==='ENOENT')continue;throw error;}
   if(!manifest.payloads)continue;
@@ -62,9 +63,9 @@ export async function buildShell(dist=path.join(app,'dist')){
  await fs.mkdir(dist,{recursive:true});await fs.cp(path.join(app,'web'),dist,{recursive:true});
  const demos=await Promise.all(catalog.map(async demo=>({...demo,source:await fs.readFile(path.join(app,'src/demos',demo.file),'utf8')})));
  await fs.writeFile(path.join(dist,'catalog.json'),JSON.stringify(demos));
- await writeTypeSnapshot(dist);await buildFrontend(dist);await refreshSiteManifests(dist);
- let profile='legacy-showcase-v1';
+ await writeTypeSnapshot(dist);await buildDemoRuntime(dist);await buildFrontend(dist);await refreshSiteManifests(dist);
+ let profile='full-engine-v1';
  try{const manifest=JSON.parse(await fs.readFile(path.join(dist,'engine-release.json'),'utf8'));profile=manifest.runtimeProfile;}catch(error){if(error.code!=='ENOENT')throw error;}
- await fs.writeFile(path.join(dist,'shell-profile.json'),JSON.stringify({schemaVersion:2,runtimeProfile:profile,legacy:profile!=='full-engine-v1'}));
+ await fs.writeFile(path.join(dist,'shell-profile.json'),JSON.stringify({schemaVersion:2,runtimeProfile:profile}));
 }
 if(process.argv[1]===fileURLToPath(import.meta.url))await buildShell();

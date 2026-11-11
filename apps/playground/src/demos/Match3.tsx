@@ -1,6 +1,7 @@
+import {EngineNode} from "@godot-js/react/engine";
+import * as G from "godot";
+import {Native, withDemo, useNodeRef, useProcess, vec2, color, useDemo, useResource} from "@playground/api";
 import * as React from "react";
-import { Node2D, Sprite2D, ColorRect, useNodeRef, useProcess, vec2, color } from "@godot-js/react";
-import { useDemo, useResource } from "@playground/api";
 
 // Swap/match/collapse/refill state machine adapted from Kenney's MIT Match-3.
 export function randomSource(seed:number){let s=seed>>>0;return ()=>{s=(Math.imul(s,1664525)+1013904223)>>>0;return s/4294967296;};}
@@ -32,13 +33,13 @@ interface BoardState {cells:Tile[];phase:string;timer:number;score:number;moves:
 const names=["gem","godot","grass","kenney","spikes"],step=62;
 function TileView({tile,n,hint}:{tile:Tile;n:number;hint:boolean}){
   const texture=useResource(`tile-${names[tile.type]}`,"Texture2D"),ref=useNodeRef<"Sprite2D">(),origin=vec2((960-n*step)/2+step/2,(640-n*step)/2+step/2),scale=React.useRef(0);
-  useProcess(ref,{writes:["position","scale"]},(commands,dt)=>{
-    const target=vec2(origin.x+tile.x*step,origin.y+tile.y*step),p=commands.readPosition(),a=Math.min(1,dt*14);
-    commands.setPosition(vec2(p.x+(target.x-p.x)*a,p.y+(target.y-p.y)*a));scale.current+=((tile.clearing?0:.42)-scale.current)*Math.min(1,dt*18);commands.command("setScale",vec2(scale.current,scale.current));
+  useProcess(ref, (node,dt)=>{
+    const target=vec2(origin.x+tile.x*step,origin.y+tile.y*step),p=node.position,a=Math.min(1,dt*14);
+    (node.position = vec2(p.x+(target.x-p.x)*a,p.y+(target.y-p.y)*a));scale.current+=((tile.clearing?0:.42)-scale.current)*Math.min(1,dt*18);(node.scale = vec2(scale.current,scale.current));
   });
-  return <Sprite2D ref={ref} name={`Tile${tile.id}`} texture={texture} modulate={hint?color(1,.75,.4):color(1,1,1)} initial={{position:vec2(origin.x+tile.x*step,origin.y+(tile.spawn??tile.y)*step),scale:vec2(.01,.01)}} engineOwned={["position","scale"]}/>;
+  return <Native ctor={G.Sprite2D} ref={ref} initial={{position:vec2(origin.x+tile.x*step,origin.y+(tile.spawn??tile.y)*step),scale:vec2(.01,.01)}} native={{name: `Tile${tile.id}`, texture: texture, modulate: hint?color(1,.75,.4):color(1,1,1)}} />;
 }
-export default function Match3(){
+function Match3(){
   const demo=useDemo(),ref=useNodeRef<"Node2D">(),n=Math.round(demo.controls.size),types=Math.round(demo.controls.types);
   const [tiles,setTiles]=React.useState<Tile[]>([]),state=React.useRef<BoardState>({cells:[],phase:"idle",timer:0,score:0,moves:0,combo:1,serial:0,seed:1,key:"",swap:null,start:null,hint:null}).current;
   const publish=()=>setTiles(state.cells.slice());
@@ -46,7 +47,7 @@ export default function Match3(){
   const reset=(seed:number)=>{state.seed=seed;const grid=createBoard(n,types,seed);state.cells=grid.flatMap((row,y)=>row.map((type,x)=>({id:++state.serial,x,y,type,spawn:y-n})));state.phase="idle";state.timer=0;state.score=0;state.moves=0;state.hint=null;state.start=null;publish();};
   const swap=(a:number[])=>{state.cells=state.cells.map(c=>c.x===a[0]&&c.y===a[1]?{...c,x:a[2],y:a[3]}:c.x===a[2]&&c.y===a[3]?{...c,x:a[0],y:a[1]}:c);publish();};
   const clearMatches=(matches:number[])=>{const ids=new Set(matches);state.combo++;state.score+=matches.length*state.combo*10;state.cells=state.cells.map(c=>({...c,clearing:ids.has(c.y*n+c.x)}));state.phase="clear";state.timer=0;demo.sound("coin");publish();};
-  useProcess(ref,{},(_,dt)=>{
+  useProcess(ref, (_,dt)=>{
     const key=`${n}:${types}:${demo.controls.seed}`;if(state.key!==key){state.key=key;reset(Math.round(demo.controls.seed));}
     if(demo.input.requests.has("shuffle"))reset(state.seed+1);
     if(demo.input.requests.has("hint")){state.hint=legalMove(board());publish();}
@@ -65,7 +66,8 @@ export default function Match3(){
     }else if(state.phase==="fall"&&state.timer>.4){const matches=findMatches(board());if(matches.length)clearMatches(matches);else{state.phase="idle";if(!legalMove(board()))reset(state.seed+1);}}
     const hint=legalMove(board());demo.stats({kind:"match3",score:state.score,moves:state.moves,combo:state.combo,phase:state.phase,tiles:state.cells.length,seed:state.seed,hintX:hint?.[0]??-1,hintY:hint?.[1]??-1,hintToX:hint?.[2]??-1,hintToY:hint?.[3]??-1});
   });
-  return <Node2D ref={ref} name="Match3"><ColorRect size={vec2(960,640)} color={color(.045,.06,.12)}/><ColorRect position={vec2((960-n*step)/2-14,(640-n*step)/2-14)} size={vec2(n*step+28,n*step+28)} color={color(.1,.13,.22)}/>
+  return <EngineNode ctor={G.Node2D} ref={ref} native={{name: "Match3"}}><EngineNode ctor={G.ColorRect} native={{size: vec2(960,640), color: color(.045,.06,.12)}} /><EngineNode ctor={G.ColorRect} native={{position: vec2((960-n*step)/2-14,(640-n*step)/2-14), size: vec2(n*step+28,n*step+28), color: color(.1,.13,.22)}} />
     {tiles.map(tile=><TileView key={tile.id} tile={tile} n={n} hint={!!state.hint&&((tile.x===state.hint[0]&&tile.y===state.hint[1])||(tile.x===state.hint[2]&&tile.y===state.hint[3]))}/>)}
-  </Node2D>;
+  </EngineNode>;
 }
+export default withDemo(Match3);

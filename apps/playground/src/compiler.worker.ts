@@ -4,24 +4,24 @@ import {decodeProjectText,readProjectBooleanSetting} from '@godot-js/react-build
 import {prepareScriptRename} from '@godot-js/react-build/script-renames';
 import {projectScript,projectModulePath} from '@godot-js/react-build/project-modules';
 import {compileEngineProject} from "./engine-project";
-import {loadReactModules,loadEngineRelease,fetchReleaseAsset} from "./engine-assets";
-import {decodeBrowserImage} from "@godot-js/react-browser/assets";
-import {prepareResourcePlan} from "./project-resources";
+import {loadReactModules,loadEngineRelease,fetchReleaseAsset,loadDemoRuntime,loadDemoDeclarations} from "./engine-assets";
+import {DEMO_INPUT_SOURCE} from "./demo-input-source";
 import {moduleCandidates} from "./module-resolution";
 import type {TypeDiagnostic} from './compiler-types';
-interface Request {id:number;kind?:'compile'|'check'|'completion'|'hover'|'rename';source?:string;file?:string;files?:Record<string,string|number[]>;entry?:string;path?:string;newPath?:string;offset?:number;runtime?:'godot'|'react'|'legacy-react';mainScene?:string;mode?:'development'|'production'}
+interface Request {id:number;kind?:'compile'|'check'|'completion'|'hover'|'rename';source?:string;file?:string;files?:Record<string,string|number[]>;entry?:string;path?:string;newPath?:string;offset?:number;runtime?:'godot'|'react';mainScene?:string;controls?:Record<string,number>;mode?:'development'|'production'}
 let declarations:Record<string,string>;
-const ready=(async()=>{const response=await fetch('./engine-release.json');if(response.ok){const release=await loadEngineRelease();declarations=JSON.parse(new TextDecoder().decode(await fetchReleaseAsset(release.api.typeSnapshot)));}else{const types=await fetch('./types.json');if(!types.ok)throw Error('无法加载类型快照');declarations=await types.json();}})();
+const ready=(async()=>{const release=await loadEngineRelease();declarations=JSON.parse(new TextDecoder().decode(await fetchReleaseAsset(release.api.typeSnapshot)));})();
 const options:ts.CompilerOptions={target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS,moduleResolution:ts.ModuleResolutionKind.Node10,jsx:ts.JsxEmit.React,strict:true,skipLibCheck:true,esModuleInterop:true,lib:['lib.es2022.d.ts'],ignoreDeprecations:'6.0',inlineSourceMap:true,inlineSources:true,resolveJsonModule:true,allowJs:true,rewriteRelativeImportExtensions:true,outDir:"/__emit"};
 self.onmessage=async(event:MessageEvent<Request>)=>{
  const request=event.data,{id,kind='compile'}=request;
  try{
   await ready;
-  const runtime=request.runtime??'legacy-react';
+  const runtime=request.runtime??'react';
+  if(runtime!=='godot'&&runtime!=='react')throw Error('项目运行模式仅支持 godot 和 react');
   const allFiles=request.files??{['/src/'+request.file]:request.source??''};
   if(kind==='rename'){self.postMessage({id,renamePlan:prepareScriptRename(allFiles,request.path!,request.newPath!)});return;}
   let activeDeclarations=declarations;
-  if(runtime!=='legacy-react'){
+  {
    const release=await loadEngineRelease(),configuration=decodeProjectText(allFiles['/project.godot']);
    const camel=readProjectBooleanSetting(configuration??'','GodotJS','runtime/core/camel_case_bindings_enabled')??false;
    const descriptor=release.api.namingProfiles?.[camel?'camel':'snake']?.typeSnapshot??(!camel?release.api.typeSnapshot:undefined);
@@ -29,10 +29,11 @@ self.onmessage=async(event:MessageEvent<Request>)=>{
    activeDeclarations=JSON.parse(new TextDecoder().decode(await fetchReleaseAsset(descriptor)));
   }
   const user=Object.fromEntries(Object.entries(allFiles).filter((entry):entry is [string,string]=>typeof entry[1]==='string')),entry=request.entry??'/src/'+request.file;
+  if(Object.values(user).some(text=>/["']@playground\/api["']/.test(text)))activeDeclarations={...activeDeclarations,'/api.d.ts':await loadDemoDeclarations()};
   const snapshot={...activeDeclarations,...user},roots=Object.keys(user).filter(p=>projectScript.test(p));
   // The worker checks native projects; the shared core owns their sole emit
   // pass, including res:// and source-extension -> output-path rewriting.
-  const compilerOptions=runtime==='legacy-react'?options:{...options,noEmit:true,allowImportingTsExtensions:true,rewriteRelativeImportExtensions:false};
+  const compilerOptions={...options,noEmit:true,allowImportingTsExtensions:true,rewriteRelativeImportExtensions:false};
   const resolve=(name:string,from:string):ts.ResolvedModule|undefined=>{
    const fixed:Record<string,string>={'@playground/api':'/api.d.ts','godot':'/godot/index.d.ts','godot-jsb':'/godot-jsb/index.d.ts','godot.annotations':'/godot.annotations/index.d.ts'};
    const base=projectModulePath(name,from);
@@ -67,22 +68,20 @@ self.onmessage=async(event:MessageEvent<Request>)=>{
      diagnostics.push({file:source.fileName,message,line:point.line+1,column:point.character+1,start,length:1,code:0,category:'error'});
     }
    }
-   let code='',resources;
-   if(kind==='compile'&&runtime==='legacy-react'&&!diagnostics.some(d=>d.category==='error'))resources=await prepareResourcePlan(allFiles,crypto.randomUUID(),(bytes,mime)=>decodeBrowserImage(bytes,mime,{}));
    if(kind==='compile'&&!diagnostics.some(d=>d.category==='error')){
-    const modules:Record<string,string>={};
-    program.emit(undefined,(_name,text,_bom,_err,sources)=>{if(sources?.length&&sources[0].fileName in user&&projectScript.test(sources[0].fileName))modules[sources[0].fileName]=text;});
-    if(runtime!=='legacy-react'){
-     const useReact=runtime==='react'||Object.values(user).some(text=>/[\"'](?:react|@godot-js\/react)(?:\/[^\"']*)?[\"']/.test(text));
-     const release=await loadEngineRelease();
-     const sdk=useReact?await loadReactModules(request.mode??'production'):{};
-     const result=await compileEngineProject({files:allFiles,runtime,entry,mainScene:request.mainScene,generatedJs:modules,...sdk});
-     self.postMessage({id,code:'',diagnostics:[...diagnostics,...result.diagnostics.map(d=>({...d,file:d.file?.startsWith('res://')?'/'+d.file.slice(6):d.file}))],pack:result.pack,manifest:{...result.manifest,engineReleaseId:release.id}},[result.pack.buffer]);return;
-    }
-    code=`const __candidates=${moduleCandidates.toString()};const __external=require;const __modules={${Object.entries(modules).map(([p,c])=>JSON.stringify(p)+':function(require,module,exports){\n'+c+'\n}').join(',')}};const __json=${JSON.stringify(jsonFiles)};const __cache=Object.create(null);\n`+
-     `function __load(name,from){if(['react','@godot-js/react','@playground/api'].includes(name))return __external(name);let path=name;if(name.startsWith('.')){let parts=from.split('/');parts.pop();for(const p of name.split('/')){if(p==='..')parts.pop();else if(p&&p!=='.')parts.push(p);}path=parts.join('/');}const id=__candidates(path).find(p=>Object.hasOwn(__modules,p)||Object.hasOwn(__json,p));if(!id)throw Error('Unsupported module: '+name);if(Object.hasOwn(__json,id))return __json[id];if(__cache[id])return __cache[id].exports;const m={exports:{}};__cache[id]=m;__modules[id](n=>__load(n,id),m,m.exports);return m.exports;}module.exports=__load(${JSON.stringify(entry)},'/');`;
+    const usesDemo=Object.values(user).some(text=>/["']@playground\/api["']/.test(text));
+    // Demo helpers import React and the engine renderer even from native scripts.
+    const useReact=usesDemo||runtime==='react'||Object.values(user).some(text=>/["'](?:react|@godot-js\/react)(?:\/[^"']*)?["']/.test(text));
+    const release=await loadEngineRelease();
+    const sdk:Partial<Awaited<ReturnType<typeof loadReactModules>>>=useReact?await loadReactModules(request.mode??'production'):{};
+    const demo=usesDemo?await loadDemoRuntime():undefined;
+    const files=demo?{...allFiles,'/.playground/demo-input.ts':DEMO_INPUT_SOURCE,'/.playground/demo-resources.pck':Array.from(demo.resources)}:allFiles;
+    const result=await compileEngineProject({files,runtime,entry,mainScene:request.mainScene,...sdk,
+     ...(demo?{runtimeModules:{...sdk.runtimeModules,'@playground/api':demo.runtime},props:{controls:request.controls??{}}}:{}),
+    });
+    self.postMessage({id,code:'',diagnostics:[...diagnostics,...result.diagnostics.map(d=>({...d,file:d.file?.startsWith('res://')?'/'+d.file.slice(6):d.file}))],pack:result.pack,manifest:{...result.manifest,engineReleaseId:release.id}},[result.pack.buffer]);return;
    }
-   self.postMessage({id,code,diagnostics,resources});
+   self.postMessage({id,code:'',diagnostics});
   }finally{service.dispose();}
  }catch(error){const details=(error as any)?.diagnostics;self.postMessage({id,code:'',diagnostics:Array.isArray(details)?details.map(d=>({...d,file:d.file?.startsWith('res://')?'/'+d.file.slice(6):d.file})):[{message:String(error),line:0,column:0,code:0,category:'error'}],error:String(error)});}
 };

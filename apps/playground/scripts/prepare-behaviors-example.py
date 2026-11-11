@@ -1,6 +1,6 @@
 from pathlib import Path
 import json
-root=Path(__file__).resolve().parents[3];dest=root/'apps/playground/examples'
+root=Path(__file__).resolve().parents[3];dest=root/'tests/react/showcase/projects'
 base=json.loads((dest/'gameplay-engine.project.json').read_text());assets=json.loads(base['files']['/assets/gameplay.resources.json'])['assets'];nav=json.loads(json.loads((dest/'parity-engine.project.json').read_text())['files']['/assets/parity.resources.json'])['assets']
 for key in ['navLeft2','navRight2','navLeft3','navRight3']:assets[key]=nav[key]
 def v(x,y,z=0):return dict(x=x,y=y,z=z)

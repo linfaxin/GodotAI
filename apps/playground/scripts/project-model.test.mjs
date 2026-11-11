@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {parseProject,filePath,addProjectFiles,renameProjectFile,canRenameProjectFile,exportProject,resolveProjectMainScene} from '../src/project-model.ts';
 import {renamedProjectFiles} from '../src/project-rename.ts';
-import {defaultProject} from '../src/project-templates.ts';
+import {defaultProject,demoProject,migrateDemoProject} from '../src/project-templates.ts';
 import {resolveResourceUidFromCache,resourceUidTextToId} from '@godot-js/react-build/resource-uids';
 import {prepareScriptRename} from '@godot-js/react-build/script-renames';
 const input=()=>({schemaVersion:2,runtime:'react',demoId:'shader',entry:'/src/App.tsx',selected:'/README.md',files:{'/src/App.tsx':'export default function App(){return null;}','/README.md':'说明','/assets/image.png':[0,128,255]},controls:{speed:1},mode:'development'});
@@ -10,8 +10,8 @@ test('project import round-trips text, binary attachments, selection and runtime
  const source=input(),project=parseProject(JSON.parse(JSON.stringify(source)));assert.deepEqual(project,source);
  project.files['/assets/image.png'][0]=42;assert.equal(source.files['/assets/image.png'][0],0);
  const legacy=parseProject({files:source.files,config:{entry:'/src/App.tsx',mode:'development'}});assert.equal(legacy.entry,'/src/App.tsx');assert.equal(legacy.mode,'development');
- assert.equal(legacy.schemaVersion,2);assert.equal(legacy.runtime,'legacy-react');
- assert.equal(legacy.demoId,'shader');
+ assert.equal(legacy.schemaVersion,2);assert.equal(legacy.runtime,'react');
+ assert.equal(legacy.demoId,'react');
  for(const runtime of ['godot','react'])assert.equal(parseProject({...source,runtime,demoId:undefined}).demoId,runtime==='godot'?'native':'react');
 });
 test('invalid imports cannot introduce path traversal, duplicate files or a missing entry',()=>{
@@ -28,10 +28,10 @@ test('original exported documents retain source, selection and configuration',()
 });
 test('migration retains exact original exports and attachments across later edits and reimport',()=>{
  const original={schemaVersion:1,runtimeRelease:'old',project:{...input(),schemaVersion:1,config:{profileId:'old-profile'},files:{...input().files,'/project.godot':'[application]\nconfig/name="Keep original"\nrun/main_scene="res://generated/legacy-host.tscn"\n','/assets/scene.scn':[1,2,3]}}};
- const project=parseProject(original);assert.equal(project.runtime,'legacy-react');assert.equal(project.schemaVersion,2);
+ const project=parseProject(original);assert.equal(project.runtime,'react');assert.equal(project.schemaVersion,2);
  project.files['/README.md']='edited';project.files['/assets/scene.scn'][0]=9;
  assert.deepEqual(exportProject(project,'original'),original);assert.deepEqual(original.project.files['/assets/scene.scn'],[1,2,3]);
- const reimport=parseProject(exportProject(project));assert.deepEqual(exportProject(reimport,'original'),original);assert.equal(reimport.files['/README.md'],'edited');assert.equal(reimport.runtime,'legacy-react');
+ const reimport=parseProject(exportProject(project));assert.deepEqual(exportProject(reimport,'original'),original);assert.equal(reimport.files['/README.md'],'edited');assert.equal(reimport.runtime,'react');
  assert.equal(reimport.files['/project.godot'],original.project.files['/project.godot']);
 });
 test('native scripts and scenes are accepted without filtering native resource data',()=>{
@@ -83,7 +83,7 @@ test('new project templates explicitly opt into native or React engine runtime',
  assert.equal(parseProject(native).entry,native.entry);assert.equal(parseProject(react).entry,react.entry);
 });
 test('unchanged rename preserves the entry and attachments; invalid renames are atomic',()=>{
- const project={...input(),runtime:'legacy-react'},before=structuredClone(project);
+ const project={...input(),runtime:'react'},before=structuredClone(project);
  assert.equal(renameProjectFile(project,project.entry,project.entry),false);assert.deepEqual(project,before);
  for(const path of ['/README.md','/src/App.txt']){assert.throws(()=>renameProjectFile(project,project.entry,path));assert.deepEqual(project,before);}
  assert.equal(renameProjectFile(project,project.entry,'src/Renamed.tsx'),true);assert.equal(project.entry,'/src/Renamed.tsx');assert.equal(project.files[project.entry],before.files[before.entry]);assert.ok(!Object.hasOwn(project.files,before.entry));
@@ -196,4 +196,18 @@ test('framework rename boundaries reject resource/declaration edits without chan
    const before=structuredClone(project);assert.equal(canRenameProjectFile(project,old)&&canRenameProjectFile(project,next),false);assert.throws(()=>renameProjectFile(project,old,next),/尚未开放/);assert.deepEqual(project,before);
   }
  }
+});
+
+test('removed renderer documents upgrade bundled demos only once and retain original edits',()=>{
+ const old={...input(),runtime:'legacy-react',entry:'/src/ShaderLab.tsx',selected:'/src/ShaderLab.tsx',files:{'/src/ShaderLab.tsx':'// my old shader changes','/assets/kept.bin':[0,255]}};
+ const demo={id:'shader',file:'ShaderLab.tsx',source:'export default function Modern(){return null;}',name:'Shader',hint:'Native React',controls:[{key:'speed',value:2}]};
+ const migrated=migrateDemoProject(parseProject(old),demo);assert.equal(migrated.runtime,'react');assert.equal(migrated.files[migrated.entry],demo.source);assert.deepEqual(exportProject(migrated,'original'),old);assert.equal(migrated.controls.speed,1);
+ migrated.files[migrated.entry]+='\n// native edit after migration';const restored=parseProject(exportProject(migrated));assert.strictEqual(migrateDemoProject(restored,demo),restored);assert.match(restored.files[restored.entry],/native edit after migration/);
+ const custom=parseProject({...old,entry:'/src/Custom.tsx',files:{'/src/Custom.tsx':'// custom source'}});assert.strictEqual(migrateDemoProject(custom,demo),custom);
+});
+
+test('migrated demo controls respect the new scene bounds while original values remain exportable',()=>{
+ const old={...input(),runtime:'legacy-react',entry:'/src/ShaderLab.tsx',files:{'/src/ShaderLab.tsx':'// old shader'},controls:{speed:999}};
+ const demo={id:'shader',file:'ShaderLab.tsx',source:'export default function App(){return null;}',name:'Shader',hint:'Native React',controls:[{key:'speed',value:1,min:0,max:3}]};
+ const next=migrateDemoProject(parseProject(old),demo);assert.equal(next.controls.speed,3);assert.equal(exportProject(next,'original').controls.speed,999);
 });

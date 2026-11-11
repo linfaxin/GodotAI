@@ -5,9 +5,9 @@ import * as SDK from '../../../scripts/jsb.react/dist';
 import {createGodotPort} from '../../../scripts/jsb.react/dist/godot';
 import {installProjectResources} from '../../../apps/playground/src/native-project-resources';
 import {prepareResourcePlan} from '../../../apps/playground/src/project-resources';
-import {Services} from '../../../apps/playground/src/api';
-import App from '../../../apps/playground/examples/composition-engine';
-import project from '../../../apps/playground/examples/composition-engine.project.json';
+import {Services} from './legacy-api';
+import App from './projects/composition-engine';
+import project from './projects/composition-engine.project.json';
 const invoke=(o:any,n:string,...args:any[])=>{const method=o[n]??o[n.replace(/_([a-z])/g,(_:string,c:string)=>c.toUpperCase())];if(typeof method!=='function')throw Error('Missing native method '+n);return method.apply(o,args);};
 const expected=['textUnicode','textSelection','textCaret','textUndo','textRedo','textInput','textUserUndo','textUserRedo','textReadOnly','textBudgetInput','listConfig','listCommands','listSelection','listDisabled','listActivated','listIcons','splitConfig','splitHorizontal','splitVertical','splitEvents','flowHorizontal','flowVertical','flowResize','tabsMetadata','tabsDisabled','tabsInput','tabsRemoved','maskA','maskB','maskParent','skyProcedural','skyPanorama','skyRotation','fogDepth','fogHeight','rangeNear','rangeVisible','rangeFar','rangeHysteresis','prefab'];
 export default class Probe extends G.Node {

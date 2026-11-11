@@ -1,4 +1,4 @@
-import { DEFAULT_DEADLINES, PREVIEW_PROTOCOL, RUN_PHASES, isPreviewEnvelope, normalizedOrigin, sameRun,
+import { DEFAULT_DEADLINES, PREVIEW_PROTOCOL, RUN_PHASES, isPreviewEnvelope, isProjectData, normalizedOrigin, sameRun,
   type BrowserArtifact, type ExitReport, type PhaseDeadlines, type PreviewDiagnostic, type RunIdentity, type RunnerEvent, type RunnerState } from './protocol.js';
 import { validateRelease, type VerifiedRelease } from './verified-loader.js';
 
@@ -156,6 +156,8 @@ export class PreviewRunner {
       } else if (message.type === 'log') {
         if (++session.logCount > 1000 || (session.logBytes += message.text!.length) > 256_000) return;
         this.emit({ type: 'log', ...identity, level: message.level!, text: message.text!, untrusted: true });
+      } else if(message.type==='project'&&session.state==='running'){
+        this.emit({type:'project',...identity,data:message.data!});
       } else if (message.type === 'fatal') this.finish(session, 'crashed', undefined, message.text, message.diagnostic);
       else if (message.type === 'exited') this.finish(session, message.code === 0 ? 'clean-exit' : 'crashed', message.code);
     };
@@ -192,5 +194,9 @@ export class PreviewRunner {
     return session.exitPromise;
   }
   async stop(): Promise<ExitReport | undefined> { ++this.sequence; return this.stopActive(); }
+  command(data:Record<string,unknown>):boolean {
+    const session=this.active;if(!session||session.settled||session.state!=='running'||!isProjectData(data))return false;
+    session.port.postMessage({protocolVersion:PREVIEW_PROTOCOL,type:'project-command',...session.identity,data});return true;
+  }
   async dispose(): Promise<void> { this.disposed = true; await this.stop(); this.listeners.clear(); }
 }

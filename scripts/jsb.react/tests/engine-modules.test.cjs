@@ -8,6 +8,6 @@ test('every public SDK subpath has an explicit runtime and declaration contract'
   assert(ENGINE_SDK_MODULES[specifier],specifier);
   assert.equal(engineModuleDeclaration(specifier,'react'),ENGINE_SDK_MODULES[specifier].declaration);
  }
- assert.equal(engineModuleDeclaration('@godot-js/react','legacy-react'),'/sdk/index.d.ts');
+ assert.equal(engineModuleDeclaration('@godot-js/react','react'),'/engine-sdk/engine.d.ts');
  assert.equal(engineModuleDeclaration('unknown-module','react'),undefined);
 });

@@ -1,6 +1,6 @@
 from pathlib import Path
 import json,struct,zlib,binascii
-root=Path(__file__).resolve().parents[1];dest=root/'examples'
+root=Path(__file__).resolve().parents[1];dest=root.parents[1]/'tests/react/showcase/projects'
 old=json.loads((dest/'usability-engine.project.json').read_text())
 def png(w,h,pixel):
  def chunk(k,b):return struct.pack('>I',len(b))+k+b+struct.pack('>I',binascii.crc32(k+b)&0xffffffff)

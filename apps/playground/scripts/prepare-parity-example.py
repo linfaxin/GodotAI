@@ -1,6 +1,6 @@
 from pathlib import Path
 import json
-r=Path(__file__).resolve().parents[3];p=r/'apps/playground/examples';base=json.loads((p/'completion-engine.project.json').read_text())
+r=Path(__file__).resolve().parents[3];p=r/'tests/react/showcase/projects';base=json.loads((p/'completion-engine.project.json').read_text())
 def v(x,y,z=0):return dict(x=x,y=y,z=z)
 a={
  'box':{'type':'BoxMesh','properties':{'size':v(.4,.4,.4)}},'batch':{'type':'MultiMesh','mesh':'box','dimension':3,'count':1},

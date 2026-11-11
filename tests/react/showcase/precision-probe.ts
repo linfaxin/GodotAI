@@ -4,9 +4,9 @@ import * as SDK from '../../../scripts/jsb.react/dist';
 import {createGodotPort} from '../../../scripts/jsb.react/dist/godot';
 import {prepareResourcePlan} from '../../../apps/playground/src/project-resources';
 import {installProjectResources} from '../../../apps/playground/src/native-project-resources';
-import {Services} from '../../../apps/playground/src/api';
-import App from '../../../apps/playground/examples/precision-engine';
-import project from '../../../apps/playground/examples/precision-engine.project.json';
+import {Services} from './legacy-api';
+import App from './projects/precision-engine';
+import project from './projects/precision-engine.project.json';
 const invoke=(o:any,n:string,...a:any[])=>(o[n]??o[n.replace(/_([a-z])/g,(_:string,c:string)=>c.toUpperCase())]).apply(o,a);
 export default class PrecisionProbe extends G.Node{
  private tick:(()=>void)|undefined;private physicsTick:(()=>void)|undefined;_process(){this.tick?.();}_physics_process(){this.physicsTick?.();}

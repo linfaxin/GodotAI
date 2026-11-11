@@ -4,7 +4,7 @@ import {promises as fs} from 'node:fs';
 import {createRequire} from 'node:module';
 import {transform} from 'esbuild';
 const require=createRequire(new URL('../package.json',import.meta.url));
-async function load(name){const text=await fs.readFile(new URL(`../src/demos/${name}.tsx`,import.meta.url),'utf8');const {code}=await transform(text,{loader:'tsx',format:'cjs',target:'es2022'});const module={exports:{}};new Function('module','exports','require',code)(module,module.exports,id=>id==='@playground/api'?{}:require(id));return module.exports;}
+async function load(name){const text=await fs.readFile(new URL(`../src/demos/${name}.tsx`,import.meta.url),'utf8');const {code}=await transform(text,{loader:'tsx',format:'cjs',target:'es2022'});const module={exports:{}};new Function('module','exports','require',code)(module,module.exports,id=>id==='@playground/api'?{withDemo:component=>component}:id==='godot'?{}:require(id));return module.exports;}
 const match=await load('Match3'),dungeon=await load('Dungeon'),city=await load('CityBuilder');
 test('match boards are deterministic, start without matches and always have a valid move',()=>{
  for(const n of [6,8,9])for(const types of [3,4,5])for(const seed of [1,17,42,999]){

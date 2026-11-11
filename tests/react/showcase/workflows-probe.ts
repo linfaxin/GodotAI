@@ -5,9 +5,9 @@ import * as SDK from '../../../scripts/jsb.react/dist';
 import {createGodotPort} from '../../../scripts/jsb.react/dist/godot';
 import {installProjectResources} from '../../../apps/playground/src/native-project-resources';
 import {prepareResourcePlan} from '../../../apps/playground/src/project-resources';
-import {Services} from '../../../apps/playground/src/api';
-import App from '../../../apps/playground/examples/workflows-engine';
-import project from '../../../apps/playground/examples/workflows-engine.project.json';
+import {Services} from './legacy-api';
+import App from './projects/workflows-engine';
+import project from './projects/workflows-engine.project.json';
 const invoke=(o:any,n:string,...args:any[])=>{const method=o[n]??o[n.replace(/_([a-z])/g,(_:string,c:string)=>c.toUpperCase())];if(typeof method!=='function')throw Error('Missing native method '+n);return method.apply(o,args);};
 const expected=['layoutImport', 'layoutContainer', 'styleNinePatch', 'styleEmpty', 'styleHover', 'stylePressed', 'top2', 'top3', 'behindPixels', 'stateTime', 'stateStop', 'stateNext', 'stateFade', 'stateTravel', 'stateCondition', 'stateNested', 'patternSnapshot', 'patternMapping', 'patternCells', 'patternPixels', 'terrainPath', 'tileCollision', 'menuConfig', 'menuCommands', 'menuMouse', 'menuKeyboard', 'checkMouse', 'checkKeyboard', 'separators', 'codeConfig', 'codeCommands', 'codeBraces', 'codeIndent', 'codeUndo', 'highlighterPixels', 'highlighterIndependent', 'prefab'];
 export default class Probe extends G.Node {

@@ -24,3 +24,15 @@ export async function loadReactModules(mode:'development'|'production') {
  const [vendor,rows]=await Promise.all([fetchReleaseAsset(manifest.sdk.vendors?.[mode]??manifest.sdk.vendor),Promise.all(Object.entries(manifest.sdk.runtimeModules).map(async([name,asset])=>[name,await fetchReleaseAsset(asset)] as const))]);
  return {vendor,runtimeModules:Object.fromEntries(rows),releaseId:manifest.id};
 }
+let demoRelease:Promise<any>|undefined;
+async function loadDemoRelease(){return demoRelease??=(async()=>{
+ const response=await fetch('./demo-release.json');if(!response.ok)throw Error('无法加载示例运行资源，请重新构建 Playground');
+ const release=await response.json();if(release.schemaVersion!==1)throw Error('示例运行资源版本无效');
+ return release;
+})();}
+export async function loadDemoDeclarations(){return new TextDecoder().decode(await fetchReleaseAsset((await loadDemoRelease()).types));}
+export async function loadDemoRuntime(){
+ const release=await loadDemoRelease();
+ const [runtime,resources]=await Promise.all([fetchReleaseAsset(release.runtime),fetchReleaseAsset(release.resources)]);
+ return {runtime,resources};
+}
