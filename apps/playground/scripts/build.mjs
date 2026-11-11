@@ -4,10 +4,10 @@ import {fileURLToPath} from "node:url";
 import {spawnSync} from "node:child_process";
 import {createHash} from "node:crypto";
 import {build} from "esbuild";
-import ts from "typescript";
 import {catalog} from "../src/catalog.ts";
 import {prepareAssets} from "./prepare-assets.mjs";
 import {buildFrontend} from "./build-frontend.mjs";
+import {buildDemoRuntime} from './build-demo-runtime.mjs';
 import {writeTypeSnapshot,createTypeSnapshot} from "./build-shell.mjs";
 import {loadProductionApiProfiles,buildEngineVendor,assembleFullEngineRelease,describeAsset,writeFullEngineOutputs} from './full-engine-release.mjs';
 import {isSourceCertified} from '../../../scripts/release/build-web-release.mjs';
@@ -19,7 +19,6 @@ const sdk=path.join(repo,"scripts/jsb.react"),host=process.env.GODOT??path.join(
 const engineReportPath=argument('--engine-report');
 const engineReport=engineReportPath?JSON.parse(await fs.readFile(engineReportPath,'utf8')):undefined;
 const template=process.env.GODOT_WEB_TEMPLATE??(engineReport?.template?.path?path.resolve(path.dirname(engineReportPath),engineReport.template.path):path.join(repo,'work/playground/engine-template/full-engine.zip'));
-const legacyOnly=process.argv.includes('--legacy-only');
 if(!path.isAbsolute(template))throw Error('GODOT_WEB_TEMPLATE must be an absolute path');
 try{await fs.access(template);}catch{throw Error(`Missing production Web template ${template}; build it with scripts/build-web-engine.sh or set GODOT_WEB_TEMPLATE to the matching full engine ZIP.`);}
 const run=(bin,args,cwd=app)=>{const r=spawnSync(bin,args,{cwd,encoding:"utf8",maxBuffer:32*1024*1024}),output=(r.stdout??"")+(r.stderr??"");const errors=output.split("\n").filter(line=>/^(?:ERROR|SCRIPT ERROR):/.test(line)&&!line.includes("compiled without fontconfig"));if(r.status!==0||errors.length)throw Error(`${bin} ${args.join(" ")} failed (${r.status})\n${output}`);return output;};
@@ -31,17 +30,11 @@ const write=(name,text)=>fs.writeFile(path.join(dist,name),text);
 await fs.mkdir(dist,{recursive:true});await fs.mkdir(path.join(project,".godot/GodotJS"),{recursive:true});await fs.mkdir(path.join(project,"generated"),{recursive:true});
 await fs.rm(path.join(dist,'engine-release.json'),{force:true});
 console.log("Building React SDK");console.log(run(process.execPath,["build.mjs"],sdk));
-if(!legacyOnly){console.log(run('pnpm',['--filter','@godot-js/react-build','build'],repo));console.log(run('pnpm',['--filter','@godot-js/react-browser','build'],repo));}
+{console.log(run('pnpm',['--filter','@godot-js/react-build','build'],repo));console.log(run('pnpm',['--filter','@godot-js/react-browser','build'],repo));}
 if(!process.argv.includes("--skip-assets"))await prepareAssets();
-const defines={"process.env.NODE_ENV":'"production"'};
-await build({entryPoints:[path.join(app,"src/vendor.ts")],outfile:path.join(project,"generated/vendor.js"),bundle:true,platform:"neutral",format:"cjs",target:"es2022",define:defines,external:["godot","godot-jsb"],inject:[path.join(sdk,"dist/internal/performance.mjs")],sourcemap:"external"});
-const hostSource=await fs.readFile(path.join(app,"src/host.ts"),"utf8");
-await fs.writeFile(path.join(project,"host.ts"),hostSource);
-await fs.writeFile(path.join(project,".godot/GodotJS/host.js"),ts.transpileModule(hostSource,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText);
-const defaults={},publicCatalog=[];
-for(const demo of catalog){const source=await fs.readFile(path.join(app,"src/demos",demo.file),"utf8"),controls=Object.fromEntries(demo.controls.map(c=>[c.key,c.value]));const code=ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.React,esModuleInterop:true}}).outputText;defaults[demo.id]={code,controls};publicCatalog.push({...demo,source});}
-await fs.writeFile(path.join(project,"generated/defaults.js"),`module.exports=${JSON.stringify(defaults)};\n`);
-await write("catalog.json",JSON.stringify(publicCatalog));
+const publicCatalog=await Promise.all(catalog.map(async demo=>({...demo,runtime:'react',source:await fs.readFile(path.join(app,'src/demos',demo.file),'utf8')})));
+await write('catalog.json',JSON.stringify(publicCatalog));
+for(const name of ['host.ts','generated/vendor.js','generated/defaults.js','.godot/GodotJS/host.js'])await fs.rm(path.join(project,name),{force:true});
 console.log("Importing playground resources");console.log(run(host,["--headless","--editor","--path",project,"--import"]));
 await fs.mkdir(path.join(dist,"engine"),{recursive:true});
 await fs.writeFile(path.join(project,"export_presets.cfg"),`[preset.0]\nname="Playground Web"\nplatform="Web"\nrunnable=true\nexport_filter="all_resources"\ninclude_filter="generated/*.js,shaders/*.gdshader"\nexclude_filter=""\nexport_path=""\n\n[preset.0.options]\ncustom_template/debug=${JSON.stringify(template)}\ncustom_template/release=${JSON.stringify(template)}\nvariant/extensions_support=false\nvariant/thread_support=false\nvram_texture_compression/for_desktop=true\nvram_texture_compression/for_mobile=false\nhtml/canvas_resize_policy=2\nprogressive_web_app/enabled=false\n`);
@@ -50,7 +43,7 @@ console.log("Exporting single-thread GodotJS Web");console.log(run(host,["--head
 await verifyTemplate();
 await fs.cp(path.join(app,"web"),dist,{recursive:true});
 let fullRelease;
-if(!legacyOnly){
+{
  console.log('Capturing API from the production Web engine');
  const engineJs=path.join(dist,'engine/game.js'),engineWasm=path.join(dist,'engine/game.wasm');
  const namingProfiles=await loadProductionApiProfiles({engineJs,engineWasm,captureDirectory:path.join(dist,'api/capture')});
@@ -69,15 +62,11 @@ for(const source of JSON.parse(await fs.readFile(path.join(app,"third-party/sour
   if(!/(?:license|readme)/i.test(source.local))continue;
   const destination=path.join(dist,source.local);await fs.mkdir(path.dirname(destination),{recursive:true});await fs.copyFile(path.join(app,source.local),destination);
 }
+await buildDemoRuntime(dist);
 await buildFrontend(dist);
 await fs.mkdir(path.join(dist,'assets'),{recursive:true});
 for(const name of ['LICENSE','ThirdPartyNotices.txt'])await fs.copyFile(path.join(app,'node_modules/monaco-editor',name),path.join(dist,'assets','monaco-'+name+(name.endsWith('.txt')?'':'.txt')));
-if(legacyOnly)await writeTypeSnapshot(dist,{legacy:true});
-const fileSizes={};for(const name of ["game.wasm","game.pck"]){fileSizes[`engine/${name}`]=(await fs.stat(path.join(dist,"engine",name))).size;}
-await write("engine.json",JSON.stringify({executable:"engine/game",mainPack:"engine/game.pck",fileSizes,args:[],runtimeProfile:'legacy-showcase-v1',legacy:true}));
-const payloads={};for(const name of ["engine/game.js","engine/game.wasm","engine/game.pck","types.json","compiler.worker.js","catalog.json"])payloads[name]={sha256:sha(await fs.readFile(path.join(dist,name))),bytes:(await fs.stat(path.join(dist,name))).size};
+const payloads={};for(const name of ['engine/game.js','engine/game.wasm','types.json','compiler.worker.js','catalog.json','demo-release.json','demo-runtime.js','demo-resources.pck','demo-api.d.ts']){const bytes=await fs.readFile(path.join(dist,name));payloads[name]={sha256:sha(bytes),bytes:bytes.length};}
 await verifyTemplate();
-await write("legacy-manifest.json",JSON.stringify({schemaVersion:1,engineVersion:run(host,["--version"]).trim(),engineTemplateSha256:templateHash,profile:"showcase-v1",runtimeProfile:'legacy-showcase-v1',legacy:true,...(fullRelease?{engineRelease:'engine-release.json',engineReleaseId:fullRelease.id}:{}),profileHash:(await import(path.join(sdk,"dist/schema/showcase.js"))).SHOWCASE_PROFILE_HASH,payloads,upstream:JSON.parse(await fs.readFile(path.join(app,"third-party/sources.json"),"utf8"))},null,2));
-if(legacyOnly)await fs.copyFile(path.join(dist,'legacy-manifest.json'),path.join(dist,'manifest.json'));
-else await write('manifest.json',JSON.stringify({schemaVersion:2,runtimeProfile:'full-engine-v1',engineRelease:'engine-release.json',engineReleaseId:fullRelease.id,engineTemplateSha256:templateHash,payloads,legacy:{manifest:'legacy-manifest.json',runtimeProfile:'legacy-showcase-v1'}},null,2));
+await write('manifest.json',JSON.stringify({schemaVersion:2,runtimeProfile:'full-engine-v1',engineRelease:'engine-release.json',engineReleaseId:fullRelease.id,engineTemplateSha256:templateHash,payloads},null,2));
 console.log(`Playground built: ${dist}`);

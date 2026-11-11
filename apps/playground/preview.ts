@@ -1,4 +1,4 @@
-import { PREVIEW_PROTOCOL, RUN_PHASES, isIdentity, normalizedOrigin, previewDiagnostic, sameRun, type RunIdentity, type RunPhase } from '../../scripts/jsb.react-browser/src/protocol.js';
+import { PREVIEW_PROTOCOL, RUN_PHASES, isIdentity, isProjectData, normalizedOrigin, previewDiagnostic, sameRun, type RunIdentity, type RunPhase } from '../../scripts/jsb.react-browser/src/protocol.js';
 import { loadVerifiedEngine, type GodotInstance, type LoadedEngine, type VerifiedRelease } from '../../scripts/jsb.react-browser/src/verified-loader.js';
 
 // The parent is on a different origin. Its origin is configured in this fixed
@@ -23,6 +23,11 @@ function startSession(identity: RunIdentity, port: MessagePort): void {
   let engine: GodotInstance | undefined, loaded: LoadedEngine | undefined;
   let started = false, exited = false, cleaned = false, quitRequested = false;
   const aborter = new AbortController();
+  let projectCommand:((json:string)=>void)|undefined;
+  const globals=globalThis as any;
+  const projectEvent=(raw:unknown)=>{if(exited||cleaned||typeof raw!=='string'||raw.length>262144)return;try{const data=JSON.parse(raw);if(isProjectData(data))send({type:'project',data});}catch{}};
+  const bindProject=(callback:unknown)=>{projectCommand=typeof callback==='function'?callback as (json:string)=>void:undefined;};
+  globals.__godotjsProjectEvent=projectEvent;globals.__godotjsSetProjectCommand=bindProject;
   const post = port.postMessage.bind(port);
   const send = (data: object) => { if (!exited) post({ ...identity, protocolVersion: PREVIEW_PROTOCOL, ...data }); };
   const phase = (value: RunPhase) => { if (!aborter.signal.aborted) send({ type: 'phase', phase: value }); };
@@ -46,8 +51,12 @@ function startSession(identity: RunIdentity, port: MessagePort): void {
     clearInterval(heartbeat); loaded?.dispose(); loaded = undefined;
     port.onmessage = null;
     removeEventListener('error', onBrowserError); removeEventListener('unhandledrejection', onRejectedPromise);
+    removeEventListener('blur',onBlur);
     for (const level of ['log', 'warn', 'error'] as const) console[level] = originalConsole[level];
     if ((globalThis as any).__godotjsReportReactError === onReactError) delete (globalThis as any).__godotjsReportReactError;
+    if(globals.__godotjsProjectEvent===projectEvent)delete globals.__godotjsProjectEvent;
+    if(globals.__godotjsSetProjectCommand===bindProject)delete globals.__godotjsSetProjectCommand;
+    projectCommand=undefined;
   };
   const requestQuit = () => { if (engine && !quitRequested) { quitRequested = true; engine.requestQuit(); } };
   const fatal = (error: unknown, location?: { message?: string; filename?: string; line?: number; column?: number }, source:'browser'|'godotjs'='browser') => {
@@ -72,6 +81,7 @@ function startSession(identity: RunIdentity, port: MessagePort): void {
     fatal(event.reason);
     event.preventDefault();
   };
+  const onBlur=()=>{if(!aborter.signal.aborted)try{projectCommand?.('{"type":"clear-input"}');}catch(error){fatal(error);}};
   const onReactError = (raw: unknown): boolean => {
     if (exited || cleaned || typeof raw !== 'string' || raw.length > 65536) return false;
     let value: {kind?:string;message?:string;stack?:string;componentStack?:string};
@@ -85,9 +95,11 @@ function startSession(identity: RunIdentity, port: MessagePort): void {
   (globalThis as any).__godotjsReportReactError=onReactError;
   addEventListener('error', onBrowserError);
   addEventListener('unhandledrejection', onRejectedPromise);
+  addEventListener('blur',onBlur);
   port.onmessage = event => {
     const data = event.data;
     if (!isIdentity(data) || !sameRun(data, identity) || data.protocolVersion !== PREVIEW_PROTOCOL) return;
+    if(data.type==='project-command'&&!exited&&!aborter.signal.aborted&&isProjectData(data.data)){try{projectCommand?.(JSON.stringify(data.data));}catch(error){fatal(error);}return;}
     if (data.type === 'stop') {
       aborter.abort(new DOMException('Stopped', 'AbortError'));
       try { requestQuit(); } catch (error) { fatal(error); }

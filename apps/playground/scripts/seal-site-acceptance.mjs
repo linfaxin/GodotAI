@@ -41,7 +41,7 @@ export async function sealSiteAcceptance(directory,reports,{verify=false,begin=f
  if(canonical(await json(start))!==canonical(candidate))throw Error('E_SITE_TEST_INPUT_DRIFT');
  const started=(await stat(start)).mtimeMs;
  const evidence={};
- for(const name of ['runtime','editor','bridge','projects','legacy','usability','refinements']){
+ for(const name of ['runtime','editor','bridge','projects','react-demos','workbench']){
   if((await stat(path.join(reports,name+'.json'))).mtimeMs<started)throw Error('E_SITE_STALE_EVIDENCE: '+name);
   const bytes=await readFile(path.join(reports,name+'.json')),result=JSON.parse(bytes);
   if(result.status!=='passed'||(['runtime','editor','bridge'].includes(name)&&result.releaseId!==release.id))throw Error('E_SITE_ACCEPTANCE: '+name);

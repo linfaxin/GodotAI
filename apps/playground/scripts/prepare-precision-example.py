@@ -1,6 +1,6 @@
 from pathlib import Path
 import json
-root=Path(__file__).resolve().parents[3];dest=root/'apps/playground/examples';base=json.loads((dest/'scene-details-engine.project.json').read_text());assets=json.loads(base['files']['/assets/gameplay.resources.json'])['assets']
+root=Path(__file__).resolve().parents[3];dest=root/'tests/react/showcase/projects';base=json.loads((dest/'scene-details-engine.project.json').read_text());assets=json.loads(base['files']['/assets/gameplay.resources.json'])['assets']
 assets.update({'contact2':{'type':'RectangleShape2D','properties':{'size':dict(x=8,y=8)}},'contact3':{'type':'BoxShape3D','properties':{'size':dict(x=.8,y=.8,z=.8)}}})
 for space in range(3):
  assets['gradient'+str(space)]={'type':'Gradient','interpolationColorSpace':space,'points':[{'offset':0,'color':dict(r=1,g=0,b=0,a=1)},{'offset':1,'color':dict(r=0,g=1,b=0,a=1)}]}

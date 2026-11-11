@@ -16,13 +16,13 @@ test('default candidate receipts reject changed bytes, wrong entry, stale or fai
  release.id=sha256(canonical(release));release.verifiedRelease.releaseId=release.id;
  await writeFile(path.join(site,'engine-release.json'),JSON.stringify(release));await writeFile(path.join(site,'index.html'),'original');
  await sealSiteAcceptance(site,reports,{begin:true});
- for(const name of ['runtime','editor','bridge','projects','legacy','usability','refinements'])await writeFile(path.join(reports,name+'.json'),JSON.stringify({status:'passed',releaseId:release.id}));
+ for(const name of ['runtime','editor','bridge','projects','react-demos','workbench'])await writeFile(path.join(reports,name+'.json'),JSON.stringify({status:'passed',releaseId:release.id}));
  await sealSiteAcceptance(site,reports);await sealSiteAcceptance(site,reports,{verify:true});
  await writeFile(path.join(site,'index.html'),'changed');await assert.rejects(sealSiteAcceptance(site,reports,{verify:true}),/E_SITE_TEST_INPUT_DRIFT/);await writeFile(path.join(site,'index.html'),'original');
  const main=path.join(site,'main.js.map'),originalMap=await readFile(main);
  await writeFile(main,JSON.stringify({sources:['res://apps/playground/main.ts'],sourcesContent:[await readFile(path.join(repo,'apps/playground/main.ts'),'utf8')]}));
  await assert.rejects(sealSiteAcceptance(site,reports,{verify:true}),/E_SITE_ENTRY/);await writeFile(main,originalMap);
- for(const name of ['runtime','usability','refinements']){
+ for(const name of ['runtime','react-demos','workbench']){
   const report=path.join(reports,name+'.json'),originalReport=await readFile(report);
   await writeFile(report,JSON.stringify({status:'failed',releaseId:release.id}));await assert.rejects(sealSiteAcceptance(site,reports,{verify:true}),/E_SITE_ACCEPTANCE/);await writeFile(report,originalReport);
   await utimes(report,new Date(0),new Date(0));await assert.rejects(sealSiteAcceptance(site,reports,{verify:true}),/E_SITE_STALE_EVIDENCE/);await utimes(report,new Date(),new Date());

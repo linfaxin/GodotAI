@@ -1,6 +1,6 @@
 from pathlib import Path
 import json,struct,zlib,binascii,math
-root=Path(__file__).resolve().parents[3];dest=root/'apps/playground/examples';old=json.loads((dest/'presentation-engine.project.json').read_text())
+root=Path(__file__).resolve().parents[3];dest=root/'tests/react/showcase/projects';old=json.loads((dest/'presentation-engine.project.json').read_text())
 def png(w,h,pixel):
  def chunk(k,d):return struct.pack('>I',len(d))+k+d+struct.pack('>I',binascii.crc32(k+d)&0xffffffff)
  return list(b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',w,h,8,6,0,0,0))+chunk(b'IDAT',zlib.compress(b''.join(b'\0'+b''.join(bytes(pixel(x,y)) for x in range(w)) for y in range(h))))+chunk(b'IEND',b''))

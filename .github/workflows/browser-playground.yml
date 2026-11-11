@@ -137,7 +137,7 @@ jobs:
         env:
           ENGINE_BUILD_REPORT: ${{ runner.temp }}/browser-engine-report.json
         run: node tests/browser-preflight/verify-source-maps.mjs "$RUNNER_TEMP/browser-preflight-site" "$RUNNER_TEMP/browser-source-map-results"
-      - name: Build the headless GodotJS editor for native project and legacy asset export
+      - name: Build the headless GodotJS editor for native project and demo resource export
         working-directory: ${{ runner.temp }}/godot-browser-build
         run: >-
           scons -j4 platform=linuxbsd target=editor arch=x86_64
@@ -173,9 +173,9 @@ jobs:
           pnpm --filter @godot-js/playground test:browser:editor
           pnpm --filter @godot-js/playground test:browser:bridge
           PLAYGROUND_TEST_SHELL=1 node apps/playground/scripts/browser-project-test.mjs > "$RUNNER_TEMP/default-playground-results/projects.json"
-          node apps/playground/scripts/browser-test.mjs > "$RUNNER_TEMP/default-playground-results/legacy.json"
-          node apps/playground/scripts/browser-resource-test.mjs --usability > "$RUNNER_TEMP/default-playground-results/usability.json"
-          node apps/playground/scripts/browser-resource-test.mjs --refinements > "$RUNNER_TEMP/default-playground-results/refinements.json"
+          node apps/playground/scripts/browser-demo-regressions-test.mjs > "$RUNNER_TEMP/default-playground-results/demo-regressions.json"
+          node apps/playground/scripts/browser-react-demos-test.mjs > "$RUNNER_TEMP/default-playground-results/react-demos.json"
+          node apps/playground/scripts/browser-test.mjs > "$RUNNER_TEMP/default-playground-results/workbench.json"
           node apps/playground/scripts/seal-site-acceptance.mjs "$PLAYGROUND_TEST_DIRECTORY" "$RUNNER_TEMP/default-playground-results"
           node apps/playground/scripts/seal-site-acceptance.mjs "$PLAYGROUND_TEST_DIRECTORY" "$RUNNER_TEMP/default-playground-results" --verify
       - name: Keep the default product candidate and its exact-site acceptance

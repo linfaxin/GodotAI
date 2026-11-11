@@ -1,6 +1,6 @@
 from pathlib import Path
 import json,struct,zlib,binascii
-root=Path(__file__).resolve().parents[1];dest=root/'examples'
+root=Path(__file__).resolve().parents[1];dest=root.parents[1]/'tests/react/showcase/projects'
 def png(w,h,pixel):
  def chunk(k,b):return struct.pack('>I',len(b))+k+b+struct.pack('>I',binascii.crc32(k+b)&0xffffffff)
  raw=b''.join(b'\0'+bytes(v for x in range(w) for v in pixel(x,y)) for y in range(h))

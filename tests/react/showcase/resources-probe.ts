@@ -5,7 +5,7 @@ import * as SDK from '../../../scripts/jsb.react/dist';
 import {createGodotPort} from '../../../scripts/jsb.react/dist/godot';
 import {emptyResourcePlan} from '../../../apps/playground/src/project-resources';
 import {installProjectResources} from '../../../apps/playground/src/native-project-resources';
-import {ProjectScene,Services} from '../../../apps/playground/src/api';
+import {ProjectScene,Services} from './legacy-api';
 const invoke=(o:any,n:string,...a:any[])=>(o[n]??o[n.replace(/_([a-z])/g,(_:string,c:string)=>c.toUpperCase())]).apply(o,a);
 const assert=(v:unknown,message:string)=>{if(!v)throw Error(message);};
 export default class ResourcesProbe extends G.Node {

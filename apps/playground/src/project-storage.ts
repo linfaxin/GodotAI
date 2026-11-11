@@ -24,7 +24,7 @@ export function createProjectStorage(database:Promise<IDBDatabase|undefined>){
    for(const row of saved.projects){
     if(!isRow(row)){invalid.set(String(projects.length),'无效项目记录');continue;}
     const [id,value]=row;
-    try{const project=parseProject(value);projects.push([id,project]);if((value as any)?.schemaVersion!==2)migrated.push(id);}
+    try{const project=parseProject(value);projects.push([id,project]);if((value as any)?.schemaVersion!==2||(value as any)?.runtime==='legacy-react')migrated.push(id);}
     catch(error){invalid.set(id,String(error));projects.push([id,value]);}
    }
    const snapshot={...saved,projects};versions.clear();for(const [id,version]of Object.entries(saved.versions??{}))versions.set(id,version);for(const [id]of projects)if(!versions.has(id))versions.set(id,0);
@@ -51,7 +51,7 @@ export function createProjectStorage(database:Promise<IDBDatabase|undefined>){
       for(const [id,edit] of valid){
        const currentVersion=nextVersions[id]??0;
        if(currentVersion!==(versions.get(id)??0)){conflicts.push(id);continue;}
-       const previous=projects.get(id) as any;if(previous&&previous.schemaVersion!==2)migrating=true;
+       const previous=projects.get(id) as any;if(previous&&(previous.schemaVersion!==2||previous.runtime==='legacy-react'))migrating=true;
        projects.set(id,edit.project);nextVersions[id]=currentVersion+1;applied.set(id,{version:currentVersion+1,revision:edit.revision});
       }
       if(malformed||migrating)backup(store,saved);

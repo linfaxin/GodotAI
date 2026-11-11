@@ -5,9 +5,9 @@ import * as SDK from '../../../scripts/jsb.react/dist';
 import {createGodotPort} from '../../../scripts/jsb.react/dist/godot';
 import {installProjectResources} from '../../../apps/playground/src/native-project-resources';
 import {prepareResourcePlan} from '../../../apps/playground/src/project-resources';
-import {Services} from '../../../apps/playground/src/api';
-import App from '../../../apps/playground/examples/refinements-engine';
-import project from '../../../apps/playground/examples/refinements-engine.project.json';
+import {Services} from './legacy-api';
+import App from './projects/refinements-engine';
+import project from './projects/refinements-engine.project.json';
 const invoke=(o:any,n:string,...args:any[])=>{const method=o[n]??o[n.replace(/_([a-z])/g,(_:string,c:string)=>c.toUpperCase())];if(typeof method!=='function')throw Error('Missing native method '+n);return method.apply(o,args);};
 const expected=['batchVisible', 'batchCustom2', 'batchCustom3', 'batchBounds', 'batchIsolated', 'batchPixels2', 'batchPixels3', 'batchHidden', 'clipOnly', 'clipDraw', 'parentMaterial', 'materialIsolated', 'cpuAnimation', 'gpuAnimation', 'particleLoop', 'mapConfig', 'mapEnabled', 'mapCollision', 'mapNavigation', 'mapMoved', 'mapSortY', 'mapSortX', 'curveLength2', 'curveLength3', 'curveSample2', 'curveSample3', 'curveNearest2', 'curveNearest3', 'curveTransform2', 'curveTransform3', 'curveDegenerate', 'overlayConfig', 'overlayPixels', 'overlayIsolated', 'customBounds', 'geometryBoundsConfig', 'codeFolding', 'codeMarkers', 'codeMarkerMigration', 'codeSearch', 'codeSearchInput', 'codeMinimap', 'codeGutterInput', 'codeFoldInput', 'codeNativeEdit', 'richStructure', 'richUnicode', 'richSelection', 'richPixels', 'richHint', 'prefab'];
 export default class Probe extends G.Node {

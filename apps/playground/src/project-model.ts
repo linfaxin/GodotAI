@@ -3,10 +3,10 @@ import {decodeProjectText,readProjectStringSetting} from '@godot-js/react-build/
 import {renamedProjectFiles} from './project-rename.ts';
 import type {ScriptRenamePlan} from '@godot-js/react-build/script-renames';
 
-export type ProjectRuntime='godot'|'react'|'legacy-react';
-export interface EditorProject {schemaVersion:2;runtime:ProjectRuntime;demoId:string;entry:string;mainScene?:string;mainSceneSource?:'project'|'explicit';selected:string;files:Record<string,string|number[]>;controls:Record<string,number>;mode:'production'|'development';migration?:{fromSchemaVersion:1;originalDocument:unknown}}
+export type ProjectRuntime='godot'|'react';
+export interface EditorProject {schemaVersion:2;runtime:ProjectRuntime;demoId:string;entry:string;mainScene?:string;mainSceneSource?:'project'|'explicit';selected:string;files:Record<string,string|number[]>;controls:Record<string,number>;mode:'production'|'development';migration?:{fromSchemaVersion:1|2;removedRenderer?:boolean;originalDocument:unknown}}
 export function canRenameProjectFile(project:EditorProject,path:string):boolean {
- return project.runtime==='legacy-react'||/\.(?:[jt]sx?|tscn)$/i.test(path)&&!(/\.d\.[cm]?ts$/i.test(path));
+ return /\.(?:[jt]sx?|tscn)$/i.test(path)&&!(/\.d\.[cm]?ts$/i.test(path));
 }
 // Legacy exports pretty-print byte arrays; their JSON can be much larger than decoded files.
 export const MAX_PROJECT_DOCUMENT_BYTES=128*1024*1024;
@@ -20,8 +20,9 @@ export function parseProject(value:unknown):EditorProject {
  if(document?.schemaVersion!==undefined&&![1,2].includes(document.schemaVersion))throw Error('不支持的项目版本');
  const data=document?.project&&[1,2].includes(document.schemaVersion)?document.project:document;
  const version=document?.schemaVersion??data?.schemaVersion??1;
- const runtime:ProjectRuntime=version===1?'legacy-react':data?.runtime;
- if(!['godot','react','legacy-react'].includes(runtime))throw Error('项目须指定 godot、react 或 legacy-react 运行模式');
+ const removedRuntime=version===1||data?.runtime==='legacy-react';
+ const runtime:ProjectRuntime=removedRuntime?'react':data?.runtime;
+ if(!['godot','react'].includes(runtime))throw Error('项目须指定 godot 或 react 运行模式');
  if(!data||typeof data!=='object'||!data.files||typeof data.files!=='object'||Array.isArray(data.files))throw Error('项目缺少 files');
  const entries=Object.entries(data.files);if(!entries.length||entries.length>64)throw Error('项目须包含 1–64 个文件');
  let bytes=0;const files:EditorProject['files']={};
@@ -33,17 +34,17 @@ export function parseProject(value:unknown):EditorProject {
  // generated host. Keep that document verbatim without treating it as a launch request.
  if(data.mainSceneSource!==undefined&&!['project','explicit'].includes(data.mainSceneSource))throw Error('无效主场景来源');
  const explicitScene=data.mainSceneSource==='project'?undefined:data.mainScene??data.config?.mainScene;
- const mainScene=runtime==='legacy-react'&&explicitScene===undefined?undefined:resolveProjectMainScene({files,mainScene:explicitScene});
+ const mainScene=runtime==='react'&&explicitScene===undefined?undefined:resolveProjectMainScene({files,mainScene:explicitScene});
  const mainSceneSource=explicitScene===undefined?'project' as const:'explicit' as const;
- if(entry&&(typeof files[entry]!=='string'||!(runtime==='legacy-react'?/\.tsx$/:/\.[jt]sx?$/).test(entry)))throw Error(runtime==='legacy-react'?'旧项目入口须为已有的 TSX 文件':'项目入口须为已有的 TS、JS、TSX 或 JSX 文件');
- if(!entry&&(!mainScene||runtime==='legacy-react'))throw Error('项目须有脚本入口或原生主场景');
+ if(entry&&(typeof files[entry]!=='string'||!/\.[jt]sx?$/.test(entry)))throw Error('项目入口须为已有的 TS、JS、TSX 或 JSX 文件');
+ if(!entry&&!mainScene)throw Error('项目须有脚本入口或原生主场景');
  if(mainScene&&!Object.hasOwn(files,filePath(mainScene.slice(6))))throw Error('主场景须为项目中已有的场景');
  const controls:Record<string,number>={};for(const [k,v] of Object.entries(data.controls??{})){if(typeof v!=='number'||!Number.isFinite(v))throw Error('无效场景参数');controls[k]=v;}
  const selection=typeof data.selected==='string'?filePath(data.selected):'';
  const selected=Object.hasOwn(files,selection)?selection:entry||(mainScene?filePath(mainScene.slice(6)):Object.keys(files)[0]);
- const migration=version===1?{fromSchemaVersion:1 as const,originalDocument:structuredClone(value)}:data.migration;
- if(migration&&(migration.fromSchemaVersion!==1||!Object.hasOwn(migration,'originalDocument')))throw Error('无效迁移备份');
- const demoId=String(data.demoId??(runtime==='godot'?'native':runtime==='react'?'react':'shader'));
+ const migration=removedRuntime?{fromSchemaVersion:version as 1|2,removedRenderer:true,originalDocument:structuredClone(value)}:data.migration;
+ if(migration&&(![1,2].includes(migration.fromSchemaVersion)||!Object.hasOwn(migration,'originalDocument')))throw Error('无效迁移备份');
+ const demoId=String(data.demoId??(runtime==='godot'?'native':'react'));
  return {schemaVersion:2,runtime,demoId,entry,...(mainScene?{mainScene,mainSceneSource}:{}),selected,files,controls,mode:(data.mode??data.config?.mode)==='development'?'development':'production',...(migration?{migration:structuredClone(migration)}:{})};
 }
 /** Read project.godot without rewriting it or interpreting scene/resource schemas. */
@@ -98,10 +99,10 @@ export function renameProjectFile(project:EditorProject,old:string,name:string,s
   if(!Object.hasOwn(scripts,file)||typeof text!=='string')throw Error('无效的脚本重命名分析结果');
   prepared[file]=text;
  }
- const files=renamedProjectFiles(prepared,old,path,project.runtime!=='legacy-react');
+ const files=renamedProjectFiles(prepared,old,path,true);
  const entry=project.entry===old?path:project.entry;
  const suffix=project.selected.slice(old.length);
- const selected=project.selected===old?path:project.runtime!=='legacy-react'&&['.uid','.import','.remap'].includes(suffix)&&project.selected===old+suffix?path+suffix:project.selected;
+ const selected=project.selected===old?path:true&&['.uid','.import','.remap'].includes(suffix)&&project.selected===old+suffix?path+suffix:project.selected;
  const mainScene=project.mainSceneSource!=='project'&&project.mainScene==='res:/'+old?'res:/'+path:project.mainScene;
  const valid=parseProject({...project,files,entry,selected,mainScene});
  Object.assign(project,{files,entry,selected:valid.selected});

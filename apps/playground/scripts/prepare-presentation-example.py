@@ -1,6 +1,6 @@
 from pathlib import Path
 import json,struct,zlib,binascii
-root=Path(__file__).resolve().parents[3];dest=root/'apps/playground/examples';base=json.loads((dest/'interactions-engine.project.json').read_text());assets=json.loads(base['files']['/assets/gameplay.resources.json'])['assets']
+root=Path(__file__).resolve().parents[3];dest=root/'tests/react/showcase/projects';base=json.loads((dest/'interactions-engine.project.json').read_text());assets=json.loads(base['files']['/assets/gameplay.resources.json'])['assets']
 def png(width,height,pixel):
  def chunk(kind,data):return struct.pack('>I',len(data))+kind+data+struct.pack('>I',binascii.crc32(kind+data)&0xffffffff)
  return list(b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',width,height,8,6,0,0,0))+chunk(b'IDAT',zlib.compress(b''.join(b'\0'+b''.join(bytes(pixel(x,y)) for x in range(width)) for y in range(height))))+chunk(b'IEND',b''))
