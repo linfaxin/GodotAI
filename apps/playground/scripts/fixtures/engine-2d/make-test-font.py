@@ -18,7 +18,7 @@ options = subset.Options()
 options.recalc_timestamp = False
 options.name_IDs = ['*']
 subsetter = subset.Subsetter(options=options)
-subsetter.populate(text='中文 2DNativeUIinput')
+subsetter.populate(text='中文测试，开始输入第一行！' + ''.join(chr(i) for i in range(32, 127)))
 subsetter.subset(font)
 for record in font['name'].names:
     if record.nameID in (1, 2, 3, 4, 6, 16, 17):

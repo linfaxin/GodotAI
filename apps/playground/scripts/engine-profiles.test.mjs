@@ -29,3 +29,26 @@ test('actual modules, features and classes must prove the requested profile',()=
  assert.throws(()=>validateEngineProfile(two.id,{...evidence,classes:[...evidence.classes,'Node3D']}),/E_ENGINE_CLASSES/);
  assert.throws(()=>validateEngineProfile(two.id,{...evidence,features:{...evidence.features,disable_3d:false}}),/E_ENGINE_FEATURES/);
 });
+
+test('general 2D builds remove unsupported Web networking and snapshot tools without removing gameplay capabilities',()=>{
+ const two=getEngineProfile('engine-2d-v1'),full=getEngineProfile('full-engine-v1');
+ for(const name of ['gdscript','text_server_fb','freetype','msdfgen','godot_physics_2d','navigation_2d','ogg','vorbis','mp3','interactive_music','noise','websocket','webrtc','multiplayer','mbedtls','webp','basis_universal','regex'])assert.ok(two.requiredModules.includes(name),name);
+ for(const name of ['disable_advanced_gui','disable_physics_2d','disable_navigation_2d'])assert.equal(two.features[name],false,name);
+ for(const moduleMode of ['baseline','explicit']){
+  const args=engineBuildArgs({profile:two.id,moduleMode});
+  for(const name of ['enet','upnp','objectdb_profiler','text_server_adv']){
+   assert.ok(args.includes(`module_${name}_enabled=no`),name);
+   assert.equal(args.includes(`module_${name}_enabled=yes`),false,name);
+   assert.equal(two.modules.includes(name),false,name);
+   // Existing archived releases remain consumable; fresh builds must prove
+   // these modules are absent from the generated enabled-module header.
+   assert.doesNotThrow(()=>validateEngineProfile(two.id,{modules:[...two.modules,name]}));
+   assert.throws(()=>validateEngineProfile(two.id,{modules:[...two.modules,name],forBuild:true}),/E_ENGINE_MODULES/);
+  }
+ }
+ assert.doesNotThrow(()=>validateEngineProfile(two.id,{modules:[...two.modules],forBuild:true}));
+ assert.equal(full.modules.includes('enet'),true);assert.equal(full.modules.includes('upnp'),true);
+ assert.deepEqual(full.disabledModules,[]);
+ assert.ok(full.requiredModules.includes('text_server_adv'));
+ assert.equal(engineBuildArgs().some(arg=>/^module_(enet|upnp|objectdb_profiler)_enabled=no$/.test(arg)),false);
+});

@@ -269,6 +269,7 @@ jobs:
           node apps/playground/scripts/browser-react-demos-test.mjs > "$RUNNER_TEMP/default-playground-results/react-demos.json"
           node apps/playground/scripts/browser-test.mjs > "$RUNNER_TEMP/default-playground-results/workbench.json"
           if [ "${{ matrix.profile }}" = "engine-2d-v1" ]; then
+            node apps/playground/scripts/browser-basic-text-test.mjs --site "$PLAYGROUND_TEST_DIRECTORY" --out "$RUNNER_TEMP/basic-text-results" --expect-fallback
             node apps/playground/scripts/browser-2d-features-test.mjs --site "$PLAYGROUND_TEST_DIRECTORY" --out "$RUNNER_TEMP/default-playground-results" --require-cjk
             xvfb-run -a env BROWSER=firefox BROWSER_HEADLESS=0 LIBGL_ALWAYS_SOFTWARE=1 PLAYGROUND_FULL_ENGINE_LOOPS=2 PLAYGROUND_FULL_ENGINE_REPORT="$RUNNER_TEMP/default-playground-results/runtime.firefox.json" node apps/playground/scripts/browser-full-engine-test.mjs
             xvfb-run -a env BROWSER=firefox BROWSER_HEADLESS=0 LIBGL_ALWAYS_SOFTWARE=1 node apps/playground/scripts/browser-2d-features-test.mjs --site "$PLAYGROUND_TEST_DIRECTORY" --out "$RUNNER_TEMP/default-playground-results/features-firefox" --report "$RUNNER_TEMP/default-playground-results/features.firefox.json" --sessions 1 --require-cjk
@@ -297,6 +298,7 @@ jobs:
             ${{ runner.temp }}/default-playground-site
             ${{ runner.temp }}/default-playground-results
             ${{ runner.temp }}/profile-gate
+            ${{ runner.temp }}/basic-text-results
             ${{ runner.temp }}/browser-engine-report.json
             ${{ runner.temp }}/browser-engine-measurement.json
             ${{ runner.temp }}/browser-engine-performance.json
