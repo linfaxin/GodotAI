@@ -13,8 +13,8 @@ jobs:
       - name: 🛠️ pnpm install
         uses: ./.github/actions/pnpm-install
 
-      - name: 🛠️ Build ecosystem packages
-        run: pnpm build:packages
+      - name: 🛠️ Build embedded scripts and ecosystem packages
+        run: pnpm build
         shell: bash
 
       - name: 🛠️ Type-check ecosystem packages
