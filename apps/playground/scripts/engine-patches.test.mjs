@@ -6,11 +6,14 @@ import {join,dirname} from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {buildBrowserEngine} from '../../../scripts/test/build-browser-engine.mjs';
 import {applyWebEnginePatches} from '../../../scripts/release/patch-web-engine.mjs';
-import {digest} from '../../../scripts/release/web-release-utils.mjs';
+import {digest,canonical} from '../../../scripts/release/web-release-utils.mjs';
+import {THREADLESS_GROUP_WAIT_ORIGINAL} from '../../../scripts/release/patch-web-threadless-groups.mjs';
 
 async function fixture(root){
  const sources={
   SConstruct:'# source-only fixture',
+  'core/object/worker_thread_pool.cpp':THREADLESS_GROUP_WAIT_ORIGINAL,
+  'platform/web/js/engine/config.js':await readFile(new URL('../../../scripts/jsb.react-browser/test/fixtures/godot-4.6.1-config.js',import.meta.url),'utf8'),
   'drivers/gles3/shaders/scene.glsl':'out highp vec3 vertex_interp;\nvoid main() {\n\tgl_PointSize = point_size;\n}\n#[fragment]\nin highp vec3 vertex_interp;\nvoid main() {\n#CODE : FRAGMENT\n#endif // !USE_SHADOW_TO_OPACITY\n}\n',
   'servers/rendering/renderer_rd/shaders/scene_forward_aa_inc.glsl':'#ifdef ALPHA_HASH_USED\nhalf compute_alpha_hash_threshold(vec3 pos, float scale) { return half(0.5); }\n#endif // ALPHA_HASH_USED\n',
   'drivers/gles3/storage/texture_storage.cpp':'void TextureStorage::_create_render_target_backbuffer(RenderTarget *rt) {\nint count = MAX(1, Image::get_image_required_mipmaps(width, height, format) - 4);\n\tif (rt->size.x > 40 && rt->size.y > 40) { allocate(); }\n}\nvoid TextureStorage::_clear_render_target(RenderTarget *rt) {}',
@@ -33,7 +36,7 @@ test('local patch CLI and the actual CI snapshot builder produce identical engin
  const out=join(root,'report.json');
  await buildBrowserEngine({'godot-source':source,'build-dir':built,out,'snapshot-only':true,scons:process.execPath,emcc:process.execPath});
  const report=JSON.parse(await readFile(out,'utf8'));
- assert.equal(report.status,'snapshotted');assert.equal(report.recipe.patches.length,5);
+ assert.equal(report.status,'snapshotted');assert.equal(report.recipe.patches.length,7);
  assert.deepEqual(report.recipe.patches,localPatches);
  for(const patch of localPatches){
   assert.equal(patch.changed,true);assert.match(patch.implementation.sha256,/^[a-f0-9]{64}$/);
@@ -51,4 +54,31 @@ test('a rejected late patch leaves all upstream files unchanged',async t=>{
  await writeFile(join(root,'platform/web/js/libs/library_godot_audio.js'),sources['platform/web/js/libs/library_godot_audio.js']);
  await assert.rejects(applyWebEnginePatches(root),/E_AUDIO_PATCH_UNSUPPORTED/);
  for(const [path,source]of Object.entries(sources))assert.equal(await readFile(join(root,path),'utf8'),source,path);
+});
+
+test('an unsupported worker-group source rejects the whole seven-patch plan without partial writes', async t => {
+ const root=await mkdtemp(join(tmpdir(),'engine-worker-patch-atomic-'));t.after(()=>rm(root,{recursive:true,force:true}));
+ const sources=await fixture(root);
+ sources['core/object/worker_thread_pool.cpp']=sources['core/object/worker_thread_pool.cpp'].replace('groups.erase(p_group);','unknown_upstream_cleanup();');
+ await writeFile(join(root,'core/object/worker_thread_pool.cpp'),sources['core/object/worker_thread_pool.cpp']);
+ await assert.rejects(applyWebEnginePatches(root),/E_THREADLESS_GROUP_PATCH_UNSUPPORTED/);
+ for(const [path,source] of Object.entries(sources))assert.equal(await readFile(join(root,path),'utf8'),source,path);
+});
+
+test('an unsupported presentation config rejects all seven patches before any source write',async t=>{
+ const root=await mkdtemp(join(tmpdir(),'engine-presentation-patch-atomic-'));t.after(()=>rm(root,{recursive:true,force:true}));
+ const sources=await fixture(root);sources['platform/web/js/engine/config.js']+='\n// unknown upstream change\n';
+ await writeFile(join(root,'platform/web/js/engine/config.js'),sources['platform/web/js/engine/config.js']);
+ await assert.rejects(applyWebEnginePatches(root),/E_PRESENTATION_PATCH_UNSUPPORTED/);
+ for(const [path,source]of Object.entries(sources))assert.equal(await readFile(join(root,path),'utf8'),source,path);
+});
+
+
+test('ThinLTO worker cap and compiler environment are part of the attested recipe',{timeout:60000},async t=>{
+ const root=await mkdtemp(join(tmpdir(),'engine-thin-recipe-'));t.after(()=>rm(root,{recursive:true,force:true}));const source=join(root,'source'),built=join(root,'build');await fixture(source);
+ const previous=Object.fromEntries(['EMCC_CORES','BINARYEN_CORES'].map(name=>[name,process.env[name]]));t.after(()=>{for(const [name,value]of Object.entries(previous)){if(value===undefined)delete process.env[name];else process.env[name]=value;}});process.env.EMCC_CORES='4';process.env.BINARYEN_CORES='4';
+ const out=join(root,'report.json');await buildBrowserEngine({'godot-source':source,'build-dir':built,out,profile:'engine-2d-v1',target:'template_release',lto:'thin',jobs:4,'snapshot-only':true,scons:process.execPath,emcc:process.execPath});const report=JSON.parse(await readFile(out,'utf8'));
+ assert(report.recipe.args.includes('linkflags=-Wl,--thinlto-jobs=4'));assert.deepEqual(report.recipe.environment,{EMCC_CORES:'4',BINARYEN_CORES:'4'});assert.deepEqual(report.toolchains.environment,report.recipe.environment);assert.equal(report.recipeSha256,digest(canonical(report.recipe)));
+ assert.notEqual(report.recipeSha256,digest(canonical({...report.recipe,args:report.recipe.args.map(arg=>arg==='linkflags=-Wl,--thinlto-jobs=4'?'linkflags=-Wl,--thinlto-jobs=8':arg)})));assert.notEqual(report.recipeSha256,digest(canonical({...report.recipe,environment:{...report.recipe.environment,EMCC_CORES:'8'}})));
+ assert.match(await readFile(join(built,'SConstruct'),'utf8'),/resolvedLinkFlags/);assert(report.godotSource.inputs.SConstruct);
 });

@@ -18,7 +18,11 @@
             if(operation=="path_ratio"){
                 if(args.size()!=1||args[0].get_type()!=Variant::FLOAT||double(args[0])<0||double(args[0])>1)return false;
                 if(PathFollow2D* follow=Object::cast_to<PathFollow2D>(node)){Path2D* path=Object::cast_to<Path2D>(follow->get_parent());if(!path||path->get_curve().is_null()||path->get_curve()->get_baked_length()<=0)return false;follow->set_progress_ratio(args[0]);return true;}
-                if(PathFollow3D* follow=Object::cast_to<PathFollow3D>(node)){Path3D* path=Object::cast_to<Path3D>(follow->get_parent());if(!path||path->get_curve().is_null()||path->get_curve()->get_baked_length()<=0)return false;follow->set_progress_ratio(args[0]);return true;}return false;
+
+#if !defined(_3D_DISABLED)
+                if(PathFollow3D* follow=Object::cast_to<PathFollow3D>(node)){Path3D* path=Object::cast_to<Path3D>(follow->get_parent());if(!path||path->get_curve().is_null()||path->get_curve()->get_baked_length()<=0)return false;follow->set_progress_ratio(args[0]);return true;}
+#endif
+                return false;
             }
             Label* label=Object::cast_to<Label>(node);if(!label)return false;
             if(operation=="label_ratio"&&args.size()==1&&args[0].get_type()==Variant::FLOAT&&double(args[0])>=0&&double(args[0])<=1){label->set_visible_ratio(args[0]);return true;}

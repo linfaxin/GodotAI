@@ -10,7 +10,11 @@
         }
         Object* shape_owner(Root& root,Node* body,int index)
         {
-            if(CollisionObject2D* two=Object::cast_to<CollisionObject2D>(body))return managed_shape(root,two,index);if(CollisionObject3D* three=Object::cast_to<CollisionObject3D>(body))return managed_shape(root,three,index);return nullptr;
+            if(CollisionObject2D* two=Object::cast_to<CollisionObject2D>(body))return managed_shape(root,two,index);
+#if !defined(_3D_DISABLED) && !defined(PHYSICS_3D_DISABLED)
+            if(CollisionObject3D* three=Object::cast_to<CollisionObject3D>(body))return managed_shape(root,three,index);
+#endif
+            return nullptr;
         }
         bool shape_contact_event(Root& root,Node* emitter,const Variant** args,int count,Variant& result)
         {
@@ -24,13 +28,17 @@
             }
             if(root.stage!="physics")return false;
             if(operation=="shape_owner"){
-                if(args.size()!=1||args[0].get_type()!=Variant::FLOAT||double(args[0])!=Math::floor(double(args[0]))||double(args[0])<0||double(args[0])>65535||(!Object::cast_to<CollisionObject2D>(node)&&!Object::cast_to<CollisionObject3D>(node)))return false;Object* owner=shape_owner(root,node,int(args[0]));if(owner)result=owner;return true;
+                if(args.size()!=1||args[0].get_type()!=Variant::FLOAT||double(args[0])!=Math::floor(double(args[0]))||double(args[0])<0||double(args[0])>65535||(!Object::cast_to<CollisionObject2D>(node)&&!node->is_class("CollisionObject3D")))return false;Object* owner=shape_owner(root,node,int(args[0]));if(owner)result=owner;return true;
             }
             if(operation=="ray_shape_owner"){
                 if(!args.is_empty()||(!node->is_class("RayCast2D")&&!node->is_class("RayCast3D")))return false;const bool hit=node->call("is_colliding");if(!hit)return true;Node* collider=Object::cast_to<Node>(static_cast<Object*>(node->call("get_collider")));const int index=node->call("get_collider_shape");Object* owner=shape_owner(root,collider,index);if(owner)result=owner;return true;
             }
             if(operation=="velocity_forced"){
-                if(args.size()!=1)return false;if(NavigationAgent2D* two=Object::cast_to<NavigationAgent2D>(node)){if(args[0].get_type()!=Variant::VECTOR2)return false;const Vector2 velocity=args[0];if(Math::abs(velocity.x)>1e6||Math::abs(velocity.y)>1e6)return false;two->set_velocity_forced(velocity);return true;}if(NavigationAgent3D* three=Object::cast_to<NavigationAgent3D>(node)){if(args[0].get_type()!=Variant::VECTOR3)return false;const Vector3 velocity=args[0];if(Math::abs(velocity.x)>1e6||Math::abs(velocity.y)>1e6||Math::abs(velocity.z)>1e6)return false;three->set_velocity_forced(velocity);return true;}return false;
+                if(args.size()!=1)return false;if(NavigationAgent2D* two=Object::cast_to<NavigationAgent2D>(node)){if(args[0].get_type()!=Variant::VECTOR2)return false;const Vector2 velocity=args[0];if(Math::abs(velocity.x)>1e6||Math::abs(velocity.y)>1e6)return false;two->set_velocity_forced(velocity);return true;}
+#if !defined(_3D_DISABLED) && !defined(NAVIGATION_3D_DISABLED)
+                if(NavigationAgent3D* three=Object::cast_to<NavigationAgent3D>(node)){if(args[0].get_type()!=Variant::VECTOR3)return false;const Vector3 velocity=args[0];if(Math::abs(velocity.x)>1e6||Math::abs(velocity.y)>1e6||Math::abs(velocity.z)>1e6)return false;three->set_velocity_forced(velocity);return true;}
+#endif
+                return false;
             }
             return false;
         }

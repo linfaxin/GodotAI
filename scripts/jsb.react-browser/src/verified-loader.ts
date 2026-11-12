@@ -16,6 +16,8 @@ export interface VerifiedRelease {
   releaseCertified?: boolean;
   allowedOrigins?: string[];
   maxAssetBytes?: number;
+  /** Explicitly public versioned assets only; private assets keep revalidation. */
+  cachePolicy?: 'revalidate' | 'public-immutable';
 }
 export interface GodotInstance {
   preloadFile(bytes: Uint8Array, path: string): Promise<void>;
@@ -95,6 +97,7 @@ async function readLimited(stream: ReadableStream<Uint8Array>, max: number, erro
 }
 export function validateRelease(release: VerifiedRelease, base = globalThis.location?.href): void {
   if (!release || typeof release.releaseId !== 'string' || !release.releaseId || typeof release.profile !== 'string' || !release.profile) throw new Error('E_RELEASE_DESCRIPTOR');
+  if (release.cachePolicy !== undefined && !['revalidate', 'public-immutable'].includes(release.cachePolicy)) throw new Error('E_RELEASE_CACHE_POLICY');
   if (release.worklets !== undefined && !Array.isArray(release.worklets)) throw new Error('E_RELEASE_WORKLETS');
   const kinds = new Set<WorkletKind>();
   for (const asset of [release.engineJs, release.engineWasm, ...release.worklets ?? []]) {
@@ -109,7 +112,7 @@ export function validateRelease(release: VerifiedRelease, base = globalThis.loca
     kinds.add(kind);
   }
 }
-export async function fetchVerifiedAsset(asset: VerifiedAsset, options: { signal?: AbortSignal; maxBytes?: number; maxDecodedBytes?: number; fetch?: typeof fetch } = {}): Promise<Uint8Array> {
+export async function fetchVerifiedAsset(asset: VerifiedAsset, options: { signal?: AbortSignal; maxBytes?: number; maxDecodedBytes?: number; fetch?: typeof fetch; cachePolicy?: 'revalidate' | 'public-immutable' } = {}): Promise<Uint8Array> {
   abort(options.signal);
   assetMetadata(asset);
   const max = byteLimit(options.maxBytes);
@@ -117,7 +120,10 @@ export async function fetchVerifiedAsset(asset: VerifiedAsset, options: { signal
   if (asset.decodedBytes !== undefined && asset.decodedBytes > maxDecoded) throw new Error('E_ASSET_DECODED_SIZE');
   // Preserve the current host's login for private static assets. Fetch still
   // omits credentials for every other origin, including the public npm CDN.
-  const response = await (options.fetch ?? globalThis.fetch)(asset.url, { signal: options.signal, credentials: 'same-origin', redirect: 'error', cache: 'no-cache' });
+  const immutable = options.cachePolicy === 'public-immutable';
+  if (options.cachePolicy !== undefined && !['revalidate', 'public-immutable'].includes(options.cachePolicy)) throw new Error('E_RELEASE_CACHE_POLICY');
+  if (immutable && !/^\/releases\/[A-Za-z0-9_-]{8,}\//.test(new URL(asset.url, globalThis.location?.href).pathname)) throw new Error('E_RELEASE_IMMUTABLE_URL');
+  const response = await (options.fetch ?? globalThis.fetch)(asset.url, { signal: options.signal, credentials: immutable ? 'omit' : 'same-origin', redirect: 'error', cache: immutable ? 'force-cache' : 'no-cache' });
   if (!response.ok) throw new Error(`E_ASSET_HTTP: ${response.status} ${new URL(asset.url, globalThis.location?.href).pathname}`);
   if (Number(response.headers.get('content-length')) > max) { void response.body?.cancel().catch(() => {}); throw new Error('E_ASSET_SIZE'); }
   if (!response.body) throw new Error('E_ASSET_BODY');
@@ -171,9 +177,9 @@ export async function injectVerifiedWasm(Engine: GodotConstructor, wasmUrl: stri
 export async function loadVerifiedEngine(release: VerifiedRelease, options: { signal?: AbortSignal; document?: Document } = {}): Promise<LoadedEngine> {
   validateRelease(release);
   const [js, wasm, ...worklets] = await Promise.all([
-    fetchVerifiedAsset(release.engineJs, { signal: options.signal, maxBytes: release.maxAssetBytes }),
-    fetchVerifiedAsset(release.engineWasm, { signal: options.signal, maxBytes: release.maxAssetBytes }),
-    ...(release.worklets ?? []).map(asset => fetchVerifiedAsset(asset, { signal: options.signal, maxBytes: release.maxAssetBytes })),
+    fetchVerifiedAsset(release.engineJs, { signal: options.signal, maxBytes: release.maxAssetBytes, cachePolicy: release.cachePolicy }),
+    fetchVerifiedAsset(release.engineWasm, { signal: options.signal, maxBytes: release.maxAssetBytes, cachePolicy: release.cachePolicy }),
+    ...(release.worklets ?? []).map(asset => fetchVerifiedAsset(asset, { signal: options.signal, maxBytes: release.maxAssetBytes, cachePolicy: release.cachePolicy })),
   ]);
   abort(options.signal);
   const doc = options.document ?? document;

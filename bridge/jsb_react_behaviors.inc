@@ -53,7 +53,11 @@
                 if(!body&&!node->is_class("RayCast2D")&&!node->is_class("RayCast3D")&&!node->is_class("ShapeCast2D")&&!node->is_class("ShapeCast3D"))return false;
                 bool pruned=false;
                 for(int i=owned.exceptions.size()-1;i>=0;--i){const NativeObjectID id=owned.exceptions[i];Node* target=resolve(root,id);if(target&&target->is_inside_tree())continue;
-                    if(body){if(const RID* rid=owned.exception_rids.getptr(*id)){if(PhysicsBody2D* source=Object::cast_to<PhysicsBody2D>(node))PhysicsServer2D::get_singleton()->body_remove_collision_exception(source->get_rid(),*rid);else if(PhysicsBody3D* source=Object::cast_to<PhysicsBody3D>(node))PhysicsServer3D::get_singleton()->body_remove_collision_exception(source->get_rid(),*rid);}}
+                    if(body){if(const RID* rid=owned.exception_rids.getptr(*id)){if(PhysicsBody2D* source=Object::cast_to<PhysicsBody2D>(node))PhysicsServer2D::get_singleton()->body_remove_collision_exception(source->get_rid(),*rid);
+#if !defined(_3D_DISABLED) && !defined(PHYSICS_3D_DISABLED)
+                            else if(PhysicsBody3D* source=Object::cast_to<PhysicsBody3D>(node))PhysicsServer3D::get_singleton()->body_remove_collision_exception(source->get_rid(),*rid);
+#endif
+                        }}
                     owned.exception_rids.erase(*id);owned.exceptions.remove_at(i);pruned=true;
                 }
                 if(pruned&&!body){node->call("clear_exceptions");for(NativeObjectID id:owned.exceptions)if(Node* target=resolve(root,id))node->call("add_exception",target);}
@@ -61,14 +65,22 @@
                 if(operation=="exception_clear"){if(!args.is_empty())return false;for(NativeObjectID id:owned.exceptions)if(Node* target=resolve(root,id))node->call(body?"remove_collision_exception_with":"remove_exception",target);owned.exceptions.clear();owned.exception_rids.clear();return true;}
                 if(args.size()!=1||args[0].get_type()!=Variant::OBJECT)return false;Node* target=Object::cast_to<Node>(static_cast<Object*>(args[0]));const NativeObjectID key=target?environment->try_get_object_id(target):NativeObjectID();
                 if(!target||target==node||!root.nodes.has(*key)||!target->is_inside_tree()||!target->is_class(body?(two?"PhysicsBody2D":"PhysicsBody3D"):(two?"CollisionObject2D":"CollisionObject3D")))return false;
-                if(operation=="exception_add"){if(owned.exceptions.has(key))return true;if(owned.exceptions.size()>=64)return false;node->call(body?"add_collision_exception_with":"add_exception",target);owned.exceptions.push_back(key);if(CollisionObject2D* object=Object::cast_to<CollisionObject2D>(target))owned.exception_rids.insert(*key,object->get_rid());else if(CollisionObject3D* object=Object::cast_to<CollisionObject3D>(target))owned.exception_rids.insert(*key,object->get_rid());return true;}
+                if(operation=="exception_add"){if(owned.exceptions.has(key))return true;if(owned.exceptions.size()>=64)return false;node->call(body?"add_collision_exception_with":"add_exception",target);owned.exceptions.push_back(key);if(CollisionObject2D* object=Object::cast_to<CollisionObject2D>(target))owned.exception_rids.insert(*key,object->get_rid());
+#if !defined(_3D_DISABLED) && !defined(PHYSICS_3D_DISABLED)
+                    else if(CollisionObject3D* object=Object::cast_to<CollisionObject3D>(target))owned.exception_rids.insert(*key,object->get_rid());
+#endif
+                    return true;}
                 if(operation=="exception_remove"){if(owned.exceptions.has(key)){node->call(body?"remove_collision_exception_with":"remove_exception",target);owned.exceptions.erase(key);owned.exception_rids.erase(*key);}return true;}
                 return false;
             }
             if(operation=="path"||operation=="nav_distance"){
                 if(root.stage!="physics"||!args.is_empty())return false;
                 if(NavigationAgent2D* agent=Object::cast_to<NavigationAgent2D>(node)){if(operation=="nav_distance")result=agent->distance_to_target();else{const Vector<Vector2>& path=agent->get_current_navigation_path();if(path.size()>4096)return false;result=path;}return true;}
-                if(NavigationAgent3D* agent=Object::cast_to<NavigationAgent3D>(node)){if(operation=="nav_distance")result=agent->distance_to_target();else{const Vector<Vector3>& path=agent->get_current_navigation_path();if(path.size()>4096)return false;result=path;}return true;}return false;
+
+#if !defined(_3D_DISABLED) && !defined(NAVIGATION_3D_DISABLED)
+                if(NavigationAgent3D* agent=Object::cast_to<NavigationAgent3D>(node)){if(operation=="nav_distance")result=agent->distance_to_target();else{const Vector<Vector3>& path=agent->get_current_navigation_path();if(path.size()>4096)return false;result=path;}return true;}
+#endif
+                return false;
             }
             if(operation=="camera_update"){Camera2D* camera=Object::cast_to<Camera2D>(node);if(!camera||root.stage!="process"||!args.is_empty())return false;camera->force_update_scroll();return true;}
             if(operation=="canvas_transform"||operation=="local_viewport"||operation=="world_viewport"||operation=="viewport_local"||operation=="viewport_world"){
@@ -84,8 +96,13 @@
                 const bool set=operation=="shader_set";if(args.size()!=(set?3:2)||args[0].get_type()!=Variant::FLOAT||double(args[0])!=Math::floor(double(args[0]))||double(args[0]) < (allow_overlay?-3:-2)||double(args[0])>63||args[1].get_type()!=Variant::STRING)return false;
                 const int slot=int(args[0]);const StringName name=String(args[1]);Ref<ShaderMaterial> material;
                 if(slot==-1&&Object::cast_to<CanvasItem>(node))material=node->get("material");
+
+#if !defined(_3D_DISABLED)
                 else if(slot==-3&&Object::cast_to<GeometryInstance3D>(node))material=Object::cast_to<GeometryInstance3D>(node)->get_material_overlay();
+#endif
+#if !defined(_3D_DISABLED)
                 else if(MeshInstance3D* mesh=Object::cast_to<MeshInstance3D>(node)){if(slot==-2)material=mesh->get_material_override();else if(slot>=0&&mesh->get_mesh().is_valid()&&slot<mesh->get_mesh()->get_surface_count())material=mesh->get_surface_override_material(slot);}
+#endif
                 if(material.is_null()||material->get_shader().is_null())return false;
                 List<PropertyInfo> uniforms;material->get_shader()->get_shader_uniform_list(&uniforms);
                 for(const PropertyInfo& uniform:uniforms)if(uniform.name==name){

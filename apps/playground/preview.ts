@@ -1,6 +1,11 @@
 import { PREVIEW_PROTOCOL, RUN_PHASES, isIdentity, isProjectData, normalizedOrigin, previewDiagnostic, sameRun, type RunIdentity, type RunPhase } from '../../scripts/jsb.react-browser/src/protocol.js';
 import { loadVerifiedEngine, type GodotInstance, type LoadedEngine, type VerifiedRelease } from '../../scripts/jsb.react-browser/src/verified-loader.js';
 
+import {assertCompiledRelease,nativeAudioEnabled,type ReleaseContext} from './src/release-context';
+import {verifyPreviewReleaseContext} from './src/preview-release-context';
+import {suppressBrowserSave} from './src/browser-shortcuts';
+suppressBrowserSave(window);
+
 // The parent is on a different origin. Its origin is configured in this fixed
 // preview document URL and verified against both event.origin and event.source.
 const configuredOrigin = new URL(location.href).searchParams.get('editorOrigin');
@@ -109,14 +114,17 @@ function startSession(identity: RunIdentity, port: MessagePort): void {
     }
     if (data.type !== 'run' || started) return;
     started = true;
-    void boot(data.release, data.artifact?.pack);
+    void boot(data.release, data.artifact?.pack, data.artifact?.manifest);
   };
   port.start();
   send({ type: 'connected' });
-  async function boot(release: VerifiedRelease, pack: unknown): Promise<void> {
+  async function boot(release: VerifiedRelease, pack: unknown, manifest:unknown): Promise<void> {
     try {
       if (!(pack instanceof Uint8Array) || !pack.byteLength || pack.byteLength > 64 * 1024 * 1024) throw new Error('E_ARTIFACT_PACK');
+      const context=(release as VerifiedRelease&{releaseContext?:ReleaseContext}).releaseContext;
+      if(context){if(context.engineReleaseId!==release.releaseId||context.engineProfile!==release.profile)throw Error('E_PREVIEW_RELEASE_CONTEXT');assertCompiledRelease(context,manifest);}
       phase(RUN_PHASES[0]); check();
+      if(context){await verifyPreviewReleaseContext(context,{signal:aborter.signal});check();}
       const result = await loadVerifiedEngine(release, { signal: aborter.signal });
       // A cooperative stop may precede the loader resolving; release late assets.
       if (aborter.signal.aborted || exited) { result.dispose(); return; }
@@ -132,7 +140,7 @@ function startSession(identity: RunIdentity, port: MessagePort): void {
       loaded.installWorklets(engine);
       phase('preloading'); await engine.preloadFile(pack, '/application.pck'); check();
       phase('initializing'); await engine.init(); check();
-      phase('starting'); await engine.start({ args: release.profile==='full-engine-v1'
+      phase('starting'); await engine.start({ args: nativeAudioEnabled(release.profile)
         ? ['--main-pack', '/application.pck', '--rendering-method', 'gl_compatibility']
         : ['--main-pack', '/application.pck', '--rendering-method', 'gl_compatibility', '--audio-driver', 'Dummy'] }); check();
       if (exited) return;

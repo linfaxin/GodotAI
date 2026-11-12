@@ -2,19 +2,19 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {chromium} from 'playwright';
+import {launchBrowser,withAcceptanceContext} from './browser-harness.mjs';
 import {createStaticServer} from './serve.mjs';
 const directory=path.resolve(process.env.PLAYGROUND_TEST_DIRECTORY??fileURLToPath(new URL('../dist',import.meta.url)));
 const release=JSON.parse(await fs.readFile(path.join(directory,'engine-release.json'),'utf8'));
 const server=createStaticServer(directory);await new Promise(resolve=>server.listen(0,'0.0.0.0',resolve));
-const browser=await chromium.launch({headless:true,executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE||undefined,args:['--no-sandbox','--enable-webgl','--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader','--disable-dev-shm-usage','--autoplay-policy=no-user-gesture-required']});
+const browser=await launchBrowser({headless:true,executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE||undefined,args:['--no-sandbox','--enable-webgl','--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader','--disable-dev-shm-usage','--autoplay-policy=no-user-gesture-required']});
 const page=await browser.newPage(),checks=[],failures=[];
 page.setDefaultTimeout(120000);page.on('pageerror',error=>failures.push(String(error)));
 const inspect=()=>page.evaluate(()=>window.__playgroundWorkbench.inspect());
 async function stop(){const state=await inspect();if(state.engine?.state==='running'){await page.locator('#stop').click();await page.waitForFunction(()=>window.__playgroundWorkbench.inspect().engine.state==='exited');}}
 async function imported(source,camel=false){
  await stop();await page.locator('#clear-log').click();
- const project={schemaVersion:2,runtime:'react',demoId:'react',entry:'/src/App.tsx',selected:'/src/App.tsx',mode:'production',controls:{},files:{'/src/App.tsx':source,'/project.godot':`config_version=5\n[rendering]\nrenderer/rendering_method="gl_compatibility"\n[GodotJS]\nruntime/core/camel_case_bindings_enabled=${camel}\n`}};
+ const project={schemaVersion:3,engineProfile:release.runtimeProfile,runtime:'react',demoId:'react',entry:'/src/App.tsx',selected:'/src/App.tsx',mode:'production',controls:{},files:{'/src/App.tsx':source,'/project.godot':`config_version=5\n[rendering]\nrenderer/rendering_method="gl_compatibility"\n[GodotJS]\nruntime/core/camel_case_bindings_enabled=${camel}\n`}};
  await page.locator('#import').setInputFiles({name:'bridge-regression.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(project))});
  await page.waitForFunction(source=>window.__playgroundWorkbench.inspect().project.files['/src/App.tsx']===source,source);
 }
@@ -35,7 +35,7 @@ try{
   const worker=new Worker('./compiler.worker.js');let serial=0;
   try{
    const source=specifiers.map((name,index)=>`import * as S${index} from '${name}'; void S${index};`).join('\n')+'\nexport default function App(){return null;}';
-   const result=await new Promise((resolve,reject)=>{const id=++serial,timer=setTimeout(()=>reject(Error('SDK subpath check timed out')),120000);worker.onerror=e=>{clearTimeout(timer);reject(Error(e.message));};worker.onmessage=e=>{if(e.data.id===id){clearTimeout(timer);resolve(e.data);}};worker.postMessage({id,kind:'compile',runtime:'react',entry:'/src/App.tsx',files:{'/src/App.tsx':source}});});
+   const result=await new Promise((resolve,reject)=>{const id=++serial,timer=setTimeout(()=>reject(Error('SDK subpath check timed out')),120000);worker.onerror=e=>{clearTimeout(timer);reject(Error(e.message));};worker.onmessage=e=>{if(e.data.id===id){clearTimeout(timer);resolve(e.data);}};worker.postMessage({id,kind:'compile',runtime:'react',entry:'/src/App.tsx',files:{'/src/App.tsx':source},engineProfile:window.__playgroundWorkbench.inspect().engineProfile,releaseContext:window.__playgroundWorkbench.inspect().releaseContext});});
    return {diagnostics:result.diagnostics,packBytes:result.pack?.byteLength};
   }finally{worker.terminate();}
  },specifiers);
@@ -73,7 +73,7 @@ try{
   checks.push(`${camel?'camel':'snake'} packed native values update on mutation and restore their captured baseline`);
  }
  assert.deepEqual(failures,[]);
- const report={status:'passed',releaseId:release.id,checks,sdkSubpaths:specifiers,errors:failures};
+ const report=await withAcceptanceContext({status:'passed',releaseId:release.id,checks,sdkSubpaths:specifiers,errors:failures}, {directory,browser});
  if(process.env.PLAYGROUND_BRIDGE_REPORT){const file=path.resolve(process.env.PLAYGROUND_BRIDGE_REPORT);await fs.mkdir(path.dirname(file),{recursive:true});await fs.writeFile(file,JSON.stringify(report,null,2)+'\n');}
  console.log(JSON.stringify(report,null,2));
 }catch(error){console.error(JSON.stringify({error:String(error),checks,state:await inspect().catch(()=>null),logs:await page.locator('#logs').textContent().catch(()=>null)},null,2));throw error;}

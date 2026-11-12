@@ -60,6 +60,8 @@ test('native source snapshot includes SCsub preset bundles while excluding unrel
   for (const name of ['jsb.runtime.bundle.js', 'jsb.editor.bundle.js', 'jsb.runtime.bundle.d.ts', 'jsb.runtime.bundle.js.map', 'jsb.editor.bundle.d.ts', 'jsb.editor.bundle.js.map']) await writeFile(resolve(root, 'scripts/out', name), `actual preset ${name}`);
   await writeFile(resolve(root, 'scripts/out/unrelated.log'), 'not a native input');
   await writeFile(resolve(root, 'scripts/jsb.react/dist/index.js'), 'not embedded by SCsub');
+  await mkdir(resolve(root,'apps/playground/dist-2d-debug'),{recursive:true});
+  await writeFile(resolve(root,'apps/playground/dist-2d-debug/main.js'),'generated candidate output');
   const snapshot = await snapshotBrowserSources(root, { module: true });
   assert.equal(Object.keys(snapshot.inputs).length, 6);
   assert(snapshot.inputs['scripts/out/jsb.runtime.bundle.js']);
@@ -355,4 +357,29 @@ test('combined aggregate rejects counter pressure, missing browsers, changed byt
     await writeJson(config['authenticated-report'], invalid);
     await assert.rejects(collectBrowserEvidence(config), /Missing authenticated full-suite check/);
   }
+});
+
+
+test('release profile classification is explicit and refuses unknown or mismatched identities',async t=>{
+ const f=await fixture(t);
+ // Having default modules enabled does not turn a compatibility fixture native.
+ f.report.recipe.args.push('modules_enabled_by_default=yes');f.report.recipeSha256=digest(canonical(f.report.recipe));
+ await writeJson(resolve(f.root,'engine-report.json'),f.report);
+ await buildRelease(f.configuration);assert.equal((await inspectRelease(f.dir)).runtimeProfile,'legacy-profiles-v1');
+ await writeJson(resolve(f.root,'assets.json'),{...f.config,runtimeProfile:'not-an-official-profile'});
+ await assert.rejects(buildRelease(f.configuration),/E_ENGINE_PROFILE/);
+ await writeJson(resolve(f.root,'assets.json'),{...f.config,runtimeProfile:'engine-2d-v1'});
+ await writeJson(resolve(f.root,'engine-report.json'),{...f.report,runtimeProfile:'full-engine-v1'});
+ await assert.rejects(buildRelease(f.configuration),/E_RELEASE_PROFILE/);
+});
+
+test('sealed release rejects an attestation from a different profile',async t=>{
+ const f=await fixture(t);await buildRelease(f.configuration);
+ const descriptor=await json(resolve(f.dir,'release.json'));
+ const attestation=await json(resolve(f.dir,descriptor.attestation));
+ await writeJson(resolve(f.dir,descriptor.attestation),{...attestation,runtimeProfile:'engine-2d-v1'});
+ const bytes=await readFile(resolve(f.dir,descriptor.attestation));
+ Object.assign(descriptor.files.find(file=>file.path===descriptor.attestation),{sha256:digest(bytes),bytes:bytes.length});
+ descriptor.id=descriptor.runtimeRelease=identity(descriptor);await writeJson(resolve(f.dir,'release.json'),descriptor);
+ await assert.rejects(inspectRelease(f.dir),/E_RELEASE_PROFILE/);
 });

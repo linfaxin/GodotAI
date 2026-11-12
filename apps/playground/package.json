@@ -4,8 +4,11 @@
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",
+    "build:2d": "node scripts/build.mjs --profile engine-2d-v1",
+    "build:2d:release": "node scripts/build.mjs --profile engine-2d-v1 --target template_release",
     "typecheck": "tsc --noEmit",
     "dev": "node scripts/serve.mjs",
+    "dev:2d": "PLAYGROUND_DIRECTORY=dist-2d-debug node scripts/serve.mjs",
     "test": "node --test scripts/*.test.mjs",
     "test:browser": "node scripts/browser-demo-regressions-test.mjs && node scripts/browser-full-engine-test.mjs && node scripts/browser-engine-editor-test.mjs && node scripts/browser-engine-bridge-test.mjs && node scripts/browser-test.mjs",
     "test:browser:full": "node scripts/browser-full-engine-test.mjs",
@@ -17,6 +20,8 @@
     "test:browser:gpu-probe": "node scripts/browser-gpu-probe.mjs",
     "test:browser:react": "node scripts/browser-demo-regressions-test.mjs && node scripts/browser-react-demos-test.mjs",
     "test:browser:resources": "node scripts/browser-react-demos-test.mjs",
+    "test:browser:2d:features": "node scripts/browser-2d-features-test.mjs --site dist-2d-debug",
+    "test:browser:release-context": "node scripts/browser-release-context-test.mjs",
     "test:browser:regressions": "node scripts/browser-demo-regressions-test.mjs"
   },
   "dependencies": {

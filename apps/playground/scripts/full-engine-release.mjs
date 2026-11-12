@@ -4,7 +4,7 @@ import {fileURLToPath} from 'node:url';
 import {createRequire} from 'node:module';
 import {createHash} from 'node:crypto';
 import {captureEngineApi} from './capture-engine-api.mjs';
-import {FULL_WEB_MODULE_BASELINE} from './full-engine-profile.mjs';
+import {getEngineProfile,validateEngineProfile} from '../../../scripts/release/engine-profiles.mjs';
 
 const repo=fileURLToPath(new URL('../../../',import.meta.url));
 const sdk=path.join(repo,'scripts/jsb.react');
@@ -57,22 +57,21 @@ export async function buildEngineVendor({mode='production'}={}){
 }
 
 /** Seal only metadata observed from the same engine bytes that will be served. */
-export function validateProductionApiCapture(ir,capture,engine){
+export function validateProductionApiCapture(ir,capture,engine,runtimeProfile=FULL_ENGINE_PROFILE){
  if(capture?.kind!=='godotjs-production-engine-api-capture'||capture.status!=='captured'||capture.entry!=='godot-jsb.internal.get_engine_api')throw Error('E_FULL_ENGINE_CAPTURE: A production native API capture is required');
  if(capture.engineJsSha256!==engine.javascript.sha256||capture.engineWasmSha256!==(engine.wasm.decodedSha256??engine.wasm.sha256))throw Error('E_FULL_ENGINE_IDENTITY: API capture belongs to different JS/WASM bytes');
  if(!Array.isArray(engine.worklets)||engine.worklets.length!==2||!engine.worklets.some(item=>/\.audio\.worklet\.js$/.test(item.path))||!engine.worklets.some(item=>/\.audio\.position\.worklet\.js$/.test(item.path)))throw Error('E_FULL_ENGINE_IDENTITY: Both production audio worklets are required');
  for(const item of engine.worklets)if(capture.worklets?.[path.basename(item.path)]!==item.sha256)throw Error('E_FULL_ENGINE_IDENTITY: Audio worklet differs from captured engine');
  if(!Array.isArray(ir.modules)||!ir.modules.length||ir.modules.some(name=>typeof name!=='string'||/godotai_api_probe|p0engineapiprobe/i.test(name))||new Set(ir.modules).size!==ir.modules.length)throw Error('E_FULL_ENGINE_MODULES: Missing production module list or inspector module present');
  if(!ir.modules.some(name=>name.toLowerCase()==='godotjs')||!ir.modules.includes('text_server_fb'))throw Error('E_FULL_ENGINE_MODULES: GodotJS and fallback text server are required');
- const missingModules=FULL_WEB_MODULE_BASELINE.filter(name=>!ir.modules.includes(name));
- if(missingModules.length)throw Error('E_FULL_ENGINE_MODULES: Reduced Web template cannot be released as full-engine-v1: '+missingModules.join(', '));
+ try{validateEngineProfile(runtimeProfile,{modules:ir.modules,classes:ir.classes});}catch(error){throw Error('E_FULL_ENGINE_MODULES: '+error.message);}
  if(ir.instrumentation||ir.classes?.some(item=>/P0EngineApiProbe/.test(item.nativeName??item.name??'')))throw Error('E_FULL_ENGINE_INSPECTOR: Inspector API cannot be released');
  if(ir.schemaVersion!==1||ir.apiVersion!=='godotjs-engine-api/1'||!ir.engineVersion||!ir.bindingVersion||!['snake','camel'].includes(ir.bindingNaming))throw Error('E_FULL_ENGINE_API: Unsupported production API identity');
  validateBindingAudit(ir,capture);
 }
 
-function validateGeneratedProfile({ir,capture,irBytes,declarations,namingVersion,codegenVersion,typeSnapshot,actualAPIHash,strictTypechecks},engine,naming){
- validateProductionApiCapture(ir,capture,engine);
+function validateGeneratedProfile({ir,capture,irBytes,declarations,namingVersion,codegenVersion,typeSnapshot,actualAPIHash,strictTypechecks},engine,naming,runtimeProfile){
+ validateProductionApiCapture(ir,capture,engine,runtimeProfile);
  if(ir.bindingNaming!==naming||capture.naming!==naming)throw Error('E_FULL_ENGINE_NAMING: Capture does not match '+naming+' bindings');
  if(capture.irSha256!==sha256(irBytes))throw Error('E_FULL_ENGINE_IDENTITY: Captured IR bytes changed');
  if(canonical(ir)!==canonical(JSON.parse(Buffer.from(irBytes).toString('utf8'))))throw Error('E_FULL_ENGINE_IDENTITY: Parsed API differs from captured IR');
@@ -89,10 +88,11 @@ function validateGeneratedProfile({ir,capture,irBytes,declarations,namingVersion
 }
 
 /** Both naming snapshots are captured from the same production engine bytes. */
-export function assembleFullEngineRelease({engine,ir,capture,irBytes,declarations,namingVersion,codegenVersion,sdkVersion,vendor,developmentVendor,typeSnapshot,namingProfiles,strictTypechecks,build={}}){
+export function assembleFullEngineRelease({engine,ir,capture,irBytes,declarations,namingVersion,codegenVersion,sdkVersion,vendor,developmentVendor,typeSnapshot,namingProfiles,strictTypechecks,build={},runtimeProfile=FULL_ENGINE_PROFILE}){
+ const definition=getEngineProfile(runtimeProfile);
  const profiles={snake:{ir,capture,irBytes,declarations,namingVersion,codegenVersion,typeSnapshot,strictTypechecks,actualAPIHash:build.actualAPIHash},camel:namingProfiles?.camel};
  if(!profiles.camel)throw Error('E_FULL_ENGINE_NAMING: Both snake and camel captures are required');
- for(const [naming,profile]of Object.entries(profiles))validateGeneratedProfile(profile,engine,naming);
+ for(const [naming,profile]of Object.entries(profiles))validateGeneratedProfile(profile,engine,naming,runtimeProfile);
  for(const field of ['engineVersion','bindingVersion','namingVersion','platform'])if(ir[field]!==profiles.camel.ir[field])throw Error('E_FULL_ENGINE_IDENTITY: Naming profiles target different '+field);
  if(namingVersion!==profiles.camel.namingVersion||codegenVersion!==profiles.camel.codegenVersion)throw Error('E_FULL_ENGINE_VERSIONS: Naming profiles use different generators');
  if(canonical([...ir.modules].sort())!==canonical([...profiles.camel.ir.modules].sort()))throw Error('E_FULL_ENGINE_IDENTITY: Naming profiles target different modules');
@@ -123,11 +123,11 @@ export function assembleFullEngineRelease({engine,ir,capture,irBytes,declaration
  const runtimeModules={};
  for(const [specifier,key]of Object.entries(FULL_ENGINE_MODULE_EXPORTS))runtimeModules[specifier]=add('.playground/runtime-modules/'+sha256(specifier)+'.js',runtimeModuleSource(key));
  const verifiedAsset=item=>({url:item.path,sha256:item.sha256,...(item.encoding?{encoding:item.encoding,decodedSha256:item.decodedSha256,decodedBytes:item.decodedBytes}:{})});
- const manifest={schemaVersion:2,runtimeProfile:FULL_ENGINE_PROFILE,profile:FULL_ENGINE_PROFILE,
+ const manifest={schemaVersion:2,runtimeProfile,profile:runtimeProfile,runtimeFamily:definition.runtimeFamily,capabilities:{audio:definition.audio,dimensions:runtimeProfile==='engine-2d-v1'?2:3},
   engine:{...engine,version:ir.engineVersion,modules:ir.modules},modules:ir.modules,
   api:{...apiProfiles.snake,namingProfiles:apiProfiles},
   sdk:{version:sdkVersion,vendor:vendorAsset,vendors:{production:vendorAsset,development:developmentVendorAsset},moduleExports:FULL_ENGINE_MODULE_EXPORTS,moduleContract:ENGINE_SDK_MODULES,runtimeModules},payloads,build,
-  verifiedRelease:{profile:FULL_ENGINE_PROFILE,engineJs:verifiedAsset(engine.javascript),engineWasm:verifiedAsset(engine.wasm),worklets:engine.worklets.map(item=>({...verifiedAsset(item),name:path.basename(item.path)})),allowedOrigins:[]},
+  verifiedRelease:{profile:runtimeProfile,engineJs:verifiedAsset(engine.javascript),engineWasm:verifiedAsset(engine.wasm),worklets:engine.worklets.map(item=>({...verifiedAsset(item),name:path.basename(item.path)})),allowedOrigins:[]},
  };
  const id=sha256(canonical(manifest));manifest.id=id;manifest.verifiedRelease.releaseId=id;
  add('engine-release.json',JSON.stringify(manifest,null,2)+'\n');

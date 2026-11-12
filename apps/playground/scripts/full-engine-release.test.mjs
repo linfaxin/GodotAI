@@ -6,20 +6,22 @@ import {resolvedBrowserModules} from '../../../scripts/test/build-browser-engine
 import {engineApiCaptureFiles} from './capture-engine-api.mjs';
 import {auditEngineBinding} from './engine-api-binding-audit.mjs';
 import {FULL_WEB_MODULE_BASELINE} from './full-engine-profile.mjs';
+import {getEngineProfile} from '../../../scripts/release/engine-profiles.mjs';
 import {createRequire} from 'node:module';
 const {ENGINE_SDK_MODULES}=createRequire(new URL('../../../scripts/jsb.react/package.json',import.meta.url))('@godot-js/react/engine-modules');
 const sdkDeclarations=()=>Object.fromEntries(Object.values(ENGINE_SDK_MODULES).map(entry=>[entry.declaration,'export {};\n']));
 
-function fixture({compressed=false}={}){
+function fixture({compressed=false,runtimeProfile='full-engine-v1'}={}){
+ const definition=getEngineProfile(runtimeProfile),classes=(runtimeProfile==='engine-2d-v1'?['Node',...definition.requiredClasses]:['Node']).map(nativeName=>({nativeName,publicName:nativeName}));
  const wasm=Buffer.from([0,97,115,109,1,0,0,0]),javascript=Buffer.from('/* production fixture */'),audio=Buffer.from('/* audio */'),position=Buffer.from('/* position */');
  const engine={javascript:describeAsset('engine/godot.js',javascript),wasm:compressed?describeAsset('engine/godot.wasm.gz',gzipSync(wasm),{encoding:'gzip',decodedSha256:sha256(wasm),decodedBytes:wasm.length}):describeAsset('engine/godot.wasm',wasm),worklets:[describeAsset('engine/godot.audio.worklet.js',audio),describeAsset('engine/godot.audio.position.worklet.js',position)]};
- const ir={schemaVersion:1,apiVersion:'godotjs-engine-api/1',engineVersion:'4.6.1.test',bindingVersion:'godotjs-test/1',namingVersion:'godotjs-public-names/1',bindingNaming:'snake',modules:[...FULL_WEB_MODULE_BASELINE],classes:[{nativeName:'Node',publicName:'Node'}],builtins:[],utilities:[],globalConstants:[],singletons:[]};
+ const ir={schemaVersion:1,apiVersion:'godotjs-engine-api/1',engineVersion:'4.6.1.test',bindingVersion:'godotjs-test/1',namingVersion:'godotjs-public-names/1',bindingNaming:'snake',modules:[...definition.modules],classes,builtins:[],utilities:[],globalConstants:[],singletons:[]};
  const irBytes=Buffer.from(JSON.stringify(ir,null,2)+'\n');
  const capture={schemaVersion:1,kind:'godotjs-production-engine-api-capture',status:'captured',naming:'snake',entry:'godot-jsb.internal.get_engine_api',engineJsSha256:sha256(javascript),engineWasmSha256:sha256(wasm),worklets:{'godot.audio.worklet.js':sha256(audio),'godot.audio.position.worklet.js':sha256(position)},irSha256:sha256(irBytes)};
- capture.bindingAudit={status:'passed',checks:Object.fromEntries(REQUIRED_BINDING_AUDIT_CHECKS.map(name=>[name,true])),details:{bindingMatrix:{counts:{classes:1,methods:0,properties:0,signals:0,virtualDeclarations:0,builtins:0,builtinMethods:0,builtinExtras:0,operators:0},missing:[]}}};
- capture.classInventory={classes:1,bindable:1,classFailures:[],nameMismatches:[]};
+ capture.bindingAudit={status:'passed',checks:Object.fromEntries(REQUIRED_BINDING_AUDIT_CHECKS.map(name=>[name,true])),details:{bindingMatrix:{counts:{classes:classes.length,methods:0,properties:0,signals:0,virtualDeclarations:0,builtins:0,builtinMethods:0,builtinExtras:0,operators:0},missing:[]}}};
+ capture.classInventory={classes:classes.length,bindable:classes.length,classFailures:[],nameMismatches:[]};
  const files={'/godot/index.d.ts':'declare module "godot" {export class Node {}}\n','/godot-jsb/index.d.ts':'declare module "godot-jsb" {}\n','/godot.annotations/index.d.ts':'declare module "godot.annotations" {}\n'};
- const base={engine,ir,irBytes,capture,declarations:{files,coverage:{classes:1},diagnostics:[]},strictTypechecks:{status:'passed',checks:{declarations:true,positiveConsumer:true,negativeConsumer:true}},namingVersion:'godotjs-public-names/1',codegenVersion:'godotjs-engine-declarations/1',sdkVersion:'0.1.0',vendor:'exports.engineReact={};\n',developmentVendor:'exports.engineReact={development:true};\n',typeSnapshot:JSON.stringify({...sdkDeclarations(),...files,'/engine-sdk/engine.d.ts':'export declare function createRoot():unknown;\n'}),build:{actualAPIHash:sha256(canonical(ir))},engineBytes:{'engine/godot.js':javascript,[engine.wasm.path]:compressed?gzipSync(wasm):wasm,'engine/godot.audio.worklet.js':audio,'engine/godot.audio.position.worklet.js':position}};
+ const base={runtimeProfile,engine,ir,irBytes,capture,declarations:{files,coverage:{classes:1},diagnostics:[]},strictTypechecks:{status:'passed',checks:{declarations:true,positiveConsumer:true,negativeConsumer:true}},namingVersion:'godotjs-public-names/1',codegenVersion:'godotjs-engine-declarations/1',sdkVersion:'0.1.0',vendor:'exports.engineReact={};\n',developmentVendor:'exports.engineReact={development:true};\n',typeSnapshot:JSON.stringify({...sdkDeclarations(),...files,'/engine-sdk/engine.d.ts':'export declare function createRoot():unknown;\n'}),build:{actualAPIHash:sha256(canonical(ir))},engineBytes:{'engine/godot.js':javascript,[engine.wasm.path]:compressed?gzipSync(wasm):wasm,'engine/godot.audio.worklet.js':audio,'engine/godot.audio.position.worklet.js':position}};
  const camelIr={...ir,bindingNaming:'camel'},camelBytes=Buffer.from(JSON.stringify(camelIr,null,2)+'\n');
  const camelFiles={...files,'/godot/index.d.ts':files['/godot/index.d.ts']+'// camel API\n'};
  const camel={ir:camelIr,irBytes:camelBytes,capture:{...capture,naming:'camel',irSha256:sha256(camelBytes)},declarations:{files:camelFiles,coverage:{classes:1},diagnostics:[]},strictTypechecks:base.strictTypechecks,namingVersion:base.namingVersion,codegenVersion:base.codegenVersion,actualAPIHash:sha256(canonical(camelIr)),typeSnapshot:JSON.stringify({...sdkDeclarations(),...camelFiles,'/engine-sdk/engine.d.ts':'export declare function createRoot():unknown;\n'})};
@@ -153,4 +155,16 @@ test('binding audit matrix counts are checked against actual IR binding kinds an
   const changed={...capture,bindingAudit:{...capture.bindingAudit,details:{bindingMatrix:{counts:{...counts,[field]:counts[field]+1},missing:[]}}}};
   assert.throws(()=>validateProductionApiCapture(ir,changed,input.engine),new RegExp('E_FULL_ENGINE_AUDIT:.*'+field));
  }
+});
+
+
+test('native 2D profile seals its own identity and rejects 3D API/module leakage',()=>{
+ const input=fixture({runtimeProfile:'engine-2d-v1'}),{manifest}=assembleFullEngineRelease(input);
+ assert.equal(manifest.runtimeProfile,'engine-2d-v1');assert.equal(manifest.profile,'engine-2d-v1');assert.equal(manifest.verifiedRelease.profile,'engine-2d-v1');
+ assert.equal(manifest.runtimeFamily,'native');assert.equal(manifest.capabilities.audio,true);
+ assert.equal(manifest.modules.includes('gltf'),false);
+ assert.throws(()=>validateProductionApiCapture({...input.ir,modules:[...input.ir.modules,'gltf']},input.capture,input.engine,'engine-2d-v1'),/E_FULL_ENGINE_MODULES/);
+ assert.throws(()=>validateProductionApiCapture({...input.ir,classes:[...input.ir.classes,{nativeName:'Node3D'}]},input.capture,input.engine,'engine-2d-v1'),/E_FULL_ENGINE_MODULES/);
+ assert.throws(()=>assembleFullEngineRelease({...input,runtimeProfile:'game-2d-v1'}),/E_ENGINE_PROFILE/);
+ assert.throws(()=>assembleFullEngineRelease({...input,runtimeProfile:'full-engine-v1'}),/E_FULL_ENGINE_MODULES/);
 });

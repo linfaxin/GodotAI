@@ -106,6 +106,9 @@ export class PreviewRunner {
     if (this.disposed) throw new Error('E_RUNNER_DISPOSED');
     if (!(artifact.pack instanceof Uint8Array) || artifact.pack.byteLength === 0 || artifact.pack.byteLength > 64 * 1024 * 1024) throw new Error('E_ARTIFACT_PACK');
     if (!artifact.manifest || typeof artifact.manifest !== 'object' || (artifact.manifest as { generation?: unknown }).generation !== artifact.generation) throw new Error('E_ARTIFACT_GENERATION');
+    const manifest = artifact.manifest as { engineReleaseId?: unknown; engineProfile?: unknown };
+    if (manifest.engineReleaseId !== undefined && manifest.engineReleaseId !== this.options.release.releaseId) throw new Error('E_ARTIFACT_ENGINE_RELEASE');
+    if (manifest.engineProfile !== undefined && manifest.engineProfile !== this.options.release.profile) throw new Error('E_ARTIFACT_ENGINE_PROFILE');
     const sequence = ++this.sequence;
     const snapshot = { ...artifact, manifest: structuredClone(artifact.manifest), pack: artifact.pack.slice() };
     await this.stopActive();

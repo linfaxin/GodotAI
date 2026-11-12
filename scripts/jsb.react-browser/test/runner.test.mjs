@@ -265,3 +265,22 @@ test('optional-PWA glue patch is deterministic, idempotent and refuses unknown l
   assert.throws(() => patchOptionalPwa('unknown Godot layout'), /E_PWA_PATCH_UNSUPPORTED/);
   assert.throws(() => patchOptionalPwa(source + source), /E_PWA_PATCH_UNSUPPORTED/);
 });
+
+test('artifacts cannot replace a declared engine identity while generic callers remain compatible',async()=>{
+ const f=fixture();try{
+  await assert.rejects(f.runner.run({...artifact,manifest:{...artifact.manifest,engineReleaseId:'another-release'}}),/E_ARTIFACT_ENGINE_RELEASE/);
+  await assert.rejects(f.runner.run({...artifact,manifest:{...artifact.manifest,engineProfile:'another-profile'}}),/E_ARTIFACT_ENGINE_PROFILE/);
+  assert.equal(f.frames.length,0);
+  await f.runner.run({...artifact,manifest:{...artifact.manifest,engineReleaseId:release.releaseId,engineProfile:release.profile}});
+ }finally{await f.cleanup();}
+});
+
+test('public immutable caching is opt-in, versioned and omits authentication credentials',async()=>{
+ const bytes=new Uint8Array([1,2,3]),sha256=Buffer.from(await crypto.subtle.digest('SHA-256',bytes)).toString('hex');
+ const calls=[],fetcher=async(url,options)=>{calls.push({url,options});return new Response(bytes);};
+ await fetchVerifiedAsset({url:'https://assets.test/release.wasm',sha256},{fetch:fetcher});
+ assert.equal(calls[0].options.credentials,'same-origin');assert.equal(calls[0].options.cache,'no-cache');
+ await assert.rejects(fetchVerifiedAsset({url:'https://assets.test/release.wasm',sha256},{fetch:fetcher,cachePolicy:'public-immutable'}),/E_RELEASE_IMMUTABLE_URL/);
+ await fetchVerifiedAsset({url:'https://assets.test/releases/candidate123/release.wasm',sha256},{fetch:fetcher,cachePolicy:'public-immutable'});
+ assert.equal(calls[1].options.credentials,'omit');assert.equal(calls[1].options.cache,'force-cache');assert.equal(calls[1].options.redirect,'error');
+});

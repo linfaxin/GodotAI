@@ -5,6 +5,7 @@ import {build} from 'esbuild';
 import {createHash} from 'node:crypto';
 import {createRequire} from 'node:module';
 import {packProject} from '@godot-js/react-browser/pck';
+import {DEMO_API_VERSION,assertResourceManifest} from './profile-resources.mjs';
 const app=fileURLToPath(new URL('../',import.meta.url));
 const sha=bytes=>createHash('sha256').update(bytes).digest('hex');
 export function unpackResources(bytes){
@@ -21,12 +22,22 @@ export function unpackResources(bytes){
  }
  return files;
 }
-export async function buildDemoRuntime(dist=path.join(app,'dist')){
+export function verifyResourcePack(resources,{assets}){
+ for(const [id,asset]of Object.entries(assets))if(![asset.uri,asset.uri+'.import',asset.uri+'.remap'].some(uri=>resources.has(uri)))throw Error('E_DEMO_RESOURCE_MISSING: '+id+' '+asset.uri);
+ for(const [uri,bytes]of resources){
+  if(!/\.(?:import|remap)$/.test(uri))continue;
+  const source=new TextDecoder().decode(bytes);
+  for(const match of source.matchAll(/(?:^|\n)path(?:\.[\w]+)?\s*=\s*"(res:\/\/[^"\n]+)"/g))if(!resources.has(match[1]))throw Error('E_DEMO_DEPENDENCY_MISSING: '+uri+' -> '+match[1]);
+ }
+}
+export async function buildDemoRuntime(dist=path.join(app,'dist'),options={}){
+ const runtimeProfile=options.runtimeProfile??'full-engine-v1',project=options.project??path.join(app,'project');
  const packFile=path.join(dist,'engine/game.pck'),resources=unpackResources(new Uint8Array(await readFile(packFile)));
  if(!resources.size)throw Error('The exported demo resource pack is empty');
- const generated=await readFile(path.join(app,'project/generated/assets.js'),'utf8');
+ const generated=await readFile(path.join(project,'generated/assets.js'),'utf8');
  const assets=JSON.parse(/exports\.assets = (.*);/.exec(generated)[1]),models=JSON.parse(/exports\.models = (.*);/.exec(generated)[1]);
- resources.set('res://.playground/demo-manifest.json',new TextEncoder().encode(JSON.stringify({assets,models})));
+ assertResourceManifest({assets,models},runtimeProfile);verifyResourcePack(resources,{assets});
+ resources.set('res://.playground/demo-manifest.json',new TextEncoder().encode(JSON.stringify({demoApiVersion:DEMO_API_VERSION,runtimeProfile,assets,models})));
  const pack=packProject(resources).pack;
  const result=await build({entryPoints:[path.join(app,'src/api.tsx')],bundle:true,write:false,platform:'neutral',format:'cjs',target:'es2022',external:['react','@godot-js/react/engine','godot','res://*'],define:{'process.env.NODE_ENV':'"production"'}});
  const runtime=new TextEncoder().encode(new TextDecoder().decode(result.outputFiles[0].contents)
@@ -34,7 +45,7 @@ export async function buildDemoRuntime(dist=path.join(app,'dist')){
   .replaceAll('require("@godot-js/react/engine")','require("res://.godot/GodotJS/node_modules/@godot-js/react/engine/index.js")'));
  const types=await readFile(path.join(app,'src/editor-api.d.ts'));
  const descriptor=(name,bytes)=>({path:name,bytes:bytes.length,sha256:sha(bytes)});
- const manifest={schemaVersion:1,runtime:descriptor('demo-runtime.js',runtime),resources:descriptor('demo-resources.pck',pack),types:descriptor('demo-api.d.ts',types)};
+ const manifest={schemaVersion:1,demoApiVersion:DEMO_API_VERSION,runtimeProfile,assetIds:Object.keys(assets).sort(),runtime:descriptor('demo-runtime.js',runtime),resources:descriptor('demo-resources.pck',pack),types:descriptor('demo-api.d.ts',types)};
  await writeFile(path.join(dist,'demo-runtime.js'),runtime);await writeFile(path.join(dist,'demo-resources.pck'),pack);
  await writeFile(path.join(dist,'demo-api.d.ts'),types);
  await writeFile(path.join(dist,'demo-release.json'),JSON.stringify(manifest,null,2)+'\n');

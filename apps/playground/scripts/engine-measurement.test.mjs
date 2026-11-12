@@ -1,0 +1,30 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {mkdtemp,mkdir,writeFile,readFile,rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {spawnSync} from 'node:child_process';
+import {createHash} from 'node:crypto';
+import {measureBrowserEngine} from '../../../scripts/test/measure-browser-engine.mjs';
+const sha=bytes=>createHash('sha256').update(bytes).digest('hex');
+
+test('engine measurement reads the exact sealed archive and roundtrips compressed bytes',async t=>{
+ const root=await mkdtemp(join(tmpdir(),'engine-measurement-'));t.after(()=>rm(root,{recursive:true,force:true}));
+ const source=join(root,'source');await mkdir(source);
+ const wasm=Buffer.from([0,97,115,109,1,0,0,0]);await writeFile(join(source,'godot.wasm'),wasm);
+ const archive=join(root,'engine.zip');assert.equal(spawnSync('zip',['-q',archive,'godot.wasm'],{cwd:source}).status,0);
+ const report=join(root,'report.json'),out=join(root,'measurement.json');
+ const value={kind:'godot-js-browser-engine-build',status:'built',runtimeProfile:'engine-2d-v1',engineTarget:'template_release',sourceCertified:false,source:{commit:'a'.repeat(40),snapshotHash:sha('module snapshot')},godotSource:{commit:'b'.repeat(40),snapshotHash:sha('godot snapshot')},toolchains:{emscripten:'fixture'},template:{path:'engine.zip',sha256:sha(await readFile(archive))},recipe:{args:['disable_3d=yes']}};
+ await writeFile(report,JSON.stringify(value));
+ const measured=await measureBrowserEngine({report,out});
+ assert.equal(measured.sizes.raw.bytes,8);assert.equal(measured.sizes.raw.sha256,sha(wasm));
+ assert.equal(measured.sourceCertified,false);assert.equal(measured.compression.gzip.level,9);assert.equal(measured.compression.brotli.quality,11);
+ assert.deepEqual(JSON.parse(await readFile(out,'utf8')),JSON.parse(JSON.stringify(measured)));
+ const compared=await measureBrowserEngine({report,baseline:out});assert.equal(compared.comparison.comparable,true);assert.equal(compared.comparison.toolchainsComparable,true);assert.equal(compared.comparison.sameSource,true);assert.deepEqual(compared.comparison.sourceMatches,{godotjs:true,godot:true});assert.equal(compared.comparison.deltaBytes.raw,0);
+ const mixed=join(root,'mixed-baseline.json');await writeFile(mixed,JSON.stringify({...measured,source:{...measured.source,snapshotHash:sha('another module snapshot')}}));
+ const observational=await measureBrowserEngine({report,baseline:mixed});assert.equal(observational.comparison.toolchainsComparable,true);assert.equal(observational.comparison.sourceMatches.godotjs,false);assert.equal(observational.comparison.sourceMatches.godot,true);assert.equal(observational.comparison.sameSource,false);assert.equal(observational.comparison.comparable,false);assert.match(observational.comparison.note,/observational/);assert.equal(observational.comparison.deltaBytes.raw,0);
+ await writeFile(mixed,JSON.stringify({...measured,godotSource:undefined}));const missing=await measureBrowserEngine({report,baseline:mixed});assert.equal(missing.comparison.sameSource,false);assert.equal(missing.comparison.comparable,false);
+ assert.match(measured.certificationScope,/does not recertify/);
+ await writeFile(report,JSON.stringify({...value,template:{...value.template,sha256:'a'.repeat(64)}}));
+ await assert.rejects(measureBrowserEngine({report}),/E_MEASURE_ARCHIVE/);
+});

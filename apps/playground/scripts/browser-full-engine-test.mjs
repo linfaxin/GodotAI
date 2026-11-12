@@ -2,14 +2,17 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {chromium} from 'playwright';
+import {launchBrowser,withAcceptanceContext} from './browser-harness.mjs';
 import {createStaticServer} from './serve.mjs';
+import {getEngineProfile} from '../../../scripts/release/engine-profiles.mjs';
+import {RUNTIME_LIFECYCLE_MINIMUM} from './runtime-evidence.mjs';
 
 // Acceptance of the built production site: no runtime, compiler, or network mocks.
 const directory=path.resolve(process.env.PLAYGROUND_TEST_DIRECTORY??fileURLToPath(new URL('../dist',import.meta.url)));
+const runtimeProfile=JSON.parse(await fs.readFile(path.join(directory,'engine-release.json'),'utf8')).runtimeProfile;
 const output=process.env.PLAYGROUND_FULL_ENGINE_REPORT;
 const timeout=Number(process.env.PLAYGROUND_FULL_ENGINE_TIMEOUT??180000);
-const lifecycleLoops=Number(process.env.PLAYGROUND_FULL_ENGINE_LOOPS??5);
+const lifecycleLoops=Number(process.env.PLAYGROUND_FULL_ENGINE_LOOPS??RUNTIME_LIFECYCLE_MINIMUM[process.env.BROWSER??'chromium']);
 assert(Number.isInteger(lifecycleLoops)&&lifecycleLoops>=1&&lifecycleLoops<=100);
 const checks=[],audio=[],errors=[],warnings=[],network=[],frames=[];
 let browser,context,page;
@@ -27,7 +30,7 @@ async function running(runtime){
  const iframe=await page.locator('#preview iframe').elementHandle(),frame=await iframe.contentFrame();
  await iframe.dispose();
  assert(frame);assert.notEqual(new URL(frame.url()).origin,new URL(page.url()).origin);
- assert.equal(new URL(frame.url()).pathname,'/preview.html');
+ assert.equal(new URL(frame.url()).pathname,new URL('preview.html',state.releaseContext.releaseRoot).pathname);
  assert.equal(await frame.locator('canvas').count(),1);
  assert.match(await page.locator('#preview iframe').getAttribute('sandbox'),/allow-pointer-lock/);
  assert.equal(await page.locator('#preview iframe').getAttribute('allow'),'autoplay');
@@ -62,7 +65,7 @@ function packedFiles(input){
  }
  return files;
 }
-const nativeProject={schemaVersion:2,runtime:'godot',demoId:'native',entry:'/src/Main.ts',selected:'/src/Main.ts',mode:'production',controls:{},files:{
+const nativeProject={schemaVersion:3,engineProfile:runtimeProfile,runtime:'godot',demoId:'native',entry:'/src/Main.ts',selected:'/src/Main.ts',mode:'production',controls:{},files:{
  '/project.godot':'config_version=5\n[application]\nconfig/name="Full engine browser acceptance"\nrun/main_scene="uid://d1t"\n[rendering]\nrenderer/rendering_method="gl_compatibility"\n',
  '/main.tscn':'[gd_scene load_steps=2 format=3 uid="uid://d1t"]\n[ext_resource type="Script" path="res://src/Main.ts" id="1"]\n[node name="Main" type="Node2D"]\nscript=ExtResource("1")\n',
  '/main.tscn.uid':'uid://d1t',
@@ -110,10 +113,10 @@ export default class Main extends Node {
 }
 try{
  const release=JSON.parse(await fs.readFile(path.join(directory,'engine-release.json'),'utf8'));
- assert.equal(release.runtimeProfile,'full-engine-v1');assert.equal(release.engine.worklets.length,2);
+ getEngineProfile(release.runtimeProfile);assert.equal(release.engine.worklets.length,2);
  await Promise.all([listen(editor),listen(preview)]);
  const editorOrigin=`http://127.0.0.1:${editor.address().port}`,previewOrigin=`http://127.0.0.1:${preview.address().port}`;
- browser=await chromium.launch({headless:true,executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE||undefined,args:['--no-sandbox','--enable-webgl','--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader','--disable-dev-shm-usage','--autoplay-policy=no-user-gesture-required']});
+ browser=await launchBrowser({headless:true,executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE||undefined,args:['--no-sandbox','--enable-webgl','--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader','--disable-dev-shm-usage','--autoplay-policy=no-user-gesture-required']});
  context=await browser.newContext({viewport:{width:1536,height:1000}});
  await context.exposeBinding('__fullAcceptanceRecord',(_source,event)=>{audio.push(event);});
  await context.addInitScript(()=>{
@@ -207,7 +210,7 @@ try{
    const id=++serial,timer=setTimeout(()=>reject(Error('Independent production compiler timed out')),120000);
    worker.onmessage=event=>{if(event.data.id===id){clearTimeout(timer);resolve(event.data);}};
    worker.onerror=event=>{clearTimeout(timer);reject(Error(event.message));};
-   worker.postMessage({id,kind,runtime:'godot',revision:serial,entry:'/src/Main.ts',files,mode:'production'});
+   worker.postMessage({id,kind,runtime:'godot',revision:serial,entry:'/src/Main.ts',files,mode:'production',engineProfile:window.__playgroundWorkbench.inspect().engineProfile,releaseContext:window.__playgroundWorkbench.inspect().releaseContext});
   });
   try{
    const checked=await request('check',files),built=await request('compile',files);
@@ -270,12 +273,14 @@ export default class Main extends G.Node2D {_ready(){
  for(const playbackType of [0,1]){
   await page.locator('#import').setInputFiles({name:`audio-${playbackType}.json`,mimeType:'application/json',buffer:Buffer.from(JSON.stringify(audioProject(playbackType)))});
   const playing=await running('godot');
+  await page.frameLocator('#preview iframe').locator('canvas').click({position:{x:8,y:8}});
   await until(()=>audio.some(event=>event.documentId===playing&&event.type==='worklet-output'&&event.name==='godot-processor'&&event.peak>0.01),`AudioStreamGenerator playback type ${playbackType} must produce a nonzero real worklet output`);
   await stop(playing);
  }
  checks.push('native AudioStreamGenerator and AudioStreamPlayer produce measured worklet output under default and stream playback settings');
  for(let index=0;index<lifecycleLoops;index++){
   await page.locator('#run').click();const loop=await running('godot');
+  await page.frameLocator('#preview iframe').locator('canvas').click({position:{x:8,y:8}});
   await until(()=>audio.some(event=>event.documentId===loop&&event.type==='worklet-output'&&event.peak>0.01),'Repeated audio session must produce real output');
   await stop(loop);
  }
@@ -293,7 +298,7 @@ export default class Main extends G.Node2D {_ready(){
  assert.deepEqual(errors,[]);
  assert.deepEqual(warnings,[],'Production React imports must resolve without failed candidate paths');
  checks.push('both real audio worklets match release hashes, execute from verified Blob bytes, and every fresh session closes audio');
- const report={status:'passed',releaseId:release.id,lifecycleLoops,checks,frames,audio,workletNetworkRequests:network.length,errors,warnings};
+ const report=await withAcceptanceContext({status:'passed',releaseId:release.id,lifecycleLoops,checks,frames,audio,workletNetworkRequests:network.length,errors,warnings}, {directory,browser});
  if(output){await fs.mkdir(path.dirname(path.resolve(output)),{recursive:true});await fs.writeFile(output,JSON.stringify(report,null,2)+'\n');}
  console.log(JSON.stringify(report,null,2));
 }catch(error){

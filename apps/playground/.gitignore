@@ -1,4 +1,7 @@
 dist/
+dist-2d-debug/
+dist-2d-release/
+dist-full-release/
 project/.godot/
 project/generated/
 project/gen/
