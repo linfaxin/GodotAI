@@ -9,7 +9,7 @@
 | `full-engine-v1` | 完整 Godot Web 模块与 2D/3D 项目 | 八个原生 React 示例 |
 | `engine-2d-v1` | 关闭 3D 场景、3D 物理、3D 导航和 XR | Shader、Lights、Match3、Dungeon |
 
-两个配置都保留原生 `godot`/`react` 项目模式、2D 渲染、物理、导航、TileMap、高级 GUI、音频、GDScript 和高级/回退文本服务。保留核心 `Vector3`/`Transform3D` 等 Variant 数学类型；这些类型的存在不代表包含 3D 场景节点。纹理、字体和音频支持还必须通过实际资源验证。
+两个配置都保留原生 `godot`/`react` 项目模式、2D 渲染、物理、导航、TileMap、高级 GUI、音频和 GDScript。新 2D 构建使用回退文本服务，Full 保留高级和回退文本服务。保留核心 `Vector3`/`Transform3D` 等 Variant 数学类型；这些类型的存在不代表包含 3D 场景节点。纹理、字体和音频支持还必须通过实际资源验证。
 
 官方 profile 定义位于 `scripts/release/engine-profiles.mjs`。它同时供 Node 构建工具和浏览器应用读取，明确必需/允许/禁止模块、功能开关、实际 API 类和示例集合。通用 SDK 的消费者自定义 profile 字符串契约保持独立。旧 `game-2d-v1` 是另一套兼容能力标识，不能代替原生 2D 模板。
 
@@ -158,6 +158,58 @@ PORT=4173 node apps/playground/scripts/serve.mjs
 `@playground/api` 与内置 asset ID 有独立兼容契约。helper 或资源发生破坏性变化时需要版本迁移或明确拒绝；仅 profile 相同不足以证明历史分享项目使用了同一套 helper。字体资源的字形覆盖和纹理导入格式必须通过实际场景验证，字体/PCK 体积与 WASM 分开统计。
 
 ## 体积实验与报告
+
+### 通用 2D 的裁剪边界
+
+通用 2D 不按内置四个示例的功能用量裁剪。保留 2D 物理、导航、完整 GUI、字体渲染、音频、GDScript、WebSocket/WebRTC 联机和已有资源格式；视频、MP3、噪声等也可能用于 2D 游戏，不能仅因没有被示例调用就删除。文字后端按本轮要求试用 fallback，具体范围见下节；Full 的高级文字不变。Shader 不依赖 GDScript。
+
+新 2D Web 构建额外显式关闭 `enet`、`upnp` 和 `objectdb_profiler`。上游 Web 的 `NetSocketWeb::open()` 返回 `ERR_UNAVAILABLE`，ENet 无法创建实际 UDP 传输；UPnP 在 `WEB_ENABLED` 下不安装 MiniUPnP 实现。对象快照分析器属于可选诊断工具；关闭它不关闭普通错误日志、源码映射或其他调试检查。保留 `multiplayer`、`websocket`、`webrtc`，避免把通用 2D 缩成单机或单一脚本模板。
+
+baseline 和 explicit 两种模块模式均执行这三个关闭选项，新构建从实际生成的模块头验证它们缺席。历史不可变 2D 归档仍可通过原有来源与哈希验证读取。新参数会产生新的构建配置哈希及默认产物目录，不覆盖历史报告；必须重建引擎才能生成新默认站点。下方历史体积表不代表这次新增裁剪的结果。
+
+2026-11-12 本地重新构建的 debug/baseline/no-LTO 样本如下（十进制 MB）：
+
+| 样本 | 原始 WASM MB | gzip 9 MB | Brotli 11 MB |
+| --- | ---: | ---: | ---: |
+| 既有 2D 样本 | 28.997664 | 8.090507 | 5.700115 |
+| 关闭三个模块后的样本 | 28.879145 | 8.053017 | 5.674656 |
+| 观察到的减少 | 0.118519 | 0.037490 | 0.025459 |
+
+本轮没有修改 C++、头文件、原生桥接 JS 或内嵌脚本，Godot 源快照一致，实际模块仅减少上述三项，已捕获的 resolved build options 相同。但 GodotJS 整体源码快照已变化，SCons 为 4.10.0（历史样本为 4.9.1）；Emscripten 4.0.11、Python 3.12.14 及压缩工具链相同。测量工具据此标记 `comparable=false`，表中差值只作前后样本观察，不作为严格单变量实验或性能结论。保留通用功能时，本轮观察到的 Brotli 差值约为 25 KB（0.45%）。
+
+该阶段构建报告位于 `work/playground/engine-2d-v1/template_debug/baseline/none/3b18e7a01adb0ac6/engine-report.json`，测量、旧归档兼容性和原生输入对照位于 `work/generic-2d-trim/{measurement,legacy-compatibility,source-comparison}.json`。当时曾重建默认 `dist-2d-debug`；当前默认产物以基础文字试用节为准。此次仅在本地验证，没有执行部署或发布。
+
+验证结果：Playground 自动测试 194 项、浏览器 SDK/发布工具单测 179 项通过；新模板独立 native/react × snake/camel Gate 四例通过；四个 2D 示例的八项交互检查通过。Chromium 的中文、物理、导航、图块、按钮、音频停止/恢复与清理特性验收首次在 camel 第一会话出现约 420 ms 的音频采样空档，原生断言通过但采样连续性验收失败，原报告保留在 `work/generic-2d-trim/features/features.json`。未改代码或验收阈值，对同一候选在空闲环境独立复测，两种命名各两次会话全部通过，报告为 `work/generic-2d-trim/features-retry/features.json`。这次局部回归没有重新执行历史完整站点的十三套验收，也没有生成新的完整验收封印。
+
+### 基础文字 2D 试用
+
+新 2D 构建另外关闭 `module_text_server_adv_enabled=no`，保留 `text_server_fb`、FreeType 和 MSDF。baseline/explicit 两种模块模式都会执行，Full 不执行此关闭选项。历史 2D 归档仍允许包含高级文字，新构建从实际模块列表检查它已被去除。参数变化选择新的默认产物目录，不覆盖旧模板及其不可变报告。
+
+此次范围是基础横排文字：普通中英文、数字、标点、控件和富文本。复杂 shaping、BiDi、完整竖排及语言相关的高级分词/断行不再属于新 2D 模板的能力；字体字形覆盖仍是独立条件。Monaco 编辑器由浏览器渲染，不使用这个原生文字后端。
+
+`browser-basic-text-test.mjs --site <候选目录> --out <结果目录> --expect-fallback` 在实际引擎中检查 primary text interface、中文及 ASCII 字形、原生 viewport 像素、富文本和混合换行，再通过真实浏览器事件驱动 LineEdit/TextEdit 的中文组合提交、英文输入、选区、换行及光标。覆盖 snake/camel 两种命名。它使用 Chromium CDP 组合事件，不验证操作系统输入法候选窗口，也不代表完整多语言验收。测试字体是带许可与固定来源哈希的 Noto 子集，只包含固定测试文本及基本 ASCII。
+
+CI 的 2D 分支单独运行这组基本文字验收，并归档 `basic-text-results`；这份附加报告独立于原有十三套站点验收封印。
+
+评审修复后，基本文字验收在加载前固定 profile、releaseId、descriptorHash、candidateId 和 siteHash，加载的 JS/WASM/worklet 字节同时核对初始站点快照；结束时重新校验身份。本地没有 CI context 时也会拒绝目录替换。普通和富文本各有独立的纯中文采样控件，四个采样控件均须位于 viewport 内；混合区域的英文像素不能满足中文断言。新增回归测试覆盖版本替换、相同版本 ID 下的字节变化、中文区域无像素、控件越界和非中文替换。
+
+本地调试候选已重建，测量如下（十进制 MB）：
+
+| 样本 | 原始 WASM | gzip 9 | Brotli 11 |
+| --- | ---: | ---: | ---: |
+| 保留高级文字的 2D 对照 | 28.879145 | 8.053017 | 5.674656 |
+| 基础文字 2D 候选 | 27.309811 | 7.486714 | 5.228618 |
+| 减少 | 1.569334 | 0.566303 | 0.446038 |
+
+新候选的整体源码快照因配置、文档和测试变化而不同，因此测量工具仍标记整树 `comparable=false`。编译/压缩工具链一致，C++、头文件、桥接 JS 和内嵌脚本未变，实际只减少 `text_server_adv`；新 WASM、gzip 和 Brotli 字节均与之前同源单组关闭实验完全一致，核对记录为 `work/2d-basic-text/native-size-comparison.json`。
+
+194 项 Playground 自动测试、179 项浏览器 SDK/发布工具单测通过。实际新模板通过 native/react × snake/camel 四项独立 Gate、两种命名各一次基本文字验收、两种命名各两次中文/物理/导航/TileMap/音频验收，以及四个 2D 示例的八项交互检查。基本文字对照与候选都观测到三行换行，包裹区域底部为 181、输入框顶部为 190，新增不重叠断言通过；候选主接口为 `Fallback (Built-in)`，features 为 449，BiDi/shaping 均为 false。本轮未验证系统输入法候选窗口、复杂文字和 Firefox/WebKit 输入，未重跑完整十三套验收，也未生成新的完整站点验收封印。
+
+新构建报告位于 `work/playground/engine-2d-v1/template_debug/baseline/none/8b28a3d2b42a7e7c/engine-report.json`。结果位于 `work/2d-basic-text/`：`measurement.json`、`advanced-reference-final/basic-text.json`、`basic-text-final/basic-text.json`、`gate/gate.json`、`features/features.json`、`react-demos.json`。此前站点完整备份在 `work/2d-basic-text/advanced-site-backup`。当前本地默认 2D 构建采用基础文字；需要高级排版可使用 Full，或通过显式历史 `--engine-report` 构建对照。没有执行部署或发布。
+
+评审修复复验位于 `work/2d-text-fix/`：Playground 197 项测试（含新增三项证据回归）、类型检查和浏览器 SDK/发布工具 179 项测试通过。Fallback 候选及高级文字对照的 snake/camel 基本文字验收均通过；实际候选的纯中文普通/富文本区域分别观测到 112/37 个采样像素。`faults/proof.json` 记录目录中途替换被拒绝、分别清空两类中文区域在两种命名下均被拒绝。此次修复只涉及验收与文档，没有重编原生引擎，也未补做完整十三套验收或 OS 输入法测试。
+
+### 测量工具
 
 ```sh
 node scripts/test/measure-browser-engine.mjs \

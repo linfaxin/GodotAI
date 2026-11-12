@@ -159,7 +159,7 @@ export async function buildBrowserEngine(configuration) {
     const resolvedOptionsBytes=await readFile(resolve(destination,featureEvidencePath));
     const resolvedBuildOptions=JSON.parse(resolvedOptionsBytes.toString('utf8'));
     const resolvedFeatures=Object.fromEntries(Object.keys(getEngineProfile(runtimeProfile).features).map(key=>[key,resolvedBuildOptions[key]]));
-    validateEngineProfile(runtimeProfile,{modules,features:resolvedFeatures});
+    validateEngineProfile(runtimeProfile,{modules,features:resolvedFeatures,forBuild:true});
     Object.assign(report, await version(destination), { status: 'built', modules, resolvedFeatures, resolvedBuildOptions, featuresEvidence:{path:featureEvidencePath,sha256:digest(resolvedOptionsBytes)}, modulesEvidence: { path: 'modules/modules_enabled.gen.h', sha256: digest(modulesHeader) }, template: { path: template, sha256: digest(bytes), bytes: bytes.length }, logSha256: digest(await readFile(`${reportFile}.log`)) });
     // Unknown source archives remain usable locally, never certified by a flag.
     report.sourceCertified = [source.commit, godotSource.commit].every(commit => /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(commit));

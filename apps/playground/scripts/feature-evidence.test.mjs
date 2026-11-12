@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {EventEmitter} from 'node:events';
 import {validateFeatureNamings,run2dFeatureAcceptance,create2dFeatureFixture,observeFeaturePage} from './browser-2d-features-test.mjs';
 import {assessStoppedAudio} from './feature-audio-evidence.mjs';
+import {runBasicTextAcceptance} from './browser-basic-text-test.mjs';
 
 test('browser WebGL console errors remain failures even when no page exception is raised',()=>{
  const events=new EventEmitter(),observed=observeFeaturePage(events);
@@ -29,6 +30,7 @@ test('feature evidence rejects an empty, duplicate, or unknown naming matrix bef
  for(const value of [[],['snake','snake'],['camel','camel'],['unknown'],['snake','camel','snake'],null,'snake']){
   assert.throws(()=>validateFeatureNamings(value),/E_FEATURE_NAMING/);
   await assert.rejects(run2dFeatureAcceptance({namings:value,engineJs:'/must-not-be-read.js'}),/E_FEATURE_NAMING/);
+  await assert.rejects(runBasicTextAcceptance({namings:value,directory:'/must-not-be-read'}),/E_FEATURE_NAMING/);
  }
  for(const value of [['snake'],['camel'],['snake','camel']])assert.deepEqual(validateFeatureNamings(value),value);
 });

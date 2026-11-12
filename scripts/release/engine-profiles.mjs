@@ -53,8 +53,18 @@ export const FULL_WEB_MODULE_BASELINE=Object.freeze([
 ]);
 
 const threeModules=Object.freeze(['csg','fbx','gltf','godot_physics_3d','gridmap','jolt_physics','meshoptimizer','mobile_vr','navigation_3d','vhacd','webxr']);
-export const ENGINE_2D_MODULE_BASELINE=Object.freeze(FULL_WEB_MODULE_BASELINE.filter(name=>!threeModules.includes(name)));
-const profile=(id,label,modules,features,forbiddenModules=[],forbiddenClasses=[])=>Object.freeze({id,label,runtimeFamily:'native',audio:true,modules:Object.freeze(modules),requiredModules:Object.freeze(modules),allowedModules:Object.freeze([...modules,'objectdb_profiler']),forbiddenModules:Object.freeze(forbiddenModules),features:Object.freeze({disable_advanced_gui:false,disable_physics_2d:false,disable_navigation_2d:false,...features}),requiredClasses:Object.freeze(id===ENGINE_2D_PROFILE?['Node2D','Sprite2D','Control','Label','CharacterBody2D','NavigationAgent2D','TileMapLayer','AudioStreamPlayer']:[]),forbiddenClasses:Object.freeze(forbiddenClasses),demoIds:Object.freeze(id===ENGINE_2D_PROFILE?['shader','lights','match3','dungeon']:['shader','lights','islands','city','destruction','racing','match3','dungeon'])});
+// The browser cannot open native UDP sockets or perform UPnP discovery. Keep
+// WebSocket/WebRTC and the multiplayer API for general-purpose 2D networking.
+// Object snapshots are an optional native debugging tool, not gameplay support.
+// The 2D template uses fallback text layout; Full keeps complex shaping/BiDi.
+const twoDBuildDisabledModules=Object.freeze(['enet','upnp','objectdb_profiler','text_server_adv']);
+export const ENGINE_2D_MODULE_BASELINE=Object.freeze(FULL_WEB_MODULE_BASELINE.filter(name=>!threeModules.includes(name)&&!twoDBuildDisabledModules.includes(name)));
+const profile=(id,label,modules,features,forbiddenModules=[],forbiddenClasses=[])=>Object.freeze({id,label,runtimeFamily:'native',audio:true,modules:Object.freeze(modules),requiredModules:Object.freeze(modules),
+ // Historical source-bound 2D archives may include advanced text, unusable Web
+ // classes or snapshot tools. They remain readable; fresh builds omit them.
+ allowedModules:Object.freeze([...modules,...(id===ENGINE_2D_PROFILE?twoDBuildDisabledModules:['objectdb_profiler'])]),
+ disabledModules:id===ENGINE_2D_PROFILE?twoDBuildDisabledModules:Object.freeze([]),
+ forbiddenModules:Object.freeze(forbiddenModules),features:Object.freeze({disable_advanced_gui:false,disable_physics_2d:false,disable_navigation_2d:false,...features}),requiredClasses:Object.freeze(id===ENGINE_2D_PROFILE?['Node2D','Sprite2D','Control','Label','CharacterBody2D','NavigationAgent2D','TileMapLayer','AudioStreamPlayer']:[]),forbiddenClasses:Object.freeze(forbiddenClasses),demoIds:Object.freeze(id===ENGINE_2D_PROFILE?['shader','lights','match3','dungeon']:['shader','lights','islands','city','destruction','racing','match3','dungeon'])});
 export const ENGINE_PROFILES=Object.freeze({
  [FULL_ENGINE_PROFILE]:profile(FULL_ENGINE_PROFILE,'完整 Godot Web 引擎',FULL_WEB_MODULE_BASELINE,{disable_3d:false,disable_physics_3d:false,disable_navigation_3d:false,disable_xr:false}),
  [ENGINE_2D_PROFILE]:profile(ENGINE_2D_PROFILE,'Godot 2D Web 引擎',ENGINE_2D_MODULE_BASELINE,{disable_3d:true,disable_physics_3d:true,disable_navigation_3d:true,disable_xr:true},threeModules,['Node3D','Camera3D','RigidBody3D','CharacterBody3D','NavigationAgent3D','GLTFDocument','GridMap']),
@@ -70,13 +80,14 @@ export function engineBuildArgs({profile:profileId=FULL_ENGINE_PROFILE,target='t
  const args=['platform=web',`target=${target}`,'arch=wasm32','threads=no','dlink_enabled=no','use_quickjs_ng=no','skip_js_runtime=yes',`modules_enabled_by_default=${moduleMode==='explicit'?'no':'yes'}`,'module_GodotJS_enabled=yes','module_text_server_fb_enabled=yes','module_godotai_api_probe_enabled=no','opengl3=yes','vulkan=no','optimize=size','debug_symbols=no',`lto=${lto}`,'use_closure_compiler=no','tests=no'];
  if(lto==='thin')args.push(`linkflags=-Wl,--thinlto-jobs=${Number(jobs)}`);
  for(const [key,value]of Object.entries(definition.features))args.push(`${key}=${value?'yes':'no'}`);
+ for(const name of definition.disabledModules)args.push(`module_${name}_enabled=no`);
  if(moduleMode==='explicit')for(const name of definition.modules)if(!['GodotJS','text_server_fb'].includes(name))args.push(`module_${name}_enabled=yes`);
  return [...args,`-j${Number(jobs)}`];
 }
-export function validateEngineProfile(profileId,{modules,features,classes}={}){
+export function validateEngineProfile(profileId,{modules,features,classes,forBuild=false}={}){
  const definition=getEngineProfile(profileId);
  if(!Array.isArray(modules)||!modules.length||new Set(modules).size!==modules.length)throw Error('E_ENGINE_MODULES: Missing or duplicate actual module list');
- const missing=definition.requiredModules.filter(name=>!modules.includes(name)),forbidden=modules.filter(name=>definition.forbiddenModules.includes(name)||!definition.allowedModules.includes(name));
+ const missing=definition.requiredModules.filter(name=>!modules.includes(name)),forbidden=modules.filter(name=>definition.forbiddenModules.includes(name)||!definition.allowedModules.includes(name)||(forBuild&&definition.disabledModules.includes(name)));
  if(missing.length||forbidden.length)throw Error('E_ENGINE_MODULES: '+definition.id+' missing ['+missing.join(', ')+'] forbidden ['+forbidden.join(', ')+']');
  if(modules.some(name=>/godotai_api_probe|p0engineapiprobe/i.test(name)))throw Error('E_ENGINE_MODULES: Inspector cannot be released');
  if(features)for(const [name,expected]of Object.entries(definition.features))if(features[name]!==expected)throw Error('E_ENGINE_FEATURES: '+name+' does not match '+definition.id);
