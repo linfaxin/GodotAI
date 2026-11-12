@@ -34,6 +34,20 @@ on:
         type: choice
         options: [template_debug, template_release]
         default: template_debug
+      engine_lto:
+        description: 'Independent LTO experiment; compare against none'
+        type: choice
+        options: [none, thin]
+        default: none
+      module_mode:
+        description: 'Baseline versus explicit module selection'
+        type: choice
+        options: [baseline, explicit]
+        default: baseline
+      measure_performance:
+        description: 'Sample real product startup, FPS and memory after acceptance'
+        type: boolean
+        default: false
       release_version:
         description: 'Exact npm version to prepare (publication is a separate command)'
         type: string
@@ -71,15 +85,22 @@ jobs:
           PLAYGROUND_TEST_SHELL: '1'
         run: |
           pnpm --filter @godot-js/playground exec playwright install --with-deps chromium
-          pnpm --filter @godot-js/playground build:frontend
+          pnpm --filter @godot-js/playground build:frontend -- --shell-only
           pnpm --filter @godot-js/playground test:browser:projects
+          node apps/playground/scripts/browser-project-isolation-test.mjs
+          node apps/playground/scripts/browser-release-context-test.mjs
       - name: Release provenance, integrity, npm-pack consumer and failure gates
         run: pnpm test:browser:unit
 
   browser:
     needs: contracts
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [full-engine-v1, engine-2d-v1]
+    name: Native product (${{ matrix.profile }}, ${{ inputs.engine_target || 'template_debug' }}, lto=${{ inputs.engine_lto || 'none' }})
     steps:
       - uses: actions/checkout@v4
         with:
@@ -88,7 +109,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: godotengine/godot
-          ref: 4.6.1-stable
+          ref: 14d19694e0c88a3f9e82d899a0400f27a24c176e
           path: .browser-engine/source
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
@@ -104,27 +125,85 @@ jobs:
       - name: Build and collect provenance for an actual single-thread engine
         env:
           ENGINE_TARGET: ${{ inputs.engine_target || 'template_debug' }}
+          EMCC_CORES: '4'
+          BINARYEN_CORES: '4'
         run: >-
           node scripts/test/build-browser-engine.mjs
           --godot-source .browser-engine/source
           --build-dir "$RUNNER_TEMP/godot-browser-build"
           --out "$RUNNER_TEMP/browser-engine-report.json"
           --target "$ENGINE_TARGET"
+          --profile "${{ matrix.profile }}"
+          --lto "${{ inputs.engine_lto || 'none' }}"
+          --module-mode "${{ inputs.module_mode || 'baseline' }}"
           --jobs 4
+      - name: Package a portable source-bound engine archive
+        if: always()
+        run: |
+          node --input-type=module <<'NODE'
+          import {readFileSync,existsSync} from 'node:fs';
+          import {packageBrowserEngineArtifact,inspectBrowserEngineArtifact} from './scripts/test/package-browser-engine-artifact.mjs';
+          const report=process.env.RUNNER_TEMP+'/browser-engine-report.json';
+          if(existsSync(report)&&JSON.parse(readFileSync(report,'utf8')).status==='built'){
+            const out=process.env.RUNNER_TEMP+'/browser-engine-artifact';
+            await packageBrowserEngineArtifact({report,out});
+            await inspectBrowserEngineArtifact(out);
+          }else console.log('No completed engine archive; portable artifact skipped.');
+          NODE
+      - name: Measure the exact completed engine archive
+        if: always()
+        run: |
+          node --input-type=module <<'NODE'
+          import {readFileSync,existsSync} from 'node:fs';
+          import {spawnSync} from 'node:child_process';
+          const report=process.env.RUNNER_TEMP+'/browser-engine-report.json';
+          if(existsSync(report)&&JSON.parse(readFileSync(report,'utf8')).status==='built'){
+            const result=spawnSync(process.execPath,['scripts/test/measure-browser-engine.mjs','--report',report,'--out',process.env.RUNNER_TEMP+'/browser-engine-measurement.json'],{stdio:'inherit'});
+            if(result.error)throw result.error;
+            process.exitCode=result.status??1;
+          }else console.log('No completed engine archive; size measurement skipped.');
+          NODE
+      - name: Identify the exact source and configuration recipe
+        run: node -e 'const fs=require("fs");const report=JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP+"/browser-engine-report.json"));fs.appendFileSync(process.env.GITHUB_ENV,"ENGINE_RECIPE_HASH="+report.recipeSha256+"\n")'
       - name: Install the pinned browser verification tools
         env:
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/playwright-browsers
         run: |
           echo "PLAYWRIGHT_BROWSERS_PATH=$PLAYWRIGHT_BROWSERS_PATH" >> "$GITHUB_ENV"
-          npm install --prefix "$RUNNER_TEMP/browser-tools" --no-audit --no-fund playwright@1.56.1
+          npm install --prefix "$RUNNER_TEMP/browser-tools" --no-audit --no-fund playwright@1.57.0
           node "$RUNNER_TEMP/browser-tools/node_modules/playwright/cli.js" install --with-deps chromium firefox webkit
           sudo apt-get update
-          sudo apt-get install -y xvfb xauth libgl1-mesa-dri libegl-mesa0
+          sudo apt-get install -y xvfb xauth libgl1-mesa-dri libegl-mesa0 pulseaudio pulseaudio-utils
           echo "PLAYWRIGHT_MODULE=$RUNNER_TEMP/browser-tools/node_modules/playwright-core/index.mjs" >> "$GITHUB_ENV"
           node --input-type=module -e 'const {chromium}=await import(process.env.RUNNER_TEMP+"/browser-tools/node_modules/playwright-core/index.mjs"); console.log("CHROMIUM="+chromium.executablePath())' >> "$GITHUB_ENV"
+      - name: Prepare a real PulseAudio browser mixing device
+        run: |
+          if ! pulseaudio --check; then
+            pulseaudio --start --exit-idle-time=-1
+          fi
+          godotjs_audio_modules="$(pactl --format=json list modules | node --input-type=module -e 'import {readFileSync} from "node:fs"; const modules=JSON.parse(readFileSync(0,"utf8")); console.log(modules.filter(item=>item.name==="module-null-sink"&&/(?:^|\s)sink_name=godotjs_browser(?:\s|$)/.test(item.argument??"")).length);')"
+          if [ "$godotjs_audio_modules" = '0' ]; then
+            pactl load-module module-null-sink sink_name=godotjs_browser rate=48000 channels=2
+          elif [ "$godotjs_audio_modules" != '1' ]; then
+            echo 'Expected a unique godotjs_browser PulseAudio null sink module' >&2
+            exit 1
+          fi
+          pactl set-default-sink godotjs_browser
+          pactl info
+          pactl --format=json list sinks | node --input-type=module -e 'import {readFileSync} from "node:fs"; const sink=JSON.parse(readFileSync(0,"utf8")).find(item=>item.name==="godotjs_browser"); if(!sink||!/\b2ch\b.*\b48000Hz\b/.test(sink.sample_specification??""))throw Error("Expected the real 48 kHz stereo browser mixing sink"); console.log(JSON.stringify({name:sink.name,state:sink.state,sampleSpecification:sink.sample_specification}));'
+      - name: Verify the independent native and production React engine gate
+        env:
+          PLAYWRIGHT_CHROMIUM_EXECUTABLE: ${{ env.CHROMIUM }}
+        run: >-
+          node apps/playground/scripts/browser-engine-profile-gate.mjs
+          --engine-js "$RUNNER_TEMP/godot-browser-build/bin/.web_zip/godot.js"
+          --engine-wasm "$RUNNER_TEMP/godot-browser-build/bin/.web_zip/godot.wasm"
+          --profile "${{ matrix.profile }}"
+          --out "$RUNNER_TEMP/profile-gate/${{ matrix.profile }}/${{ inputs.engine_target || 'template_debug' }}"
       - name: Verify real main-thread compiler, revision and preview races
         run: node --test apps/playground/test/*.test.mjs
       - name: Prepare the existing native browser regression gate
+        if: matrix.profile == 'full-engine-v1'
         env:
           GODOT_SOURCE: ${{ runner.temp }}/godot-browser-build
           ENGINE_TARGET: ${{ inputs.engine_target || 'template_debug' }}
@@ -132,8 +211,10 @@ jobs:
           export GODOT_WEB_TEMPLATE="$RUNNER_TEMP/godot-browser-build/bin/godot.web.$ENGINE_TARGET.wasm32.nothreads.zip"
           node tests/browser-preflight/prepare.mjs "$RUNNER_TEMP/browser-preflight-site"
       - name: Verify native boot, real canvas input, restart, exit and tamper rejection
+        if: matrix.profile == 'full-engine-v1'
         run: node tests/browser-preflight/verify.mjs "$RUNNER_TEMP/browser-preflight-site" "$RUNNER_TEMP/browser-preflight-results"
       - name: Verify native authored source locations, compressed columns and uncaught errors
+        if: matrix.profile == 'full-engine-v1'
         env:
           ENGINE_BUILD_REPORT: ${{ runner.temp }}/browser-engine-report.json
         run: node tests/browser-preflight/verify-source-maps.mjs "$RUNNER_TEMP/browser-preflight-site" "$RUNNER_TEMP/browser-source-map-results"
@@ -150,46 +231,78 @@ jobs:
           module_navigation_2d_enabled=yes module_navigation_3d_enabled=yes
           module_godot_physics_2d_enabled=yes module_godot_physics_3d_enabled=yes
           module_ogg_enabled=yes module_vorbis_enabled=yes module_gltf_enabled=yes module_jpg_enabled=yes
-      - name: Build the default full-engine product candidate
+      - name: Build the selected native product candidate
         env:
           GODOT: ${{ runner.temp }}/godot-browser-build/bin/godot.linuxbsd.editor.x86_64
           GODOT_IMPORTER: ${{ runner.temp }}/godot-browser-build/bin/godot.linuxbsd.editor.x86_64
+          PLAYWRIGHT_CHROMIUM_EXECUTABLE: ${{ env.CHROMIUM }}
         run: >-
           node apps/playground/scripts/build.mjs
           --engine-report "$RUNNER_TEMP/browser-engine-report.json"
+          --profile "${{ matrix.profile }}"
+          --target "${{ inputs.engine_target || 'template_debug' }}"
+          --skip-sdk-build
+          --work-dir "$RUNNER_TEMP/product-work/${{ matrix.profile }}/${{ inputs.engine_target || 'template_debug' }}"
           --out "$RUNNER_TEMP/default-playground-site"
+      - name: Prepare transparent HTTP delivery variants
+        run: node apps/playground/scripts/prepare-site-delivery.mjs "$RUNNER_TEMP/default-playground-site"
       - name: Accept the exact default product candidate
         env:
           PLAYGROUND_TEST_DIRECTORY: ${{ runner.temp }}/default-playground-site
+          PLAYGROUND_ACCEPTANCE_CONTEXT: ${{ runner.temp }}/default-playground-results/site-start.json
           PLAYWRIGHT_CHROMIUM_EXECUTABLE: ${{ env.CHROMIUM }}
           PLAYGROUND_FULL_ENGINE_LOOPS: '50'
           PLAYGROUND_FULL_ENGINE_REPORT: ${{ runner.temp }}/default-playground-results/runtime.json
           PLAYGROUND_EDITOR_REPORT: ${{ runner.temp }}/default-playground-results/editor.json
           PLAYGROUND_BRIDGE_REPORT: ${{ runner.temp }}/default-playground-results/bridge.json
+          PLAYGROUND_DEMO_REGRESSIONS_REPORT: ${{ runner.temp }}/default-playground-results/demo-regressions.json
+          PLAYGROUND_DELIVERY_REPORT: ${{ runner.temp }}/default-playground-results/delivery.json
           PLAYGROUND_SCREENSHOTS: ${{ runner.temp }}/default-playground-results/screenshots
         run: |
           node apps/playground/scripts/seal-site-acceptance.mjs "$PLAYGROUND_TEST_DIRECTORY" "$RUNNER_TEMP/default-playground-results" --begin
+          node apps/playground/scripts/browser-http-delivery-test.mjs
           pnpm --filter @godot-js/playground test:browser:full
           pnpm --filter @godot-js/playground test:browser:editor
           pnpm --filter @godot-js/playground test:browser:bridge
-          PLAYGROUND_TEST_SHELL=1 node apps/playground/scripts/browser-project-test.mjs > "$RUNNER_TEMP/default-playground-results/projects.json"
+          node apps/playground/scripts/browser-project-test.mjs > "$RUNNER_TEMP/default-playground-results/projects.json"
           node apps/playground/scripts/browser-demo-regressions-test.mjs > "$RUNNER_TEMP/default-playground-results/demo-regressions.json"
           node apps/playground/scripts/browser-react-demos-test.mjs > "$RUNNER_TEMP/default-playground-results/react-demos.json"
           node apps/playground/scripts/browser-test.mjs > "$RUNNER_TEMP/default-playground-results/workbench.json"
+          if [ "${{ matrix.profile }}" = "engine-2d-v1" ]; then
+            node apps/playground/scripts/browser-2d-features-test.mjs --site "$PLAYGROUND_TEST_DIRECTORY" --out "$RUNNER_TEMP/default-playground-results" --require-cjk
+            xvfb-run -a env BROWSER=firefox BROWSER_HEADLESS=0 LIBGL_ALWAYS_SOFTWARE=1 PLAYGROUND_FULL_ENGINE_LOOPS=2 PLAYGROUND_FULL_ENGINE_REPORT="$RUNNER_TEMP/default-playground-results/runtime.firefox.json" node apps/playground/scripts/browser-full-engine-test.mjs
+            xvfb-run -a env BROWSER=firefox BROWSER_HEADLESS=0 LIBGL_ALWAYS_SOFTWARE=1 node apps/playground/scripts/browser-2d-features-test.mjs --site "$PLAYGROUND_TEST_DIRECTORY" --out "$RUNNER_TEMP/default-playground-results/features-firefox" --report "$RUNNER_TEMP/default-playground-results/features.firefox.json" --sessions 1 --require-cjk
+            xvfb-run -a env BROWSER=webkit BROWSER_HEADLESS=0 LIBGL_ALWAYS_SOFTWARE=1 PLAYGROUND_FULL_ENGINE_LOOPS=2 PLAYGROUND_FULL_ENGINE_REPORT="$RUNNER_TEMP/default-playground-results/runtime.webkit.json" node apps/playground/scripts/browser-full-engine-test.mjs
+            xvfb-run -a env BROWSER=webkit BROWSER_HEADLESS=0 LIBGL_ALWAYS_SOFTWARE=1 node apps/playground/scripts/browser-2d-features-test.mjs --site "$PLAYGROUND_TEST_DIRECTORY" --out "$RUNNER_TEMP/default-playground-results/features-webkit" --report "$RUNNER_TEMP/default-playground-results/features.webkit.json" --sessions 1 --require-cjk
+          fi
           node apps/playground/scripts/seal-site-acceptance.mjs "$PLAYGROUND_TEST_DIRECTORY" "$RUNNER_TEMP/default-playground-results"
           node apps/playground/scripts/seal-site-acceptance.mjs "$PLAYGROUND_TEST_DIRECTORY" "$RUNNER_TEMP/default-playground-results" --verify
+      - name: Sample accepted product performance
+        if: github.event_name == 'workflow_dispatch' && inputs.measure_performance
+        env:
+          PLAYWRIGHT_CHROMIUM_EXECUTABLE: ${{ env.CHROMIUM }}
+        run: >-
+          node apps/playground/scripts/browser-engine-performance.mjs
+          --site "$RUNNER_TEMP/default-playground-site"
+          --out "$RUNNER_TEMP/browser-engine-performance.json"
+          --samples 3 --browser chromium
       - name: Keep the default product candidate and its exact-site acceptance
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: browser-playground-candidate-${{ github.sha }}
+          name: browser-playground-candidate-${{ matrix.profile }}-${{ inputs.engine_target || 'template_debug' }}-${{ inputs.engine_lto || 'none' }}-${{ env.ENGINE_RECIPE_HASH }}
           if-no-files-found: error
           retention-days: 14
           path: |
             ${{ runner.temp }}/default-playground-site
             ${{ runner.temp }}/default-playground-results
+            ${{ runner.temp }}/profile-gate
             ${{ runner.temp }}/browser-engine-report.json
+            ${{ runner.temp }}/browser-engine-measurement.json
+            ${{ runner.temp }}/browser-engine-performance.json
+            ${{ runner.temp }}/browser-engine-artifact
       - name: Prepare the compatibility conformance candidate
+        if: matrix.profile == 'full-engine-v1'
         env:
           RELEASE_VERSION: ${{ inputs.release_version || '0.1.0' }}
         run: >-
@@ -198,20 +311,24 @@ jobs:
           --out "$RUNNER_TEMP/browser-playground-site"
           --version "$RELEASE_VERSION"
       - name: Verify the actual Playground and collect release-bound evidence
+        if: matrix.profile == 'full-engine-v1'
         run: >-
           node scripts/test/browser-playground.mjs
           --site "$RUNNER_TEMP/browser-playground-site"
           --out "$RUNNER_TEMP/browser-playground-results"
       - name: Verify HttpOnly same-origin authentication and cross-origin cookie omission
+        if: matrix.profile == 'full-engine-v1'
         run: >-
           node scripts/test/browser-playground.mjs --authenticated-gate
           --site "$RUNNER_TEMP/browser-playground-site"
           --out "$RUNNER_TEMP/browser-authenticated-results"
       - name: Verify the same candidate in Firefox and Linux Playwright WebKit
+        if: matrix.profile == 'full-engine-v1'
         run: |
           xvfb-run -a env BROWSER=firefox BROWSER_HEADLESS=0 LIBGL_ALWAYS_SOFTWARE=1 node scripts/test/browser-playground.mjs --site "$RUNNER_TEMP/browser-playground-site" --out "$RUNNER_TEMP/browser-firefox-results"
           xvfb-run -a env BROWSER=webkit BROWSER_HEADLESS=0 LIBGL_ALWAYS_SOFTWARE=1 node scripts/test/browser-playground.mjs --site "$RUNNER_TEMP/browser-playground-site" --out "$RUNNER_TEMP/browser-webkit-results"
       - name: Verify real engine lifecycle pressure and failure cancellation
+        if: matrix.profile == 'full-engine-v1'
         run: >-
           node scripts/test/browser-stress.mjs
           --site "$RUNNER_TEMP/browser-playground-site"
@@ -219,6 +336,7 @@ jobs:
           --fixture game2d --mode production
           --iterations 100 --failures 20
       - name: Join exact-release integration, source-map and lifecycle evidence
+        if: matrix.profile == 'full-engine-v1'
         run: >-
           node scripts/release/collect-browser-evidence.mjs
           --site "$RUNNER_TEMP/browser-playground-site"
@@ -231,6 +349,7 @@ jobs:
           --webkit-report "$RUNNER_TEMP/browser-webkit-results/report.json"
           --out "$RUNNER_TEMP/browser-acceptance.json"
       - name: Seal the validated candidate and verify its external npm consumer
+        if: matrix.profile == 'full-engine-v1'
         env:
           RELEASE_VERSION: ${{ inputs.release_version || '0.1.0' }}
         run: |
@@ -238,7 +357,7 @@ jobs:
           node scripts/release/pin-web-release.mjs --site "$RUNNER_TEMP/browser-playground-site" --release scripts/jsb.web-engine/dist
           node scripts/release/verify-web-release.mjs --dir scripts/jsb.web-engine/dist --require-certified --pack-out "$RUNNER_TEMP/browser-release-pack" --report "$RUNNER_TEMP/browser-release-verification.json"
       - name: Keep the exact candidate, reports and source-build evidence
-        if: always()
+        if: always() && matrix.profile == 'full-engine-v1'
         uses: actions/upload-artifact@v4
         with:
           name: browser-conformance-candidate-${{ github.sha }}
@@ -257,5 +376,6 @@ jobs:
             ${{ runner.temp }}/browser-acceptance.json
             ${{ runner.temp }}/browser-release-pack
             ${{ runner.temp }}/browser-release-verification.json
+            ${{ runner.temp }}/browser-engine-artifact
             ${{ runner.temp }}/browser-playground-site
             scripts/jsb.web-engine/dist

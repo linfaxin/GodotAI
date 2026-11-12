@@ -1,4 +1,7 @@
+
+#if !defined(_3D_DISABLED)
 #include "scene/3d/visual_instance_3d.h"
+#endif
 #include "scene/gui/code_edit.h"
 #include "scene/gui/menu_button.h"
 #include "scene/gui/popup_menu.h"
@@ -23,31 +26,59 @@
 #include "scene/gui/rich_text_label.h"
 #include "scene/2d/tile_map_layer.h"
 #include "scene/2d/path_2d.h"
+
+#if !defined(_3D_DISABLED)
 #include "scene/3d/path_3d.h"
+#endif
 #include "scene/gui/container.h"
 #include "scene/gui/base_button.h"
 #include "scene/resources/particle_process_material.h"
 #include "scene/2d/gpu_particles_2d.h"
+
+#if !defined(_3D_DISABLED)
 #include "scene/3d/gpu_particles_3d.h"
+#endif
+
+#if !defined(_3D_DISABLED) && !defined(PHYSICS_3D_DISABLED)
 #include "scene/3d/physics/spring_arm_3d.h"
+#endif
 #include "scene/resources/packed_scene.h"
+
+#if !defined(_3D_DISABLED)
 #include "scene/resources/skeleton_profile.h"
+#endif
+#if !defined(_3D_DISABLED)
 #include "scene/3d/skeleton_3d.h"
+#endif
+#if !defined(_3D_DISABLED)
 #include "scene/3d/node_3d.h"
+#endif
 #include "scene/2d/node_2d.h"
 #include "scene/2d/physics/character_body_2d.h"
+
+#if !defined(_3D_DISABLED) && !defined(PHYSICS_3D_DISABLED)
 #include "scene/3d/physics/character_body_3d.h"
+#endif
 #include "scene/2d/physics/kinematic_collision_2d.h"
+
+#if !defined(_3D_DISABLED) && !defined(PHYSICS_3D_DISABLED)
 #include "scene/3d/physics/kinematic_collision_3d.h"
+#endif
 #include "scene/gui/scroll_container.h"
+
+#if !defined(_3D_DISABLED)
 #include "scene/3d/camera_3d.h"
+#endif
 #include "scene/2d/camera_2d.h"
 #include "scene/main/canvas_item.h"
 #include "scene/resources/material.h"
 #include "scene/resources/atlas_texture.h"
 #include "scene/resources/shader.h"
 #include "scene/2d/navigation/navigation_agent_2d.h"
+
+#if !defined(_3D_DISABLED) && !defined(NAVIGATION_3D_DISABLED)
 #include "scene/3d/navigation/navigation_agent_3d.h"
+#endif
 #include "scene/animation/animation_player.h"
 #include "scene/animation/animation_tree.h"
 #include "scene/animation/animation_node_state_machine.h"
@@ -63,17 +94,32 @@
 #include "scene/resources/font.h"
 #include "scene/resources/style_box.h"
 #include "scene/resources/2d/shape_2d.h"
+
+#if !defined(_3D_DISABLED) && !defined(PHYSICS_3D_DISABLED)
 #include "scene/resources/3d/shape_3d.h"
+#endif
 #include "scene/resources/world_2d.h"
+
+#if !defined(_3D_DISABLED) && !defined(PHYSICS_3D_DISABLED)
 #include "scene/resources/3d/world_3d.h"
+#endif
 #include "servers/physics_2d/physics_server_2d.h"
+
+#if !defined(_3D_DISABLED) && !defined(PHYSICS_3D_DISABLED)
 #include "servers/physics_3d/physics_server_3d.h"
+#endif
 #include "scene/main/viewport.h"
 #include "scene/gui/container.h"
 #include "scene/gui/subviewport_container.h"
+
+#if !defined(_3D_DISABLED)
 #include "scene/3d/mesh_instance_3d.h"
+#endif
 #include "scene/2d/physics/collision_object_2d.h"
+
+#if !defined(_3D_DISABLED) && !defined(PHYSICS_3D_DISABLED)
 #include "scene/3d/physics/collision_object_3d.h"
+#endif
 #include "servers/audio/audio_server.h"
 #include "core/io/image.h"
 #include <atomic>
@@ -327,6 +373,8 @@ namespace jsb
             return target&&(target==root||root->is_ancestor_of(target))?target:nullptr;
         }
 
+
+#if !defined(_3D_DISABLED)
         bool apply_skeleton_profile(Skeleton3D* skeleton,const Ref<SkeletonProfile>& profile)
         {
             const int count=profile.is_valid()?profile->get_bone_size():0;
@@ -336,6 +384,8 @@ namespace jsb
             for(int i=0;i<count;++i){skeleton->add_bone(profile->get_bone_name(i));const StringName parent=profile->get_bone_parent(i);if(parent!=StringName())skeleton->set_bone_parent(i,names[parent]);skeleton->set_bone_rest(i,profile->get_reference_pose(i));}
             skeleton->reset_bone_poses();return true;
         }
+#endif
+
 
         bool validate_scene_targets(Node* root,Node* node,int& budget)
         {
@@ -344,8 +394,14 @@ namespace jsb
             if(node->is_class("Parallax2D")){const Vector2 size=node->get("repeat_size"),scale=node->get("scale");const int count=node->get("repeat_times");if(count<1||count>16||size.x<0||size.y<0||size.x>16384||size.y>16384||scale.x<=0||scale.y<=0)return false;}
             if(node->has_meta("__godot_react_profile"))
             {
+
+#if !defined(_3D_DISABLED)
                 Skeleton3D* skeleton=Object::cast_to<Skeleton3D>(node);Ref<SkeletonProfile> profile=node->get_meta("__godot_react_profile");
                 if(!skeleton||profile.is_null()||!apply_skeleton_profile(skeleton,profile))return false;
+#endif
+#if defined(_3D_DISABLED)
+                return false;
+#endif
             }
             if(node->is_class("Joint2D")||node->is_class("Joint3D"))for(const char* property:{"node_a","node_b"}){const NodePath path=node->get(property);if(!path.is_empty()){Node* target=path.is_absolute()?nullptr:node->get_node_or_null(path);if(!target||!(target==root||root->is_ancestor_of(target))||!target->is_class(node->is_class("Joint2D")?"PhysicsBody2D":"PhysicsBody3D"))return false;}}
             if(Control* control=Object::cast_to<Control>(node))for(const char* property:{"focus_neighbor_left","focus_neighbor_top","focus_neighbor_right","focus_neighbor_bottom","focus_next","focus_previous"}){const NodePath path=control->get(property);if(!path.is_empty()){Node* target=path.is_absolute()||path.get_subname_count()?nullptr:control->get_node_or_null(path);if(!target||!(target==root||root->is_ancestor_of(target))||!Object::cast_to<Control>(target))return false;}}
@@ -532,7 +588,11 @@ namespace jsb
             bool attachment = false;
             Ref<Resource> prefab;
             ObjectID prefab_root;
+#if !defined(_3D_DISABLED)
             Ref<SkeletonProfile> skeleton_profile;
+#else
+            Ref<Resource> skeleton_profile;
+#endif
             Ref<MultiMesh> multimesh_source;
             Ref<ParticleProcessMaterial> particle_source,particle_instance;
             Ref<ButtonGroup> group_source;
@@ -1837,7 +1897,7 @@ namespace jsb
                 }
                 info.GetReturnValue().Set(impl::Helper::new_string(isolate, String(property == StringName("node_a") ? owned->joint_a : owned->joint_b))); return;
             }
-            if((property==StringName("material")&&Object::cast_to<CanvasItem>(node))||(property==StringName("material_override")&&Object::cast_to<MeshInstance3D>(node))||(property==StringName("material_overlay")&&Object::cast_to<GeometryInstance3D>(node))){
+            if((property==StringName("material")&&Object::cast_to<CanvasItem>(node))||(property==StringName("material_override")&&node->is_class("MeshInstance3D"))||(property==StringName("material_overlay")&&node->is_class("GeometryInstance3D"))){
                 const int slot=property==StringName("material")?-1:property==StringName("material_overlay")?-3:-2;Variant source;
                 if(op==SET){if(!state.mutation_stage(*root)||info.Length()!=4||!state.safe_from_js(*root,context,info[3],source,Variant::OBJECT)){fail("E_MATERIAL: expected registered material");return;}Ref<Material> material=source;if(!source.is_null()&&material.is_null()){fail("E_MATERIAL: expected material");return;}node->set(property,state.private_material(*owned,slot,material));if(!verify())return;}
                 else{if(const Ref<ShaderMaterial>* original=owned->shader_sources.getptr(slot))source=*original;else source=node->get(property);}
@@ -1849,11 +1909,15 @@ namespace jsb
                 if(set&&(!state.mutation_stage(*root)||info.Length()!=4||!state.safe_from_js(*root,context,info[3],value,hint))){fail("E_USABILITY_PROPERTY: invalid value or phase");return;}
                 if(!state.usability_special(*root,*owned,node,name,value,set,result)){fail("E_USABILITY_PROPERTY: invalid target, bus, font or range");return;}if(!verify())return;v8::Local<v8::Value> encoded;if(!state.safe_to_js(*root,context,result,encoded)){fail("E_USABILITY_PROPERTY: cannot encode result");return;}info.GetReturnValue().Set(encoded);return;
             }
+
+#if !defined(_3D_DISABLED)
             if(property==StringName("__react_surface_materials")){
                 MeshInstance3D* mesh=Object::cast_to<MeshInstance3D>(node);if(!mesh){fail("E_SURFACE_MATERIAL: MeshInstance3D required");return;}
                 if(op==SET){Variant value;if(!state.mutation_stage(*root)||info.Length()!=4||!state.safe_from_js(*root,context,info[3],value,Variant::ARRAY)){fail("E_SURFACE_MATERIAL: expected registered material array");return;}const Array materials=value;if(materials.size()>64){fail("E_SURFACE_MATERIAL: too many surfaces");return;}for(int i=0;i<materials.size();++i)if(materials[i].get_type()!=Variant::NIL){Ref<Resource> material=materials[i];if(material.is_null()||(!material->is_class("StandardMaterial3D")&&!material->is_class("ShaderMaterial"))){fail("E_SURFACE_MATERIAL: unsupported material");return;}}owned->surface_materials=materials;}
                 v8::Local<v8::Value> result;if(!state.safe_to_js(*root,context,owned->surface_materials,result)){fail("E_SURFACE_MATERIAL: result");return;}info.GetReturnValue().Set(result);return;
             }
+#endif
+
             if(property==StringName("__react_layout")){
                 Control* control=Object::cast_to<Control>(node);if(!control){fail("E_LAYOUT: layout requires Control");return;}
                 if(op==SET){if(!state.mutation_stage(*root)||info.Length()!=4){fail("E_LAYOUT: layout requires commit");return;}if(info[3]->IsNull()){owned->layout.clear();control->set_anchors_and_offsets_preset(Control::PRESET_TOP_LEFT);}else{Variant value;if(!state.safe_from_js(*root,context,info[3],value,Variant::ARRAY)){fail("E_LAYOUT: invalid layout");return;}Array edges=value;if(edges.size()!=8){fail("E_LAYOUT: expected eight layout edges");return;}for(int i=0;i<8;++i)if(edges[i].get_type()!=Variant::FLOAT||double(edges[i])<(i<4?0:-1e6)||double(edges[i])>(i<4?1:1e6)){fail("E_LAYOUT: invalid layout edge");return;}if(double(edges[0])>double(edges[2])||double(edges[1])>double(edges[3])){fail("E_LAYOUT: anchors must be ordered");return;}owned->layout=edges;for(int i=0;i<4;++i)control->set_anchor(Side(i),edges[i],false,true);for(int i=0;i<4;++i)control->set_offset(Side(i),edges[i+4]);}if(!verify())return;}
@@ -1908,8 +1972,13 @@ namespace jsb
                 AnimationPlayer* player=library?Object::cast_to<AnimationPlayer>(node):nullptr;
                 if(library&&!player){fail("E_PROPERTY_PROFILE: library requires AnimationPlayer");return;}
                 if(prefab&&!node->is_class("Node2D")&&!node->is_class("Node3D")){fail("E_PROPERTY_PROFILE: scene host must be spatial");return;}
+
+#if !defined(_3D_DISABLED)
                 Skeleton3D* skeleton=(prefab||library)?nullptr:Object::cast_to<Skeleton3D>(node);
                 if(!prefab&&!library&&!skeleton){fail("E_PROPERTY_PROFILE: skeleton profile requires Skeleton3D");return;}
+#else
+                if(!prefab&&!library){fail("E_PROPERTY_PROFILE: 3D skeletons are unavailable in this engine");return;}
+#endif
                 if(op==SET)
                 {
                     if(!state.mutation_stage(*root)||info.Length()!=4){fail("E_PHASE: native scene configuration requires a commit");return;}
@@ -1937,6 +2006,8 @@ namespace jsb
                     }
                     else
                     {
+
+#if !defined(_3D_DISABLED)
                         Ref<SkeletonProfile> profile=value;
                         if(!value.is_null()&&profile.is_null()){fail("E_ASSET_TYPE: SkeletonProfile required");return;}
                         if(owned->skeleton_profile!=profile)
@@ -1944,6 +2015,8 @@ namespace jsb
                             if(!apply_skeleton_profile(skeleton,profile)){fail("E_SKELETON_PROFILE: invalid bone hierarchy");return;}
                             owned->skeleton_profile=profile;
                         }
+#endif
+
                     }
                     if(!verify())return;
                 }
@@ -2124,9 +2197,13 @@ namespace jsb
                 else if(operation=="peaks"&&args.empty()){result=Vector2(server->get_bus_peak_volume_left_db(index,0),server->get_bus_peak_volume_right_db(index,0));valid=true;}
                 if(!valid){fail("E_AUDIO_COMMAND: invalid bus operation");return;}if(!verify())return;v8::Local<v8::Value> encoded;if(!state.safe_to_js(*root,context,result,encoded)){fail("E_COMMAND_CODEC: audio result");return;}info.GetReturnValue().Set(encoded);return;
             }
+
+#if !defined(_3D_DISABLED)
             if(method_text=="__react_blend_names"){
                 MeshInstance3D* mesh=Object::cast_to<MeshInstance3D>(node);if(root->stage!="process"||!mesh||info[3].As<v8::Array>()->Length()!=0){fail("E_BLEND_SHAPE: invalid target");return;}Array names;for(int i=0;i<mesh->get_blend_shape_count();++i)names.push_back(mesh->get_mesh()->get_blend_shape_name(i));v8::Local<v8::Value> encoded;if(!state.safe_to_js(*root,context,names,encoded))return;info.GetReturnValue().Set(encoded);return;
             }
+#endif
+
             if(method_text.begins_with("__react_tween_")||method_text.begins_with("__react_multimesh_")||method_text.begins_with("__react_query_")){
                 const bool query=method_text.begins_with("__react_query_");if(root->stage!=(query?"physics":"process")){fail("E_COMMAND_PHASE: extension command outside frame phase");return;}
                 const auto input=info[3].As<v8::Array>();std::vector<Variant> args(input->Length());
@@ -2136,7 +2213,7 @@ namespace jsb
                     const String operation=method_text.trim_prefix("__react_tween_");
                     if(operation=="start"&&args.size()==1&&args[0].get_type()==Variant::ARRAY){Array plan=args[0];bool okay=plan.size()>=2&&plan.size()<=129&&plan[0].get_type()==Variant::ARRAY;Array config=okay?Array(plan[0]):Array();okay=okay&&config.size()==1&&config[0].get_type()==Variant::FLOAT&&double(config[0])==Math::floor(double(config[0]));int loops=okay?int(config[0]):-1;okay=okay&&loops>=0&&loops<=1000000;double duration=0;
                         for(int i=1;okay&&i<plan.size();++i){if(plan[i].get_type()!=Variant::ARRAY){okay=false;break;}Array step=plan[i];if(step.size()!=7||step[0].get_type()!=Variant::STRING){okay=false;break;}String property=step[0];Variant current=node->get(property);if((property!="position"&&property!="rotation"&&property!="scale")||current.get_type()!=step[1].get_type()||step[2].get_type()!=Variant::FLOAT||step[3].get_type()!=Variant::FLOAT||double(step[2])<0||double(step[3])<0||double(step[2])>86400||double(step[3])>86400||step[4].get_type()!=Variant::FLOAT||step[5].get_type()!=Variant::FLOAT||double(step[4])!=Math::floor(double(step[4]))||double(step[5])!=Math::floor(double(step[5]))||int(step[4])<0||int(step[4])>11||int(step[5])<0||int(step[5])>3||step[6].get_type()!=Variant::BOOL)okay=false;else duration+=double(step[2])+double(step[3]);}
-                        if(okay&&duration>0&&node->is_inside_tree()&&(Object::cast_to<Node2D>(node)||Object::cast_to<Node3D>(node))){Ref<Tween> tween=node->create_tween();tween->set_loops(loops);for(int i=1;i<plan.size();++i){Array step=plan[i];if(bool(step[6]))tween->parallel();else tween->chain();Ref<PropertyTweener> property=tween->tween_property(node,NodePath(String(step[0])),step[1],step[2]);property->set_delay(step[3]);property->set_trans(Tween::TransitionType(int(step[4])));property->set_ease(Tween::EaseType(int(step[5])));}if(owned->tween.is_valid())owned->tween->kill();owned->tween=tween;valid=true;}
+                        if(okay&&duration>0&&node->is_inside_tree()&&(Object::cast_to<Node2D>(node)||node->is_class("Node3D"))){Ref<Tween> tween=node->create_tween();tween->set_loops(loops);for(int i=1;i<plan.size();++i){Array step=plan[i];if(bool(step[6]))tween->parallel();else tween->chain();Ref<PropertyTweener> property=tween->tween_property(node,NodePath(String(step[0])),step[1],step[2]);property->set_delay(step[3]);property->set_trans(Tween::TransitionType(int(step[4])));property->set_ease(Tween::EaseType(int(step[5])));}if(owned->tween.is_valid())owned->tween->kill();owned->tween=tween;valid=true;}
                     }else if(operation=="running"&&args.empty()){result=owned->tween.is_valid()&&owned->tween->is_running();valid=true;}
                     else if(operation=="cancel"&&args.empty()){if(owned->tween.is_valid())owned->tween->kill();owned->tween.unref();valid=true;}
                     else if(owned->tween.is_valid()){if(operation=="pause"&&args.empty()){owned->tween->pause();valid=true;}else if(operation=="resume"&&args.empty()){owned->tween->play();valid=true;}else if(operation=="advance"&&args.size()==1&&args[0].get_type()==Variant::FLOAT&&double(args[0])>=0&&double(args[0])<=86400){owned->tween->custom_step(args[0]);valid=true;}}
@@ -2149,9 +2226,16 @@ namespace jsb
                 }else{
                     const bool three=method_text.ends_with("3"),ray=method_text=="__react_query_ray2"||method_text=="__react_query_ray3",shape=method_text=="__react_query_shape2"||method_text=="__react_query_shape3";
                     const Variant::Type vector=three?Variant::VECTOR3:Variant::VECTOR2;
+#if defined(_3D_DISABLED) || defined(PHYSICS_3D_DISABLED)
+                    if(three){fail("E_EXTENSION_COMMAND: 3D physics is unavailable");return;}
+#endif
                     if((ray||shape)&&args.size()==(ray?5:6)&&args[1].get_type()==vector&&args[2].get_type()==Variant::FLOAT&&double(args[2])>=0&&double(args[2])<=4294967295.0&&Math::floor(double(args[2]))==double(args[2])&&args[3].get_type()==Variant::BOOL&&args[4].get_type()==Variant::BOOL){Array hits;const uint32_t mask=uint32_t(int64_t(args[2]));const bool areas=args[3],bodies=args[4];if(!ray&&(args[5].get_type()!=Variant::FLOAT||double(args[5])<1||double(args[5])>64||Math::floor(double(args[5]))!=double(args[5]))){fail("E_QUERY: invalid result limit");return;}const int max=ray?1:int(args[5]);
-                        if(three){Node3D* spatial=Object::cast_to<Node3D>(node);PhysicsDirectSpaceState3D* space=spatial&&spatial->get_world_3d().is_valid()?spatial->get_world_3d()->get_direct_space_state():nullptr;if(space){if(ray&&args[0].get_type()==vector){PhysicsDirectSpaceState3D::RayParameters parameters;parameters.from=args[0];parameters.to=args[1];parameters.collision_mask=mask;parameters.collide_with_areas=areas;parameters.collide_with_bodies=bodies;PhysicsDirectSpaceState3D::RayResult hit;if(space->intersect_ray(parameters,hit)){hits.push_back(hit.collider);hits.push_back(hit.position);hits.push_back(hit.normal);hits.push_back(hit.shape);}valid=true;}else if(shape){Ref<Shape3D> resource=args[0];if(resource.is_valid()){PhysicsDirectSpaceState3D::ShapeParameters parameters;parameters.shape_rid=resource->get_rid();parameters.transform.origin=args[1];parameters.collision_mask=mask;parameters.collide_with_areas=areas;parameters.collide_with_bodies=bodies;PhysicsDirectSpaceState3D::ShapeResult results[64];int count=space->intersect_shape(parameters,results,max);for(int i=0;i<count;++i){Array hit;hit.push_back(compat::ObjectDB::get_instance(results[i].collider_id));hit.push_back(results[i].shape);hits.push_back(hit);}valid=true;}}}}
-                        else{Node2D* spatial=Object::cast_to<Node2D>(node);PhysicsDirectSpaceState2D* space=spatial&&spatial->get_world_2d().is_valid()?spatial->get_world_2d()->get_direct_space_state():nullptr;if(space){if(ray&&args[0].get_type()==vector){PhysicsDirectSpaceState2D::RayParameters parameters;parameters.from=args[0];parameters.to=args[1];parameters.collision_mask=mask;parameters.collide_with_areas=areas;parameters.collide_with_bodies=bodies;PhysicsDirectSpaceState2D::RayResult hit;if(space->intersect_ray(parameters,hit)){hits.push_back(hit.collider);hits.push_back(hit.position);hits.push_back(hit.normal);hits.push_back(hit.shape);}valid=true;}else if(shape){Ref<Shape2D> resource=args[0];if(resource.is_valid()){PhysicsDirectSpaceState2D::ShapeParameters parameters;parameters.shape_rid=resource->get_rid();parameters.transform.set_origin(args[1]);parameters.collision_mask=mask;parameters.collide_with_areas=areas;parameters.collide_with_bodies=bodies;PhysicsDirectSpaceState2D::ShapeResult results[64];int count=space->intersect_shape(parameters,results,max);for(int i=0;i<count;++i){Array hit;hit.push_back(compat::ObjectDB::get_instance(results[i].collider_id));hit.push_back(results[i].shape);hits.push_back(hit);}valid=true;}}}}
+
+#if !defined(_3D_DISABLED) && !defined(PHYSICS_3D_DISABLED)
+                        if(three){Node3D* spatial=Object::cast_to<Node3D>(node);PhysicsDirectSpaceState3D* space=spatial&&spatial->get_world_3d().is_valid()?spatial->get_world_3d()->get_direct_space_state():nullptr;if(space){if(ray&&args[0].get_type()==vector){PhysicsDirectSpaceState3D::RayParameters parameters;parameters.from=args[0];parameters.to=args[1];parameters.collision_mask=mask;parameters.collide_with_areas=areas;parameters.collide_with_bodies=bodies;PhysicsDirectSpaceState3D::RayResult hit;if(space->intersect_ray(parameters,hit)){hits.push_back(hit.collider);hits.push_back(hit.position);hits.push_back(hit.normal);hits.push_back(hit.shape);}valid=true;}else if(shape){Ref<Shape3D> resource=args[0];if(resource.is_valid()){PhysicsDirectSpaceState3D::ShapeParameters parameters;parameters.shape_rid=resource->get_rid();parameters.transform.origin=args[1];parameters.collision_mask=mask;parameters.collide_with_areas=areas;parameters.collide_with_bodies=bodies;PhysicsDirectSpaceState3D::ShapeResult results[64];int count=space->intersect_shape(parameters,results,max);for(int i=0;i<count;++i){Array hit;hit.push_back(compat::ObjectDB::get_instance(results[i].collider_id));hit.push_back(results[i].shape);hits.push_back(hit);}valid=true;}}}}else
+#endif
+
+                        {Node2D* spatial=Object::cast_to<Node2D>(node);PhysicsDirectSpaceState2D* space=spatial&&spatial->get_world_2d().is_valid()?spatial->get_world_2d()->get_direct_space_state():nullptr;if(space){if(ray&&args[0].get_type()==vector){PhysicsDirectSpaceState2D::RayParameters parameters;parameters.from=args[0];parameters.to=args[1];parameters.collision_mask=mask;parameters.collide_with_areas=areas;parameters.collide_with_bodies=bodies;PhysicsDirectSpaceState2D::RayResult hit;if(space->intersect_ray(parameters,hit)){hits.push_back(hit.collider);hits.push_back(hit.position);hits.push_back(hit.normal);hits.push_back(hit.shape);}valid=true;}else if(shape){Ref<Shape2D> resource=args[0];if(resource.is_valid()){PhysicsDirectSpaceState2D::ShapeParameters parameters;parameters.shape_rid=resource->get_rid();parameters.transform.set_origin(args[1]);parameters.collision_mask=mask;parameters.collide_with_areas=areas;parameters.collide_with_bodies=bodies;PhysicsDirectSpaceState2D::ShapeResult results[64];int count=space->intersect_shape(parameters,results,max);for(int i=0;i<count;++i){Array hit;hit.push_back(compat::ObjectDB::get_instance(results[i].collider_id));hit.push_back(results[i].shape);hits.push_back(hit);}valid=true;}}}}
                         result=hits;
                     }
                 }
@@ -2180,24 +2264,42 @@ namespace jsb
                     if(operation=="nodes"&&input->Length()==0&&scene){Array paths;Vector<Node*> pending;pending.push_back(scene);while(!pending.is_empty()){Node* current=pending[pending.size()-1];pending.resize(pending.size()-1);paths.push_back(scene->get_path_to(current));for(int i=current->get_child_count(false)-1;i>=0;--i)pending.push_back(current->get_child(i,false));}result=paths;valid=true;}
                     else if(string_arg(0,path))if(Node* target=scene_target(scene,path))
                     {
-                        AnimationPlayer* player=Object::cast_to<AnimationPlayer>(target);Skeleton3D* skeleton=Object::cast_to<Skeleton3D>(target);
-                        if(operation=="blend_names"&&input->Length()==1){if(MeshInstance3D* mesh=Object::cast_to<MeshInstance3D>(target)){Array names;for(int i=0;i<mesh->get_blend_shape_count();++i)names.push_back(mesh->get_mesh()->get_blend_shape_name(i));result=names;valid=true;}}
-                        else if(operation=="blend_get"&&input->Length()==2){if(MeshInstance3D* mesh=Object::cast_to<MeshInstance3D>(target)){Variant index;if(value_arg(1,index,Variant::INT)&&int64_t(index)>=0&&int64_t(index)<mesh->get_blend_shape_count()){result=mesh->get_blend_shape_value(index);valid=true;}}}
-                        else if(operation=="blend_set"&&input->Length()==3){if(MeshInstance3D* mesh=Object::cast_to<MeshInstance3D>(target)){Variant index,value;if(value_arg(1,index,Variant::INT)&&int64_t(index)>=0&&int64_t(index)<mesh->get_blend_shape_count()&&value_arg(2,value,Variant::FLOAT)){mesh->set_blend_shape_value(index,value);valid=true;}}}
-                        else if(operation=="animations"&&input->Length()==1&&player){List<StringName> names;player->get_animation_list(&names);Array values;for(const StringName& name:names)values.push_back(name);result=values;valid=true;}
+                        AnimationPlayer* player=Object::cast_to<AnimationPlayer>(target);
+#if !defined(_3D_DISABLED)
+                        Skeleton3D* skeleton=Object::cast_to<Skeleton3D>(target);
+#endif
+                        if(operation=="animations"&&input->Length()==1&&player){List<StringName> names;player->get_animation_list(&names);Array values;for(const StringName& name:names)values.push_back(name);result=values;valid=true;}
                         else if(operation=="play"&&input->Length()==5&&player){String name;Variant blend,speed,back;if(string_arg(1,name)&&player->has_animation(name)&&value_arg(2,blend,Variant::FLOAT)&&value_arg(3,speed,Variant::FLOAT)&&value_arg(4,back,Variant::BOOL)){player->play(name,blend,speed,back);valid=true;}}
                         else if(operation=="pause"&&input->Length()==1&&player){player->pause();valid=true;}
                         else if(operation=="seek"&&input->Length()==3&&player){Variant seconds,update;if(value_arg(1,seconds,Variant::FLOAT)&&double(seconds)>=0&&value_arg(2,update,Variant::BOOL)){player->seek(seconds,update);valid=true;}}
                         else if(operation=="stop"&&input->Length()==2&&player){Variant keep;if(value_arg(1,keep,Variant::BOOL)){player->stop(keep);valid=true;}}
                         else if(operation=="advance"&&input->Length()==2){if(AnimationMixer* mixer=Object::cast_to<AnimationMixer>(target)){Variant delta;if(value_arg(1,delta,Variant::FLOAT)){mixer->advance(delta);valid=true;}}}
                         else if(operation=="position2d"&&input->Length()==1){if(Node2D* spatial=Object::cast_to<Node2D>(target)){result=spatial->get_position();valid=true;}}
+
+#if !defined(_3D_DISABLED)
                         else if(operation=="position"&&input->Length()==1){if(Node3D* spatial=Object::cast_to<Node3D>(target)){result=spatial->get_position();valid=true;}}
+#endif
                         else if(operation=="is_playing"&&input->Length()==1&&player){result=player->is_playing();valid=true;}
                         else if(operation=="animation_position"&&input->Length()==1&&player){result=player->get_current_animation_position();valid=true;}
+
+#if !defined(_3D_DISABLED)
+                        else if(operation=="blend_names"&&input->Length()==1){if(MeshInstance3D* mesh=Object::cast_to<MeshInstance3D>(target)){Array names;for(int i=0;i<mesh->get_blend_shape_count();++i)names.push_back(mesh->get_mesh()->get_blend_shape_name(i));result=names;valid=true;}}
+                        else if(operation=="blend_get"&&input->Length()==2){if(MeshInstance3D* mesh=Object::cast_to<MeshInstance3D>(target)){Variant index;if(value_arg(1,index,Variant::INT)&&int64_t(index)>=0&&int64_t(index)<mesh->get_blend_shape_count()){result=mesh->get_blend_shape_value(index);valid=true;}}}
+                        else if(operation=="blend_set"&&input->Length()==3){if(MeshInstance3D* mesh=Object::cast_to<MeshInstance3D>(target)){Variant index,value;if(value_arg(1,index,Variant::INT)&&int64_t(index)>=0&&int64_t(index)<mesh->get_blend_shape_count()&&value_arg(2,value,Variant::FLOAT)){mesh->set_blend_shape_value(index,value);valid=true;}}}
+
+#endif
+#if !defined(_3D_DISABLED)
                         else if(operation=="bone_reset"&&input->Length()==1&&skeleton){skeleton->reset_bone_poses();valid=true;}
+#endif
+#if !defined(_3D_DISABLED)
                         else if(operation.begins_with("bone_set_")&&input->Length()==3&&skeleton){Variant index,value;const bool rotation=operation=="bone_set_rotation";if(value_arg(1,index,Variant::INT)&&int64_t(index)>=0&&int64_t(index)<skeleton->get_bone_count()&&value_arg(2,value,rotation?Variant::QUATERNION:Variant::VECTOR3)){if(rotation)skeleton->set_bone_pose_rotation(index,value);else if(operation=="bone_set_position")skeleton->set_bone_pose_position(index,value);else if(operation=="bone_set_scale")skeleton->set_bone_pose_scale(index,value);else{fail("E_SCENE_COMMAND: unknown bone command");return;}valid=true;}}
+#endif
+#if !defined(_3D_DISABLED)
                         else if(operation=="bone_count"&&input->Length()==1&&skeleton){result=skeleton->get_bone_count();valid=true;}
+#endif
+#if !defined(_3D_DISABLED)
                         else if((operation=="bone_position"||operation=="bone_rotation")&&input->Length()==2&&skeleton){Variant index;if(value_arg(1,index,Variant::INT)&&int64_t(index)>=0&&int64_t(index)<skeleton->get_bone_count()){result=operation=="bone_position"?Variant(skeleton->get_bone_pose_position(index)):Variant(skeleton->get_bone_pose_rotation(index));valid=true;}}
+#endif
                         else if((operation=="parameter"||operation=="parameter_integer"||operation=="parameter_boolean"||operation=="parameter_vector2")&&input->Length()==3){String name;Variant value;const Variant::Type hint=operation=="parameter_integer"?Variant::INT:operation=="parameter_boolean"?Variant::BOOL:operation=="parameter_vector2"?Variant::VECTOR2:Variant::FLOAT;if(string_arg(1,name)&&value_arg(2,value,hint))valid=tree_parameter(Object::cast_to<AnimationTree>(target),name,value);}
                         else if((operation=="travel"||operation=="start")&&input->Length()==2){String name;if(string_arg(1,name))valid=tree_state(Object::cast_to<AnimationTree>(target),operation,name,result);}
                         else if(operation=="state"&&input->Length()==1)valid=tree_state(Object::cast_to<AnimationTree>(target),"state",StringName(),result);
@@ -2240,10 +2342,16 @@ namespace jsb
                 args[i] = &values[i];
             }
             if(node->is_class("Parallax2D")&&method_text=="set_scale"&&!values.empty()){const Vector2 scale=values[0];if(scale.x<=0||scale.y<=0){fail("E_PARALLAX_BUDGET: positive scale required");return;}}
+
+#if !defined(_3D_DISABLED)
             if(Skeleton3D* skeleton=Object::cast_to<Skeleton3D>(node))if(method_text.contains("bone_")&&!values.empty()&&values[0].get_type()==Variant::INT&&(int64_t(values[0])<0||int64_t(values[0])>=skeleton->get_bone_count())){fail("E_SKELETON_BONE: bone index outside skeleton");return;}
+#endif
             if(node->is_class("TabContainer")&&method_text=="set_current_tab"){const int count=node->call("get_tab_count");if(values.empty()||int64_t(values[0])<0||int64_t(values[0])>=count){fail("E_TAB_INDEX: tab index outside current children");return;}}
             if((node->is_class("ShapeCast2D")||node->is_class("ShapeCast3D"))&&(method_text=="get_collider"||method_text=="get_collision_point"||method_text=="get_collision_normal")){const int count=node->call("get_collision_count");if(values.empty()||int64_t(values[0])<0||int64_t(values[0])>=count){fail("E_SHAPE_INDEX: collision index outside current results");return;}}
+
+#if !defined(_3D_DISABLED)
             if((method_text=="get_blend_shape_value"||method_text=="set_blend_shape_value")&&node->is_class("MeshInstance3D")){const int count=Object::cast_to<MeshInstance3D>(node)->get_blend_shape_count();if(values.empty()||int64_t(values[0])<0||int64_t(values[0])>=count){fail("E_BLEND_INDEX: index outside mesh blend shapes");return;}}
+#endif
             if(method_text=="set_update_mode"&&(values.empty()||int64_t(values[0])<0||int64_t(values[0])>4)){fail("E_VIEWPORT_MODE: invalid update mode");return;}
             if(method_text=="queue"&&node->is_class("AnimationPlayer")&&(values.empty()||!Object::cast_to<AnimationPlayer>(node)->has_animation(values[0]))){fail("E_ANIMATION_NAME: unknown queued clip");return;}
             Callable::CallError error;

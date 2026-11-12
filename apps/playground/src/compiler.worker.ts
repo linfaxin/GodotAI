@@ -4,23 +4,29 @@ import {decodeProjectText,readProjectBooleanSetting} from '@godot-js/react-build
 import {prepareScriptRename} from '@godot-js/react-build/script-renames';
 import {projectScript,projectModulePath} from '@godot-js/react-build/project-modules';
 import {compileEngineProject} from "./engine-project";
-import {loadReactModules,loadEngineRelease,fetchReleaseAsset,loadDemoRuntime,loadDemoDeclarations} from "./engine-assets";
+import {loadReactModules,loadEngineRelease,fetchReleaseAsset,loadDemoRuntime,loadDemoDeclarations,initializeReleaseContext,type ReleaseContext} from "./engine-assets";
 import {DEMO_INPUT_SOURCE} from "./demo-input-source";
 import {moduleCandidates} from "./module-resolution";
 import type {TypeDiagnostic} from './compiler-types';
-interface Request {id:number;kind?:'compile'|'check'|'completion'|'hover'|'rename';source?:string;file?:string;files?:Record<string,string|number[]>;entry?:string;path?:string;newPath?:string;offset?:number;runtime?:'godot'|'react';mainScene?:string;controls?:Record<string,number>;mode?:'development'|'production'}
-let declarations:Record<string,string>;
-const ready=(async()=>{const release=await loadEngineRelease();declarations=JSON.parse(new TextDecoder().decode(await fetchReleaseAsset(release.api.typeSnapshot)));})();
+interface Request {id:number;kind?:'compile'|'check'|'completion'|'hover'|'rename';source?:string;file?:string;files?:Record<string,string|number[]>;entry?:string;path?:string;newPath?:string;offset?:number;runtime?:'godot'|'react';mainScene?:string;controls?:Record<string,number>;mode?:'development'|'production';engineProfile?:string;demoApiVersion?:number;releaseContext?:ReleaseContext}
+let declarations:Record<string,string>|undefined;
+async function initialize(request:Request){
+ if(!request.releaseContext)throw Error('E_RELEASE_CONTEXT_REQUIRED');
+ const context=await initializeReleaseContext(request.releaseContext);
+ if(request.engineProfile!==context.engineProfile)throw Error('E_PROJECT_ENGINE_PROFILE');
+ if(!declarations){const release=await loadEngineRelease();declarations=JSON.parse(new TextDecoder().decode(await fetchReleaseAsset(release.api.typeSnapshot)));}
+ return context;
+}
 const options:ts.CompilerOptions={target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS,moduleResolution:ts.ModuleResolutionKind.Node10,jsx:ts.JsxEmit.React,strict:true,skipLibCheck:true,esModuleInterop:true,lib:['lib.es2022.d.ts'],ignoreDeprecations:'6.0',inlineSourceMap:true,inlineSources:true,resolveJsonModule:true,allowJs:true,rewriteRelativeImportExtensions:true,outDir:"/__emit"};
 self.onmessage=async(event:MessageEvent<Request>)=>{
  const request=event.data,{id,kind='compile'}=request;
  try{
-  await ready;
+  const releaseContext=await initialize(request);
   const runtime=request.runtime??'react';
   if(runtime!=='godot'&&runtime!=='react')throw Error('项目运行模式仅支持 godot 和 react');
   const allFiles=request.files??{['/src/'+request.file]:request.source??''};
   if(kind==='rename'){self.postMessage({id,renamePlan:prepareScriptRename(allFiles,request.path!,request.newPath!)});return;}
-  let activeDeclarations=declarations;
+  let activeDeclarations=declarations!;
   {
    const release=await loadEngineRelease(),configuration=decodeProjectText(allFiles['/project.godot']);
    const camel=readProjectBooleanSetting(configuration??'','GodotJS','runtime/core/camel_case_bindings_enabled')??false;
@@ -75,11 +81,12 @@ self.onmessage=async(event:MessageEvent<Request>)=>{
     const release=await loadEngineRelease();
     const sdk:Partial<Awaited<ReturnType<typeof loadReactModules>>>=useReact?await loadReactModules(request.mode??'production'):{};
     const demo=usesDemo?await loadDemoRuntime():undefined;
+    if(demo&&request.demoApiVersion!==undefined&&request.demoApiVersion!==demo.demoApiVersion)throw Error('E_DEMO_API_VERSION');
     const files=demo?{...allFiles,'/.playground/demo-input.ts':DEMO_INPUT_SOURCE,'/.playground/demo-resources.pck':Array.from(demo.resources)}:allFiles;
     const result=await compileEngineProject({files,runtime,entry,mainScene:request.mainScene,...sdk,
      ...(demo?{runtimeModules:{...sdk.runtimeModules,'@playground/api':demo.runtime},props:{controls:request.controls??{}}}:{}),
     });
-    self.postMessage({id,code:'',diagnostics:[...diagnostics,...result.diagnostics.map(d=>({...d,file:d.file?.startsWith('res://')?'/'+d.file.slice(6):d.file}))],pack:result.pack,manifest:{...result.manifest,engineReleaseId:release.id}},[result.pack.buffer]);return;
+    self.postMessage({id,code:'',diagnostics:[...diagnostics,...result.diagnostics.map(d=>({...d,file:d.file?.startsWith('res://')?'/'+d.file.slice(6):d.file}))],pack:result.pack,manifest:{...result.manifest,engineReleaseId:release.id,engineProfile:release.runtimeProfile,releaseContext,...(demo?{demoApiVersion:demo.demoApiVersion,demoDescriptorHash:demo.demoDescriptorHash}:{})}},[result.pack.buffer]);return;
    }
    self.postMessage({id,code:'',diagnostics});
   }finally{service.dispose();}

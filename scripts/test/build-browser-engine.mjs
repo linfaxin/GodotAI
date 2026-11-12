@@ -1,16 +1,17 @@
 #!/usr/bin/env node
 // Build provenance is collected where SCons actually runs. Merely pointing at
 // a source header and an unrelated template is never source certification.
-import { readFile, readdir, mkdir, rm, cp, lstat, readlink, copyFile } from 'node:fs/promises';
+import { readFile, writeFile, readdir, mkdir, rm, cp, lstat, readlink, copyFile } from 'node:fs/promises';
 import { createWriteStream, existsSync } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
 import { dirname, resolve, basename, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { canonical, digest, fail, options, required, writeJson } from '../release/web-release-utils.mjs';
 import { applyWebEnginePatches } from '../release/patch-web-engine.mjs';
+import {getEngineProfile,engineBuildArgs,validateEngineProfile} from '../release/engine-profiles.mjs';
 
 const moduleRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
-const excluded = new Set(['.git', 'node_modules', '.godot', '__pycache__', 'bin', 'obj', 'out', 'dist', 'work', '.browser-engine']);
+const excluded = new Set(['.git', 'node_modules', '.godot', '__pycache__', 'bin', 'obj', 'out', 'dist', 'dist-conformance', 'dist-2d-debug', 'dist-2d-release', 'dist-full-release', 'work', '.browser-engine']);
 const generated = /(?:\.(?:o|os|obj|a|pdb|ilk|wasm|zip|tgz|pyc)$|\.gen\.(?:h|cpp)$|^\.scons)/;
 // SCsub unconditionally reads both runtime/editor preset inputs while producing
 // jsb_project_preset.gen.cpp, including skip_js_runtime=yes template builds.
@@ -83,12 +84,13 @@ async function execute(command, args, cwd, logPath) {
   });
 }
 export async function buildBrowserEngine(configuration) {
+  const runtimeProfile=getEngineProfile(configuration.profile??configuration.runtimeProfile??'full-engine-v1').id;
   const reportFile = resolve(required(configuration.out, '--out'));
   const builder = { path: 'scripts/test/build-browser-engine.mjs', sha256: digest(await readFile(fileURLToPath(import.meta.url))) };
   if (configuration['existing-template']) {
     if (!configuration.development) fail('E_BROWSER_UNCERTIFIED', '--existing-template requires --development; its source provenance cannot be reconstructed');
     const template = resolve(configuration['existing-template']);
-    const report = { schemaVersion: 1, kind: 'godot-js-browser-engine-build', status: 'existing-development', sourceCertified: false, builder,
+    const report = { schemaVersion: 1, kind: 'godot-js-browser-engine-build', runtimeProfile:configuration.profile??configuration.runtimeProfile??'legacy-profiles-v1', status: 'existing-development', sourceCertified: false, builder,
       godotVersion: configuration['godot-version'] ?? 'unknown', engineTarget: configuration.target ?? 'unknown', pckVersion: 3,
       source: { commit: 'unknown', snapshotHash: 'unknown', observation: 'An existing template is not bound to the current checkout.' }, godotSource: { commit: 'unknown', snapshotHash: 'unknown' },
       recipe: { command: 'unknown', args: [], observation: 'Original executed build recipe is unavailable.' },
@@ -124,6 +126,14 @@ export async function buildBrowserEngine(configuration) {
   }
   if (!existsSync(resolve(destinationModule, 'impl/web/js/jsbb.impl.js'))) fail('E_BROWSER_BRIDGE', 'Build @godot-js/web-bridge first; generated impl/web/js/jsbb.impl.js is a required snapshotted build input');
   const patches = await applyWebEnginePatches(destination, { python: configuration.python ?? 'python3' });
+  // Capture SCons' final environment after target/platform/module resolution.
+  // This hook is part of the attested SConstruct bytes and never touches upstream.
+  const featureEvidencePath='bin/godotjs-web-build-features.json';
+  const featureKeys=['disable_3d','disable_physics_3d','disable_navigation_3d','disable_xr','disable_advanced_gui','disable_physics_2d','disable_navigation_2d','threads','dlink_enabled','opengl3','vulkan','debug_symbols','lto','optimize','target','modules_enabled_by_default','linkflags'];
+  const hook='\n# GodotJS: record the resolved environment, not just requested CLI flags.\nimport json as _godotjs_json\nimport os as _godotjs_os\n_godotjs_os.makedirs("bin", exist_ok=True)\nwith open('+JSON.stringify(featureEvidencePath)+', "w", encoding="utf-8") as _godotjs_report:\n    _godotjs_values = {key: env.get(key) for key in '+JSON.stringify(featureKeys)+'}\n    _godotjs_values["resolvedLinkFlags"] = [str(flag) for flag in env.get("LINKFLAGS", [])]\n    _godotjs_json.dump(_godotjs_values, _godotjs_report, sort_keys=True)\n';
+  const sconstructPath=resolve(destination,'SConstruct');
+  const sconstruct=await readFile(sconstructPath,'utf8');
+  await writeFile(sconstructPath,sconstruct+hook);
   const source = await snapshotBrowserSources(destinationModule, { module: true });
   source.commit = git(moduleRoot, ['rev-parse', 'HEAD'])?.trim() ?? 'unknown'; source.dirty = git(moduleRoot, ['status', '--porcelain'])?.trim() ?? 'unknown';
   const godotSource = await snapshotBrowserSources(destination);
@@ -131,12 +141,11 @@ export async function buildBrowserEngine(configuration) {
   const target = configuration.target ?? 'template_debug';
   if (!['template_debug', 'template_release'].includes(target)) fail('E_BROWSER_TARGET', 'Only template_debug/template_release are supported');
   const scons = configuration.scons ?? 'scons';
-  const args = ['platform=web', `target=${target}`, 'arch=wasm32', 'threads=no', 'dlink_enabled=no', 'use_quickjs_ng=no', 'skip_js_runtime=yes',
-    'modules_enabled_by_default=yes', 'module_GodotJS_enabled=yes', 'module_text_server_fb_enabled=yes', 'module_godotai_api_probe_enabled=no',
-    'opengl3=yes', 'vulkan=no', 'debug_symbols=no', 'lto=none', 'use_closure_compiler=no', 'tests=no', `-j${configuration.jobs ?? 4}`];
-  const toolchains = { emscripten: await toolVersion(configuration.emcc ?? 'emcc', ['--version']), scons: await toolVersion(scons, ['--version']), python: await toolVersion(configuration.python ?? 'python3', ['--version']) };
-  const recipe = { command: scons, args, cwd: 'independent-build-tree', builderSha256: builder.sha256, patches, generatedNativeInputs: nativeBundles.map(name => `scripts/out/${name}`) };
-  const report = { schemaVersion: 1, kind: 'godot-js-browser-engine-build', runtimeProfile: 'full-engine-v1', status: 'snapshotted', source, godotSource, builder, toolchains, recipe, recipeSha256: digest(canonical(recipe)), engineTarget: target, pckVersion: 3 };
+  const args=engineBuildArgs({profile:runtimeProfile,target,jobs:configuration.jobs??4,lto:configuration.lto??'none',moduleMode:configuration['module-mode']??'baseline'});
+  const environment=Object.fromEntries(['EMCC_CORES','BINARYEN_CORES'].filter(name=>process.env[name]!==undefined).map(name=>[name,process.env[name]]));
+  const toolchains = { environment, emscripten: await toolVersion(configuration.emcc ?? 'emcc', ['--version']), scons: await toolVersion(scons, ['--version']), python: await toolVersion(configuration.python ?? 'python3', ['--version']) };
+  const recipe = { command: scons, args, environment, cwd: 'independent-build-tree', builderSha256: builder.sha256, patches, generatedNativeInputs: nativeBundles.map(name => `scripts/out/${name}`), featureCapture:{path:featureEvidencePath,hookSha256:digest(hook)} };
+  const report = { schemaVersion: 1, kind: 'godot-js-browser-engine-build', runtimeProfile, requestedArgs:[...args], status: 'snapshotted', source, godotSource, builder, toolchains, recipe, recipeSha256: digest(canonical(recipe)), engineTarget: target, pckVersion: 3 };
   await writeJson(reportFile, report);
   if (configuration['snapshot-only']) return { status: report.status, report: reportFile };
   try {
@@ -146,7 +155,12 @@ export async function buildBrowserEngine(configuration) {
     if (templates.length !== 1) fail('E_BROWSER_TEMPLATE', `Expected one matching archive; found ${templates.length}`);
     const template = resolve(destination, 'bin', templates[0]), bytes = await readFile(template);
     const modulesHeader = await readFile(resolve(destination, 'modules/modules_enabled.gen.h'), 'utf8');
-    Object.assign(report, await version(destination), { status: 'built', modules: resolvedBrowserModules(modulesHeader), modulesEvidence: { path: 'modules/modules_enabled.gen.h', sha256: digest(modulesHeader) }, template: { path: template, sha256: digest(bytes), bytes: bytes.length }, logSha256: digest(await readFile(`${reportFile}.log`)) });
+    const modules=resolvedBrowserModules(modulesHeader);
+    const resolvedOptionsBytes=await readFile(resolve(destination,featureEvidencePath));
+    const resolvedBuildOptions=JSON.parse(resolvedOptionsBytes.toString('utf8'));
+    const resolvedFeatures=Object.fromEntries(Object.keys(getEngineProfile(runtimeProfile).features).map(key=>[key,resolvedBuildOptions[key]]));
+    validateEngineProfile(runtimeProfile,{modules,features:resolvedFeatures});
+    Object.assign(report, await version(destination), { status: 'built', modules, resolvedFeatures, resolvedBuildOptions, featuresEvidence:{path:featureEvidencePath,sha256:digest(resolvedOptionsBytes)}, modulesEvidence: { path: 'modules/modules_enabled.gen.h', sha256: digest(modulesHeader) }, template: { path: template, sha256: digest(bytes), bytes: bytes.length }, logSha256: digest(await readFile(`${reportFile}.log`)) });
     // Unknown source archives remain usable locally, never certified by a flag.
     report.sourceCertified = [source.commit, godotSource.commit].every(commit => /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(commit));
     await writeJson(reportFile, report); return { status: 'built', sourceCertified: report.sourceCertified, template, report: reportFile };

@@ -34,7 +34,11 @@
             if(name=="clip_children")return value.get_type()==Variant::INT&&int64_t(value)>=0&&int64_t(value)<=2&&refine_clips(node,node->get_parent(),node,int(value));
             if(name=="custom_aabb")return value.get_type()==Variant::AABB&&refine_aabb(value);
             if(name=="curve"){
-                if(value.is_null())return true;if(Path2D* path=Object::cast_to<Path2D>(node)){Ref<Curve2D> curve=value;return refine_curve_budget(curve,false);}if(Path3D* path=Object::cast_to<Path3D>(node)){Ref<Curve3D> curve=value;return curve.is_valid()&&refine_curve_budget(curve,curve->is_closed());}
+                if(value.is_null())return true;if(Path2D* path=Object::cast_to<Path2D>(node)){Ref<Curve2D> curve=value;return refine_curve_budget(curve,false);}
+#if !defined(_3D_DISABLED)
+                if(Path3D* path=Object::cast_to<Path3D>(node)){Ref<Curve3D> curve=value;return curve.is_valid()&&refine_curve_budget(curve,curve->is_closed());}
+#endif
+
             }
             if(name=="rendering_quadrant_size"||name=="physics_quadrant_size")return value.get_type()==Variant::INT&&int64_t(value)>=1&&int64_t(value)<=256;
             if(name=="y_sort_origin")return value.get_type()==Variant::INT&&int64_t(value)>=-32768&&int64_t(value)<=32767;
@@ -49,9 +53,13 @@
         }
         bool refine_command(Root& root,Owned& owned,Node* node,const String& op,const Array& args,Variant& result){
             const auto integer=[](const Variant& value,int min,int max){return value.get_type()==Variant::FLOAT&&double(value)==Math::floor(double(value))&&double(value)>=min&&double(value)<=max;};
+
+#if !defined(_3D_DISABLED)
             if(op=="setOverlayShaderParameter"||op=="getOverlayShaderParameter"){
                 const bool set=op=="setOverlayShaderParameter";if(!Object::cast_to<GeometryInstance3D>(node)||args.size()!=(set?2:1)||args[0].get_type()!=Variant::STRING)return false;Array call;call.push_back(-3.0);for(int j=0;j<args.size();++j)call.push_back(args[j]);return behavior_command(root,owned,node,set?"shader_set":"shader_get",call,result,true);
             }
+#endif
+
             if(node->is_class("MultiMeshInstance2D")||node->is_class("MultiMeshInstance3D")){
                 Ref<MultiMesh> mesh=node->get("multimesh");if(mesh.is_null())return false;const int count=mesh->get_instance_count();
                 if(op=="getVisibleInstanceCount"&&args.is_empty()){result=mesh->get_visible_instance_count();return true;}
@@ -66,11 +74,15 @@
                 if((op=="getClosestCurvePoint"||op=="getClosestCurveOffset")&&args.size()==1&&args[0].get_type()==Variant::VECTOR2){const Vector2 point=args[0];if(Math::abs(point.x)>1e6||Math::abs(point.y)>1e6)return false;result=op=="getClosestCurvePoint"?Variant(length>0?curve->get_closest_point(point):(curve->get_point_count()?curve->get_point_position(0):Vector2())):Variant(length>0?curve->get_closest_offset(point):0.0);return true;}
                 if((op=="sampleCurve"||op=="sampleCurveTransform")&&args.size()==(op=="sampleCurve"?2:3)&&args[0].get_type()==Variant::FLOAT&&Math::abs(double(args[0]))<=1e6&&args[1].get_type()==Variant::BOOL&&(args.size()==2||args[2].get_type()==Variant::BOOL)){const double at=CLAMP(double(args[0]),0.0,length);const Vector2 point=length>0?curve->sample_baked(at,args[1]):(curve->get_point_count()?curve->get_point_position(0):Vector2());result=op=="sampleCurve"?Variant(point):Variant(length>0?curve->sample_baked_with_rotation(at,args[1]):Transform2D(0,point));return true;}return false;
             }
+
+#if !defined(_3D_DISABLED)
             if(Path3D* path=Object::cast_to<Path3D>(node)){
                 const Ref<Curve3D> curve=path->get_curve();if(curve.is_null()||!refine_curve_budget(curve,curve->is_closed()))return false;const double length=curve->get_baked_length();if(op=="getCurveLength"&&args.is_empty()){result=length;return true;}
                 if((op=="getClosestCurvePoint"||op=="getClosestCurveOffset")&&args.size()==1&&args[0].get_type()==Variant::VECTOR3){const Vector3 point=args[0];for(int j=0;j<3;++j)if(Math::abs(point[j])>1e6)return false;result=op=="getClosestCurvePoint"?Variant(length>0?curve->get_closest_point(point):(curve->get_point_count()?curve->get_point_position(0):Vector3())):Variant(length>0?curve->get_closest_offset(point):0.0);return true;}
                 if((op=="sampleCurve"||op=="sampleCurveTransform")&&args.size()==(op=="sampleCurve"?2:3)&&args[0].get_type()==Variant::FLOAT&&Math::abs(double(args[0]))<=1e6&&args[1].get_type()==Variant::BOOL&&(args.size()==2||args[2].get_type()==Variant::BOOL)){const double at=CLAMP(double(args[0]),0.0,length);const Vector3 point=length>0?curve->sample_baked(at,args[1]):(curve->get_point_count()?curve->get_point_position(0):Vector3());result=op=="sampleCurve"?Variant(point):Variant(length>0?curve->sample_baked_with_rotation(at,args[1],args[2]):Transform3D(Basis(),point));return true;}return false;
             }
+#endif
+
             if(TileMapLayer* map=Object::cast_to<TileMapLayer>(node)){if(op=="updateInternals"&&args.is_empty()){map->update_internals();return true;}return false;}
             if(RichTextLabel* label=Object::cast_to<RichTextLabel>(node)){if(op=="getHintAt"&&args.size()==1&&args[0].get_type()==Variant::VECTOR2){const Vector2 at=args[0];if(at.x<0||at.y<0||at.x>label->get_size().x||at.y>label->get_size().y)return false;const String hint=static_cast<Control*>(label)->get_tooltip(at);if(hint.length()>256)return false;result=hint;return true;}return false;}
             TextEdit* edit=Object::cast_to<TextEdit>(node);if(!edit)return false;
@@ -92,8 +104,16 @@
         bool prepare_refinement_prefab(Root& root,Node* scope,Node* node){
             if(scope==node&&(!refine_clips(node,node->get_parent())||!refine_batch_budget(root,nullptr,refine_subtree_bytes(node))))return false;
             if(node->is_class("MultiMeshInstance2D")||node->is_class("MultiMeshInstance3D")){Ref<MultiMesh> source=node->get("multimesh");node->set("multimesh",refine_copy_batch(source));}
+
+#if !defined(_3D_DISABLED)
             if(GeometryInstance3D* geometry=Object::cast_to<GeometryInstance3D>(node)){if(!refine_aabb(geometry->get_custom_aabb()))return false;Ref<ShaderMaterial> shader=geometry->get_material_overlay();if(shader.is_valid())geometry->set_material_overlay(shader->duplicate());}
+#endif
+
             if(Path2D* path=Object::cast_to<Path2D>(node))if(path->get_curve().is_valid()&&!refine_curve_budget(path->get_curve(),false))return false;
+
+#if !defined(_3D_DISABLED)
             if(Path3D* path=Object::cast_to<Path3D>(node))if(path->get_curve().is_valid()&&!refine_curve_budget(path->get_curve(),path->get_curve()->is_closed()))return false;
+#endif
+
             return true;
         }

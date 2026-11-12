@@ -4,13 +4,37 @@ import {fileURLToPath} from "node:url";
 import {spawnSync} from "node:child_process";
 import {createHash} from "node:crypto";
 const app=path.resolve(path.dirname(fileURLToPath(import.meta.url)),"..");
-const repo=path.resolve(app,"../.."),project=path.join(app,"project");
+const repo=path.resolve(app,"../..");
+import {getEngineProfile} from "../../../scripts/release/engine-profiles.mjs";
+import {DEMO_API_VERSION,assertResourceManifest} from "./profile-resources.mjs";
 const run=(bin,args)=>{const r=spawnSync(bin,args,{encoding:"utf8",maxBuffer:16*1024*1024});const errors=(r.stderr??'').split('\n').filter(line=>/^(?:ERROR|SCRIPT ERROR):/.test(line)&&line!=='ERROR: Godot was compiled without fontconfig, system font support is disabled.');if(r.status!==0||errors.length)throw Error(`${bin} failed (${r.status})\n${r.stdout}\n${r.stderr}`);return r.stdout;};
-export async function prepareAssets(){
+export async function describeResourceTool(executable){
+  if(!executable)throw Error("Set GODOT_IMPORTER to the pinned Godot 4.6.1 importer");
+  let file=executable;
+  if(!file.includes(path.sep)){file=undefined;for(const directory of (process.env.PATH??"").split(path.delimiter)){const candidate=path.join(directory,executable);try{await fs.access(candidate,fs.constants.X_OK);file=candidate;break;}catch{}}if(!file)throw Error("Resource tool not found: "+executable);}
+  const binary=await fs.realpath(file),version=run(binary,["--version"]).trim();
+  if(!/^4\.6\.1(?:\.|$)/.test(version))throw Error("Resource tools must use Godot 4.6.1: "+version);
+  return {path:binary,version,sha256:createHash("sha256").update(await fs.readFile(binary)).digest("hex")};
+}
+export async function prepareAssets(options={}){
+  const preparerSha256=createHash('sha256').update(await fs.readFile(fileURLToPath(import.meta.url))).digest('hex');
+  const runtimeProfile=options.runtimeProfile??"full-engine-v1",profile=getEngineProfile(runtimeProfile),twoD=runtimeProfile==="engine-2d-v1";
+  const project=path.resolve(options.project??path.join(repo,"work/playground",runtimeProfile,"resource-project"));
+  const temp=path.resolve(options.workDirectory??path.join(repo,"work/playground",runtimeProfile,"asset-project")),derived=path.join(project,"assets/derived");
+  if(project===temp||project.startsWith(temp+path.sep)||temp.startsWith(project+path.sep))throw Error("Resource and conversion projects must be independent directories");
+  if(temp===app||temp.startsWith(app+path.sep)||app.startsWith(temp+path.sep))throw Error('Resource conversion work directory must be outside the application source');
+  const importer=options.importer??process.env.GODOT_IMPORTER;
+  const importerTool=importer?await describeResourceTool(importer):twoD?undefined:await describeResourceTool(importer);
+  const inputs={};
+  const copyInput=async(source,destination)=>{const bytes=await fs.readFile(source);inputs[path.relative(app,source).split(path.sep).join("/")]=createHash("sha256").update(bytes).digest("hex");await fs.copyFile(source,destination);};
   const sources=JSON.parse(await fs.readFile(path.join(app,"third-party/sources.json"),"utf8"));
   for(const source of sources){const data=await fs.readFile(path.join(app,source.local));if(createHash("sha256").update(data).digest("hex")!==source.sha256)throw Error(`Upstream asset checksum mismatch: ${source.local}`);}
-  const temp=path.join(repo,"work/playground/asset-project"),derived=path.join(project,"assets/derived");
-  await fs.mkdir(temp,{recursive:true});await fs.mkdir(derived,{recursive:true});
+  await fs.mkdir(project,{recursive:true});
+  await fs.rm(path.join(project,"assets"),{recursive:true,force:true});
+  await fs.rm(temp,{recursive:true,force:true});await fs.mkdir(temp,{recursive:true});await fs.mkdir(derived,{recursive:true});
+  let parts={};
+  const assets={};
+  if(!twoD){
   await fs.writeFile(path.join(temp,"project.godot"),'config_version=5\n[application]\nconfig/name="Playground asset conversion"\n[rendering]\nrenderer/rendering_method="gl_compatibility"\n');
   await fs.cp(path.join(app,"third-party/kenney/models"),path.join(temp,"models"),{recursive:true});
   for(const name of ["city","racing"])await fs.cp(path.join(app,`third-party/${name}/models`),path.join(temp,name),{recursive:true});
@@ -21,21 +45,21 @@ export async function prepareAssets(){
     {id:"race-car",source:"racing/vehicle-truck-red.glb",parts:true},
     {id:"shards",source:"destruction/cube_fragments.glb",parts:true,collision:true,strictTexture:false}];
   await fs.writeFile(path.join(temp,"models.json"),JSON.stringify(models));
-  await fs.copyFile(path.join(app,"scripts/extract-assets.gd"),path.join(temp,"extract.gd"));
+  await copyInput(path.join(app,"scripts/extract-assets.gd"),path.join(temp,"extract.gd"));
   // Reimport the full source graph, including newly added external GLB textures.
   await fs.rm(path.join(temp,".godot"),{recursive:true,force:true});
-  const godot=process.env.GODOT_IMPORTER??"godot";
+  const godot=importerTool.path;
   run(godot,["--headless","--editor","--path",temp,"--import"]);
   console.log(run(godot,["--headless","--path",temp,"--script","res://extract.gd","--",derived]));
-  const assets={};
   for(const {id,parts} of models)if(!parts)assets[id]={uri:`res://assets/derived/${id}.res`,type:"Mesh"};
-  const parts=JSON.parse(await fs.readFile(path.join(derived,"models.json"),"utf8"));
+  parts=JSON.parse(await fs.readFile(path.join(derived,"models.json"),"utf8"));
   for(const group of Object.values(parts))for(const part of group){assets[part.id]={uri:`res://assets/derived/${part.id}.res`,type:"Mesh"};if(part.shapeId)assets[part.shapeId]={uri:`res://assets/derived/${part.shapeId}.res`,type:"ConvexPolygonShape3D"};}
-  for(const name of ["gem","godot","grass","kenney","spikes"]){const id=`tile-${name}`;await fs.copyFile(path.join(app,`third-party/match3/sprites/tiles/${id}.png`),path.join(derived,`${id}.png`));assets[id]={uri:`res://assets/derived/${id}.png`,type:"Texture2D"};}
-  for(const [id,file] of Object.entries({light:"2d/lights_and_shadows/light.png",floor:"2d/lights_and_shadows/background.png",godotea:"2d/sprite_shaders/godotea.png"})){
-    await fs.copyFile(path.join(app,"third-party/godot",file),path.join(derived,`${id}.png`));assets[id]={uri:`res://assets/derived/${id}.png`,type:"Texture2D"};
   }
-  for(const sound of ["jump","land","coin"]){await fs.copyFile(path.join(app,"third-party/kenney/sounds",`${sound}.ogg`),path.join(derived,`${sound}.ogg`));assets[`sound-${sound}`]={uri:`res://assets/derived/${sound}.ogg`,type:"AudioStream"};}
+  for(const name of ["gem","godot","grass","kenney","spikes"]){const id=`tile-${name}`;await copyInput(path.join(app,`third-party/match3/sprites/tiles/${id}.png`),path.join(derived,`${id}.png`));assets[id]={uri:`res://assets/derived/${id}.png`,type:"Texture2D"};}
+  for(const [id,file] of Object.entries({light:"2d/lights_and_shadows/light.png",floor:"2d/lights_and_shadows/background.png",godotea:"2d/sprite_shaders/godotea.png"})){
+    await copyInput(path.join(app,"third-party/godot",file),path.join(derived,`${id}.png`));assets[id]={uri:`res://assets/derived/${id}.png`,type:"Texture2D"};
+  }
+  for(const sound of ["jump","land","coin"]){await copyInput(path.join(app,"third-party/kenney/sounds",`${sound}.ogg`),path.join(derived,`${sound}.ogg`));assets[`sound-${sound}`]={uri:`res://assets/derived/${sound}.ogg`,type:"AudioStream"};}
   const resources={
     "platform-shape":['BoxShape3D','size = Vector3(3, 0.6, 3)'],
     "player-shape":['CapsuleShape3D','radius = 0.25\nheight = 1.1'],
@@ -49,15 +73,23 @@ export async function prepareAssets(){
     sky:['Environment','background_mode = 1\nbackground_color = Color(0.42, 0.72, 0.82, 1)\nambient_light_source = 3\nambient_light_color = Color(0.72, 0.84, 1, 1)\nambient_light_energy = 0.65\ntonemap_mode = 0'],
   };
   for(const [name,rgba] of Object.entries({mint:[.22,.65,.48,1],violet:[.52,.35,.85,1],gold:[1,.62,.16,1],dark:[.12,.16,.22,1],stone:[.35,.42,.5,1],ghost:[.4,1,.75,.45]}))resources[`material-${name}`]=['StandardMaterial3D',`albedo_color = Color(${rgba.join(', ')})\nroughness = 0.8\n${rgba[3]<1?'transparency = 1\n':''}`];
+  if(twoD)for(const id of Object.keys(resources))if(id!=="occluder")delete resources[id];
   for(const [id,[type,body]] of Object.entries(resources)){await fs.writeFile(path.join(derived,`${id}.tres`),`[gd_resource type="${type}" format=3]\n\n[resource]\n${body}\n`);assets[id]={uri:`res://assets/derived/${id}.tres`,type:type.endsWith("Mesh")?"Mesh":type};}
   for(const [index,name] of ["plasma","portal","hologram"].entries()){
+    await fs.mkdir(path.join(project,'shaders'),{recursive:true});
+    await copyInput(path.join(app,'project/shaders',`${name}.gdshader`),path.join(project,'shaders',`${name}.gdshader`));
     const image=index===2?'[ext_resource type="Texture2D" path="res://assets/derived/godotea.png" id="2"]\n':"";
     await fs.writeFile(path.join(derived,`shader-${index}.tres`),`[gd_resource type="ShaderMaterial" load_steps=${index===2?3:2} format=3]\n[ext_resource type="Shader" path="res://shaders/${name}.gdshader" id="1"]\n${image}\n[resource]\nshader = ExtResource("1")\n${index===2?'shader_parameter/image = ExtResource("2")\n':""}`);
     assets[`shader-${index}`]={uri:`res://assets/derived/shader-${index}.tres`,type:"ShaderMaterial"};
   }
+  assertResourceManifest({assets,models:parts},runtimeProfile);
   await fs.mkdir(path.join(project,"generated"),{recursive:true});
   await fs.writeFile(path.join(project,"generated/assets.js"),`exports.assets = ${JSON.stringify(assets)};\nexports.models = ${JSON.stringify(parts)};\n`);
   await fs.writeFile(path.join(project,"asset-hub.tres"),`[gd_resource type="Resource" load_steps=${Object.keys(assets).length+1} format=3]\n${Object.entries(assets).map(([id,a])=>`[ext_resource type="${a.type}" path="${a.uri}" id="${id}"]`).join("\n")}\n[resource]\nmetadata/assets = [${Object.keys(assets).map(id=>`ExtResource("${id}")`).join(", ")}]\n`);
+  const receipt={schemaVersion:1,runtimeProfile,demoApiVersion:DEMO_API_VERSION,demoIds:profile.demoIds,importer:importerTool??null,inputs:twoD?inputs:{...Object.fromEntries(sources.map(source=>[source.local,source.sha256])),...inputs},assetIds:Object.keys(assets).sort(),models:parts,importSettings:{renderer:"gl_compatibility",cleanImport:true},preparerSha256};
+  if(createHash('sha256').update(await fs.readFile(fileURLToPath(import.meta.url))).digest('hex')!==preparerSha256)throw Error('Resource preparer changed during preparation');
+  if(importerTool&&createHash('sha256').update(await fs.readFile(importerTool.path)).digest('hex')!==importerTool.sha256)throw Error('Resource importer changed during preparation');
+  await fs.writeFile(path.join(project,"generated/resource-inputs.json"),JSON.stringify(receipt,null,2)+"\n");
   return assets;
 }
 if(process.argv[1]===fileURLToPath(import.meta.url))await prepareAssets();

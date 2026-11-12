@@ -4,7 +4,12 @@ import {renamedProjectFiles} from './project-rename.ts';
 import type {ScriptRenamePlan} from '@godot-js/react-build/script-renames';
 
 export type ProjectRuntime='godot'|'react';
-export interface EditorProject {schemaVersion:2;runtime:ProjectRuntime;demoId:string;entry:string;mainScene?:string;mainSceneSource?:'project'|'explicit';selected:string;files:Record<string,string|number[]>;controls:Record<string,number>;mode:'production'|'development';migration?:{fromSchemaVersion:1|2;removedRenderer?:boolean;originalDocument:unknown}}
+export const PROJECT_SCHEMA_VERSION=3;
+export const DEFAULT_ENGINE_PROFILE='full-engine-v1';
+export function validEngineProfile(value:unknown):value is string {return typeof value==='string'&&/^[a-z][a-z0-9._-]{0,127}$/.test(value);}
+export function projectProfileMatches(project:Pick<EditorProject,'engineProfile'>,profile:string):boolean{return project.engineProfile===profile;}
+
+export interface EditorProject {schemaVersion:3;engineProfile:string;demoApiVersion?:number;runtime:ProjectRuntime;demoId:string;entry:string;mainScene?:string;mainSceneSource?:'project'|'explicit';selected:string;files:Record<string,string|number[]>;controls:Record<string,number>;mode:'production'|'development';migration?:{fromSchemaVersion:1|2|3;removedRenderer?:boolean;originalDocument:unknown}}
 export function canRenameProjectFile(project:EditorProject,path:string):boolean {
  return /\.(?:[jt]sx?|tscn)$/i.test(path)&&!(/\.d\.[cm]?ts$/i.test(path));
 }
@@ -17,10 +22,14 @@ export function filePath(value:string):string {
 }
 export function parseProject(value:unknown):EditorProject {
  const document=value as any;
- if(document?.schemaVersion!==undefined&&![1,2].includes(document.schemaVersion))throw Error('不支持的项目版本');
- const data=document?.project&&[1,2].includes(document.schemaVersion)?document.project:document;
+ if(document?.schemaVersion!==undefined&&![1,2,3].includes(document.schemaVersion))throw Error('不支持的项目版本');
+ const data=document?.project&&[1,2,3].includes(document.schemaVersion)?document.project:document;
  const version=document?.schemaVersion??data?.schemaVersion??1;
- const removedRuntime=version===1||data?.runtime==='legacy-react';
+ const removedRuntime=version===1||(version<3&&data?.runtime==='legacy-react');
+ const engineProfile=version===3?data?.engineProfile:DEFAULT_ENGINE_PROFILE;
+ if(!validEngineProfile(engineProfile))throw Error('项目须指定有效的引擎配置 engineProfile');
+ const demoApiVersion=data?.demoApiVersion;
+ if(demoApiVersion!==undefined&&(!Number.isSafeInteger(demoApiVersion)||demoApiVersion<1))throw Error('无效的示例 API 版本');
  const runtime:ProjectRuntime=removedRuntime?'react':data?.runtime;
  if(!['godot','react'].includes(runtime))throw Error('项目须指定 godot 或 react 运行模式');
  if(!data||typeof data!=='object'||!data.files||typeof data.files!=='object'||Array.isArray(data.files))throw Error('项目缺少 files');
@@ -42,10 +51,10 @@ export function parseProject(value:unknown):EditorProject {
  const controls:Record<string,number>={};for(const [k,v] of Object.entries(data.controls??{})){if(typeof v!=='number'||!Number.isFinite(v))throw Error('无效场景参数');controls[k]=v;}
  const selection=typeof data.selected==='string'?filePath(data.selected):'';
  const selected=Object.hasOwn(files,selection)?selection:entry||(mainScene?filePath(mainScene.slice(6)):Object.keys(files)[0]);
- const migration=removedRuntime?{fromSchemaVersion:version as 1|2,removedRenderer:true,originalDocument:structuredClone(value)}:data.migration;
- if(migration&&(![1,2].includes(migration.fromSchemaVersion)||!Object.hasOwn(migration,'originalDocument')))throw Error('无效迁移备份');
+ const migration=data.migration??(version<3?{fromSchemaVersion:version as 1|2,...(removedRuntime?{removedRenderer:true}:{}),originalDocument:structuredClone(value)}:undefined);
+ if(migration&&(![1,2,3].includes(migration.fromSchemaVersion)||!Object.hasOwn(migration,'originalDocument')))throw Error('无效迁移备份');
  const demoId=String(data.demoId??(runtime==='godot'?'native':'react'));
- return {schemaVersion:2,runtime,demoId,entry,...(mainScene?{mainScene,mainSceneSource}:{}),selected,files,controls,mode:(data.mode??data.config?.mode)==='development'?'development':'production',...(migration?{migration:structuredClone(migration)}:{})};
+ return {schemaVersion:3,engineProfile,...(demoApiVersion!==undefined?{demoApiVersion}:{}),runtime,demoId,entry,...(mainScene?{mainScene,mainSceneSource}:{}),selected,files,controls,mode:(data.mode??data.config?.mode)==='development'?'development':'production',...(migration?{migration:structuredClone(migration)}:{})};
 }
 /** Read project.godot without rewriting it or interpreting scene/resource schemas. */
 export function resolveProjectMainScene(project:{files:Record<string,string|number[]>;mainScene?:string;mainSceneSource?:'project'|'explicit'}):string|undefined {

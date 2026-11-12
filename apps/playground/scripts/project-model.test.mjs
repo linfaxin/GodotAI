@@ -1,16 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {parseProject,filePath,addProjectFiles,renameProjectFile,canRenameProjectFile,exportProject,resolveProjectMainScene} from '../src/project-model.ts';
+import {parseProject,filePath,addProjectFiles,renameProjectFile,canRenameProjectFile,exportProject,resolveProjectMainScene,projectProfileMatches} from '../src/project-model.ts';
 import {renamedProjectFiles} from '../src/project-rename.ts';
 import {defaultProject,demoProject,migrateDemoProject} from '../src/project-templates.ts';
 import {resolveResourceUidFromCache,resourceUidTextToId} from '@godot-js/react-build/resource-uids';
 import {prepareScriptRename} from '@godot-js/react-build/script-renames';
-const input=()=>({schemaVersion:2,runtime:'react',demoId:'shader',entry:'/src/App.tsx',selected:'/README.md',files:{'/src/App.tsx':'export default function App(){return null;}','/README.md':'说明','/assets/image.png':[0,128,255]},controls:{speed:1},mode:'development'});
+const input=()=>({schemaVersion:3,engineProfile:'full-engine-v1',runtime:'react',demoId:'shader',entry:'/src/App.tsx',selected:'/README.md',files:{'/src/App.tsx':'export default function App(){return null;}','/README.md':'说明','/assets/image.png':[0,128,255]},controls:{speed:1},mode:'development'});
 test('project import round-trips text, binary attachments, selection and runtime settings',()=>{
  const source=input(),project=parseProject(JSON.parse(JSON.stringify(source)));assert.deepEqual(project,source);
  project.files['/assets/image.png'][0]=42;assert.equal(source.files['/assets/image.png'][0],0);
  const legacy=parseProject({files:source.files,config:{entry:'/src/App.tsx',mode:'development'}});assert.equal(legacy.entry,'/src/App.tsx');assert.equal(legacy.mode,'development');
- assert.equal(legacy.schemaVersion,2);assert.equal(legacy.runtime,'react');
+ assert.equal(legacy.schemaVersion,3);assert.equal(legacy.runtime,'react');
  assert.equal(legacy.demoId,'react');
  for(const runtime of ['godot','react'])assert.equal(parseProject({...source,runtime,demoId:undefined}).demoId,runtime==='godot'?'native':'react');
 });
@@ -28,7 +28,7 @@ test('original exported documents retain source, selection and configuration',()
 });
 test('migration retains exact original exports and attachments across later edits and reimport',()=>{
  const original={schemaVersion:1,runtimeRelease:'old',project:{...input(),schemaVersion:1,config:{profileId:'old-profile'},files:{...input().files,'/project.godot':'[application]\nconfig/name="Keep original"\nrun/main_scene="res://generated/legacy-host.tscn"\n','/assets/scene.scn':[1,2,3]}}};
- const project=parseProject(original);assert.equal(project.runtime,'react');assert.equal(project.schemaVersion,2);
+ const project=parseProject(original);assert.equal(project.runtime,'react');assert.equal(project.schemaVersion,3);
  project.files['/README.md']='edited';project.files['/assets/scene.scn'][0]=9;
  assert.deepEqual(exportProject(project,'original'),original);assert.deepEqual(original.project.files['/assets/scene.scn'],[1,2,3]);
  const reimport=parseProject(exportProject(project));assert.deepEqual(exportProject(reimport,'original'),original);assert.equal(reimport.files['/README.md'],'edited');assert.equal(reimport.runtime,'react');
@@ -43,7 +43,7 @@ test('native scripts and scenes are accepted without filtering native resource d
  assert.equal(parseProject({...native,mainScene:'res://world/Other.scn',files:{...native.files,'/world/Other.scn':[1,2,3]}}).mainScene,'res://world/Other.scn');
  assert.throws(()=>parseProject({...native,files:{'/project.godot':raw}}),/主场景/);
  assert.throws(()=>parseProject({...input(),schemaVersion:2,runtime:undefined}),/运行模式/);
- assert.throws(()=>parseProject({...input(),schemaVersion:3}),/版本/);
+ assert.throws(()=>parseProject({...input(),schemaVersion:4}),/版本/);
 });
 test('project.godot UID main scenes resolve to existing files without config rewrites',()=>{
  const files={'/project.godot':'[application]\nrun/main_scene="uid://native42"\n','/world/Main.tscn':'[gd_scene format=3 uid="uid://native42"]\n[node name="Main" type="Node"]\n'};
@@ -77,7 +77,7 @@ test('binary native main scenes resolve from the original Godot UID cache withou
 });
 test('new project templates explicitly opt into native or React engine runtime',()=>{
  const native=defaultProject(),react=defaultProject('react');assert.equal(native.runtime,'godot');assert.equal(react.runtime,'react');
- assert.equal(native.schemaVersion,2);assert.ok(!native.migration);assert.match(native.files[native.entry],/extends Node2D/);
+ assert.equal(native.schemaVersion,3);assert.ok(!native.migration);assert.match(native.files[native.entry],/extends Node2D/);
  assert.equal(native.mainScene,'res://main.tscn');assert.match(native.files['/project.godot'],/run\/main_scene="res:\/\/main.tscn"/);assert.match(native.files['/main.tscn'],/path="res:\/\/src\/Main.ts"/);assert.match(native.files['/main.tscn'],/\[node name="Main" type="Node2D"\]/);
  assert.match(react.files[react.entry],/import \{EngineNode\} from "@godot-js\/react\/engine"/);assert.match(react.files[react.entry],/import \{Label\} from "godot"/);assert.match(react.files[react.entry],/<EngineNode ctor=\{Label\} native=\{\{text:"Hello React \+ Godot"\}\}/);
  assert.equal(parseProject(native).entry,native.entry);assert.equal(parseProject(react).entry,react.entry);
@@ -199,7 +199,7 @@ test('framework rename boundaries reject resource/declaration edits without chan
 });
 
 test('removed renderer documents upgrade bundled demos only once and retain original edits',()=>{
- const old={...input(),runtime:'legacy-react',entry:'/src/ShaderLab.tsx',selected:'/src/ShaderLab.tsx',files:{'/src/ShaderLab.tsx':'// my old shader changes','/assets/kept.bin':[0,255]}};
+ const old={...input(),schemaVersion:2,runtime:'legacy-react',entry:'/src/ShaderLab.tsx',selected:'/src/ShaderLab.tsx',files:{'/src/ShaderLab.tsx':'// my old shader changes','/assets/kept.bin':[0,255]}};
  const demo={id:'shader',file:'ShaderLab.tsx',source:'export default function Modern(){return null;}',name:'Shader',hint:'Native React',controls:[{key:'speed',value:2}]};
  const migrated=migrateDemoProject(parseProject(old),demo);assert.equal(migrated.runtime,'react');assert.equal(migrated.files[migrated.entry],demo.source);assert.deepEqual(exportProject(migrated,'original'),old);assert.equal(migrated.controls.speed,1);
  migrated.files[migrated.entry]+='\n// native edit after migration';const restored=parseProject(exportProject(migrated));assert.strictEqual(migrateDemoProject(restored,demo),restored);assert.match(restored.files[restored.entry],/native edit after migration/);
@@ -207,7 +207,31 @@ test('removed renderer documents upgrade bundled demos only once and retain orig
 });
 
 test('migrated demo controls respect the new scene bounds while original values remain exportable',()=>{
- const old={...input(),runtime:'legacy-react',entry:'/src/ShaderLab.tsx',files:{'/src/ShaderLab.tsx':'// old shader'},controls:{speed:999}};
+ const old={...input(),schemaVersion:2,runtime:'legacy-react',entry:'/src/ShaderLab.tsx',files:{'/src/ShaderLab.tsx':'// old shader'},controls:{speed:999}};
  const demo={id:'shader',file:'ShaderLab.tsx',source:'export default function App(){return null;}',name:'Shader',hint:'Native React',controls:[{key:'speed',value:1,min:0,max:3}]};
  const next=migrateDemoProject(parseProject(old),demo);assert.equal(next.controls.speed,3);assert.equal(exportProject(next,'original').controls.speed,999);
+});
+
+
+test('schema3 preserves explicit and unknown profile identities and helper API requirements',()=>{
+ for(const engineProfile of ['full-engine-v1','engine-2d-v1','future-native-v8']){
+  const source={...input(),engineProfile,demoApiVersion:1},project=parseProject(source);
+  assert.deepEqual(exportProject(project),source);assert.equal(projectProfileMatches(project,engineProfile),true);
+  assert.equal(projectProfileMatches(project,'another-v1'),false);
+ }
+ for(const engineProfile of [undefined,'','../full',' full-engine-v1','UPPER'])assert.throws(()=>parseProject({...input(),engineProfile}),/engineProfile/);
+ for(const demoApiVersion of [0,-1,1.5,'1'])assert.throws(()=>parseProject({...input(),demoApiVersion}),/API/);
+});
+test('schema2 migrates once to full while retaining an earlier original document chain',()=>{
+ const old={...input(),schemaVersion:2};delete old.engineProfile;
+ const migrated=parseProject(old);assert.equal(migrated.schemaVersion,3);assert.equal(migrated.engineProfile,'full-engine-v1');assert.deepEqual(exportProject(migrated,'original'),old);
+ assert.deepEqual(parseProject(exportProject(migrated)),migrated);
+ const original={schemaVersion:1,project:{config:{entry:old.entry},files:old.files}};
+ const chained={...old,migration:{fromSchemaVersion:1,removedRenderer:false,originalDocument:original}};
+ assert.deepEqual(parseProject(chained).migration,chained.migration);assert.deepEqual(exportProject(parseProject(chained),'original'),original);
+});
+test('native and demo templates bind the requested target profile without cross-profile remapping',()=>{
+ for(const runtime of ['godot','react']){const project=defaultProject(runtime,'engine-2d-v1');assert.equal(project.schemaVersion,3);assert.equal(project.engineProfile,'engine-2d-v1');assert.equal(project.migration,undefined);}
+ const demo={id:'match3',file:'Match3.tsx',source:'export default function App(){return null;}',name:'Match3',hint:'2D',controls:[]};
+ const project=demoProject(demo,'engine-2d-v1');assert.equal(project.engineProfile,'engine-2d-v1');assert.equal(project.demoApiVersion,1);assert.equal(project.demoId,'match3');
 });

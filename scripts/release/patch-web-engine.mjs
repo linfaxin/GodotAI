@@ -7,6 +7,8 @@ import {fileURLToPath,pathToFileURL} from 'node:url';
 import {createHash} from 'node:crypto';
 import {patchAudioLifecycle} from './patch-web-audio-lifecycle.mjs';
 import {patchOptionalPwa} from './patch-web-optional-pwa.mjs';
+import {patchThreadlessGroups} from './patch-web-threadless-groups.mjs';
+import {patchPresentationBoundary} from './patch-web-presentation-boundary.mjs';
 
 const repo=fileURLToPath(new URL('../../',import.meta.url));
 const execute=promisify(execFile),hash=value=>createHash('sha256').update(value).digest('hex');
@@ -34,6 +36,8 @@ export async function applyWebEnginePatches(root,{python='python3'}={}) {
  for(const [path,apply,implementation]of [
   ['platform/web/js/libs/library_godot_os.js',patchOptionalPwa,'scripts/release/patch-web-optional-pwa.mjs'],
   ['platform/web/js/libs/library_godot_audio.js',patchAudioLifecycle,'scripts/release/patch-web-audio-lifecycle.mjs'],
+  ['core/object/worker_thread_pool.cpp',patchThreadlessGroups,'scripts/release/patch-web-threadless-groups.mjs'],
+  ['platform/web/js/engine/config.js',patchPresentationBoundary,'scripts/release/patch-web-presentation-boundary.mjs'],
  ]) {
   const result=apply(await readFile(resolve(root,path),'utf8'));
   await add(path,result.code,result.patchId,implementation);

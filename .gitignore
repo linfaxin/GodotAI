@@ -42,6 +42,7 @@ node_modules/
 .pnpm-store
 
 # test artifacts
+/work/
 /tests/bin/
 /tests/project/gen/
 /tests/project/typings/

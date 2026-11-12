@@ -5,6 +5,9 @@ import {createHash} from 'node:crypto';
 import {catalog} from '../src/catalog.ts';
 import {buildFrontend} from './build-frontend.mjs';
 import {buildDemoRuntime} from './build-demo-runtime.mjs';
+import {getEngineProfile} from '../../../scripts/release/engine-profiles.mjs';
+import {profileCatalog,collectManifestPayloads} from './profile-resources.mjs';
+import {invalidateSiteDelivery} from './site-delivery-state.mjs';
 const app=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 /** Engine/SDK types are release inputs; demo helper types have their own descriptor. */
 export async function createTypeSnapshot({engineFiles}={}){
@@ -28,7 +31,8 @@ export async function writeTypeSnapshot(dist,options){
   let manifest;
   try{manifest=JSON.parse(await fs.readFile(path.join(dist,'engine-release.json'),'utf8'));}catch(error){if(error.code!=='ENOENT')throw error;}
   if(manifest){
-   if(manifest.schemaVersion!==2||manifest.runtimeProfile!=='full-engine-v1')throw Error('Unsupported full engine descriptor');
+   if(manifest.schemaVersion!==2)throw Error('Unsupported native engine descriptor');
+   getEngineProfile(manifest.runtimeProfile);
    const snapshots=[];
    for(const [naming,profile]of Object.entries(manifest.api.namingProfiles??{snake:manifest.api})){
     const engineFiles=JSON.parse(await fs.readFile(path.join(dist,profile.declarationsSnapshot.path),'utf8'));
@@ -52,20 +56,38 @@ async function refreshSiteManifests(dist){
   let manifest;
   try{manifest=JSON.parse(await fs.readFile(path.join(dist,name),'utf8'));}catch(error){if(error.code==='ENOENT')continue;throw error;}
   if(!manifest.payloads)continue;
-  for(const asset of Object.keys(manifest.payloads)){
-   const bytes=await fs.readFile(path.join(dist,asset));
-   manifest.payloads[asset]={sha256:createHash('sha256').update(bytes).digest('hex'),bytes:bytes.length};
-  }
+  manifest.payloads=await collectManifestPayloads(dist);
   await fs.writeFile(path.join(dist,name),JSON.stringify(manifest,null,2));
  }
 }
-export async function buildShell(dist=path.join(app,'dist')){
- await fs.mkdir(dist,{recursive:true});await fs.cp(path.join(app,'web'),dist,{recursive:true});
- const demos=await Promise.all(catalog.map(async demo=>({...demo,source:await fs.readFile(path.join(app,'src/demos',demo.file),'utf8')})));
+export async function buildShell(dist=path.join(app,'dist'),options={}){
+ const shellOnly=options.shellOnly??process.env.PLAYGROUND_TEST_SHELL==='1';
+ let existing;
+ try{existing=JSON.parse(await fs.readFile(path.join(dist,'engine-release.json'),'utf8'));}catch(error){if(error.code!=='ENOENT')throw error;}
+ const runtimeProfile=options.runtimeProfile??existing?.runtimeProfile??'full-engine-v1';getEngineProfile(runtimeProfile);
+ if(existing&&existing.runtimeProfile!==runtimeProfile)throw Error('Shell profile must match its exact engine release');
+ if(shellOnly&&existing)throw Error('A shell-only fixture must use an output directory without an engine release');
+ if(!shellOnly&&!existing)throw Error('A frontend refresh requires an existing engine release; use --shell-only for contract fixtures');
+ if(!shellOnly){
+  const resourceBuild=JSON.parse(await fs.readFile(path.join(dist,'resource-build.json'),'utf8'));
+  if(resourceBuild.runtimeProfile!==runtimeProfile||resourceBuild.engineReleaseId!==existing.id)throw Error('Resource build does not belong to this engine release');
+  for(const [asset,expected]of [['engine/game.pck',resourceBuild.output?.sha256],['resource-inputs/generated/assets.js',resourceBuild.generatedManifest?.sha256]])if(createHash('sha256').update(await fs.readFile(path.join(dist,asset))).digest('hex')!==expected)throw Error('Resource refresh input changed: '+asset);
+ }
+ await fs.mkdir(dist,{recursive:true});await invalidateSiteDelivery(dist);await fs.cp(path.join(app,'web'),dist,{recursive:true});
+ const demos=await Promise.all(profileCatalog(catalog,runtimeProfile).map(async demo=>({...demo,source:await fs.readFile(path.join(app,'src/demos',demo.file),'utf8')})));
  await fs.writeFile(path.join(dist,'catalog.json'),JSON.stringify(demos));
- await writeTypeSnapshot(dist);await buildDemoRuntime(dist);await buildFrontend(dist);await refreshSiteManifests(dist);
- let profile='full-engine-v1';
- try{const manifest=JSON.parse(await fs.readFile(path.join(dist,'engine-release.json'),'utf8'));profile=manifest.runtimeProfile;}catch(error){if(error.code!=='ENOENT')throw error;}
- await fs.writeFile(path.join(dist,'shell-profile.json'),JSON.stringify({schemaVersion:2,runtimeProfile:profile}));
+ await writeTypeSnapshot(dist);
+ if(!shellOnly){
+  // The retained exported PCK and generated resource map are immutable refresh
+  // inputs. Copy the small manifest into the output instead of relying on a
+  // mutable build-workspace directory surviving deployment.
+  await buildDemoRuntime(dist,{project:path.join(dist,'resource-inputs'),runtimeProfile});
+ }
+ await buildFrontend(dist,undefined,{runtimeProfile});
+ await fs.writeFile(path.join(dist,'shell-profile.json'),JSON.stringify({schemaVersion:2,runtimeProfile,shellOnly}));
+ await refreshSiteManifests(dist);
 }
-if(process.argv[1]===fileURLToPath(import.meta.url))await buildShell();
+if(process.argv[1]===fileURLToPath(import.meta.url)){
+ const option=name=>{const index=process.argv.indexOf(name);return index<0?undefined:process.argv[index+1];};
+ await buildShell(option('--out')??path.join(app,'dist'),{runtimeProfile:option('--profile'),shellOnly:process.argv.includes('--shell-only')||process.env.PLAYGROUND_TEST_SHELL==='1'});
+}

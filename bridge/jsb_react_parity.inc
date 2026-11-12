@@ -55,11 +55,20 @@
         bool advanced_query(Root& root,Node* node,const String& operation,const Array& args,Variant& result)
         {
             const bool three=operation.ends_with("3"),ray=operation.begins_with("ray"),motion=operation.begins_with("motion");
+#if defined(_3D_DISABLED) || defined(PHYSICS_3D_DISABLED)
+            if(three)return false;
+#endif
             if(args.size()!=11||args[3].get_type()!=Variant::FLOAT||double(args[3])<0||double(args[3])>4294967295.0||Math::floor(double(args[3]))!=double(args[3])||args[4].get_type()!=Variant::BOOL||args[5].get_type()!=Variant::BOOL||args[6].get_type()!=Variant::FLOAT||double(args[6])<0||double(args[6])>10000||args[7].get_type()!=Variant::ARRAY||args[8].get_type()!=Variant::FLOAT||double(args[8])<1||double(args[8])>64||Math::floor(double(args[8]))!=double(args[8])||args[9].get_type()!=Variant::BOOL||args[10].get_type()!=Variant::BOOL)return false;
             const Array excluded=args[7];if(excluded.size()>64)return false;
             HashSet<RID> exclusions;
-            for(int i=0;i<excluded.size();++i){if(excluded[i].get_type()!=Variant::OBJECT)return false;Node* target=Object::cast_to<Node>(static_cast<Object*>(excluded[i]));const NativeObjectID key=target?environment->try_get_object_id(target):NativeObjectID();if(!target||!root.nodes.has(*key))return false;if(three){CollisionObject3D* body=Object::cast_to<CollisionObject3D>(target);if(!body)return false;exclusions.insert(body->get_rid());}else{CollisionObject2D* body=Object::cast_to<CollisionObject2D>(target);if(!body)return false;exclusions.insert(body->get_rid());}}
+            for(int i=0;i<excluded.size();++i){if(excluded[i].get_type()!=Variant::OBJECT)return false;Node* target=Object::cast_to<Node>(static_cast<Object*>(excluded[i]));const NativeObjectID key=target?environment->try_get_object_id(target):NativeObjectID();if(!target||!root.nodes.has(*key))return false;
+#if !defined(_3D_DISABLED) && !defined(PHYSICS_3D_DISABLED)
+                if(three){CollisionObject3D* body=Object::cast_to<CollisionObject3D>(target);if(!body)return false;exclusions.insert(body->get_rid());}else
+#endif
+                {CollisionObject2D* body=Object::cast_to<CollisionObject2D>(target);if(!body)return false;exclusions.insert(body->get_rid());}}
             const uint32_t mask=uint32_t(int64_t(args[3]));const int limit=int(args[8]);Array hits;
+
+#if !defined(_3D_DISABLED) && !defined(PHYSICS_3D_DISABLED)
             if(three){
                 Node3D* spatial=Object::cast_to<Node3D>(node);PhysicsDirectSpaceState3D* space=spatial&&spatial->get_world_3d().is_valid()?spatial->get_world_3d()->get_direct_space_state():nullptr;if(!space)return false;
                 if(ray){if(args[1].get_type()!=Variant::VECTOR3||args[2].get_type()!=Variant::VECTOR3)return false;PhysicsDirectSpaceState3D::RayParameters parameters;parameters.from=args[1];parameters.to=args[2];parameters.exclude=exclusions;parameters.collision_mask=mask;parameters.collide_with_areas=args[4];parameters.collide_with_bodies=args[5];parameters.hit_from_inside=args[9];parameters.hit_back_faces=args[10];PhysicsDirectSpaceState3D::RayResult hit;if(space->intersect_ray(parameters,hit)){hits.push_back(hit.collider);hits.push_back(hit.position);hits.push_back(hit.normal);hits.push_back(hit.shape);}result=hits;return true;}
@@ -67,8 +76,10 @@
                 PhysicsDirectSpaceState3D::ShapeParameters parameters;parameters.shape_rid=shape->get_rid();parameters.transform=transform;parameters.motion=args[2];parameters.margin=args[6];parameters.exclude=exclusions;parameters.collision_mask=mask;parameters.collide_with_areas=args[4];parameters.collide_with_bodies=args[5];
                 if(motion){real_t safe=1,unsafe=1;space->cast_motion(parameters,safe,unsafe);result=Vector2(safe,unsafe);return true;}
                 PhysicsDirectSpaceState3D::ShapeResult results[64];const int count=space->intersect_shape(parameters,results,limit);for(int i=0;i<count;++i){Array hit;hit.push_back(compat::ObjectDB::get_instance(results[i].collider_id));hit.push_back(results[i].shape);hits.push_back(hit);}result=hits;return true;
-            }
-            else {
+            }else
+#endif
+
+            {
                 Node2D* spatial=Object::cast_to<Node2D>(node);PhysicsDirectSpaceState2D* space=spatial&&spatial->get_world_2d().is_valid()?spatial->get_world_2d()->get_direct_space_state():nullptr;if(!space)return false;
                 if(ray){if(args[1].get_type()!=Variant::VECTOR2||args[2].get_type()!=Variant::VECTOR2)return false;PhysicsDirectSpaceState2D::RayParameters parameters;parameters.from=args[1];parameters.to=args[2];parameters.exclude=exclusions;parameters.collision_mask=mask;parameters.collide_with_areas=args[4];parameters.collide_with_bodies=args[5];parameters.hit_from_inside=args[9];PhysicsDirectSpaceState2D::RayResult hit;if(space->intersect_ray(parameters,hit)){hits.push_back(hit.collider);hits.push_back(hit.position);hits.push_back(hit.normal);hits.push_back(hit.shape);}result=hits;return true;}
                 if(args[0].get_type()!=Variant::OBJECT||args[1].get_type()!=Variant::TRANSFORM2D||args[2].get_type()!=Variant::VECTOR2)return false;Ref<Shape2D> shape=args[0];if(shape.is_null())return false;const Transform2D transform=args[1];if(Math::abs(transform.determinant())<1e-10)return false;

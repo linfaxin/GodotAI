@@ -17,6 +17,9 @@ function fixture(load){
  const sandbox={URL,Uint8Array,AbortController,DOMException,queueMicrotask,console,parent,location:{href:'http://preview.test/preview.html?editorOrigin=http://editor.test'},document:{getElementById(){return{hidden:false};}},
   addEventListener(name,fn){if(!listeners.has(name))listeners.set(name,new Set());listeners.get(name).add(fn);},removeEventListener(name,fn){listeners.get(name)?.delete(fn);},
   setInterval(){const handle=++id;timers.add(handle);return handle;},clearInterval(handle){timers.delete(handle);},requestAnimationFrame(callback){callback();},__load:load};
+ // Production preview shortcuts register on window; this realm's window is
+ // the same event target/global as its existing lifecycle listeners.
+ sandbox.window=sandbox;
  vm.runInNewContext(code,sandbox);
  for(const fn of listeners.get('message'))fn({origin:'http://editor.test',source:parent,ports:[port],data:{...identity,type:'connect',protocolVersion:1,editorOrigin:'http://editor.test'}});
  const event=(name,value)=>{for(const fn of [...listeners.get(name)??[]])fn(value);};

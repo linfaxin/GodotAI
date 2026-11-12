@@ -39,6 +39,8 @@
 
         bool interaction_command(Root& root,Owned& owned,Node* node,const String& operation,const Array& args,Variant& result)
         {
+
+#if !defined(_3D_DISABLED) && !defined(PHYSICS_3D_DISABLED)
             if(operation.begins_with("spring_")){
                 SpringArm3D* arm=Object::cast_to<SpringArm3D>(node);if(!arm||root.stage!="physics")return false;
                 for(int j=owned.exceptions.size()-1;j>=0;--j){const NativeObjectID id=owned.exceptions[j];Node* target=resolve(root,id);if(target&&target->is_inside_tree())continue;if(const RID* rid=owned.exception_rids.getptr(*id))arm->remove_excluded_object(*rid);owned.exception_rids.erase(*id);owned.exceptions.remove_at(j);}
@@ -48,6 +50,8 @@
                 if(operation=="spring_add"){if(owned.exceptions.has(id))return true;if(owned.exceptions.size()>=64)return false;arm->add_excluded_object(target->get_rid());owned.exceptions.push_back(id);owned.exception_rids.insert(*id,target->get_rid());return true;}
                 if(operation=="spring_remove"){if(owned.exceptions.has(id)){arm->remove_excluded_object(target->get_rid());owned.exceptions.erase(id);owned.exception_rids.erase(*id);}return true;}return false;
             }
+#endif
+
             if(root.stage!="process")return false;
             if(operation.begins_with("layout_"))return layout_tween(owned,Object::cast_to<Control>(node),operation.trim_prefix("layout_"),args,result);
             if(operation.begins_with("ui_")){
@@ -57,7 +61,11 @@
                 if(property=="position")control->set_position(value);else if(property=="size"){if(value.x<control->get_combined_minimum_size().x||value.y<control->get_combined_minimum_size().y)return false;control->set_size(value);}else if(property=="scale"){if(value.x<=0||value.y<=0)return false;control->set_scale(value);}else if(property=="pivot")control->set_pivot_offset(value);else return false;return true;
             }
             if(operation=="gpu_restart"){
-                if(!args.is_empty())return false;if(GPUParticles2D* two=Object::cast_to<GPUParticles2D>(node)){two->restart();return true;}if(GPUParticles3D* three=Object::cast_to<GPUParticles3D>(node)){three->restart();return true;}return false;
+                if(!args.is_empty())return false;if(GPUParticles2D* two=Object::cast_to<GPUParticles2D>(node)){two->restart();return true;}
+#if !defined(_3D_DISABLED)
+                if(GPUParticles3D* three=Object::cast_to<GPUParticles3D>(node)){three->restart();return true;}
+#endif
+                return false;
             }
             if(operation=="group_pressed"||operation=="group_buttons"){
                 BaseButton* button=Object::cast_to<BaseButton>(node);if(!button||!args.is_empty())return false;Ref<ButtonGroup> group=button->get_button_group();if(group.is_null()){result=operation=="group_buttons"?Variant(Array()):Variant();return true;}

@@ -3,6 +3,7 @@ import { readFile, readdir, lstat, mkdir, writeFile } from 'node:fs/promises';
 import { resolve, relative, dirname, sep } from 'node:path';
 import { gunzipSync } from 'node:zlib';
 import { assertGame2dCertification } from './game-2d-evidence.mjs';
+import {isEngineProfile,getEngineProfile,validateEngineProfile} from './engine-profiles.mjs';
 
 export const digest = value => createHash('sha256').update(value).digest('hex');
 export function canonical(value) {
@@ -114,6 +115,7 @@ export async function inspectRelease(directory, { requireCertified = false } = {
     if (key !== 'release.json' && !paths.has(key)) fail('E_RELEASE_UNSEALED', `Unsealed file ${key}`);
   }
   const attestation = await json(within(root, descriptor.attestation));
+  if(attestation.runtimeProfile!==undefined&&attestation.runtimeProfile!==descriptor.runtimeProfile)fail('E_RELEASE_PROFILE','Attestation profile differs from release');
   if (attestation.schemaVersion !== 1 || attestation.kind !== 'godot-js-web-release-attestation') fail('E_RELEASE_ATTESTATION', 'Unsupported release attestation');
   if (digest(canonical(attestation.recipe)) !== attestation.recipeSha256) fail('E_RELEASE_RECIPE', 'Attestation recipe was changed');
   for (const patch of attestation.recipe?.patches ?? []) if (attestation.godotSource?.inputs?.[patch.path] !== patch.afterSha256) fail('E_RELEASE_RECIPE', `Source patch is not in the attested snapshot: ${patch.patchId}`);
@@ -124,6 +126,18 @@ export async function inspectRelease(directory, { requireCertified = false } = {
     for (const source of [attestation.source, attestation.godotSource]) if (digest(canonical(source.inputs)) !== source.snapshotHash) fail('E_RELEASE_SOURCE', 'Source snapshot map does not match its hash');
     if (descriptor.target?.sourceCommit !== attestation.source.commit || descriptor.target?.sourceDiffHash !== attestation.source.snapshotHash || descriptor.target?.buildFlags?.godot_build_recipe_sha256 !== attestation.recipeSha256) fail('E_RELEASE_SOURCE', 'Runtime target does not match the actual engine source tuple');
     if (!attestation.recipe?.args?.includes('threads=no') || !attestation.recipe.args.includes('dlink_enabled=no') || !attestation.recipe.args.includes('platform=web')) fail('E_RELEASE_RECIPE', 'Recipe must explicitly build single-thread non-dlink Web');
+  }
+  if(descriptor.runtimeProfile!==undefined&&descriptor.runtimeProfile!=='legacy-profiles-v1')getEngineProfile(descriptor.runtimeProfile);
+  if(isEngineProfile(descriptor.runtimeProfile)){
+    if(descriptor.legacy!==false||!descriptor.engineRelease)fail('E_RELEASE_PROFILE','Native release cannot enter the legacy path');
+    const native=await json(within(root,descriptor.engineRelease));
+    const nativeIdentity=structuredClone(native);delete nativeIdentity.id;delete nativeIdentity.verifiedRelease?.releaseId;
+    if(native.schemaVersion!==2||native.runtimeProfile!==descriptor.runtimeProfile||native.profile!==descriptor.runtimeProfile||native.verifiedRelease?.profile!==descriptor.runtimeProfile||native.id!==digest(canonical(nativeIdentity))||native.id!==descriptor.engineReleaseId||native.verifiedRelease?.releaseId!==native.id)fail('E_RELEASE_PROFILE','Native descriptor identity/profile mismatch');
+    const ir=await json(within(root,native.api.ir.path));
+    if(attestation.modules&&canonical([...attestation.modules].sort())!==canonical([...ir.modules].sort()))fail('E_RELEASE_MODULES','Attested modules differ from native API');
+    try{validateEngineProfile(descriptor.runtimeProfile,{modules:ir.modules,classes:ir.classes,features:attestation.resolvedFeatures||attestation.resolvedBuildOptions?{...attestation.resolvedBuildOptions,...attestation.resolvedFeatures}:undefined});}catch(error){fail('E_RELEASE_PROFILE',error.message);}
+    if(canonical([...ir.modules].sort())!==canonical([...(native.modules??[])].sort())||canonical([...ir.modules].sort())!==canonical([...(descriptor.engine.modules??[])].sort()))fail('E_RELEASE_MODULES','Native module evidence does not match the actual API');
+    if(descriptor.runtimeProfile==='engine-2d-v1'&&!attestation.resolvedFeatures&&!attestation.resolvedBuildOptions&&descriptor.sourceCertified)fail('E_RELEASE_PROFILE','Certified 2D requires resolved feature evidence');
   }
   if (descriptor.certified) {
     if (!descriptor.sourceCertified || descriptor.certification?.status !== 'passed' || descriptor.certification.runtimeRelease !== descriptor.id) fail('E_RELEASE_CERTIFICATION', 'Missing source or exact-release browser certification');

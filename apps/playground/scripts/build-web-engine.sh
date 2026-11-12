@@ -1,27 +1,38 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Use Godot 4.6.1 source with this checkout mounted at modules/GodotJS.
 : "${GODOT_SOURCE:?Set GODOT_SOURCE to the Godot 4.6.1 source directory}"
 command -v emcc >/dev/null
 command -v scons >/dev/null
 task_repo="$(cd "$(dirname "$0")/../../.." && pwd)"
-if [ "$(realpath "$GODOT_SOURCE/modules/GodotJS/bridge")" != "$task_repo/bridge" ]; then
-  echo "GODOT_SOURCE/modules/GodotJS must reference this checkout" >&2
+task_profile="${ENGINE_PROFILE:-full-engine-v1}"
+task_target="${ENGINE_TARGET:-template_debug}"
+task_lto="${ENGINE_LTO:-none}"
+task_module_mode="${ENGINE_MODULE_MODE:-baseline}"
+task_jobs="${JOBS:-4}"
+cd "$task_repo"
+task_layout="$(node scripts/test/package-browser-engine-artifact.mjs --paths --repository "$task_repo" \
+  --profile "$task_profile" --target "$task_target" --lto "$task_lto" --module-mode "$task_module_mode" --jobs "$task_jobs")"
+mapfile -t task_paths <<< "$task_layout"
+task_build_dir="${task_paths[0]}"
+task_report="${task_paths[2]}"
+task_template_out="${task_paths[3]}"
+mkdir -p "$(dirname "$task_report")"
+task_lock="$task_report.lock"
+if ! mkdir "$task_lock"; then
+  echo "This engine configuration is already building: $task_lock" >&2
   exit 1
 fi
-node "$task_repo/scripts/release/patch-web-engine.mjs" "$GODOT_SOURCE"
-cd "$task_repo"
-pnpm build:engine-js
-cd "$GODOT_SOURCE"
-scons -j"${JOBS:-4}" platform=web target=template_debug \
-  threads=no dlink_enabled=no use_closure_compiler=no optimize=speed debug_symbols=no \
-  skip_js_runtime=yes use_quickjs_ng=no modules_enabled_by_default=yes \
-  module_GodotJS_enabled=yes module_text_server_fb_enabled=yes \
-  module_godotai_api_probe_enabled=no tests=no
-# Export only the completed archive. Intermediate SDK bin files are never the
-# default template selected by the playground pipeline.
-task_template_out="${WEB_TEMPLATE_OUT:-$task_repo/work/playground/engine-template/full-engine.zip}"
-mkdir -p "$(dirname "$task_template_out")"
-cp "$GODOT_SOURCE/bin/godot.web.template_debug.wasm32.nothreads.zip" "$task_template_out.tmp"
-mv "$task_template_out.tmp" "$task_template_out"
-echo "Full engine template: $task_template_out"
+trap 'rmdir "$task_lock"' EXIT
+task_build_report="$task_build_dir/bin/godotjs-web-build-report-$$.json"
+# Set this only after building and freezing shared SDK inputs for a build matrix.
+if [ "${SKIP_ENGINE_JS_BUILD:-0}" != 1 ]; then pnpm build:engine-js; fi
+node scripts/test/build-browser-engine.mjs \
+  --godot-source "$GODOT_SOURCE" --build-dir "$task_build_dir" \
+  --out "$task_build_report" --profile "$task_profile" --target "$task_target" \
+  --lto "$task_lto" --module-mode "$task_module_mode" --jobs "$task_jobs"
+task_development=()
+if [ "${ENGINE_DEVELOPMENT:-0}" = 1 ]; then task_development+=(--development); fi
+node scripts/test/package-browser-engine-artifact.mjs --report "$task_build_report" \
+  --publish "$task_report" --template-out "$task_template_out" "${task_development[@]}"
+echo "Engine template: $task_template_out"
+echo "Engine report: $task_report"

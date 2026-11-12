@@ -2,14 +2,15 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {chromium} from 'playwright';
+import {launchBrowser,withAcceptanceContext} from './browser-harness.mjs';
 import {createStaticServer} from './serve.mjs';
 import {defaultProject} from '../src/project-templates.ts';
 const directory=path.resolve(process.env.PLAYGROUND_TEST_DIRECTORY??fileURLToPath(new URL('../dist',import.meta.url)));
+const release=JSON.parse(await fs.readFile(path.join(directory,'engine-release.json'),'utf8'));
 const servers=[createStaticServer(directory),createStaticServer(directory)];
 for(const server of servers)await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
 const [editor,preview]=servers.map(server=>'http://127.0.0.1:'+server.address().port);
-const browser=await chromium.launch({headless:true,executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE??'/usr/bin/chromium',args:['--no-sandbox','--disable-dev-shm-usage','--enable-webgl','--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader','--autoplay-policy=no-user-gesture-required']});
+const browser=await launchBrowser({headless:true,executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE??'/usr/bin/chromium',args:['--no-sandbox','--disable-dev-shm-usage','--enable-webgl','--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader','--autoplay-policy=no-user-gesture-required']});
 const results=[];
 const snapshot=page=>page.evaluate(()=>{const state=globalThis.__playgroundWorkbench?.inspect();return {runtime:state?.project?.runtime,controls:state?.project?.controls,engine:state?.engine,diagnostics:state?.diagnostics,stats:state?.events?.filter(event=>event.type==='stats').at(-1)?.stats,logs:document.querySelector('#logs')?.textContent.slice(-5000)};});
 async function selected(page,id='react'){
@@ -17,7 +18,7 @@ async function selected(page,id='react'){
  await page.waitForFunction(()=>globalThis.__playgroundWorkbench?.inspect().ready,null,{timeout:90000});
 }
 async function imported(page,source,runtime='react'){
- const project=defaultProject(runtime);project.files[project.entry]=source;
+ const project=defaultProject(runtime,release.runtimeProfile);project.files[project.entry]=source;
  await page.locator('#import').setInputFiles({name:'demo-regression.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(project))});
  await page.waitForFunction(source=>{const state=globalThis.__playgroundWorkbench.inspect();return state.project.files[state.project.entry]===source;},source);
 }
@@ -71,7 +72,7 @@ export default class Main extends Node2D {_ready(){const value=vec3(1,2,3);if(va
   await running(page);await page.waitForFunction(()=>document.querySelector('#logs').textContent.includes('NATIVE_DEMO_HELPER_OK'),null,{timeout:8000});
   const state=await snapshot(page);assert.equal(state.runtime,'godot');assert.deepEqual(state.diagnostics.filter(d=>d.category==='error'),[]);
  });
- const report={status:results.every(result=>result.status==='passed')?'passed':'failed',results};
+ const report=await withAcceptanceContext({status:results.every(result=>result.status==='passed')?'passed':'failed',results}, {directory,browser});
  if(process.env.PLAYGROUND_DEMO_REGRESSIONS_REPORT)await fs.writeFile(process.env.PLAYGROUND_DEMO_REGRESSIONS_REPORT,JSON.stringify(report,null,2)+'\n');
  console.log(JSON.stringify(report,null,2));if(report.status!=='passed')process.exitCode=1;
 }finally{await browser.close();await Promise.all(servers.map(server=>new Promise(resolve=>server.close(resolve))));}
