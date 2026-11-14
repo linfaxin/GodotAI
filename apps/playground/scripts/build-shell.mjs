@@ -8,7 +8,11 @@ import {buildDemoRuntime} from './build-demo-runtime.mjs';
 import {getEngineProfile} from '../../../scripts/release/engine-profiles.mjs';
 import {profileCatalog,collectManifestPayloads} from './profile-resources.mjs';
 import {invalidateSiteDelivery} from './site-delivery-state.mjs';
+import {describeWorkerCandidate} from './worker-candidate.mjs';
+import {assertWorkerRuntimeAbi} from '../../../scripts/release/engine-profiles.mjs';
+import {assertWorkerSdkBuildFrozen} from './worker-sdk-proof.mjs';
 const app=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
+const repository=path.resolve(app,'../..');
 /** Engine/SDK types are release inputs; demo helper types have their own descriptor. */
 export async function createTypeSnapshot({engineFiles}={}){
  const types={};
@@ -56,12 +60,14 @@ async function refreshSiteManifests(dist){
   let manifest;
   try{manifest=JSON.parse(await fs.readFile(path.join(dist,name),'utf8'));}catch(error){if(error.code==='ENOENT')continue;throw error;}
   if(!manifest.payloads)continue;
+  if(manifest.schemaVersion===3)manifest.runtime=await describeWorkerCandidate(dist,JSON.parse(await fs.readFile(path.join(dist,'engine-release.json'),'utf8')));
   manifest.payloads=await collectManifestPayloads(dist);
   await fs.writeFile(path.join(dist,name),JSON.stringify(manifest,null,2));
  }
 }
-export async function buildShell(dist=path.join(app,'dist'),options={}){
+export async function buildShell(dist,options={}){
  const shellOnly=options.shellOnly??process.env.PLAYGROUND_TEST_SHELL==='1';
+ dist=dist??path.join(app,shellOnly?'dist-shell':options.runtimeProfile==='engine-2d-v1'?'dist-2d-debug':'dist');
  let existing;
  try{existing=JSON.parse(await fs.readFile(path.join(dist,'engine-release.json'),'utf8'));}catch(error){if(error.code!=='ENOENT')throw error;}
  const runtimeProfile=options.runtimeProfile??existing?.runtimeProfile??'full-engine-v1';getEngineProfile(runtimeProfile);
@@ -69,6 +75,8 @@ export async function buildShell(dist=path.join(app,'dist'),options={}){
  if(shellOnly&&existing)throw Error('A shell-only fixture must use an output directory without an engine release');
  if(!shellOnly&&!existing)throw Error('A frontend refresh requires an existing engine release; use --shell-only for contract fixtures');
  if(!shellOnly){
+  try{assertWorkerRuntimeAbi(existing.runtimeAbi);}catch{throw Error('E_EXECUTION_BACKEND_RETIRED: rebuild the complete playground as a Worker release before refreshing');}
+  await assertWorkerSdkBuildFrozen(repository,existing.build?.sdkBuild);
   const resourceBuild=JSON.parse(await fs.readFile(path.join(dist,'resource-build.json'),'utf8'));
   if(resourceBuild.runtimeProfile!==runtimeProfile||resourceBuild.engineReleaseId!==existing.id)throw Error('Resource build does not belong to this engine release');
   for(const [asset,expected]of [['engine/game.pck',resourceBuild.output?.sha256],['resource-inputs/generated/assets.js',resourceBuild.generatedManifest?.sha256]])if(createHash('sha256').update(await fs.readFile(path.join(dist,asset))).digest('hex')!==expected)throw Error('Resource refresh input changed: '+asset);
@@ -85,9 +93,10 @@ export async function buildShell(dist=path.join(app,'dist'),options={}){
  }
  await buildFrontend(dist,undefined,{runtimeProfile});
  await fs.writeFile(path.join(dist,'shell-profile.json'),JSON.stringify({schemaVersion:2,runtimeProfile,shellOnly}));
+ if(!shellOnly)await assertWorkerSdkBuildFrozen(repository,existing.build.sdkBuild);
  await refreshSiteManifests(dist);
 }
 if(process.argv[1]===fileURLToPath(import.meta.url)){
  const option=name=>{const index=process.argv.indexOf(name);return index<0?undefined:process.argv[index+1];};
- await buildShell(option('--out')??path.join(app,'dist'),{runtimeProfile:option('--profile'),shellOnly:process.argv.includes('--shell-only')||process.env.PLAYGROUND_TEST_SHELL==='1'});
+ await buildShell(option('--out'),{runtimeProfile:option('--profile'),shellOnly:process.argv.includes('--shell-only')||process.env.PLAYGROUND_TEST_SHELL==='1'});
 }

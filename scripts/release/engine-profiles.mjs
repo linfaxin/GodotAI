@@ -70,6 +70,12 @@ export const ENGINE_PROFILES=Object.freeze({
  [ENGINE_2D_PROFILE]:profile(ENGINE_2D_PROFILE,'Godot 2D Web 引擎',ENGINE_2D_MODULE_BASELINE,{disable_3d:true,disable_physics_3d:true,disable_navigation_3d:true,disable_xr:true},threeModules,['Node3D','Camera3D','RigidBody3D','CharacterBody3D','NavigationAgent3D','GLTFDocument','GridMap']),
 });
 export function isEngineProfile(id){return typeof id==='string'&&Object.hasOwn(ENGINE_PROFILES,id);}
+/** Transport ABI is independent of the engine capability/profile dimension. */
+export const WORKER_RUNTIME_ABI=Object.freeze({protocolVersion:2,host:1,audio:1,presentation:1});
+export function assertWorkerRuntimeAbi(value){
+ if(!value||Object.keys(WORKER_RUNTIME_ABI).some(key=>value[key]!==WORKER_RUNTIME_ABI[key])||Object.keys(value).some(key=>!Object.hasOwn(WORKER_RUNTIME_ABI,key)))throw Error('E_WORKER_RUNTIME_ABI');
+ return value;
+}
 export function getEngineProfile(id=FULL_ENGINE_PROFILE){if(!isEngineProfile(id))throw Error('E_ENGINE_PROFILE: Unsupported official engine profile '+String(id));return ENGINE_PROFILES[id];}
 export function engineBuildArgs({profile:profileId=FULL_ENGINE_PROFILE,target='template_debug',jobs=4,lto='none',moduleMode='baseline'}={}){
  const definition=getEngineProfile(profileId);

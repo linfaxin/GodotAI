@@ -1,11 +1,10 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
-import {fileURLToPath} from 'node:url';
 import {createStaticServer} from './serve.mjs';
-import {launchBrowser,withAcceptanceContext} from './browser-harness.mjs';
+import {launchBrowser,withAcceptanceContext,defaultTestDirectory} from './browser-harness.mjs';
 
 // Editor/data contracts deliberately use shell mode; they are never engine-run evidence.
-const directory=process.env.PLAYGROUND_TEST_DIRECTORY??fileURLToPath(new URL('../dist',import.meta.url));
+const directory=defaultTestDirectory();
 const server=createStaticServer(directory);await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
 const origin=`http://127.0.0.1:${server.address().port}`,browser=await launchBrowser(),checks=[];
 const inspect=page=>page.evaluate(()=>window.__playgroundWorkbench.inspect());

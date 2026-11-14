@@ -30,10 +30,10 @@ on:
   workflow_dispatch:
     inputs:
       engine_target:
-        description: 'Actual engine target, independently of the SDK mode'
+        description: 'Both native targets by default; optionally select one target for a diagnostic run'
         type: choice
-        options: [template_debug, template_release]
-        default: template_debug
+        options: [all, template_debug, template_release]
+        default: all
       engine_lto:
         description: 'Independent LTO experiment; compare against none'
         type: choice
@@ -48,6 +48,10 @@ on:
         description: 'Sample real product startup, FPS and memory after acceptance'
         type: boolean
         default: false
+      performance_baseline_run_id:
+        description: 'Optional prior run containing frozen legacy baseline sites; absent means measurements have no regression acceptance'
+        type: string
+        default: ''
       release_version:
         description: 'Exact npm version to prepare (publication is a separate command)'
         type: string
@@ -57,6 +61,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: browser-playground-${{ github.ref }}
@@ -90,7 +95,9 @@ jobs:
           node apps/playground/scripts/browser-project-isolation-test.mjs
           node apps/playground/scripts/browser-release-context-test.mjs
       - name: Release provenance, integrity, npm-pack consumer and failure gates
-        run: pnpm test:browser:unit
+        run: |
+          pnpm test:browser:unit
+          node --test scripts/release/test/worker-workflow.test.mjs
 
   browser:
     needs: contracts
@@ -100,7 +107,8 @@ jobs:
       fail-fast: false
       matrix:
         profile: [full-engine-v1, engine-2d-v1]
-    name: Native product (${{ matrix.profile }}, ${{ inputs.engine_target || 'template_debug' }}, lto=${{ inputs.engine_lto || 'none' }})
+        target: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.engine_target != 'all' && inputs.engine_target != '' && format('["{0}"]', inputs.engine_target) || '["template_debug","template_release"]') }}
+    name: Native product (${{ matrix.profile }}, ${{ matrix.target }}, lto=${{ inputs.engine_lto || 'none' }})
     steps:
       - uses: actions/checkout@v4
         with:
@@ -124,7 +132,7 @@ jobs:
       - run: python3 -m pip install scons==4.9.1
       - name: Build and collect provenance for an actual single-thread engine
         env:
-          ENGINE_TARGET: ${{ inputs.engine_target || 'template_debug' }}
+          ENGINE_TARGET: ${{ matrix.target }}
           EMCC_CORES: '4'
           BINARYEN_CORES: '4'
         run: >-
@@ -176,6 +184,11 @@ jobs:
           sudo apt-get install -y xvfb xauth libgl1-mesa-dri libegl-mesa0 pulseaudio pulseaudio-utils
           echo "PLAYWRIGHT_MODULE=$RUNNER_TEMP/browser-tools/node_modules/playwright-core/index.mjs" >> "$GITHUB_ENV"
           node --input-type=module -e 'const {chromium}=await import(process.env.RUNNER_TEMP+"/browser-tools/node_modules/playwright-core/index.mjs"); console.log("CHROMIUM="+chromium.executablePath())' >> "$GITHUB_ENV"
+      - name: Verify passive observation preserves user activation
+        env:
+          PLAYWRIGHT_CHROMIUM_EXECUTABLE: ${{ env.CHROMIUM }}
+          PLAYGROUND_BROWSER_DEFAULT_SETTINGS: '1'
+        run: node apps/playground/scripts/browser-passive-recorder-test.mjs --out "$RUNNER_TEMP/passive-recorder-proof.json"
       - name: Prepare a real PulseAudio browser mixing device
         run: |
           if ! pulseaudio --check; then
@@ -199,14 +212,14 @@ jobs:
           --engine-js "$RUNNER_TEMP/godot-browser-build/bin/.web_zip/godot.js"
           --engine-wasm "$RUNNER_TEMP/godot-browser-build/bin/.web_zip/godot.wasm"
           --profile "${{ matrix.profile }}"
-          --out "$RUNNER_TEMP/profile-gate/${{ matrix.profile }}/${{ inputs.engine_target || 'template_debug' }}"
+          --out "$RUNNER_TEMP/profile-gate/${{ matrix.profile }}/${{ matrix.target }}"
       - name: Verify real main-thread compiler, revision and preview races
         run: node --test apps/playground/test/*.test.mjs
       - name: Prepare the existing native browser regression gate
         if: matrix.profile == 'full-engine-v1'
         env:
           GODOT_SOURCE: ${{ runner.temp }}/godot-browser-build
-          ENGINE_TARGET: ${{ inputs.engine_target || 'template_debug' }}
+          ENGINE_TARGET: ${{ matrix.target }}
         run: |
           export GODOT_WEB_TEMPLATE="$RUNNER_TEMP/godot-browser-build/bin/godot.web.$ENGINE_TARGET.wasm32.nothreads.zip"
           node tests/browser-preflight/prepare.mjs "$RUNNER_TEMP/browser-preflight-site"
@@ -240,68 +253,88 @@ jobs:
           node apps/playground/scripts/build.mjs
           --engine-report "$RUNNER_TEMP/browser-engine-report.json"
           --profile "${{ matrix.profile }}"
-          --target "${{ inputs.engine_target || 'template_debug' }}"
+          --target "${{ matrix.target }}"
           --skip-sdk-build
-          --work-dir "$RUNNER_TEMP/product-work/${{ matrix.profile }}/${{ inputs.engine_target || 'template_debug' }}"
+          --work-dir "$RUNNER_TEMP/product-work/${{ matrix.profile }}/${{ matrix.target }}"
           --out "$RUNNER_TEMP/default-playground-site"
       - name: Prepare transparent HTTP delivery variants
         run: node apps/playground/scripts/prepare-site-delivery.mjs "$RUNNER_TEMP/default-playground-site"
-      - name: Accept the exact default product candidate
+      - name: Accept both explicit Worker presenters against the exact candidate
         env:
-          PLAYGROUND_TEST_DIRECTORY: ${{ runner.temp }}/default-playground-site
-          PLAYGROUND_ACCEPTANCE_CONTEXT: ${{ runner.temp }}/default-playground-results/site-start.json
           PLAYWRIGHT_CHROMIUM_EXECUTABLE: ${{ env.CHROMIUM }}
-          PLAYGROUND_FULL_ENGINE_LOOPS: '50'
-          PLAYGROUND_FULL_ENGINE_REPORT: ${{ runner.temp }}/default-playground-results/runtime.json
-          PLAYGROUND_EDITOR_REPORT: ${{ runner.temp }}/default-playground-results/editor.json
-          PLAYGROUND_BRIDGE_REPORT: ${{ runner.temp }}/default-playground-results/bridge.json
-          PLAYGROUND_DEMO_REGRESSIONS_REPORT: ${{ runner.temp }}/default-playground-results/demo-regressions.json
-          PLAYGROUND_DELIVERY_REPORT: ${{ runner.temp }}/default-playground-results/delivery.json
-          PLAYGROUND_SCREENSHOTS: ${{ runner.temp }}/default-playground-results/screenshots
-        run: |
-          node apps/playground/scripts/seal-site-acceptance.mjs "$PLAYGROUND_TEST_DIRECTORY" "$RUNNER_TEMP/default-playground-results" --begin
-          node apps/playground/scripts/browser-http-delivery-test.mjs
-          pnpm --filter @godot-js/playground test:browser:full
-          pnpm --filter @godot-js/playground test:browser:editor
-          pnpm --filter @godot-js/playground test:browser:bridge
-          node apps/playground/scripts/browser-project-test.mjs > "$RUNNER_TEMP/default-playground-results/projects.json"
-          node apps/playground/scripts/browser-demo-regressions-test.mjs > "$RUNNER_TEMP/default-playground-results/demo-regressions.json"
-          node apps/playground/scripts/browser-react-demos-test.mjs > "$RUNNER_TEMP/default-playground-results/react-demos.json"
-          node apps/playground/scripts/browser-test.mjs > "$RUNNER_TEMP/default-playground-results/workbench.json"
-          if [ "${{ matrix.profile }}" = "engine-2d-v1" ]; then
-            node apps/playground/scripts/browser-basic-text-test.mjs --site "$PLAYGROUND_TEST_DIRECTORY" --out "$RUNNER_TEMP/basic-text-results" --expect-fallback
-            node apps/playground/scripts/browser-2d-features-test.mjs --site "$PLAYGROUND_TEST_DIRECTORY" --out "$RUNNER_TEMP/default-playground-results" --require-cjk
-            xvfb-run -a env BROWSER=firefox BROWSER_HEADLESS=0 LIBGL_ALWAYS_SOFTWARE=1 PLAYGROUND_FULL_ENGINE_LOOPS=2 PLAYGROUND_FULL_ENGINE_REPORT="$RUNNER_TEMP/default-playground-results/runtime.firefox.json" node apps/playground/scripts/browser-full-engine-test.mjs
-            xvfb-run -a env BROWSER=firefox BROWSER_HEADLESS=0 LIBGL_ALWAYS_SOFTWARE=1 node apps/playground/scripts/browser-2d-features-test.mjs --site "$PLAYGROUND_TEST_DIRECTORY" --out "$RUNNER_TEMP/default-playground-results/features-firefox" --report "$RUNNER_TEMP/default-playground-results/features.firefox.json" --sessions 1 --require-cjk
-            xvfb-run -a env BROWSER=webkit BROWSER_HEADLESS=0 LIBGL_ALWAYS_SOFTWARE=1 PLAYGROUND_FULL_ENGINE_LOOPS=2 PLAYGROUND_FULL_ENGINE_REPORT="$RUNNER_TEMP/default-playground-results/runtime.webkit.json" node apps/playground/scripts/browser-full-engine-test.mjs
-            xvfb-run -a env BROWSER=webkit BROWSER_HEADLESS=0 LIBGL_ALWAYS_SOFTWARE=1 node apps/playground/scripts/browser-2d-features-test.mjs --site "$PLAYGROUND_TEST_DIRECTORY" --out "$RUNNER_TEMP/default-playground-results/features-webkit" --report "$RUNNER_TEMP/default-playground-results/features.webkit.json" --sessions 1 --require-cjk
-          fi
-          node apps/playground/scripts/seal-site-acceptance.mjs "$PLAYGROUND_TEST_DIRECTORY" "$RUNNER_TEMP/default-playground-results"
-          node apps/playground/scripts/seal-site-acceptance.mjs "$PLAYGROUND_TEST_DIRECTORY" "$RUNNER_TEMP/default-playground-results" --verify
-      - name: Sample accepted product performance
+          PLAYGROUND_BROWSER_DEFAULT_SETTINGS: '1'
+          BROWSER_HEADLESS: '0'
+          PLAYGROUND_VIRTUAL_DISPLAY: '1'
+          PLAYGROUND_AUDIO_DEVICE_KIND: 'pulse-null-sink'
+        run: >-
+          xvfb-run -a node apps/playground/scripts/worker-acceptance-matrix.mjs
+          --site "$RUNNER_TEMP/default-playground-site"
+          --out "$RUNNER_TEMP/default-playground-results"
+      - name: Download independent frozen performance baseline sites
+        if: github.event_name == 'workflow_dispatch' && inputs.measure_performance && inputs.performance_baseline_run_id != ''
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ inputs.performance_baseline_run_id }}
+          pattern: browser-playground-candidate-${{ matrix.profile }}-${{ matrix.target }}-*
+          path: ${{ runner.temp }}/performance-baseline-artifacts
+      - name: Measure fixed legacy-to-Worker performance regression budgets
         if: github.event_name == 'workflow_dispatch' && inputs.measure_performance
         env:
           PLAYWRIGHT_CHROMIUM_EXECUTABLE: ${{ env.CHROMIUM }}
-        run: >-
-          node apps/playground/scripts/browser-engine-performance.mjs
-          --site "$RUNNER_TEMP/default-playground-site"
-          --out "$RUNNER_TEMP/browser-engine-performance.json"
-          --samples 3 --browser chromium
+          PLAYGROUND_BROWSER_DEFAULT_SETTINGS: '1'
+          BROWSER_HEADLESS: '0'
+          PLAYGROUND_VIRTUAL_DISPLAY: '1'
+          PLAYGROUND_AUDIO_DEVICE_KIND: 'pulse-null-sink'
+          PERFORMANCE_BASELINE_RUN_ID: ${{ inputs.performance_baseline_run_id }}
+        run: |
+          if [ -n "$PERFORMANCE_BASELINE_RUN_ID" ]; then
+            node --input-type=module <<'BASELINE_SITE'
+          import {readdir,access,writeFile} from 'node:fs/promises';
+          import path from 'node:path';
+          const sites=[];
+          async function visit(directory){for(const item of await readdir(directory,{withFileTypes:true})){const file=path.join(directory,item.name);if(item.isDirectory())await visit(file);else if(item.name==='engine-release.json'){try{await access(path.join(directory,'preview.legacy.html'));sites.push(directory);}catch{}}}}
+          await visit(path.join(process.env.RUNNER_TEMP,'performance-baseline-artifacts'));
+          if(sites.length!==1)throw Error('Expected exactly one frozen legacy baseline site, received '+sites.length);
+          await writeFile(path.join(process.env.RUNNER_TEMP,'performance-baseline-site.txt'),sites[0]);
+          BASELINE_SITE
+          fi
+          xvfb-run -a sh -eu <<'WORKER_PERFORMANCE'
+          if [ -n "$PERFORMANCE_BASELINE_RUN_ID" ]; then
+            baseline_site=$(cat "$RUNNER_TEMP/performance-baseline-site.txt")
+            node apps/playground/scripts/browser-engine-performance.mjs --site "$baseline_site" --out "$RUNNER_TEMP/browser-engine-performance.legacy.json" --samples 3 --browser chromium --execution legacy
+          fi
+          worker_performance_status=0
+          if [ -n "$PERFORMANCE_BASELINE_RUN_ID" ]; then
+            node apps/playground/scripts/browser-engine-performance.mjs --site "$RUNNER_TEMP/default-playground-site" --out "$RUNNER_TEMP/browser-engine-performance.worker-direct.json" --samples 3 --browser chromium --execution worker --presentation-backend direct --baseline "$RUNNER_TEMP/browser-engine-performance.legacy.json" --write-budget "$RUNNER_TEMP/browser-engine-budget.direct.json" || worker_performance_status=1
+            node apps/playground/scripts/browser-engine-performance.mjs --site "$RUNNER_TEMP/default-playground-site" --out "$RUNNER_TEMP/browser-engine-performance.worker-bitmap.json" --samples 3 --browser chromium --execution worker --presentation-backend bitmap --baseline "$RUNNER_TEMP/browser-engine-performance.legacy.json" --write-budget "$RUNNER_TEMP/browser-engine-budget.bitmap.json" || worker_performance_status=1
+          else
+            echo 'No external legacy baseline supplied; regression acceptance remains not-evaluated.'
+            node apps/playground/scripts/browser-engine-performance.mjs --site "$RUNNER_TEMP/default-playground-site" --out "$RUNNER_TEMP/browser-engine-performance.worker-direct.json" --samples 3 --browser chromium --execution worker --presentation-backend direct || worker_performance_status=1
+            node apps/playground/scripts/browser-engine-performance.mjs --site "$RUNNER_TEMP/default-playground-site" --out "$RUNNER_TEMP/browser-engine-performance.worker-bitmap.json" --samples 3 --browser chromium --execution worker --presentation-backend bitmap || worker_performance_status=1
+          fi
+          exit "$worker_performance_status"
+          WORKER_PERFORMANCE
       - name: Keep the default product candidate and its exact-site acceptance
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: browser-playground-candidate-${{ matrix.profile }}-${{ inputs.engine_target || 'template_debug' }}-${{ inputs.engine_lto || 'none' }}-${{ env.ENGINE_RECIPE_HASH }}
+          name: browser-playground-candidate-${{ matrix.profile }}-${{ matrix.target }}-${{ inputs.engine_lto || 'none' }}-${{ env.ENGINE_RECIPE_HASH }}
           if-no-files-found: error
           retention-days: 14
           path: |
             ${{ runner.temp }}/default-playground-site
             ${{ runner.temp }}/default-playground-results
+            ${{ runner.temp }}/passive-recorder-proof.json
             ${{ runner.temp }}/profile-gate
             ${{ runner.temp }}/basic-text-results
             ${{ runner.temp }}/browser-engine-report.json
             ${{ runner.temp }}/browser-engine-measurement.json
-            ${{ runner.temp }}/browser-engine-performance.json
+            ${{ runner.temp }}/browser-engine-performance.legacy.json
+            ${{ runner.temp }}/browser-engine-performance.worker-direct.json
+            ${{ runner.temp }}/browser-engine-performance.worker-bitmap.json
+            ${{ runner.temp }}/browser-engine-budget.direct.json
+            ${{ runner.temp }}/browser-engine-budget.bitmap.json
             ${{ runner.temp }}/browser-engine-artifact
       - name: Prepare the compatibility conformance candidate
         if: matrix.profile == 'full-engine-v1'
@@ -362,7 +395,7 @@ jobs:
         if: always() && matrix.profile == 'full-engine-v1'
         uses: actions/upload-artifact@v4
         with:
-          name: browser-conformance-candidate-${{ github.sha }}
+          name: browser-conformance-candidate-${{ github.sha }}-${{ matrix.target }}
           if-no-files-found: warn
           retention-days: 14
           path: |
@@ -381,3 +414,81 @@ jobs:
             ${{ runner.temp }}/browser-engine-artifact
             ${{ runner.temp }}/browser-playground-site
             scripts/jsb.web-engine/dist
+
+
+  rollout-summary:
+    name: Aggregate all four Worker product targets without publishing
+    needs: browser
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Collect the immutable candidates and their evidence
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: browser-playground-candidate-*
+          path: ${{ runner.temp }}/worker-candidates
+      - name: Assess default-switch and publication gates
+        env:
+          WORKER_ARTIFACT_ROOT: ${{ runner.temp }}/worker-candidates
+          WORKER_ROLLOUT_OUT: ${{ runner.temp }}/worker-rollout-summary.json
+          WORKER_BROWSER_JOB_RESULT: ${{ needs.browser.result }}
+        run: |
+          node --input-type=module <<'WORKER_AGGREGATE'
+          import {readFile,readdir,mkdir,writeFile,appendFile} from 'node:fs/promises';
+          import path from 'node:path';
+          import {assessWorkerRollout,assertWorkerPerformanceEvidence} from './apps/playground/scripts/worker-rollout-gates.mjs';
+          const root=path.resolve(process.env.WORKER_ARTIFACT_ROOT),out=path.resolve(process.env.WORKER_ROLLOUT_OUT);
+          const load=async filename=>JSON.parse(await readFile(filename,'utf8'));
+          const failures=[],inventory=[],candidates=[],seen=new Set();
+          let artifacts=[];
+          try{artifacts=await readdir(root,{withFileTypes:true});}catch(error){if(error.code!=='ENOENT')throw error;}
+          for(const artifact of artifacts.filter(entry=>entry.isDirectory()).sort((a,b)=>a.name.localeCompare(b.name))){
+            const directory=path.join(root,artifact.name),site=path.join(directory,'default-playground-site'),reports=path.join(directory,'default-playground-results');
+            const item={artifact:artifact.name,status:'blocked'};inventory.push(item);
+            try{
+              const manifest=await load(path.join(site,'manifest.json'));
+              item.key=manifest.runtimeProfile+':'+manifest.engineTarget;
+              if(seen.has(item.key))throw Error('Duplicate target artifact '+item.key);
+              seen.add(item.key);
+              const performance={baseline:path.join(directory,'browser-engine-performance.legacy.json'),...Object.fromEntries(['direct','bitmap'].map(presentation=>[presentation,{report:path.join(directory,'browser-engine-performance.worker-'+presentation+'.json'),budget:path.join(directory,'browser-engine-budget.'+presentation+'.json')}]))};
+              candidates.push({site,reports,capabilities:path.join(reports,'worker-capabilities.json'),performance});
+              const receipt=await load(path.join(reports,'site-acceptance.json'));
+              item.acceptanceBatchId=receipt.acceptanceBatchId;item.candidateId=receipt.candidateId;item.siteHash=receipt.siteHash;
+              item.performance=await assertWorkerPerformanceEvidence(receipt,performance,{target:manifest.engineTarget,site});
+              item.status='evidence-collected';
+            }catch(error){item.failure=String(error.message??error);failures.push(artifact.name+': '+item.failure);}
+          }
+          const requiredTargets=[];
+          for(const profile of ['full-engine-v1','engine-2d-v1'])for(const target of ['template_debug','template_release'])requiredTargets.push(profile+':'+target);
+          const missingTargets=requiredTargets.filter(key=>!seen.has(key));
+          failures.push(...missingTargets.map(key=>'Missing target artifact: '+key));
+          if(process.env.WORKER_BROWSER_JOB_RESULT!=='success')failures.push('Upstream native product matrix: '+process.env.WORKER_BROWSER_JOB_RESULT);
+          const result=await assessWorkerRollout({candidates});
+          result.failures.push(...failures);
+          if(result.failures.length){result.defaultSwitch='blocked';result.publication='blocked';}
+          result.status=result.failures.length?'blocked':'ready-for-review';
+          result.requiredTargets=requiredTargets;result.missingTargets=missingTargets;result.artifacts=inventory;
+          result.automaticPublication=false;
+          await mkdir(path.dirname(out),{recursive:true});await writeFile(out,JSON.stringify(result,null,2)+'\n');
+          if(process.env.GITHUB_STEP_SUMMARY)await appendFile(process.env.GITHUB_STEP_SUMMARY,'## Worker rollout evidence\n\nStatus: **'+result.status+'**. Default switch: **'+result.defaultSwitch+'**. Publication: **'+result.publication+'**.\n\n'+result.failures.map(message=>'- '+message).join('\n')+'\n');
+          console.log(JSON.stringify({status:result.status,defaultSwitch:result.defaultSwitch,publication:result.publication,missingTargets,failures:result.failures},null,2));
+          WORKER_AGGREGATE
+      - name: Preserve the explicit rollout decision
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: worker-rollout-summary-${{ github.sha }}
+          path: ${{ runner.temp }}/worker-rollout-summary.json
+          if-no-files-found: error
+          retention-days: 14

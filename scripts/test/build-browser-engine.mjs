@@ -8,6 +8,7 @@ import { dirname, resolve, basename, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { canonical, digest, fail, options, required, writeJson } from '../release/web-release-utils.mjs';
 import { applyWebEnginePatches } from '../release/patch-web-engine.mjs';
+import {workerRuntimeBuildProof} from '../release/patch-web-worker-runtime.mjs';
 import {getEngineProfile,engineBuildArgs,validateEngineProfile} from '../release/engine-profiles.mjs';
 
 const moduleRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -145,7 +146,7 @@ export async function buildBrowserEngine(configuration) {
   const environment=Object.fromEntries(['EMCC_CORES','BINARYEN_CORES'].filter(name=>process.env[name]!==undefined).map(name=>[name,process.env[name]]));
   const toolchains = { environment, emscripten: await toolVersion(configuration.emcc ?? 'emcc', ['--version']), scons: await toolVersion(scons, ['--version']), python: await toolVersion(configuration.python ?? 'python3', ['--version']) };
   const recipe = { command: scons, args, environment, cwd: 'independent-build-tree', builderSha256: builder.sha256, patches, generatedNativeInputs: nativeBundles.map(name => `scripts/out/${name}`), featureCapture:{path:featureEvidencePath,hookSha256:digest(hook)} };
-  const report = { schemaVersion: 1, kind: 'godot-js-browser-engine-build', runtimeProfile, requestedArgs:[...args], status: 'snapshotted', source, godotSource, builder, toolchains, recipe, recipeSha256: digest(canonical(recipe)), engineTarget: target, pckVersion: 3 };
+  const report = { schemaVersion: 1, kind: 'godot-js-browser-engine-build', runtimeProfile, requestedArgs:[...args], status: 'snapshotted', source, godotSource, builder, toolchains, recipe, recipeSha256: digest(canonical(recipe)), engineTarget: target, pckVersion: 3, ...workerRuntimeBuildProof(patches) };
   await writeJson(reportFile, report);
   if (configuration['snapshot-only']) return { status: report.status, report: reportFile };
   try {

@@ -11,8 +11,16 @@ import { publishRelease, verifyCDN } from '../publish-web-release.mjs';
 import { pinRelease } from '../pin-web-release.mjs';
 import { collectBrowserEvidence } from '../collect-browser-evidence.mjs';
 import { buildBrowserEngine, snapshotBrowserSources } from '../../test/build-browser-engine.mjs';
-import { canonical, digest, inspectRelease, json, writeJson, identity, hashSiteRuntimeFiles } from '../web-release-utils.mjs';
+import { canonical, digest, inspectRelease, json, writeJson, identity, hashSiteRuntimeFiles, assertSourcePatchChains } from '../web-release-utils.mjs';
 import { patchAudioLifecycle } from '../patch-web-audio-lifecycle.mjs';
+
+test('composed native source patches require a continuous chain ending at the compiled snapshot',()=>{
+ const first=digest('upstream'),middle=digest('lifecycle'),last=digest('worker imports');
+ const report={recipe:{patches:[{patchId:'lifecycle',path:'audio.js',beforeSha256:first,afterSha256:middle},{patchId:'worker',path:'audio.js',beforeSha256:middle,afterSha256:last}]},godotSource:{inputs:{'audio.js':last}}};
+ assert.equal(assertSourcePatchChains(report).get('audio.js').patchId,'worker');
+ const broken=structuredClone(report);broken.recipe.patches[1].beforeSha256=first;assert.throws(()=>assertSourcePatchChains(broken),/Broken source patch chain/);
+ const stale=structuredClone(report);stale.godotSource.inputs['audio.js']=middle;assert.throws(()=>assertSourcePatchChains(stale),/not in the attested snapshot/);
+});
 
 async function fixture(t, certifiedSource = false) {
   const root = await mkdtemp(resolve(tmpdir(), 'web-release-test-'));

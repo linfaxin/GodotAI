@@ -18,6 +18,10 @@ export interface VerifiedRelease {
   maxAssetBytes?: number;
   /** Explicitly public versioned assets only; private assets keep revalidation. */
   cachePolicy?: 'revalidate' | 'public-immutable';
+  /** Runtime transport contract, independently versioned from engine profiles. */
+  runtimeAbi?: { protocolVersion: 2; host: 1; audio: 1; presentation: 1 };
+  runtimeWorker?: VerifiedAsset;
+  runtimeAudioWorklet?: VerifiedAsset;
 }
 export interface GodotInstance {
   preloadFile(bytes: Uint8Array, path: string): Promise<void>;
@@ -36,6 +40,38 @@ export interface LoadedEngine {
   /** Install on this instance before init(), using Godot 4.6.1's module-config hook. */
   installWorklets(instance: GodotInstance): void;
   dispose(): void;
+}
+export interface VerifiedWorkletBytes {
+  name: string;
+  /** Digest of these decoded bytes, ready for the receiving host to execute. */
+  sha256: string;
+  bytes: Uint8Array;
+}
+export interface LoadedWorkerEngine extends LoadedEngine {
+  worklets: readonly VerifiedWorkletBytes[];
+  runtimeAudioWorklet?: VerifiedWorkletBytes;
+}
+/** Narrow injection surface for worker hosts and loader contract tests. */
+export interface VerifiedWorkerScope {
+  fetch: typeof fetch;
+  importScripts(...urls: string[]): void;
+  location?: { href: string };
+}
+export interface VerifiedRuntimeWorker {
+  worker: Worker;
+  /** Original HTTP script URL, for an explicit logical base in Blob workers. */
+  readonly scriptUrl: string;
+  /** Terminates the worker and releases the exact verified script URL. */
+  dispose(): void;
+}
+export interface RuntimeWorkerLoadOptions {
+  signal?: AbortSignal;
+  maxBytes?: number;
+  cachePolicy?: 'revalidate' | 'public-immutable';
+  allowedOrigins?: readonly string[];
+  workerOptions?: WorkerOptions;
+  Worker?: new (scriptURL: string | URL, options?: WorkerOptions) => Worker;
+  fetch?: typeof fetch;
 }
 
 function abort(signal?: AbortSignal): void { if (signal?.aborted) throw signal.reason ?? new DOMException('Cancelled', 'AbortError'); }
@@ -100,7 +136,8 @@ export function validateRelease(release: VerifiedRelease, base = globalThis.loca
   if (release.cachePolicy !== undefined && !['revalidate', 'public-immutable'].includes(release.cachePolicy)) throw new Error('E_RELEASE_CACHE_POLICY');
   if (release.worklets !== undefined && !Array.isArray(release.worklets)) throw new Error('E_RELEASE_WORKLETS');
   const kinds = new Set<WorkletKind>();
-  for (const asset of [release.engineJs, release.engineWasm, ...release.worklets ?? []]) {
+  if (release.runtimeAbi !== undefined && (!release.runtimeAbi || release.runtimeAbi.protocolVersion !== 2 || release.runtimeAbi.host !== 1 || release.runtimeAbi.audio !== 1 || release.runtimeAbi.presentation !== 1)) throw new Error('E_RELEASE_RUNTIME_ABI');
+  for (const asset of [release.engineJs, release.engineWasm, ...release.worklets ?? [], ...release.runtimeWorker ? [release.runtimeWorker] : [], ...release.runtimeAudioWorklet ? [release.runtimeAudioWorklet] : []]) {
     assetMetadata(asset);
     const url = new URL(asset.url, base);
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('E_RELEASE_URL');
@@ -111,6 +148,140 @@ export function validateRelease(release: VerifiedRelease, base = globalThis.loca
     if (kinds.has(kind)) throw new Error('E_RELEASE_WORKLET_DUPLICATE');
     kinds.add(kind);
   }
+}
+
+/** Resolve before crossing realms: a verified Blob has no HTTP relative base. */
+export function resolveVerifiedRelease(release: VerifiedRelease, base = globalThis.location?.href): VerifiedRelease {
+  validateRelease(release, base);
+  const resolve = <T extends VerifiedAsset>(asset: T): T => ({ ...asset, url: new URL(asset.url, base).href });
+  return { ...release, engineJs: resolve(release.engineJs), engineWasm: resolve(release.engineWasm),
+    ...(release.worklets ? { worklets: release.worklets.map(resolve) } : {}),
+    ...(release.runtimeWorker ? { runtimeWorker: resolve(release.runtimeWorker) } : {}),
+    ...(release.runtimeAudioWorklet ? { runtimeAudioWorklet: resolve(release.runtimeAudioWorklet) } : {}) };
+}
+
+function abortable<T>(pending: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) { void pending.catch(() => {}); return Promise.reject(signal.reason); }
+  return new Promise<T>((resolve, reject) => {
+    const cancelled = () => { signal.removeEventListener('abort', cancelled); reject(signal.reason); };
+    signal.addEventListener('abort', cancelled, { once: true });
+    pending.then(value => { signal.removeEventListener('abort', cancelled); resolve(value); }, error => { signal.removeEventListener('abort', cancelled); reject(error); });
+  });
+}
+
+/** Downloads a bundled, self-contained classic worker and executes those exact
+ * verified bytes. Creation does not imply application readiness; the caller's
+ * protocol owns handshake and startup deadlines. Never imports an unverified URL. */
+export async function loadVerifiedRuntimeWorker(asset: VerifiedAsset, options: RuntimeWorkerLoadOptions = {}): Promise<VerifiedRuntimeWorker> {
+  abort(options.signal);
+  assetMetadata(asset);
+  const url = new URL(asset.url, globalThis.location?.href);
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('E_RELEASE_URL');
+  if (options.allowedOrigins && !options.allowedOrigins.includes(url.origin)) throw new Error('E_RELEASE_ORIGIN');
+  if (options.workerOptions?.type !== undefined && options.workerOptions.type !== 'classic') throw new Error('E_RUNTIME_WORKER_TYPE');
+  const bytes = await fetchVerifiedAsset(asset, options);
+  abort(options.signal);
+  let blobUrl: string | undefined, worker: Worker | undefined, disposed = false;
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    options.signal?.removeEventListener('abort', dispose);
+    try { worker?.terminate(); }
+    finally { if (blobUrl) { URL.revokeObjectURL(blobUrl); blobUrl = undefined; } }
+  };
+  try {
+    options.signal?.addEventListener('abort', dispose, { once: true });
+    abort(options.signal);
+    blobUrl = URL.createObjectURL(new Blob([bytes.slice().buffer], { type: 'text/javascript' }));
+    const Constructor = options.Worker ?? globalThis.Worker;
+    if (typeof Constructor !== 'function') throw new Error('E_RUNTIME_WORKER_UNAVAILABLE');
+    worker = new Constructor(blobUrl, { ...options.workerOptions, type: 'classic' });
+    // An injected constructor can synchronously cancel before returning.
+    if (disposed) worker.terminate();
+    abort(options.signal);
+    return { worker, scriptUrl: url.href, dispose };
+  } catch (error) { dispose(); throw error; }
+}
+
+/** Worker equivalent of loadVerifiedEngine, without document or DOM execution.
+ * importScripts remains synchronous; this adapter must run before project code.
+ * Raw verified worklet bytes may be transferred to the iframe's audio host. */
+export async function loadVerifiedWorkerEngine(release: VerifiedRelease, options: { signal?: AbortSignal; scope?: VerifiedWorkerScope; fetch?: typeof fetch; includeRuntimeAudioWorklet?: boolean; baseUrl?: string } = {}): Promise<LoadedWorkerEngine> {
+  const scope = options.scope ?? globalThis as unknown as VerifiedWorkerScope;
+  release = resolveVerifiedRelease(release, options.baseUrl ?? scope.location?.href);
+  if (typeof scope.importScripts !== 'function') throw new Error('E_ENGINE_WORKER_IMPORT');
+  const controller = new AbortController();
+  const forwardAbort = () => controller.abort(options.signal?.reason ?? new DOMException('Cancelled', 'AbortError'));
+  const urls: string[] = [];
+  const installed = new Map<object, { config: Record<string, unknown>; wrapper: unknown; own?: PropertyDescriptor }>();
+  let disposed = false;
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    options.signal?.removeEventListener('abort', forwardAbort);
+    controller.signal.removeEventListener('abort', dispose);
+    controller.abort(new DOMException('Engine disposed', 'AbortError'));
+    for (const { config, wrapper, own } of installed.values()) if (config.getModuleConfig === wrapper) {
+      if (own) Object.defineProperty(config, 'getModuleConfig', own);
+      else delete config.getModuleConfig;
+    }
+    installed.clear();
+    for (const url of urls) URL.revokeObjectURL(url);
+    urls.length = 0;
+  };
+  const blob = (bytes: Uint8Array) => {
+    const url = URL.createObjectURL(new Blob([bytes.slice().buffer], { type: 'text/javascript' }));
+    urls.push(url); return url;
+  };
+  options.signal?.addEventListener('abort', forwardAbort, { once: true });
+  controller.signal.addEventListener('abort', dispose, { once: true });
+  if (options.signal?.aborted) forwardAbort();
+  try {
+    abort(controller.signal);
+    const declared = release.worklets ?? [];
+    const runtimeAudio = options.includeRuntimeAudioWorklet === true ? release.runtimeAudioWorklet : undefined;
+    const assets = [release.engineJs, release.engineWasm, ...declared, ...runtimeAudio ? [runtimeAudio] : []];
+    const bytes = await Promise.all(assets.map(asset => fetchVerifiedAsset(asset, { signal: controller.signal, maxBytes: release.maxAssetBytes, cachePolicy: release.cachePolicy, fetch: options.fetch ?? scope.fetch.bind(scope) })));
+    abort(controller.signal);
+    const worklets = declared.map((asset, index): VerifiedWorkletBytes => ({ name: declaredWorkletKind(asset, scope.location?.href), sha256: asset.decodedSha256 ?? asset.sha256, bytes: bytes[index + 2] }));
+    const runtimeAudioWorklet = runtimeAudio ? { name: 'runtime.audio.worklet.js', sha256: runtimeAudio.decodedSha256 ?? runtimeAudio.sha256, bytes: bytes.at(-1)! } : undefined;
+    const workletUrls = new Map(worklets.map(worklet => [worklet.name, blob(worklet.bytes)]));
+    const captureKey = '__godotjsVerifiedEngine_' + crypto.randomUUID().replaceAll('-', '');
+    const globals = scope as unknown as Record<string, unknown>;
+    const capture = new TextEncoder().encode(`globalThis[${JSON.stringify(captureKey)}] = typeof Engine === 'function' ? Engine : undefined;`);
+    let Engine: GodotConstructor;
+    try {
+      // The capture is a separate, fixed host script; engine bytes are unchanged.
+      scope.importScripts(blob(bytes[0]), blob(capture));
+      Engine = globals[captureKey] as GodotConstructor;
+    } finally { delete globals[captureKey]; }
+    abort(controller.signal);
+    if (!Engine! || typeof Engine.load !== 'function') throw new Error('E_ENGINE_API');
+    const basePath = await abortable(injectVerifiedWasm(Engine, release.engineWasm.url, bytes[1], scope), controller.signal);
+    abort(controller.signal);
+    const installWorklets = (instance: GodotInstance) => {
+      if (disposed) throw new Error('E_ENGINE_DISPOSED');
+      if (!workletUrls.size) return;
+      const config = (instance as unknown as { config?: Record<string, unknown> }).config;
+      if (!config || typeof config.getModuleConfig !== 'function') throw new Error('E_ENGINE_WORKLET_API');
+      if (installed.has(config)) return;
+      const original = config.getModuleConfig as (...args: unknown[]) => { locateFile?: (...args: unknown[]) => unknown };
+      const wrapper = function(this: unknown, ...args: unknown[]) {
+        if (disposed) throw new Error('E_ENGINE_DISPOSED');
+        const module = original.apply(this, args), locateFile = module?.locateFile;
+        if (typeof locateFile !== 'function') throw new Error('E_ENGINE_WORKLET_API');
+        return { ...module, locateFile(path: string, ...rest: unknown[]) {
+          if (disposed) throw new Error('E_ENGINE_DISPOSED');
+          const kind = workletKind(path);
+          if (kind) { const url = workletUrls.get(kind); if (!url) throw new Error('E_ENGINE_WORKLET_MISSING'); return url; }
+          return locateFile.call(module, path, ...rest);
+        } };
+      };
+      const own = Object.getOwnPropertyDescriptor(config, 'getModuleConfig');
+      config.getModuleConfig = wrapper; installed.set(config, { config, wrapper, own });
+    };
+    return { Engine, basePath, wasmSha256: release.engineWasm.decodedSha256 ?? release.engineWasm.sha256, worklets, runtimeAudioWorklet, installWorklets, dispose };
+  } catch (error) { dispose(); throw error; }
 }
 export async function fetchVerifiedAsset(asset: VerifiedAsset, options: { signal?: AbortSignal; maxBytes?: number; maxDecodedBytes?: number; fetch?: typeof fetch; cachePolicy?: 'revalidate' | 'public-immutable' } = {}): Promise<Uint8Array> {
   abort(options.signal);

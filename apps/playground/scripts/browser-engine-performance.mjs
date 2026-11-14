@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import {readFile,writeFile,mkdir} from 'node:fs/promises';
 import {createServer} from 'node:http';
-import {createHash} from 'node:crypto';
+import {createHash,randomUUID} from 'node:crypto';
 import {performance} from 'node:perf_hooks';
 import os from 'node:os';
 import path from 'node:path';
@@ -12,9 +12,10 @@ import {fileURLToPath} from 'node:url';
 import {gunzipSync} from 'node:zlib';
 import {options,within} from '../../../scripts/release/web-release-utils.mjs';
 import {getEngineProfile} from '../../../scripts/release/engine-profiles.mjs';
-import {launchBrowser} from './browser-harness.mjs';
+import {launchBrowser,browserLaunchEvidence} from './browser-harness.mjs';
 import {createStaticServer} from './serve.mjs';
-import {siteIdentity} from './site-evidence.mjs';
+import {siteIdentity,canonical,performanceComparisonInputs,assertPerformanceComparable} from './site-evidence.mjs';
+import {assessPerformanceBudget,createWorkerRegressionBudget} from './performance-acceptance.mjs';
 
 const demos=Object.freeze(['shader','lights','match3','dungeon']);
 const launchArgs=Object.freeze(['--no-sandbox','--enable-webgl','--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader','--disable-dev-shm-usage','--autoplay-policy=no-user-gesture-required']);
@@ -28,8 +29,86 @@ const summarize=values=>{
  if(!n)return{count:0,min:null,max:null,median:null,p95:null};
  return{count:n,min:sorted[0],max:sorted[n-1],median:n%2?sorted[(n-1)/2]:(sorted[n/2-1]+sorted[n/2])/2,p95:sorted[Math.ceil(.95*n)-1]};
 };
+/** Pure observation of the candidate's existing monotonic counters. Sampling
+ * cannot recover per-frame capture duration, ACK RTT or on-screen FPS. */
+export function summarizeBitmapPresentation(samples,{session,windowStartMs,windowEndMs}={}){
+ const result={schemaVersion:1,availability:'unavailable',method:'Differences of actual identity-bound Worker presentation counters sampled through the unchanged Host snapshot',unit:'events/second',window:{startMs:windowStartMs??null,endMs:windowEndMs??null,clock:'Node navigation-relative sampling timestamps; browser telemetry window, approximate alignment at 250ms sampling resolution'},commitHz:null,captureHz:null,ackHz:null,skippedHz:null,captureDurationMs:null,ackRoundTripMs:null,provesOnscreenFPS:false,counterDeltas:{},latencyAvailability:'The runtime exposes cumulative counts only; no capture duration or ACK RTT is inferred.',publicationCadenceCaveat:'Heartbeat publication can repeat counter snapshots between samples. Interval distributions include this quantization and are not per-frame timing distributions.',rawSamples:[],intervalRates:[]};
+ if(session?.executionBackend!=='worker'||session?.presentationBackend!=='bitmap'){result.availability='not-applicable';return result;}
+ const keys=['runId','documentId','workerId','runConfigurationHash'];
+ if(keys.some(key=>typeof session[key]!=='string'||!session[key])||!Number.isFinite(windowStartMs)||!Number.isFinite(windowEndMs)||windowEndMs<=windowStartMs)return result;
+ result.identity=Object.fromEntries(keys.map(key=>[key,session[key]]));
+ for(const sample of samples??[]){
+  if(!Number.isFinite(sample.atMs)||sample.atMs<windowStartMs||sample.atMs>windowEndMs)continue;
+  const actual=sample.frames?.map(frame=>frame.worker).find(value=>value?.executionBackend==='worker'&&value.presentationBackend==='bitmap'&&keys.every(key=>value[key]===session[key]));
+  const memory=actual?.memory,worker=memory?.presentation;
+  if(memory?.schemaVersion!==1||memory.workerId!==session.workerId||memory.realmId!==session.workerId||memory.executionBackend!=='worker'||!worker)continue;
+  result.rawSamples.push({atMs:sample.atMs,worker,host:actual.presentationHost??null});
+ }
+ result.rawSamples.sort((a,b)=>a.atMs-b.atMs);
+ const counters={committed:'commitHz',captured:'captureHz',acknowledged:'ackHz',skipped:'skippedHz'};
+ for(const [counter,metric]of Object.entries(counters)){
+  const values=result.rawSamples.filter(sample=>Number.isSafeInteger(sample.worker[counter])&&sample.worker[counter]>=0);
+  if(values.length<2)continue;
+  if(values.some((value,index)=>index&&value.worker[counter]<values[index-1].worker[counter])){result.availability='inconsistent-counter';result.reason='A monotonic counter decreased: '+counter;for(const name of Object.values(counters))result[name]=null;return result;}
+  const first=values[0],last=values.at(-1),elapsed=last.atMs-first.atMs;
+  if(elapsed<=0)continue;
+  const countDelta=last.worker[counter]-first.worker[counter];
+  result.counterDeltas[counter]={startValue:first.worker[counter],endValue:last.worker[counter],startObservedAtMs:first.atMs,endObservedAtMs:last.atMs,elapsedMs:elapsed,countDelta};
+  result[metric]=countDelta*1000/elapsed;
+ }
+ for(let index=1;index<result.rawSamples.length;index++){
+  const before=result.rawSamples[index-1],after=result.rawSamples[index],elapsed=after.atMs-before.atMs;if(elapsed<=0)continue;
+  const interval={startMs:before.atMs,endMs:after.atMs};
+  for(const [counter,metric]of Object.entries(counters))interval[metric]=[before.worker[counter],after.worker[counter]].every(value=>Number.isSafeInteger(value)&&value>=0)?(after.worker[counter]-before.worker[counter])*1000/elapsed:null;
+  result.intervalRates.push(interval);
+ }
+ result.intervalRateDistributions=Object.fromEntries(Object.values(counters).map(metric=>[metric,summarize(result.intervalRates.map(value=>value[metric]))]));
+ result.availability=Number.isFinite(result.captureHz)&&Number.isFinite(result.ackHz)?'observed':'insufficient-counter-samples';
+ return result;
+}
+/** Bounded opt-in timestamps, separate from counter-rate estimates. */
+export function summarizeWorkerTimings(session,{windowStartEpochMs,windowEndEpochMs}={}){
+ const result={schemaVersion:1,availability:'not-applicable',identity:null,clock:null,scope:'Capture/ACK/Host consumption during the FPS observation window; trusted KeyJ input probe afterward. Native consumption is a real fixture _input callback. No physical input/display claim.',captureDurationMs:null,ackRoundTripMs:null,hostConsumptionLatencyMs:null,hostConsumptionDurationMs:null,inputHostToWorkerMs:null,inputHostToNativeMs:null,inputWorkerDispatchMs:null,inputNativeQueueMs:null,rawFrames:[],rawInputs:[],provesOnscreenPresentation:false};
+ if(session?.executionBackend!=='worker')return result;
+ result.availability='unavailable';const data=session.memory?.benchmark;
+ if(!data||data.schemaVersion!==1||data.mode!=='benchmark')return result;
+ const keys=['runId','documentId','workerId','runConfigurationHash'];
+ if(keys.some(key=>typeof session[key]!=='string'||!session[key])||!Number.isSafeInteger(data.sampleLimitPerKind)||data.sampleLimitPerKind<1||data.sampleLimitPerKind>4096||!Array.isArray(data.frames)||!Array.isArray(data.inputs)||data.frames.length>data.sampleLimitPerKind||data.inputs.length>data.sampleLimitPerKind)throw Error('E_PERFORMANCE_BENCHMARK_EVIDENCE');
+ result.identity=Object.fromEntries(keys.map(key=>[key,session[key]]));result.clock=data.clock;
+ const finite=value=>typeof value==='number'&&Number.isFinite(value)&&value>=0;
+ const inputSequences=new Set(),frameIds=new Set();
+ for(const row of data.inputs){
+  if(!Number.isSafeInteger(row.sequence)||inputSequences.has(row.sequence)||![row.capturedAtMs,row.forwardedAtMs,row.workerReceivedAtMs].every(finite)||row.capturedAtMs>row.forwardedAtMs||row.workerDispatchedAtMs!==null&&(!finite(row.workerDispatchedAtMs)||row.workerDispatchedAtMs<row.workerReceivedAtMs)||row.nativeConsumedAtMs!==null&&(!finite(row.nativeConsumedAtMs)||row.nativeConsumedAtMs<row.workerReceivedAtMs))throw Error('E_PERFORMANCE_INPUT_TIMING');
+  inputSequences.add(row.sequence);if(row.trusted===true&&row.code==='KeyJ'&&['keydown','keyup'].includes(row.event))result.rawInputs.push({...row});
+ }
+ for(const row of data.frames){
+  if(!Number.isSafeInteger(row.frameId)||frameIds.has(row.frameId)||![row.captureStartedAtMs,row.captureEndedAtMs].every(finite)||row.captureEndedAtMs<row.captureStartedAtMs||row.ackReceivedAtMs!==null&&(!finite(row.ackReceivedAtMs)||row.ackReceivedAtMs<row.captureEndedAtMs))throw Error('E_PERFORMANCE_FRAME_TIMING');
+  frameIds.add(row.frameId);
+  if(row.hostConsumedAtMs!==null&&(!finite(row.hostReceivedAtMs)||!finite(row.hostConsumedAtMs)||row.hostConsumedAtMs<row.hostReceivedAtMs||!finite(row.ackReceivedAtMs)||!['consumed','released'].includes(row.hostDisposition)))throw Error('E_PERFORMANCE_HOST_CONSUMPTION_TIMING');
+  if(finite(windowStartEpochMs)&&finite(windowEndEpochMs)&&row.captureStartedAtMs>=windowStartEpochMs&&row.captureEndedAtMs<=windowEndEpochMs)result.rawFrames.push({...row});
+ }
+ const inputs=result.rawInputs,frames=result.rawFrames,consumed=frames.filter(row=>row.hostDisposition==='consumed');
+ result.captureDurationMs=summarize(frames.map(row=>row.captureEndedAtMs-row.captureStartedAtMs));
+ result.ackRoundTripMs=summarize(frames.filter(row=>row.ackReceivedAtMs!==null).map(row=>row.ackReceivedAtMs-row.captureEndedAtMs));
+ // Only same-realm ordering is validated above. Adjacent cross-realm readings
+ // can reverse under browser precision reduction; omit those intervals without
+ // discarding Native consumption or inventing zero latency.
+ const crossRealmConsumed=consumed.filter(row=>row.hostReceivedAtMs>=row.captureEndedAtMs&&row.hostConsumedAtMs<=row.ackReceivedAtMs);
+ result.hostConsumptionLatencyMs=summarize(crossRealmConsumed.map(row=>row.hostConsumedAtMs-row.captureEndedAtMs));
+ result.hostConsumptionDurationMs=summarize(consumed.map(row=>row.hostConsumedAtMs-row.hostReceivedAtMs));
+ result.inputHostToWorkerMs=summarize(inputs.filter(row=>row.workerReceivedAtMs>=row.forwardedAtMs).map(row=>row.workerReceivedAtMs-row.capturedAtMs));
+ result.inputWorkerDispatchMs=summarize(inputs.filter(row=>row.workerDispatchedAtMs!==null).map(row=>row.workerDispatchedAtMs-row.workerReceivedAtMs));
+ result.inputHostToNativeMs=summarize(inputs.filter(row=>row.nativeConsumedAtMs!==null&&row.nativeConsumedAtMs>=row.forwardedAtMs).map(row=>row.nativeConsumedAtMs-row.capturedAtMs));
+ result.inputNativeQueueMs=summarize(inputs.filter(row=>row.nativeConsumedAtMs!==null).map(row=>row.nativeConsumedAtMs-row.workerReceivedAtMs));
+ result.availability=result.inputHostToNativeMs.count>=2&&(session.presentationBackend!=='bitmap'||result.ackRoundTripMs.count>0&&result.hostConsumptionLatencyMs.count>0)?'observed':'insufficient-samples';
+ result.unavailableCrossRealmIntervals={inputHostToWorker:inputs.length-result.inputHostToWorkerMs.count,inputHostToNative:inputs.filter(row=>row.nativeConsumedAtMs!==null).length-result.inputHostToNativeMs.count,hostConsumptionLatency:consumed.length-crossRealmConsumed.length};
+ result.rejectedSamples=data.rejectedSamples;return result;
+}
 function integer(value,fallback,name,min,max){const number=value===undefined?fallback:Number(value);if(!Number.isSafeInteger(number)||number<min||number>max)throw Error('E_PERFORMANCE_OPTION: '+name);return number;}
 async function optionalText(filename){try{return(await readFile(filename,'utf8')).trim();}catch{return null;}}
+async function performanceHardware(){
+ return {platform:process.platform,arch:process.arch,node:process.version,kernel:os.release(),cpuModels:[...new Set(os.cpus().map(cpu=>cpu.model))],logicalCPUs:os.cpus().length,availableParallelism:os.availableParallelism(),totalMemoryBytes:os.totalmem(),cgroupCpuMax:await optionalText('/sys/fs/cgroup/cpu.max'),cgroupMemoryMax:await optionalText('/sys/fs/cgroup/memory.max'),loadAverageStart:os.loadavg()};
+}
 /** Serialized into each real browser realm. Only WeakRef/WeakMap retain native
  * memories; the observer never changes bytes, imports, memory limits or grow(). */
 export function installWasmMemoryObserver(){
@@ -85,20 +164,25 @@ export function installWasmMemoryObserver(){
  Object.defineProperty(globalThis,key,{value:observer,configurable:true});
 }
 function startWasmMemorySampling(page,navigationStart){
- const samples=[],frames=new Map();let active=true;
+ const samples=[],frames=new Map(),workers=new Map();let active=true;
  async function sample(){
-  const previews=page.frames().filter(frame=>{try{return new URL(frame.url()).pathname.endsWith('/preview.html');}catch{return false;}}),observations=[];
+  const previews=page.frames().filter(frame=>{try{return /\/preview(?:\.legacy)?\.html$/.test(new URL(frame.url()).pathname);}catch{return false;}}),observations=[];
   for(const frame of previews){
    try{
-    const value=await frame.evaluate(()=>globalThis.__enginePerformanceWasmMemoryObserver?.snapshot()??null);
-    observations.push({url:frame.url(),observer:value});
+    const observation=await frame.evaluate(()=>{const current=globalThis.__playgroundRuntimeSession;return{legacy:globalThis.__enginePerformanceWasmMemoryObserver?.snapshot()??null,session:typeof current==='function'?current():current??null};});
+    const value=observation.legacy,session=observation.session,memory=session?.memory;
+    observations.push({url:frame.url(),observer:value,worker:session});
     if(value){const previous=frames.get(value.realmId);frames.set(value.realmId,{url:frame.url(),...value,wasmMemoryCapacityPeakBytes:value.observedMemories>0||previous?.observedMemories>0?Math.max(previous?.wasmMemoryCapacityPeakBytes??0,value.wasmMemoryCapacityPeakBytes??0):null});}
+    if(memory?.schemaVersion===1&&memory.workerId===session.workerId&&memory.realmId===session.workerId&&memory.executionBackend==='worker'){
+     const previous=workers.get(memory.workerId),capacity=memory.wasmMemoryCapacityPeakBytes,heap=memory.jsHeapUsedPeakBytes;
+     workers.set(memory.workerId,{url:frame.url(),runId:session.runId,documentId:session.documentId,runConfigurationHash:session.runConfigurationHash,runConfiguration:session.runConfiguration,presentationBackend:session.presentationBackend,...memory,wasmMemoryCapacityPeakBytes:Number.isFinite(capacity)?Math.max(previous?.wasmMemoryCapacityPeakBytes??0,capacity):previous?.wasmMemoryCapacityPeakBytes??null,jsHeapUsedPeakBytes:Number.isFinite(heap)?Math.max(previous?.jsHeapUsedPeakBytes??0,heap):previous?.jsHeapUsedPeakBytes??null});
+    }
    }catch(error){observations.push({url:frame.url(),error:String(error)});}
   }
   samples.push({atMs:performance.now()-navigationStart,frames:observations});
  }
  const pending=(async()=>{while(active){await sample();if(active)await wait(250);}})();
- return{sample,async stop(){active=false;await pending;const recorded=[...frames.values()],observed=recorded.some(frame=>frame.observedMemories>0);return{method:'WeakRef observation of actual exports from native WebAssembly.instantiate/instantiateStreaming, sampled in real preview frames',samplingIntervalMs:250,unit:'bytes',scope:'Maximum observed per-preview-realm sum of live exported WebAssembly.Memory buffer capacities; per-memory peaks and raw frame samples are retained. The tested workbench has one active preview. Capacity includes unused space and is neither resident/physical memory nor renderer RSS. No memory parameters, grow calls, module bytes or imports are changed.',coverage:'Only exported Memory objects from observed asynchronous instantiations; synchronous new WebAssembly.Instance and non-exported/import-only memories are not covered.',wasmMemoryCapacityPeakBytes:observed?Math.max(...recorded.map(frame=>frame.wasmMemoryCapacityPeakBytes??0)):null,observedPreviewRealms:recorded,rawSamples:samples,availability:observed?'observed-exported-memory':'no-exported-memory-observed'};}};
+ return{sample,async stop(){active=false;await pending;const recorded=[...frames.values()],workerRealms=[...workers.values()],capacities=[...recorded.filter(frame=>frame.observedMemories>0).map(frame=>frame.wasmMemoryCapacityPeakBytes),...workerRealms.map(worker=>worker.wasmMemoryCapacityPeakBytes)].filter(Number.isFinite),heaps=workerRealms.map(worker=>worker.jsHeapUsedPeakBytes).filter(Number.isFinite);return{method:'Legacy async-instantiation WeakRef observation plus actual Worker HEAPU8 buffer capacity reported by the exact candidate runtime',samplingIntervalMs:250,unit:'bytes',scope:'Maximum observed per-realm WASM linear-memory capacity. Worker measurements are collected inside the Worker and bound to its run/document/worker/config identity. Page-target CDP heap remains separate. Capacity is neither resident memory nor renderer RSS.',coverage:'Worker capacity covers the active native HEAPU8/_jsbb_ buffer. Worker JS heap is available only when that realm exposes performance.memory; unavailable values remain null. Legacy observation covers exported asynchronous instantiations only.',wasmMemoryCapacityPeakBytes:capacities.length?Math.max(...capacities):null,workerJSHeapUsedPeakBytes:heaps.length?Math.max(...heaps):null,observedWorkerRealms:workerRealms,observedPreviewRealms:recorded,rawSamples:samples,availability:capacities.length?'observed-native-memory':'no-native-memory-observed'};}};
 }
 export function editorObservation({demoId,settleMs}){
  if(window.top!==window)return;
@@ -138,12 +222,12 @@ function startMemorySampling(context,page,navigationStart){
  })();
  return async()=>{active=false;await pending;await session?.detach().catch(()=>{});const heap=records.map(value=>value.jsHeapUsedBytes).filter(Number.isFinite);return{method:'Chromium CDP page-target Performance.getMetrics',samplingIntervalMs:250,scope:'Sampled over navigation, the observation window and shutdown. Page-target JavaScript heap includes the editor and frames sharing that target. This is neither renderer RSS nor WASM linear-memory peak, and can omit separate iframe targets.',sampledPeakJSHeapUsedBytes:heap.length?Math.max(...heap):null,samples:records,errors};};
 }
-async function runScenario({site,identity,editorOrigin,previewOrigin,demoId,sample,browserName,timeout,settleMs,observeMs}){
+async function runScenario({site,identity,editorOrigin,previewOrigin,demoId,sample,browserName,timeout,settleMs,observeMs,presentationBackend,executionBackend}){
  const wallStart=performance.now(),record={demoId,sample,status:'measuring',browser:null,errors:[],consoleErrors:[],consoleMessages:[],httpResponses:[]};
  let browser,context,page,stopMemory,wasmMemorySampler;
  const responses=[];
  try{
-  const beforeLaunch=performance.now();browser=await launchBrowser({browser:browserName,headless:true,args:[...launchArgs]});record.browserLaunchMs=performance.now()-beforeLaunch;record.browser={name:browser.browserType().name(),version:browser.version()};
+  const beforeLaunch=performance.now();browser=await launchBrowser({browser:browserName,headless:true,args:[...launchArgs]});record.browserLaunchMs=performance.now()-beforeLaunch;record.browser={name:browser.browserType().name(),version:browser.version(),...browserLaunchEvidence(browser)};
   context=await browser.newContext({viewport:{width:1536,height:1000},deviceScaleFactor:1});
   await context.addInitScript(installWasmMemoryObserver);
   await context.addInitScript(editorObservation,{demoId,settleMs});
@@ -154,7 +238,7 @@ async function runScenario({site,identity,editorOrigin,previewOrigin,demoId,samp
   const navigationStart=performance.now();
   if(browserName==='chromium')stopMemory=startMemorySampling(context,page,navigationStart);
   wasmMemorySampler=startWasmMemorySampling(page,navigationStart);
-  await page.goto(editorOrigin+'/?project='+encodeURIComponent(demoId)+'&previewOrigin='+encodeURIComponent(previewOrigin),{waitUntil:'domcontentloaded'});
+  await page.goto(editorOrigin+'/?project='+encodeURIComponent(demoId)+'&previewOrigin='+encodeURIComponent(previewOrigin)+'&presentationBackend='+encodeURIComponent(presentationBackend)+'&executionBackend='+encodeURIComponent(executionBackend)+(executionBackend==='worker'?'&benchmarkTimings=1':''),{waitUntil:'domcontentloaded'});
   await page.waitForFunction(({demoId,settleMs,observeMs})=>{
    const observed=globalThis.__enginePerformanceObservation,state=globalThis.__playgroundWorkbench?.inspect();
    if(observed?.error)throw Error(JSON.stringify(observed.error));
@@ -172,7 +256,21 @@ async function runScenario({site,identity,editorOrigin,previewOrigin,demoId,samp
   record.fps=summarize(observed.telemetry.filter(entry=>entry.withinMeasurementWindow).map(entry=>entry.fps));assert(record.fps.count>=3,'Expected real finite telemetry FPS samples');
   record.navigation=await page.evaluate(()=>performance.getEntriesByType('navigation').map(entry=>entry.toJSON()));
   const iframe=page.frames().find(frame=>new URL(frame.url()||'about:blank').origin===previewOrigin);
-  record.graphics=iframe?await iframe.evaluate(()=>{const canvas=document.querySelector('canvas');const gl=canvas?.getContext('webgl2');if(!gl)return null;const extension=gl.getExtension('WEBGL_debug_renderer_info');return{version:gl.getParameter(gl.VERSION),vendor:extension?gl.getParameter(extension.UNMASKED_VENDOR_WEBGL):gl.getParameter(gl.VENDOR),renderer:extension?gl.getParameter(extension.UNMASKED_RENDERER_WEBGL):gl.getParameter(gl.RENDERER)};}).catch(error=>({error:String(error)})):null;
+  record.runtimeSession=iframe?await iframe.evaluate(()=>{const current=globalThis.__playgroundRuntimeSession;return typeof current==='function'?current():current??null;}):null;
+  if(executionBackend==='worker'){assert.equal(record.runtimeSession?.executionBackend,'worker','Measured execution backend must be the actual Worker');assert.equal(record.runtimeSession?.presentationBackend,presentationBackend);}
+  else assert.equal(record.runtimeSession,null,'Legacy baseline must execute the explicit legacy preview');
+  record.graphics=iframe?await iframe.evaluate(()=>{const current=globalThis.__playgroundRuntimeSession,session=typeof current==='function'?current():current;if(session?.executionBackend==='worker')return session.graphics??null;const canvas=document.querySelector('canvas');const gl=canvas?.getContext('webgl2');if(!gl)return null;const extension=gl.getExtension('WEBGL_debug_renderer_info');return{version:gl.getParameter(gl.VERSION),vendor:extension?gl.getParameter(extension.UNMASKED_VENDOR_WEBGL):gl.getParameter(gl.VENDOR),renderer:extension?gl.getParameter(extension.UNMASKED_RENDERER_WEBGL):gl.getParameter(gl.RENDERER)};}).catch(error=>({error:String(error)})):null;
+  if(executionBackend==='worker'){
+   // No warmup: actual input is measured after the fixed FPS window ends.
+   await page.evaluate(()=>{const enable=globalThis.__playgroundWorkbench?.enableNativeInputBenchmark;if(typeof enable!=='function')throw Error('E_PERFORMANCE_BENCHMARK_UNSUPPORTED');enable();});
+   await page.waitForFunction(()=>globalThis.__playgroundWorkbench.inspect().events.some(event=>event.type==='benchmark-input-ready'),null,{timeout});
+   await iframe.locator('canvas').focus();await page.keyboard.press('j');
+   await iframe.waitForFunction(()=>{const value=globalThis.__playgroundRuntimeSession,session=typeof value==='function'?value():value;return session?.memory?.benchmark?.inputs.filter(row=>row.trusted&&row.code==='KeyJ'&&row.nativeConsumedAtMs!==null).length>=2;},null,{timeout});
+   record.runtimeSession=await iframe.evaluate(()=>{const value=globalThis.__playgroundRuntimeSession;return typeof value==='function'?value():value;});
+   const origin=await page.evaluate(()=>performance.timeOrigin),windowEnd=observed.telemetry.filter(row=>row.withinMeasurementWindow).at(-1).atMs;
+   record.workerTimings=summarizeWorkerTimings(record.runtimeSession,{windowStartEpochMs:origin+observed.runningAt+settleMs,windowEndEpochMs:origin+windowEnd});
+   assert.equal(record.workerTimings.availability,'observed','Timing requires actual Native input and presentation receipts');
+  }else{await iframe.locator('canvas').focus();await page.keyboard.press('j');}
   await wasmMemorySampler.sample();
   // Shutdown is observed after the timed window, never used to warm another sample.
   const beforeStop=performance.now();await page.evaluate(()=>{globalThis.__enginePerformanceObservation.shutdownRequested=true;});await page.locator('#stop').click();await page.waitForFunction(()=>globalThis.__playgroundWorkbench.inspect().engine?.state==='exited'&&!document.querySelector('#preview iframe'),null,{timeout});record.stopMs=performance.now()-beforeStop;assert.deepEqual(record.errors,[]);
@@ -187,7 +285,11 @@ async function runScenario({site,identity,editorOrigin,previewOrigin,demoId,samp
   throw Object.assign(error,{performanceSample:record});
  }
  finally{
-  if(wasmMemorySampler){record.wasmMemoryObservation=await wasmMemorySampler.stop();record.wasmMemoryCapacityPeakBytes=record.wasmMemoryObservation.wasmMemoryCapacityPeakBytes;}
+  if(wasmMemorySampler){
+   record.wasmMemoryObservation=await wasmMemorySampler.stop();record.wasmMemoryCapacityPeakBytes=record.wasmMemoryObservation.wasmMemoryCapacityPeakBytes;record.workerJSHeapUsedPeakBytes=record.wasmMemoryObservation.workerJSHeapUsedPeakBytes;
+   const telemetry=record.observation?.telemetry?.filter(value=>value.withinMeasurementWindow)??[];
+   record.bitmapPresentation=summarizeBitmapPresentation(record.wasmMemoryObservation.rawSamples,{session:record.runtimeSession,windowStartMs:Number.isFinite(record.observation?.runningAt)?record.observation.runningAt+settleMs:null,windowEndMs:telemetry.at(-1)?.atMs});
+  }
   if(stopMemory)record.memory=await stopMemory();else record.memory={method:null,sampledPeakJSHeapUsedBytes:null,scope:'No supported Chromium CDP page-target memory metrics for this browser.'};
   await Promise.allSettled(responses);await context?.close();await browser?.close();record.wallClockMs=performance.now()-wallStart;
  }
@@ -213,26 +315,57 @@ export async function measureEnginePerformance(configuration){
  const site=path.resolve(configuration.site),out=path.resolve(configuration.out);if(out===site||out.startsWith(site+path.sep))throw Error('E_PERFORMANCE_OUTPUT: Report must be outside the immutable site');
  const samples=integer(configuration.samples,3,'samples',1,100),settleMs=integer(configuration['settle-ms'],1000,'settle-ms',0,60000),observeMs=integer(configuration['observe-ms'],3000,'observe-ms',250,120000),timeout=integer(configuration['timeout-ms'],180000,'timeout-ms',1000,600000),browserName=configuration.browser??'chromium';
  if(!['chromium','firefox','webkit'].includes(browserName))throw Error('E_PERFORMANCE_BROWSER');
+ const presentationBackend=configuration['presentation-backend']??'direct';if(!['direct','bitmap'].includes(presentationBackend))throw Error('E_PERFORMANCE_PRESENTATION');
+ let budget=configuration.budget?JSON.parse(await readFile(path.resolve(configuration.budget),'utf8')):undefined;
+ const executionBackend=configuration.execution??'worker';if(!['legacy','worker'].includes(executionBackend))throw Error('E_PERFORMANCE_EXECUTION');
  const releaseBytes=await readFile(path.join(site,'engine-release.json')),release=JSON.parse(releaseBytes),siteManifest=JSON.parse(await readFile(path.join(site,'manifest.json'),'utf8'));assert.equal(typeof release.runtimeProfile,'string');getEngineProfile(release.runtimeProfile);
+ if(executionBackend==='legacy'){
+  let html;try{html=await readFile(path.join(site,'preview.legacy.html'),'utf8');}catch{throw Error('E_PERFORMANCE_LEGACY_SITE: supply a frozen external legacy baseline site; the product no longer ships a legacy entry');}
+  if(!html.includes('./preview.legacy.js'))throw Error('E_PERFORMANCE_LEGACY_SITE');
+ }
  const catalog=JSON.parse(await readFile(path.join(site,'catalog.json'),'utf8'));for(const id of demos)assert(catalog.some(demo=>demo.id===id),'Missing shared demo '+id);
  const completeIdentity=await siteIdentity(site),{payloads,...identity}=completeIdentity;
+ const producer={schemaVersion:1,kind:'worker-performance-tool',sources:{}};
+ for(const name of ['browser-engine-performance.mjs','performance-acceptance.mjs','browser-harness.mjs','site-evidence.mjs'])producer.sources['apps/playground/scripts/'+name]=sha(await readFile(new URL('./'+name,import.meta.url)));
+ const hardware=await performanceHardware(),comparisonInputs=await performanceComparisonInputs(site,{demos});
+ if(configuration.baseline){
+  if(executionBackend!=='worker'||configuration.budget||!configuration['write-budget'])throw Error('E_PERFORMANCE_BASELINE: use --execution worker --baseline JSON --write-budget JSON before measuring');
+  const bytes=await readFile(path.resolve(configuration.baseline)),baseline=JSON.parse(bytes);
+  // The retired entry lives in an independently frozen site. Engine bytes and
+  // SDK release must still match; keep each site's actual candidate identity.
+  if(baseline.identity?.profile!==identity.profile)throw Error('E_PERFORMANCE_BASELINE_IDENTITY: profile');
+  assertPerformanceComparable(baseline.comparisonInputs,comparisonInputs);
+  if(baseline.engine?.templateTarget!==siteManifest.engineTarget)throw Error('E_PERFORMANCE_BASELINE_IDENTITY: native target');
+  if(canonical(baseline.producer)!==canonical(producer))throw Error('E_PERFORMANCE_BASELINE_PRODUCER: baseline and Worker measurements must use the same frozen tool sources');
+  for(const key of ['platform','arch','node','kernel','cpuModels','logicalCPUs','availableParallelism','totalMemoryBytes','cgroupCpuMax','cgroupMemoryMax'])if(canonical(baseline.hardware?.[key])!==canonical(hardware[key]))throw Error('E_PERFORMANCE_BASELINE_HARDWARE: '+key);
+  for(const [key,value]of Object.entries({samplesPerDemo:samples,settleMs,observeMs,timeoutMs:timeout,browser:browserName}))if(baseline.parameters?.[key]!==value)throw Error('E_PERFORMANCE_BASELINE_PARAMETERS: '+key);
+  if(JSON.stringify(baseline.parameters?.demos)!==JSON.stringify(demos))throw Error('E_PERFORMANCE_BASELINE_PARAMETERS: demos');
+  budget=createWorkerRegressionBudget(baseline,{baselineSha256:sha(bytes),presentationBackend});
+  const budgetFile=path.resolve(configuration['write-budget']);if(budgetFile===site||budgetFile.startsWith(site+path.sep))throw Error('E_PERFORMANCE_BUDGET_OUTPUT');
+  const budgetBytes=JSON.stringify(budget,null,2)+'\n';await mkdir(path.dirname(budgetFile),{recursive:true});
+  try{await writeFile(budgetFile,budgetBytes,{flag:'wx'});}catch(error){if(error.code!=='EEXIST'||await readFile(budgetFile,'utf8')!==budgetBytes)throw error;}
+ }else if(configuration['write-budget'])throw Error('E_PERFORMANCE_BASELINE: --write-budget requires --baseline');
  const asset=release.engine.wasm,stored=await readFile(within(site,asset.path));assert.equal(sha(stored),asset.sha256);assert.equal(stored.length,asset.bytes);assert(stored.length<=128*1024*1024);assert(asset.encoding===undefined||asset.encoding==='gzip');const wasm=asset.encoding==='gzip'?gunzipSync(stored,{maxOutputLength:128*1024*1024}):stored,wasmSha256=sha(wasm);assert.equal(wasmSha256,asset.decodedSha256??asset.sha256);assert(WebAssembly.validate(wasm));
  const editorHandler=createStaticServer(site),editor=createServer((req,res)=>{if(new URL(req.url,'http://localhost').pathname==='/__engine_performance_probe.html'){res.writeHead(200,{'content-type':'text/html','cache-control':'no-store'}).end('<!doctype html><title>Isolated WebAssembly compile sample</title>');return;}editorHandler.emit('request',req,res);}),preview=createStaticServer(site);
- const report={schemaVersion:1,kind:'godotjs-browser-engine-performance',status:'measuring',startedAt:new Date().toISOString(),site,identity,engine:{profile:release.runtimeProfile,releaseId:release.id,descriptorHash:sha(releaseBytes),wasmSha256,wasmBytes:wasm.length,templateTarget:siteManifest.engineTarget??release.build?.engineTarget??release.build?.target??null,recipeSha256:release.build?.recipeSha256??null,reportedSourceCertified:release.build?.sourceCertified===true,buildReportSha256:release.build?.engineReportSha256??null,templateSha256:release.build?.engineTemplateSha256??null,source:release.build?.engineSource?{commit:release.build.engineSource.commit,snapshotHash:release.build.engineSource.snapshotHash}:null,godotSource:release.build?.godotSource?{commit:release.build.godotSource.commit,snapshotHash:release.build.godotSource.snapshotHash}:null,abi:{api:release.api?.version,binding:release.api?.bindingVersion,naming:release.api?.bindingNaming,sdk:release.sdk?.version,runtimeFamily:release.runtimeFamily}},parameters:{samplesPerDemo:samples,demos,settleMs,observeMs,timeoutMs:timeout,browser:browserName,headless:process.env.BROWSER_HEADLESS!=='0',viewport:{width:1536,height:1000},deviceScaleFactor:1,launchArgs:browserName==='chromium'?[...launchArgs]:[],browserCache:'A new browser process and empty context per demo/sample; no startup warm-up.',serverCache:'The same Node static servers remain running; file bodies are read through fs/OS, and OS filesystem caches are not flushed.',telemetry:'FPS is the actual application stats event value based on its process delta; raw events and timestamps are retained.',pollResolutionMs:20,percentile:'Nearest-rank p95; an even-count median is the average of the middle two values.',wasmMemoryObserver:'Proxy forwarding of native async instantiation; fulfillment values and rejection reasons preserved, WeakRef-only exported Memory observation in preview frames at 250 ms plus a final sample before stop. Logical capacity, not physical memory.',compileOrder:'Separate fresh browser processes after all UI startup samples; fetch/decode/hash excluded from WebAssembly.compile duration.',thresholds:'No acceptance thresholds or pass/fail performance budget evaluated.'},hardware:{platform:process.platform,arch:process.arch,node:process.version,kernel:os.release(),cpuModels:[...new Set(os.cpus().map(cpu=>cpu.model))],logicalCPUs:os.cpus().length,availableParallelism:os.availableParallelism(),totalMemoryBytes:os.totalmem(),cgroupCpuMax:await optionalText('/sys/fs/cgroup/cpu.max'),cgroupMemoryMax:await optionalText('/sys/fs/cgroup/memory.max'),loadAverageStart:os.loadavg()},scenarios:[],compileSamples:[]};
+ const report={schemaVersion:2,measurementBatchId:randomUUID(),kind:'godotjs-browser-engine-performance',status:'measuring',startedAt:new Date().toISOString(),site,identity,engine:{profile:release.runtimeProfile,releaseId:release.id,descriptorHash:sha(releaseBytes),wasmSha256,wasmBytes:wasm.length,templateTarget:siteManifest.engineTarget??release.build?.engineTarget??release.build?.target??null,recipeSha256:release.build?.recipeSha256??null,reportedSourceCertified:release.build?.sourceCertified===true,buildReportSha256:release.build?.engineReportSha256??null,templateSha256:release.build?.engineTemplateSha256??null,source:release.build?.engineSource?{commit:release.build.engineSource.commit,snapshotHash:release.build.engineSource.snapshotHash}:null,godotSource:release.build?.godotSource?{commit:release.build.godotSource.commit,snapshotHash:release.build.godotSource.snapshotHash}:null,abi:{api:release.api?.version,binding:release.api?.bindingVersion,naming:release.api?.bindingNaming,sdk:release.sdk?.version,runtimeFamily:release.runtimeFamily}},parameters:{samplesPerDemo:samples,demos,settleMs,observeMs,timeoutMs:timeout,browser:browserName,headless:process.env.BROWSER_HEADLESS!=='0',viewport:{width:1536,height:1000},deviceScaleFactor:1,launchArgs:browserName==='chromium'?[...launchArgs]:[],browserCache:'A new browser process and empty context per demo/sample; no startup warm-up.',serverCache:'The same Node static servers remain running; file bodies are read through fs/OS, and OS filesystem caches are not flushed.',telemetry:'FPS is the actual application stats event value based on its process delta; raw events and timestamps are retained.',benchmarkTiming:'Bounded opt-in Worker timing. Both backends focus the canvas and press KeyJ after the fixed observation window; actual Native _input timing is collected only in Worker mode.',pollResolutionMs:20,percentile:'Nearest-rank p95; an even-count median is the average of the middle two values.',wasmMemoryObserver:'Actual Worker memory snapshots identified by run/document/worker/config plus legacy WeakRef observation. Logical capacity, not physical memory; page-target heap is separate.',compileOrder:'Separate fresh browser processes after all UI startup samples; fetch/decode/hash excluded from WebAssembly.compile duration.',thresholds:budget?{budgetId:budget.id}: 'No versioned performance budget supplied; acceptance remains not-evaluated.'},hardware,scenarios:[],compileSamples:[]};
+ report.comparisonInputs=comparisonInputs;report.producer=producer;report.measurementStatus='measuring';report.performanceAcceptance={status:'not-evaluated',reason:'Measurement is not performance acceptance.'};
+ report.measurementScope={profile:release.runtimeProfile,executionBackend,presentationBackend:executionBackend==='worker'?presentationBackend:'legacy',browser:browserName,settingsTier:browserName==='chromium'?'environment-override':'default'};
  try{
   await Promise.all([listen(editor),listen(preview)]);const editorOrigin='http://127.0.0.1:'+editor.address().port,previewOrigin='http://127.0.0.1:'+preview.address().port;report.origins={editor:editorOrigin,preview:previewOrigin};
   for(let sample=1;sample<=samples;sample++)for(let offset=0;offset<demos.length;offset++){
    const demoId=demos[(offset+sample-1)%demos.length];console.error(`[performance] ${release.runtimeProfile} ${demoId} cold sample ${sample}/${samples}`);
-   try{report.scenarios.push(await runScenario({site,identity,editorOrigin,previewOrigin,demoId,sample,browserName,timeout,settleMs,observeMs}));}catch(error){if(error.performanceSample)report.scenarios.push(error.performanceSample);throw error;}
+   try{report.scenarios.push(await runScenario({site,identity,editorOrigin,previewOrigin,demoId,sample,browserName,timeout,settleMs,observeMs,presentationBackend,executionBackend}));}catch(error){if(error.performanceSample)report.scenarios.push(error.performanceSample);throw error;}
   }
   for(let sample=1;sample<=samples;sample++){console.error(`[performance] isolated WebAssembly.compile sample ${sample}/${samples}`);try{report.compileSamples.push(await runCompileSample({editorOrigin,browserName,asset,wasmSha256,timeout,sample}));}catch(error){if(error.compileSample)report.compileSamples.push(error.compileSample);throw error;}}
   const after=await siteIdentity(site);for(const key of ['profile','releaseId','descriptorHash','candidateId','siteHash'])assert.equal(after[key],identity[key],'Candidate changed during measurement: '+key);
-  report.summary={demos:Object.fromEntries(demos.map(demoId=>{const entries=report.scenarios.filter(sample=>sample.demoId===demoId);return[demoId,{navigationToReadyMs:summarize(entries.map(sample=>sample.navigationToReadyMs)),navigationToRunningMs:summarize(entries.map(sample=>sample.navigationToRunningMs)),navigationToFirstTelemetryMs:summarize(entries.map(sample=>sample.navigationToFirstTelemetryMs)),perSampleMedianTelemetryFPS:summarize(entries.map(sample=>sample.fps.median)),sampledPageTargetJSHeapPeakBytes:summarize(entries.map(sample=>sample.memory?.sampledPeakJSHeapUsedBytes)),wasmMemoryCapacityPeakBytes:summarize(entries.map(sample=>sample.wasmMemoryCapacityPeakBytes)),stopMs:summarize(entries.map(sample=>sample.stopMs))}];})),isolatedWebAssemblyCompileMs:summarize(report.compileSamples.map(sample=>sample.compileMs))};
-  report.status='completed';
- }catch(error){report.status='failed';report.error=String(error.stack??error);throw Object.assign(error,{performanceReport:report});}
+  report.summary={demos:Object.fromEntries(demos.map(demoId=>{const entries=report.scenarios.filter(sample=>sample.demoId===demoId);return[demoId,{navigationToReadyMs:summarize(entries.map(sample=>sample.navigationToReadyMs)),navigationToRunningMs:summarize(entries.map(sample=>sample.navigationToRunningMs)),navigationToFirstTelemetryMs:summarize(entries.map(sample=>sample.navigationToFirstTelemetryMs)),perSampleMedianTelemetryFPS:summarize(entries.map(sample=>sample.fps.median)),perSampleBitmapCaptureHz:summarize(entries.map(sample=>sample.bitmapPresentation?.captureHz)),perSampleBitmapAckHz:summarize(entries.map(sample=>sample.bitmapPresentation?.ackHz)),perSampleBitmapCommitHz:summarize(entries.map(sample=>sample.bitmapPresentation?.commitHz)),perSampleCaptureDurationP95Ms:summarize(entries.map(sample=>sample.workerTimings?.captureDurationMs?.p95)),perSampleAckRoundTripP95Ms:summarize(entries.map(sample=>sample.workerTimings?.ackRoundTripMs?.p95)),perSampleHostConsumptionP95Ms:summarize(entries.map(sample=>sample.workerTimings?.hostConsumptionLatencyMs?.p95)),perSampleInputToWorkerP95Ms:summarize(entries.map(sample=>sample.workerTimings?.inputHostToWorkerMs?.p95)),perSampleInputToNativeP95Ms:summarize(entries.map(sample=>sample.workerTimings?.inputHostToNativeMs?.p95)),sampledPageTargetJSHeapPeakBytes:summarize(entries.map(sample=>sample.memory?.sampledPeakJSHeapUsedBytes)),wasmMemoryCapacityPeakBytes:summarize(entries.map(sample=>sample.wasmMemoryCapacityPeakBytes)),workerJSHeapUsedPeakBytes:summarize(entries.map(sample=>sample.workerJSHeapUsedPeakBytes)),stopMs:summarize(entries.map(sample=>sample.stopMs))}];})),isolatedWebAssemblyCompileMs:summarize(report.compileSamples.map(sample=>sample.compileMs))};
+  report.measurementScope.settingsTier=report.scenarios[0]?.browser.settingsTier??report.measurementScope.settingsTier;
+  report.parameters.actualLaunchArgs=report.scenarios[0]?.browser.launchArgs??[];
+  report.measurementStatus='completed';report.performanceAcceptance=assessPerformanceBudget(report,budget);report.status=report.performanceAcceptance.status==='failed'?'failed':'completed';
+ }catch(error){report.status='failed';report.measurementStatus='failed';report.error=String(error.stack??error);throw Object.assign(error,{performanceReport:report});}
  finally{report.finishedAt=new Date().toISOString();report.hardware.loadAverageEnd=os.loadavg();await Promise.all([close(editor),close(preview)]);await mkdir(path.dirname(out),{recursive:true});await writeFile(out,JSON.stringify(report,null,2)+'\n');}
  return report;
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
- try{const configuration=options(process.argv.slice(2),['--help']);if(configuration.help){console.log('node apps/playground/scripts/browser-engine-performance.mjs --site DIR --out JSON [--samples 3] [--browser chromium] [--settle-ms 1000] [--observe-ms 3000] [--timeout-ms 180000]');}else{const report=await measureEnginePerformance(configuration);console.log(JSON.stringify({status:report.status,profile:report.engine.profile,scenarios:report.scenarios.length,compileSamples:report.compileSamples.length,out:path.resolve(configuration.out),summary:report.summary},null,2));}}catch(error){console.error(error.stack??error);process.exitCode=1;}
+ try{const configuration=options(process.argv.slice(2),['--help']);if(configuration.help){console.log('node apps/playground/scripts/browser-engine-performance.mjs --site DIR --out JSON [--samples 3] [--browser chromium] [--settle-ms 1000] [--observe-ms 3000] [--timeout-ms 180000] [--presentation-backend direct|bitmap] [--execution legacy|worker] [--budget JSON | --baseline JSON --write-budget JSON]');}else{const report=await measureEnginePerformance(configuration);if(report.status==='failed')process.exitCode=1;console.log(JSON.stringify({status:report.status,measurementStatus:report.measurementStatus,performanceAcceptance:report.performanceAcceptance,profile:report.engine.profile,scenarios:report.scenarios.length,compileSamples:report.compileSamples.length,out:path.resolve(configuration.out),summary:report.summary},null,2));}}catch(error){console.error(error.stack??error);process.exitCode=1;}
 }

@@ -1,16 +1,18 @@
+import {installParentPortReceiptObserver} from './parent-port-outcome-evidence.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {launchBrowser,withAcceptanceContext} from './browser-harness.mjs';
+import {launchBrowser,withAcceptanceContext,defaultTestDirectory,observedWorkerSessions,observedWorkerOutcomes} from './browser-harness.mjs';
 import {createStaticServer} from './serve.mjs';
-const directory=path.resolve(process.env.PLAYGROUND_TEST_DIRECTORY??fileURLToPath(new URL('../dist',import.meta.url)));
+const directory=defaultTestDirectory();
 const release=JSON.parse(await fs.readFile(path.join(directory,'engine-release.json'),'utf8'));
 const server=createStaticServer(directory);await new Promise(resolve=>server.listen(0,'0.0.0.0',resolve));
 const browser=await launchBrowser({headless:true,executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE||undefined,args:['--no-sandbox','--enable-webgl','--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader','--disable-dev-shm-usage','--autoplay-policy=no-user-gesture-required']});
 const page=await browser.newPage(),checks=[],failures=[];
 page.setDefaultTimeout(120000);page.on('pageerror',error=>failures.push(String(error)));
 const inspect=()=>page.evaluate(()=>window.__playgroundWorkbench.inspect());
+const expectedFailures=new Map(),terminalObserver=await installParentPortReceiptObserver(page.context());
 async function stop(){const state=await inspect();if(state.engine?.state==='running'){await page.locator('#stop').click();await page.waitForFunction(()=>window.__playgroundWorkbench.inspect().engine.state==='exited');}}
 async function imported(source,camel=false){
  await stop();await page.locator('#clear-log').click();
@@ -52,6 +54,13 @@ try{
   await page.waitForFunction(marker=>document.querySelector('#logs').textContent.includes(marker)&&document.querySelector('#status').textContent==='运行错误'&&window.__playgroundWorkbench.inspect().engine?.state==='exited',marker);
   const logs=await page.locator('#logs').textContent();assert(logs.includes(marker));assert(logs.includes('res://src/App.tsx:'+prelude.split('\n').length+':'),'The exact authored source line must reach the editor');
   assert.equal(await page.locator('#preview iframe').count(),0);checks.push(`${kind} failure reports its authored stack and disposes the preview`);
+  if(release.runtimeAbi){
+   const initialOutcome=observedWorkerOutcomes(browser).findLast(session=>session.workerErrors?.some(value=>String(value).includes(marker)));
+   assert(initialOutcome,'Expected React failure must retain its actual Worker identity');
+   const outcome=await terminalObserver.join(initialOutcome);
+   assert(outcome,'Expected React failure must retain its actual Worker identity and outcome');
+   expectedFailures.set(outcome.workerId,{...outcome,expectedFailure:{kind,marker,logs,sourcePath:'res://src/App.tsx',authoredSource:true,iframeDisposed:true}});
+  }
  }
  await imported(prelude+`class Boundary extends React.Component<{children?:React.ReactNode},{failed:boolean}>{
  state={failed:false};static getDerivedStateFromError(){return {failed:true};}
@@ -73,7 +82,8 @@ try{
   checks.push(`${camel?'camel':'snake'} packed native values update on mutation and restore their captured baseline`);
  }
  assert.deepEqual(failures,[]);
- const report=await withAcceptanceContext({status:'passed',releaseId:release.id,checks,sdkSubpaths:specifiers,errors:failures}, {directory,browser});
+ const sessions=new Map(observedWorkerSessions(browser).map(session=>[session.workerId,session]));for(const [id,session]of expectedFailures)sessions.set(id,session);
+ const report=await withAcceptanceContext({status:'passed',suite:'engine-bridge',releaseId:release.id,checks,sdkSubpaths:specifiers,errors:failures,...(release.runtimeAbi?{sessions:[...sessions.values()]}:{})}, {directory,browser});
  if(process.env.PLAYGROUND_BRIDGE_REPORT){const file=path.resolve(process.env.PLAYGROUND_BRIDGE_REPORT);await fs.mkdir(path.dirname(file),{recursive:true});await fs.writeFile(file,JSON.stringify(report,null,2)+'\n');}
  console.log(JSON.stringify(report,null,2));
 }catch(error){console.error(JSON.stringify({error:String(error),checks,state:await inspect().catch(()=>null),logs:await page.locator('#logs').textContent().catch(()=>null)},null,2));throw error;}

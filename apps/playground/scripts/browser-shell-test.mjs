@@ -1,11 +1,10 @@
-import {launchBrowser} from './browser-harness.mjs';
+import {launchBrowser,defaultTestDirectory} from './browser-harness.mjs';
 import {getEngineProfile} from '../../../scripts/release/engine-profiles.mjs';
 import path from 'node:path';
-import {fileURLToPath} from 'node:url';
 import assert from 'node:assert/strict';
 import {createStaticServer} from './serve.mjs';
 import fs from 'node:fs/promises';
-const directory=path.resolve(process.env.PLAYGROUND_TEST_DIRECTORY??fileURLToPath(new URL('../dist',import.meta.url)));
+const directory=defaultTestDirectory();
 const site=JSON.parse(await fs.readFile(path.join(directory,'shell-profile.json'),'utf8')),shellOnly=site.shellOnly===true,profile=getEngineProfile(site.runtimeProfile);
 if(process.env.PLAYGROUND_TEST_SHELL==='1'&&!shellOnly)throw Error('Shell contracts require an explicit shell-only fixture build');
 const server=createStaticServer(directory);await new Promise(r=>server.listen(0,'127.0.0.1',r));const port=server.address().port;

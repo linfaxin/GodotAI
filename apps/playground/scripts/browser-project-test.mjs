@@ -1,4 +1,4 @@
-import {launchBrowser,withAcceptanceContext} from './browser-harness.mjs';
+import {launchBrowser,withAcceptanceContext,defaultTestDirectory} from './browser-harness.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import {gzipSync} from 'node:zlib';
@@ -6,7 +6,7 @@ import {fileURLToPath} from 'node:url';
 import os from 'node:os';
 import path from 'node:path';
 import {createStaticServer} from './serve.mjs';
-const directory=path.resolve(process.env.PLAYGROUND_TEST_DIRECTORY??fileURLToPath(new URL('../dist',import.meta.url)));
+const directory=defaultTestDirectory();
 const server=createStaticServer(directory);await new Promise(r=>server.listen(0,'127.0.0.1',r));
 const base=`http://127.0.0.1:${server.address().port}`;
 const legacyBase=base+'/?project=shader';

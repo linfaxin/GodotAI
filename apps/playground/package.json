@@ -9,6 +9,7 @@
     "typecheck": "tsc --noEmit",
     "dev": "node scripts/serve.mjs",
     "dev:2d": "PLAYGROUND_DIRECTORY=dist-2d-debug node scripts/serve.mjs",
+    "dev:2d:release": "PLAYGROUND_DIRECTORY=dist-2d-release node scripts/serve.mjs",
     "test": "node --test scripts/*.test.mjs",
     "test:browser": "node scripts/browser-demo-regressions-test.mjs && node scripts/browser-full-engine-test.mjs && node scripts/browser-engine-editor-test.mjs && node scripts/browser-engine-bridge-test.mjs && node scripts/browser-test.mjs",
     "test:browser:full": "node scripts/browser-full-engine-test.mjs",
@@ -21,8 +22,15 @@
     "test:browser:react": "node scripts/browser-demo-regressions-test.mjs && node scripts/browser-react-demos-test.mjs",
     "test:browser:resources": "node scripts/browser-react-demos-test.mjs",
     "test:browser:2d:features": "node scripts/browser-2d-features-test.mjs --site dist-2d-debug",
+    "test:browser:matrix": "node scripts/worker-acceptance-matrix.mjs",
     "test:browser:release-context": "node scripts/browser-release-context-test.mjs",
-    "test:browser:regressions": "node scripts/browser-demo-regressions-test.mjs"
+    "test:browser:regressions": "node scripts/browser-demo-regressions-test.mjs",
+    "build:worker": "node scripts/build.mjs",
+    "build:2d:worker": "node scripts/build.mjs --profile engine-2d-v1",
+    "build:2d:release:worker": "node scripts/build.mjs --profile engine-2d-v1 --target template_release",
+    "dev:worker": "node scripts/serve.mjs",
+    "dev:2d:worker": "PLAYGROUND_DIRECTORY=dist-2d-debug node scripts/serve.mjs",
+    "dev:2d:release:worker": "PLAYGROUND_DIRECTORY=dist-2d-release node scripts/serve.mjs"
   },
   "dependencies": {
     "@godot-js/react": "workspace:*",

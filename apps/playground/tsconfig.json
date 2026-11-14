@@ -21,6 +21,8 @@
     }
   },
   "include": [
+    "preview.ts",
+    "runtime.worker.ts",
     "src/**/*.ts",
     "src/**/*.tsx"
   ],

@@ -6,7 +6,7 @@ import { dirname, resolve, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { gzipSync } from 'node:zlib';
-import { canonical, digest, fail, options, required, json, writeJson, filesIn, relativePath, safePath, within, identity, assertCommit, assertHash, inspectRelease } from './web-release-utils.mjs';
+import { canonical, digest, fail, options, required, json, writeJson, filesIn, relativePath, safePath, within, identity, assertCommit, assertHash, inspectRelease, assertSourcePatchChains } from './web-release-utils.mjs';
 import { patchOptionalPwa, OPTIONAL_PWA_PATCH } from './patch-web-optional-pwa.mjs';
 import { patchAudioLifecycle, AUDIO_LIFECYCLE_PATCH } from './patch-web-audio-lifecycle.mjs';
 import {loadProductionApiProfiles,buildEngineVendor,assembleFullEngineRelease} from '../../apps/playground/scripts/full-engine-release.mjs';
@@ -67,15 +67,16 @@ export async function buildRelease(configuration) {
       if (name === 'godot.js') {
         for (const [apply, patchId] of [[patchOptionalPwa, OPTIONAL_PWA_PATCH], [patchAudioLifecycle, AUDIO_LIFECYCLE_PATCH]]) {
           const beforeSha256 = digest(bytes);
-          const sourcePatch = report.recipe?.patches?.find(patch => patch.patchId === patchId && patch.afterSha256 === report.godotSource?.inputs?.[patch.path]);
+          const sourcePatch = report.recipe?.patches?.find(patch => patch.patchId === patchId);
           // Optimizers may remove the marker comment. A successful source build
           // already binds the patched library bytes to this exact archive.
           const appliedInSource = sourcePatch && report.kind === 'godot-js-browser-engine-build' && report.status === 'built'
             && digest(canonical(report.godotSource.inputs)) === report.godotSource.snapshotHash
             && digest(canonical(report.recipe)) === report.recipeSha256;
+          if (appliedInSource) assertSourcePatchChains(report);
           const patch = appliedInSource ? { code: bytes.toString('utf8'), changed: false, patchId } : apply(bytes.toString('utf8'));
           bytes = Buffer.from(patch.code);
-          jsGluePatches.push({ patchId: patch.patchId, beforeSha256, afterSha256: digest(bytes), changed: patch.changed, via: appliedInSource ? 'source-recipe' : 'generated-glue', sourcePatches: sourcePatch ? [sourcePatch] : [] });
+          jsGluePatches.push({ patchId: patch.patchId, beforeSha256, afterSha256: digest(bytes), changed: patch.changed, via: appliedInSource ? 'source-recipe' : 'generated-glue', sourcePatches: sourcePatch ? report.recipe.patches.filter(item => item.path === sourcePatch.path) : [] });
         }
       }
       if (name === 'godot.wasm' && !configuration['raw-wasm']) {
