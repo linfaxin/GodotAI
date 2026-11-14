@@ -1,24 +1,59 @@
 {
   "name": "@godot-js/react-build",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "TypeScript, template and publication toolchain for the GodotJS React renderer",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
-    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
-    "./core": { "types": "./dist/core/index.d.ts", "import": "./dist/core/index.js" },
-    "./scene-text": { "types": "./dist/core/scene-text.d.ts", "import": "./dist/core/scene-text.js" },
-    "./bootstrap": { "types": "./dist/bootstrap.d.ts", "import": "./dist/bootstrap.js" },
-    "./imports": { "types": "./dist/core/imports.d.ts", "import": "./dist/core/imports.js" },
-    "./module-loading": { "types": "./dist/core/module-loading.d.ts", "import": "./dist/core/module-loading.js" },
-    "./resource-uids": { "types": "./dist/core/resource-uids.d.ts", "import": "./dist/core/resource-uids.js" },
-    "./project-settings": { "types": "./dist/core/project-settings.d.ts", "import": "./dist/core/project-settings.js" },
-    "./script-renames": { "types": "./dist/core/script-renames.d.ts", "import": "./dist/core/script-renames.js" },
-    "./project-modules": { "types": "./dist/core/project-modules.d.ts", "import": "./dist/core/project-modules.js" }
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./core": {
+      "types": "./dist/core/index.d.ts",
+      "import": "./dist/core/index.js"
+    },
+    "./scene-text": {
+      "types": "./dist/core/scene-text.d.ts",
+      "import": "./dist/core/scene-text.js"
+    },
+    "./bootstrap": {
+      "types": "./dist/bootstrap.d.ts",
+      "import": "./dist/bootstrap.js"
+    },
+    "./imports": {
+      "types": "./dist/core/imports.d.ts",
+      "import": "./dist/core/imports.js"
+    },
+    "./module-loading": {
+      "types": "./dist/core/module-loading.d.ts",
+      "import": "./dist/core/module-loading.js"
+    },
+    "./resource-uids": {
+      "types": "./dist/core/resource-uids.d.ts",
+      "import": "./dist/core/resource-uids.js"
+    },
+    "./project-settings": {
+      "types": "./dist/core/project-settings.d.ts",
+      "import": "./dist/core/project-settings.js"
+    },
+    "./script-renames": {
+      "types": "./dist/core/script-renames.d.ts",
+      "import": "./dist/core/script-renames.js"
+    },
+    "./project-modules": {
+      "types": "./dist/core/project-modules.d.ts",
+      "import": "./dist/core/project-modules.js"
+    }
   },
-  "bin": { "godot-react": "dist/cli.js" },
-  "files": ["dist", "README.md"],
+  "bin": {
+    "godot-react": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "pnpm build && node --test test/*.test.mjs"
@@ -28,7 +63,11 @@
     "esbuild": "^0.25.0",
     "typescript": "6.0.3"
   },
-  "devDependencies": { "@types/node": "^24.12.2" },
-  "engines": { "node": ">=22" },
+  "devDependencies": {
+    "@types/node": "^24.12.2"
+  },
+  "engines": {
+    "node": ">=22"
+  },
   "license": "MIT"
 }
