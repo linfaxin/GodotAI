@@ -5,11 +5,12 @@ export type {ReleaseContext} from './release-context';
 export interface ReleaseAsset {path:string;sha256:string;bytes:number;encoding?:'gzip';decodedSha256?:string;decodedBytes?:number;maxDecodedBytes?:number}
 export interface EngineRelease {
  schemaVersion:2;runtimeProfile:string;id:string;candidateId?:string;
+ runtimeAbi?:{protocolVersion:2;host:1;audio:1;presentation:1};
  engine:{javascript:ReleaseAsset;wasm:ReleaseAsset;worklets?:ReleaseAsset[]};
  api:{ir:ReleaseAsset;typeSnapshot:ReleaseAsset;declarations?:unknown;hash?:string;namingProfiles?:Partial<Record<'snake'|'camel',{typeSnapshot:ReleaseAsset}>>};
  sdk:{vendor:ReleaseAsset;vendors?:Partial<Record<'development'|'production',ReleaseAsset>>;runtimeModules:Record<string,ReleaseAsset>};
 }
-interface ReleaseState {manifest:EngineRelease;context:ReleaseContext;demo?:any}
+interface ReleaseState {manifest:EngineRelease;context:ReleaseContext;demo?:any;site?:any}
 let state:Promise<ReleaseState>|undefined;
 const cache=new Map<string,Promise<Uint8Array>>();
 const digest=async(bytes:Uint8Array)=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes.slice().buffer)),n=>n.toString(16).padStart(2,'0')).join('');
@@ -31,9 +32,10 @@ async function readState(expected?:ReleaseContext):Promise<ReleaseState>{
  let demo:any;
  if(demoResponse.ok){const bytes=new Uint8Array(await demoResponse.arrayBuffer());const demoHash=await digest(bytes);demo={...JSON.parse(new TextDecoder().decode(bytes)),descriptorHash:demoHash};context.demoDescriptorHash=demoHash;}
  else if(demoResponse.status!==404)throw Error('E_DEMO_RELEASE_HTTP: '+demoResponse.status);
+ let site:any;
  const siteResponse=await fetch(new URL('manifest.json',context.releaseRoot),{cache:'no-cache',credentials:'same-origin',redirect:'error'});
  if(siteResponse.ok){
-  const bytes=new Uint8Array(await siteResponse.arrayBuffer()),site=JSON.parse(new TextDecoder().decode(bytes));
+  const bytes=new Uint8Array(await siteResponse.arrayBuffer());site=JSON.parse(new TextDecoder().decode(bytes));
   if(site.runtimeProfile!==context.engineProfile||site.engineReleaseId!==context.engineReleaseId)throw Error('E_SITE_RELEASE_MISMATCH');
   if(site.payloads?.['demo-release.json']&&site.payloads['demo-release.json'].sha256!==context.demoDescriptorHash)throw Error('E_SITE_DEMO_MISMATCH');
   context.candidateId=await digest(bytes);
@@ -41,7 +43,7 @@ async function readState(expected?:ReleaseContext):Promise<ReleaseState>{
  }else if(siteResponse.status!==404)throw Error('E_SITE_MANIFEST_HTTP: '+siteResponse.status);
  assertReleaseContext(context);
  if(expected)assertSameRelease(expected,context);
- return {manifest,context,demo};
+ return {manifest,context,demo,site};
 }
 /** Workers initialize from the editor's context, not their own latest pointer. */
 export async function initializeReleaseContext(expected?:ReleaseContext):Promise<ReleaseContext>{
@@ -51,6 +53,7 @@ export async function initializeReleaseContext(expected?:ReleaseContext):Promise
 }
 export async function loadReleaseContext():Promise<ReleaseContext>{return initializeReleaseContext();}
 export async function loadEngineRelease():Promise<EngineRelease>{state??=readState();return (await state).manifest;}
+export async function loadRuntimeCandidate():Promise<any>{state??=readState();return (await state).site?.runtime;}
 export async function loadSiteConfiguration():Promise<{runtimeProfile:string;shellOnly:boolean}>{
  const response=await fetch('./shell-profile.json',{cache:'no-cache'});
  if(response.ok){const value=await response.json();if(value.schemaVersion!==2||typeof value.runtimeProfile!=='string')throw Error('E_SITE_PROFILE');getEngineProfile(value.runtimeProfile);return {runtimeProfile:value.runtimeProfile,shellOnly:value.shellOnly===true};}

@@ -234,7 +234,7 @@ function onEngineEvent(event:RunnerEvent){
   $('stop').setAttribute('disabled','');$('fps').textContent='— FPS';
   if(event.report.diagnostic?.stack)log(event.report.diagnostic.stack,'error');
   if(event.report.reason==='clean-exit'||event.report.reason==='forced-frame-disposal'){status('已停止');$('telemetry').textContent='场景已释放';}
-  else{status('运行错误','error');log(event.report.detail??event.report.reason,'error');}
+  else{status('运行错误','error');log(event.report.detail??event.report.diagnostic?.message??event.report.reason,'error');}
   return;
  }
  if(event.state==='running'){
@@ -272,3 +272,4 @@ async function start(){
 start().catch(error=>{status('加载失败','error');log(String(error),'error');});
 // Read-only diagnostics for integration tests and local debugging.
 (globalThis as any).__playgroundWorkbench={inspect:()=>({project:structuredClone(current),projectId:selected?.id,engineProfile:siteEngineProfile,storageDatabaseName:'godotjs-playground-v3:'+siteEngineProfile,diagnostics:structuredClone(diagnostics),ready,revision,events:structuredClone(projectEvents),engine:nativePreview?{releaseId:nativePreview.manifest.id,profile:nativePreview.manifest.runtimeProfile,state:nativePreview.runner.state}:undefined,releaseContext:structuredClone(sessionReleaseContext)})};
+if(new URL(location.href).searchParams.get('benchmarkTimings')==='1')(globalThis as any).__playgroundWorkbench.enableNativeInputBenchmark=()=>send({type:'benchmark-input',enabled:true});

@@ -9,6 +9,7 @@ export interface DemoServices {controls:Readonly<Record<string,number>>;input:In
 const Services=React.createContext<DemoServices|null>(null);
 const emptyInput=():InputState=>({keys:new Set(),pressed:new Set(),actions:new Set(),requests:new Set(),pointer:{x:480,y:320},down:false,clicks:[],releases:[],wheel:0});
 let activeInput:InputState|undefined;
+let benchmarkNativeInput:((event:string,code:string)=>void)|undefined;
 export const vec2=(x=0,y=0)=>new G.Vector2(x,y);
 export const vec3=(x=0,y=0,z=0)=>new G.Vector3(x,y,z);
 export const color=(r:number,g:number,b:number,a=1)=>new G.Color(r,g,b,a);
@@ -48,6 +49,7 @@ export function forwardDemoInput(event:any){
  const input=activeInput;if(!input)return;const kind=String(event.get_class());
  if(kind==='InputEventKey'){
   const key=Number(event.physical_keycode||event.keycode),code=key===32?'Space':key>=65&&key<=90?'Key'+String.fromCharCode(key):key>=48&&key<=57?'Digit'+(key-48):({4194312:'Delete',4194319:'ArrowLeft',4194321:'ArrowRight',4194320:'ArrowUp',4194322:'ArrowDown'} as Record<number,string>)[key]??'';
+  if(code&&!event.echo)benchmarkNativeInput?.(event.pressed?'keydown':'keyup',code);
   if(code){if(event.pressed){input.keys.add(code);if(!event.echo){input.pressed.add(code);input.actions.add(code);}}else input.keys.delete(code);}
  }
  if(kind==='InputEventMouseMotion'||kind==='InputEventMouseButton'){
@@ -57,7 +59,7 @@ export function forwardDemoInput(event:any){
 function transport(){
  if(!G.OS.has_feature('web'))return undefined;
  const window=G.JavaScriptBridge.get_interface('window');
- return {send(value:unknown){window.call('__godotjsProjectEvent',JSON.stringify(value));},listen(callback:(value:any)=>void){const native=G.JavaScriptBridge.create_callback(G.Callable.create((args:any)=>{const raw=args.get(0);if(typeof raw==='string'&&raw.length<=262144)callback(JSON.parse(raw));}));window.call('__godotjsSetProjectCommand',native);return ()=>{if(native)window.call('__godotjsSetProjectCommand',null);};}};
+ return {send(value:unknown){window.call('__godotjsProjectEvent',JSON.stringify(value));},nativeInput(event:string,code:string){window.call('__godotjsBenchmarkInput',event,code);},listen(callback:(value:any)=>void){const native=G.JavaScriptBridge.create_callback(G.Callable.create((args:any)=>{const raw=args.get(0);if(typeof raw==='string'&&raw.length<=262144)callback(JSON.parse(raw));}));window.call('__godotjsSetProjectCommand',native);return ()=>{if(native)window.call('__godotjsSetProjectCommand',null);};}};
 }
 export function withDemo(Component:React.ComponentType):React.ComponentType<{controls?:Record<string,number>}>{
  return function PlaygroundDemo({controls:initial={}}){
@@ -65,7 +67,7 @@ export function withDemo(Component:React.ComponentType):React.ComponentType<{con
   const channel=React.useMemo(transport,[]),players=React.useRef<Record<string,any>>({}),data=resources();
   activeInput=state.input;
   const inputCtor=React.useMemo(()=>{G.ResourceLoader.load('res://.playground/demo-input.ts');return require('res://.godot/GodotJS/.playground/demo-input.js').default;},[]);
-  React.useEffect(()=>{const unsubscribe=channel?.listen(command=>{if(command.type==='controls')setControls(command.controls);else if(command.type==='action'&&typeof command.action==='string')state.input.requests.add(command.action);else if(command.type==='import-data')state.input.imported=command.data;else if(command.type==='clear-input')clearDemoInput();});return()=>{unsubscribe?.();if(activeInput===state.input)activeInput=undefined;};},[]);
+  React.useEffect(()=>{const unsubscribe=channel?.listen(command=>{if(command.type==='controls')setControls(command.controls);else if(command.type==='action'&&typeof command.action==='string')state.input.requests.add(command.action);else if(command.type==='import-data')state.input.imported=command.data;else if(command.type==='clear-input')clearDemoInput();else if(command.type==='benchmark-input'&&command.enabled===true){benchmarkNativeInput=(event,code)=>channel?.nativeInput(event,code);channel?.send({type:'benchmark-input-ready'});}});return()=>{unsubscribe?.();benchmarkNativeInput=undefined;if(activeInput===state.input)activeInput=undefined;};},[]);
   useFrame('process',delta=>{state.frames++;state.elapsed+=delta;for(const name of state.sounds.splice(0))players.current[name]?.play();if(state.elapsed>=.1){channel?.send({type:'stats',state:'running',frames:state.frames,fps:Math.round(1/Math.max(delta,.001)),stats:state.stats});state.elapsed=0;}});
   const services:DemoServices={controls,input:state.input,models:data.models,stats:stats=>{state.stats=stats;},sound:name=>{if(state.sounds.length<16)state.sounds.push(name);},exportJSON:(name,value)=>channel?.send({type:'export-data',name,data:value})};
   return <Services.Provider value={services}><EngineNode ctor={inputCtor}/><Component/>{(['jump','coin','land'] as const).map(name=><DemoSound key={name} name={name} reference={players.current}/>)}</Services.Provider>;

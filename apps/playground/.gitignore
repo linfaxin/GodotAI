@@ -1,4 +1,5 @@
 dist/
+dist-shell/
 dist-2d-debug/
 dist-2d-release/
 dist-full-release/

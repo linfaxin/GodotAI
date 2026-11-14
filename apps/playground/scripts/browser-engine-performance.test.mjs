@@ -1,7 +1,40 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
-import {installWasmMemoryObserver,editorObservation} from './browser-engine-performance.mjs';
+import {installWasmMemoryObserver,editorObservation,summarizeBitmapPresentation,summarizeWorkerTimings} from './browser-engine-performance.mjs';
+
+test('benchmark intervals use actual timestamp stages and keep unconsumed Native input unavailable',()=>{
+ const session={executionBackend:'worker',presentationBackend:'bitmap',runId:'run',documentId:'doc',workerId:'worker',runConfigurationHash:'hash',memory:{benchmark:{schemaVersion:1,mode:'benchmark',sampleLimitPerKind:8,clock:'unit-only',rejectedSamples:0,inputs:[
+  {sequence:1,event:'keydown',code:'KeyJ',trusted:true,capturedAtMs:20,forwardedAtMs:21,workerReceivedAtMs:23,workerDispatchedAtMs:24,nativeConsumedAtMs:27},
+  {sequence:2,event:'keyup',code:'KeyJ',trusted:true,capturedAtMs:30,forwardedAtMs:31,workerReceivedAtMs:33,workerDispatchedAtMs:34,nativeConsumedAtMs:38}],frames:[{frameId:1,resizeEpoch:0,captureStartedAtMs:1,captureEndedAtMs:3,hostReceivedAtMs:4,hostConsumedAtMs:5,ackReceivedAtMs:8,hostDisposition:'consumed'},{frameId:2,resizeEpoch:0,captureStartedAtMs:6,captureEndedAtMs:7,hostReceivedAtMs:8,hostConsumedAtMs:9,ackReceivedAtMs:10,hostDisposition:'released'}]}}};
+ const observed=summarizeWorkerTimings(session,{windowStartEpochMs:0,windowEndEpochMs:12});assert.equal(observed.availability,'observed');assert.equal(observed.captureDurationMs.median,1.5);assert.equal(observed.ackRoundTripMs.median,4);assert.equal(observed.hostConsumptionDurationMs.count,1,'release is not presentation consumption');assert.equal(observed.inputHostToNativeMs.p95,8);assert.equal(observed.provesOnscreenPresentation,false);
+ session.memory.benchmark.inputs[0].nativeConsumedAtMs=null;assert.equal(summarizeWorkerTimings(session,{windowStartEpochMs:0,windowEndEpochMs:12}).availability,'insufficient-samples');
+ session.memory.benchmark.inputs[1].workerReceivedAtMs=50;assert.throws(()=>summarizeWorkerTimings(session),/INPUT_TIMING/);
+ assert.equal(summarizeWorkerTimings({...session,memory:{}}).availability,'unavailable');assert.equal(summarizeWorkerTimings({executionBackend:'legacy'}).availability,'not-applicable');
+});
+
+test('rounded cross-realm intervals stay unavailable while same-realm and Native evidence is retained',()=>{
+ const session={executionBackend:'worker',presentationBackend:'bitmap',runId:'run',documentId:'doc',workerId:'worker',runConfigurationHash:'hash',memory:{benchmark:{schemaVersion:1,mode:'benchmark',sampleLimitPerKind:8,inputs:[
+  {sequence:1,event:'keydown',code:'KeyJ',trusted:true,capturedAtMs:20,forwardedAtMs:20.1,workerReceivedAtMs:19.9,workerDispatchedAtMs:20.2,nativeConsumedAtMs:25},
+  {sequence:2,event:'keyup',code:'KeyJ',trusted:true,capturedAtMs:30,forwardedAtMs:31,workerReceivedAtMs:33,workerDispatchedAtMs:34,nativeConsumedAtMs:38}],frames:[
+  {frameId:1,resizeEpoch:0,captureStartedAtMs:1,captureEndedAtMs:3,hostReceivedAtMs:2.9,hostConsumedAtMs:3.1,ackReceivedAtMs:5,hostDisposition:'consumed'},
+  {frameId:2,resizeEpoch:0,captureStartedAtMs:6,captureEndedAtMs:7,hostReceivedAtMs:8,hostConsumedAtMs:9,ackReceivedAtMs:10,hostDisposition:'consumed'}]}}};
+ const result=summarizeWorkerTimings(session,{windowStartEpochMs:0,windowEndEpochMs:12});
+ assert.equal(result.availability,'observed');assert.equal(result.rawInputs.length,2);assert.equal(result.inputHostToWorkerMs.count,1);assert.equal(result.inputHostToWorkerMs.min,3);assert.equal(result.inputHostToNativeMs.count,2);assert.equal(result.hostConsumptionLatencyMs.count,1);assert.equal(result.hostConsumptionDurationMs.count,2);assert.deepEqual(result.unavailableCrossRealmIntervals,{inputHostToWorker:1,inputHostToNative:0,hostConsumptionLatency:1});assert.equal(result.rawInputs[0].workerReceivedAtMs,19.9);
+});
+
+test('bitmap rates come from same-session counter differences without inventing capture duration or ACK RTT',()=>{
+ const session={executionBackend:'worker',presentationBackend:'bitmap',runId:'run',documentId:'document',workerId:'worker',runConfigurationHash:'config'};
+ const sample=(atMs,n,patch={})=>({atMs,frames:[{worker:{...session,memory:{schemaVersion:1,workerId:'worker',realmId:'worker',executionBackend:'worker',presentation:{committed:n*2,captured:n,acknowledged:n,skipped:0}},presentationHost:{retainedBitmap:{frameId:n}},...patch}}]});
+ const result=summarizeBitmapPresentation([sample(0,0),sample(1000,10),sample(1250,12),sample(1500,15),sample(1750,20,{workerId:'stale'}),sample(2000,40)],{session,windowStartMs:1000,windowEndMs:1500});
+ assert.equal(result.captureHz,10);assert.equal(result.ackHz,10);assert.equal(result.commitHz,20);assert.equal(result.skippedHz,0);
+ assert.equal(result.availability,'observed');assert.equal(result.rawSamples.length,3);
+ assert.equal(result.intervalRateDistributions.captureHz.min,8);assert.equal(result.intervalRateDistributions.captureHz.max,12);
+ assert.equal(result.captureDurationMs,null);assert.equal(result.ackRoundTripMs,null);assert.equal(result.provesOnscreenFPS,false);
+ assert.equal(summarizeBitmapPresentation([],{session,windowStartMs:1,windowEndMs:2}).captureHz,null);
+ assert.equal(summarizeBitmapPresentation([sample(1000,1),sample(1250,0)],{session,windowStartMs:1000,windowEndMs:1500}).availability,'inconsistent-counter');
+ assert.equal(summarizeBitmapPresentation([],{session:{...session,presentationBackend:'direct'}}).availability,'not-applicable');
+});
 
 // A real valid module exporting one memory, min=1/max=2 pages, no imports.
 const binary=Uint8Array.from([0,97,115,109,1,0,0,0,5,4,1,1,1,2,7,10,1,6,109,101,109,111,114,121,2,0]);

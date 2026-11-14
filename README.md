@@ -52,6 +52,8 @@ See [Breaking Changes](https://godotjs.github.io/misc/breaking-changes/) if upgr
 
 The default Playground in [`apps/playground`](apps/playground) contains eight interactive Godot showcase demos in the original IDE layout. Its build uses a matching GodotJS editor and Web template; see its README for commands.
 
+The native Playground runs Godot, GodotJS and scene React together in an ordinary Worker using transferable ArrayBuffers. Normal build/dev/test commands use Worker; legacy preview pages, build/dev commands and execution switches have been removed. Both 2D and full profiles support direct presentation by default and explicit bitmap presentation. Browser compatibility, capability and performance evidence still gate publication; see the [Worker delivery contract](docs/browser-worker-runtime.zh-CN.md).
+
 The browser SDK conformance workbench is also retained in that directory for the release and browser CI gates. It builds separately with `pnpm --filter @godot-js/playground build:conformance` into `dist-conformance/`.
 It compiles and type-checks projects in browser Workers and runs the generated
 PCK in actual Godot WASM. See the [implementation and local verification guide](docs/browser-playground.zh-CN.md)

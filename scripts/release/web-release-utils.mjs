@@ -12,6 +12,18 @@ export function canonical(value) {
   return JSON.stringify(value);
 }
 export function fail(code, message) { throw Object.assign(new Error(`${code}: ${message}`), { code }); }
+/** Ordered checked patches may compose on one source file. Only the last
+ * output is in the compiled snapshot; every intermediate edge must connect. */
+export function assertSourcePatchChains(report) {
+  const latest = new Map();
+  for (const patch of report.recipe?.patches ?? []) {
+    assertHash(patch.beforeSha256, 'source patch input'); assertHash(patch.afterSha256, 'source patch output');
+    if (latest.has(patch.path) && latest.get(patch.path).afterSha256 !== patch.beforeSha256) fail('E_RELEASE_RECIPE', `Broken source patch chain: ${patch.path}`);
+    latest.set(patch.path, patch);
+  }
+  for (const [path, patch] of latest) if (report.godotSource?.inputs?.[path] !== patch.afterSha256) fail('E_RELEASE_RECIPE', `Source patch is not in the attested snapshot: ${patch.patchId}`);
+  return latest;
+}
 export function options(args, booleans = []) {
   const result = {};
   for (let index = 0; index < args.length; index++) {
@@ -118,7 +130,7 @@ export async function inspectRelease(directory, { requireCertified = false } = {
   if(attestation.runtimeProfile!==undefined&&attestation.runtimeProfile!==descriptor.runtimeProfile)fail('E_RELEASE_PROFILE','Attestation profile differs from release');
   if (attestation.schemaVersion !== 1 || attestation.kind !== 'godot-js-web-release-attestation') fail('E_RELEASE_ATTESTATION', 'Unsupported release attestation');
   if (digest(canonical(attestation.recipe)) !== attestation.recipeSha256) fail('E_RELEASE_RECIPE', 'Attestation recipe was changed');
-  for (const patch of attestation.recipe?.patches ?? []) if (attestation.godotSource?.inputs?.[patch.path] !== patch.afterSha256) fail('E_RELEASE_RECIPE', `Source patch is not in the attested snapshot: ${patch.patchId}`);
+  assertSourcePatchChains(attestation);
   if (descriptor.sourceCertified) {
     if (attestation.status !== 'built') fail('E_RELEASE_SOURCE', 'Source certification requires an actual successful build');
     assertCommit(attestation.source?.commit, 'GodotJS commit'); assertHash(attestation.source?.snapshotHash, 'GodotJS snapshot');

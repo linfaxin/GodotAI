@@ -1,11 +1,13 @@
-import {readFile,writeFile,mkdir,stat} from 'node:fs/promises';
+import {readFile,writeFile,mkdir,stat,readdir} from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {randomUUID} from 'node:crypto';
 import {canonical,digest,sitePayloads,siteCandidateId} from './site-evidence.mjs';
 import {isEngineProfile} from '../../../scripts/release/engine-profiles.mjs';
 import {assessStoppedAudio} from './feature-audio-evidence.mjs';
-import {assertRuntimeEvidence} from './runtime-evidence.mjs';
+import {assertRuntimeEvidence,assertWorkerSessionEvidence} from './runtime-evidence.mjs';
+import {assertWorkerBuildProof,assertWorkerCandidate,workerAcceptancePlan,runConfigurationHash} from './worker-candidate.mjs';
+import {assertWorkerSdkSources} from './worker-sdk-proof.mjs';
 
 const repo=fileURLToPath(new URL('../../../',import.meta.url));
 const json=async file=>JSON.parse(await readFile(file,'utf8'));
@@ -14,14 +16,26 @@ export const REQUIRED_2D_SITE_REPORTS=Object.freeze(['features','features.firefo
 export const REQUIRED_2D_FEATURE_CHECKS=Object.freeze(['physicsRay','physicsCollision','navigation','tilemapRendered','textMetrics','textRendered','cjkGlyphCoverage','audioStarted','audioStopped','audioRestarted','nativeButtonInput','nativeCleanup']);
 export async function sealSiteAcceptance(directory,reports,{verify=false,begin=false}={}){
  directory=path.resolve(directory);reports=path.resolve(reports);
+ if(reports===directory||reports.startsWith(directory+path.sep))throw Error('E_SITE_EVIDENCE_OUTPUT: reports must remain outside the immutable site');
  const release=await json(path.join(directory,'engine-release.json'));
+ const worker=Boolean(release.runtimeAbi);
+ const manifest=worker?await json(path.join(directory,'manifest.json')):undefined;
  if(release.schemaVersion!==2||!isEngineProfile(release.runtimeProfile))throw Error('E_SITE_PROFILE');
  if(release.build?.sourceCertified!==true)throw Error('E_SITE_UNCERTIFIED_SOURCE');
+ if(worker)assertWorkerBuildProof({kind:'godot-js-browser-engine-build',status:'built',runtimeAbi:release.runtimeAbi,workerPatch:release.build.workerPatch,recipe:release.build.engineRecipe,recipeSha256:release.build.recipeSha256,godotSource:release.build.godotSource});
+ if(worker)await assertWorkerSdkSources(repo,release.build.sdkBuild);
  const resources=await json(path.join(directory,'resource-build.json'));
  if(resources.runtimeProfile!==release.runtimeProfile||resources.engineReleaseId!==release.id)throw Error('E_SITE_RESOURCE_IDENTITY');
  const identity=structuredClone(release);delete identity.id;delete identity.verifiedRelease.releaseId;
  if(digest(canonical(identity))!==release.id)throw Error('E_SITE_RELEASE_ID');
  const sources={};
+ const testSources={};
+ if(worker){
+  const testRoot=path.join(repo,'apps/playground/scripts');
+  for(const entry of await readdir(testRoot,{withFileTypes:true}))if(entry.isFile()&&/\.(?:mjs|py|sh)$/.test(entry.name))testSources['apps/playground/scripts/'+entry.name]=digest(await readFile(path.join(testRoot,entry.name)));
+  async function fixtures(prefix){for(const entry of await readdir(path.join(testRoot,prefix),{withFileTypes:true})){const relative=prefix+'/'+entry.name;if(entry.isDirectory())await fixtures(relative);else if(entry.isFile())testSources['apps/playground/scripts/'+relative]=digest(await readFile(path.join(testRoot,relative)));else throw Error('E_SITE_TEST_SOURCE_SYMLINK: '+relative);}}
+  await fixtures('fixtures');
+ }
  for(const [mapName,entry]of [['main.js.map','apps/playground/src/main.ts'],['compiler.worker.js.map','apps/playground/src/compiler.worker.ts'],['preview.js.map','apps/playground/preview.ts']]){
   const map=await json(path.join(directory,mapName)),expected=await readFile(path.join(repo,entry),'utf8');
   const suffix=entry.includes('/src/')?'src/'+path.basename(entry):path.basename(entry);
@@ -32,6 +46,26 @@ export async function sealSiteAcceptance(directory,reports,{verify=false,begin=f
   sources[entry]=digest(map.sourcesContent[index]);
  }
  const payloads=await sitePayloads(directory);
+ if(worker){
+  assertWorkerCandidate(manifest,release,payloads);
+  // Check every repository-owned source in all executable runtime bundles,
+  // including their SDK imports, rather than accepting only an entry wrapper.
+  for(const [mapName,required]of [['preview.js.map','apps/playground/preview.ts'],['runtime.worker.js.map','apps/playground/runtime.worker.ts'],['runtime.audio.worklet.js.map','scripts/jsb.react-browser/src/worker-audio-worklet.ts']]){
+   const map=await json(path.join(directory,mapName));let found=false,checked=0;
+   if(!Array.isArray(map.sources)||!Array.isArray(map.sourcesContent)||map.sources.length!==map.sourcesContent.length)throw Error('E_SITE_SOURCE_MAP: '+mapName);
+   for(let index=0;index<map.sources.length;index++){
+    const source=map.sources[index].replaceAll('\\','/');
+    if(source.includes('node_modules/'))continue;
+    const relative=source.replace(/^(?:\.\.\/|\.\/)+/,'');
+    const entry=/^(?:apps|scripts)\//.test(relative)?relative:'apps/playground/'+relative;
+    if(entry.includes('..')||entry.startsWith('/')||typeof map.sourcesContent[index]!=='string')throw Error('E_SITE_SOURCE_PATH: '+source);
+    let expected;try{expected=await readFile(path.join(repo,entry),'utf8');}catch{throw Error('E_SITE_SOURCE_MISSING: '+entry);}
+    if(expected!==map.sourcesContent[index])throw Error('E_SITE_SOURCE_DRIFT: '+entry);
+    sources[entry]=digest(expected);checked++;if(entry===required)found=true;
+   }
+   if(!found||!checked)throw Error('E_SITE_ENTRY: '+required);
+  }
+ }
  for(const name of ['generatedManifest','output','demoPack']){
   const item=resources[name];
   if(!item||typeof item.path!=='string'||item.path.startsWith('/')||item.path.split('/').some(part=>part==='..'||part==='.'||!part)||item.path.includes('\\')||payloads[item.path]?.sha256!==item.sha256||(item.bytes!==undefined&&payloads[item.path]?.bytes!==item.bytes))throw Error('E_SITE_RESOURCE_PAYLOAD: '+name);
@@ -43,39 +77,60 @@ export async function sealSiteAcceptance(directory,reports,{verify=false,begin=f
  for(const [name,asset]of Object.entries(release.payloads))if(payloads[name]?.sha256!==asset.sha256||payloads[name]?.bytes!==asset.bytes)throw Error('E_SITE_PAYLOAD: '+name);
  const siteHash=digest(canonical(payloads));
  const descriptorHash=digest(await readFile(path.join(directory,'engine-release.json'))),candidateId=await siteCandidateId(directory,descriptorHash);
- const base={schemaVersion:2,application:'default-playground',profile:release.runtimeProfile,releaseId:release.id,descriptorHash,candidateId,sources,siteHash,payloads};
+ const base={schemaVersion:worker?3:2,application:'default-playground',profile:release.runtimeProfile,releaseId:release.id,descriptorHash,candidateId,sources,siteHash,payloads,...(worker?{testSources,runtimeAbi:release.runtimeAbi,reportPlan:workerAcceptancePlan(release.runtimeProfile)}:{})};
  const start=path.join(reports,'site-start.json');
- if(begin){const candidate={...base,runId:randomUUID()};await mkdir(reports,{recursive:true});await writeFile(start,JSON.stringify(candidate,null,2)+'\n');return {status:'prepared',profile:candidate.profile,releaseId:candidate.releaseId,candidateId:candidate.candidateId,siteHash:candidate.siteHash,runId:candidate.runId,context:start,files:Object.keys(payloads).length};}
- const prepared=await json(start),candidate={...base,runId:prepared.runId};
- if(typeof candidate.runId!=='string'||!candidate.runId||canonical(prepared)!==canonical(candidate))throw Error('E_SITE_TEST_INPUT_DRIFT');
+ const batchKey=worker?'acceptanceBatchId':'runId';
+ if(begin){const candidate={...base,[batchKey]:randomUUID()};await mkdir(reports,{recursive:true});await writeFile(start,JSON.stringify(candidate,null,2)+'\n');return {status:'prepared',profile:candidate.profile,releaseId:candidate.releaseId,candidateId:candidate.candidateId,siteHash:candidate.siteHash,[batchKey]:candidate[batchKey],context:start,files:Object.keys(payloads).length,...(worker?{reportPlan:base.reportPlan}:{})};}
+ const prepared=await json(start),candidate={...base,[batchKey]:prepared[batchKey]};
+ if(typeof candidate[batchKey]!=='string'||!candidate[batchKey]||canonical(prepared)!==canonical(candidate))throw Error('E_SITE_TEST_INPUT_DRIFT');
  const started=(await stat(start)).mtimeMs;
  const evidence={};
- const required=[...REQUIRED_SITE_REPORTS,...(release.runtimeProfile==='engine-2d-v1'?REQUIRED_2D_SITE_REPORTS:[])];
- for(const name of required){
+ const required=worker?base.reportPlan:[...REQUIRED_SITE_REPORTS,...(release.runtimeProfile==='engine-2d-v1'?REQUIRED_2D_SITE_REPORTS:[])].map(name=>({name,suite:name,browser:name.includes('.')?name.split('.')[1]:'chromium'}));
+ for(const plan of required){
+  const {name}=plan,suite=plan.suite;
   if((await stat(path.join(reports,name+'.json'))).mtimeMs<started)throw Error('E_SITE_STALE_EVIDENCE: '+name);
   const bytes=await readFile(path.join(reports,name+'.json')),result=JSON.parse(bytes);
   if(result.status!=='passed')throw Error('E_SITE_ACCEPTANCE: '+name);
-  for(const key of ['profile','releaseId','descriptorHash','candidateId','siteHash','runId'])if(result[key]!==candidate[key])throw Error('E_SITE_EVIDENCE_IDENTITY: '+name+' '+key);
+  for(const key of ['profile','releaseId','descriptorHash','candidateId','siteHash',batchKey])if(result[key]!==candidate[key])throw Error('E_SITE_EVIDENCE_IDENTITY: '+name+' '+key);
   if(result.testMode!=='real-engine'||!['chromium','firefox','webkit'].includes(result.browser?.name)||typeof result.browser?.version!=='string'||!result.browser.version)throw Error('E_SITE_EVIDENCE_MODE: '+name);
-  if(name==='features'||name.startsWith('features.')){
-   const expectedBrowser=name==='features'?'chromium':name.slice('features.'.length),sessions=name==='features'?2:1;
+  if(worker){
+   if(result.browser.name!==plan.browser||result.runConfiguration?.presentationBackend!==plan.presentationBackend)throw Error('E_SITE_EVIDENCE_MATRIX: '+name);
+   if(result.browser.settingsTier!=='default')throw Error('E_SITE_EVIDENCE_BROWSER_SETTINGS: '+name);
+   if(!['delivery','editor'].includes(suite))assertWorkerSessionEvidence(result);
+   else if(result.schemaVersion!==3||Object.hasOwn(result,'runId')||result.runConfigurationHash!==runConfigurationHash(result.runConfiguration)||result.executionScope!==(suite==='editor'?'compiler-worker':'http-delivery'))throw Error('E_SITE_WORKER_EVIDENCE: non-engine suite schema/scope');
+  }
+  if(suite==='features'||suite.startsWith('features.')){
+   const expectedBrowser=worker?plan.browser:suite==='features'?'chromium':suite.slice('features.'.length),sessions=expectedBrowser==='chromium'?2:1;
    if(result.browser.name!==expectedBrowser)throw Error('E_SITE_EVIDENCE_BROWSER: '+name);
    if(result.suite!=='2d-features'||result.engine?.javascript!==release.engine?.javascript?.sha256||result.engine?.wasm!==(release.engine?.wasm?.decodedSha256??release.engine?.wasm?.sha256))throw Error('E_SITE_FEATURE_ENGINE');
    if(!Array.isArray(result.cases)||result.cases.length<2*sessions||!result.cases.every(item=>['snake','camel'].includes(item.naming)&&item.status==='passed'&&item.result?.status==='passed')||!['snake','camel'].every(naming=>new Set(result.cases.filter(item=>item.naming===naming).map(item=>item.session)).size>=sessions))throw Error('E_SITE_FEATURE_CASES');
    if(result.font?.cjkRequired!==true)throw Error('E_SITE_FEATURE_TEXT: CJK coverage is mandatory');
+   const featureWorkers=new Set();
+   if(worker){
+    if(!Array.isArray(result.warnings)||result.warnings.length)throw Error('E_SITE_FEATURE_WARNINGS');
+    const harness=result.harness,proof=release.build.sdkBuild;
+    if(harness?.kind!=='synthetic-editor-official-preview'||harness.sdkSourceSnapshotHash!==proof.sourceSnapshotHash||harness.sdkOutputSnapshotHash!==proof.outputSnapshotHash||!Array.isArray(harness.sourceAssets)||!harness.sourceAssets.length||!harness.sourceAssets.some(asset=>asset.path==='scripts/jsb.react-browser/dist/worker-runner.js')||harness.sourceAssets.some(asset=>asset.sha256!==proof.outputs[asset.path]?.sha256||asset.bytes!==proof.outputs[asset.path]?.bytes))throw Error('E_SITE_FEATURE_HARNESS_IDENTITY');
+    if(result.sessions.length!==result.cases.length)throw Error('E_SITE_FEATURE_WORKER_SESSION');
+   }
    for(const item of result.cases){
+    if(worker){
+     const observed=result.sessions.find(session=>session.workerId===item.session?.workerId);
+     if(!observed||featureWorkers.has(observed.workerId)||!/^[a-f0-9]{64}$/.test(item.packSha256)||canonical(observed)!==canonical(item.session)||observed.buildKey!==item.packSha256||observed.runtime!=='godot'||observed.workerState!=='native-exited'||observed.exit?.reason!=='clean-exit'||observed.exit?.engineOutcome?.kind!=='native-exit'||observed.exit?.engineOutcome?.code!==0||observed.exit?.hostCleanup?.status!=='complete'||observed.audio?.closed!==true||observed.audio?.contextsCreated!==1||observed.audio?.contextsClosed!==1||observed.audio?.liveNodes!==0||observed.audio?.latePackets!==0||observed.audio?.transferredChunksOwned!==0)throw Error('E_SITE_FEATURE_WORKER_SESSION');
+     featureWorkers.add(observed.workerId);
+     if(!Array.isArray(item.warnings)||item.warnings.length)throw Error('E_SITE_FEATURE_WARNINGS');
+    }
     if(!REQUIRED_2D_FEATURE_CHECKS.every(check=>item.result.checks?.[check]===true))throw Error('E_SITE_FEATURE_CHECKS');
     if(item.exitCode!==0||!['errors','consoleErrors','nativeErrors','lifecycleWarnings'].every(key=>Array.isArray(item[key])&&item[key].length===0))throw Error('E_SITE_FEATURE_RUNTIME');
     const text=item.result.observations?.text;
     if(text?.cjkCovered!==true||text.text!=='中文'||!Number.isInteger(text.renderedPixels)||text.renderedPixels<=5)throw Error('E_SITE_FEATURE_TEXT');
-    if(!Array.isArray(item.audio)||!item.audio.length||!item.audio.every(record=>record.closed===true&&record.state==='closed'&&record.closeCalls===1&&Array.isArray(record.worklets)&&record.worklets.length>=2&&Array.isArray(record.meters)))throw Error('E_SITE_FEATURE_AUDIO');
+    if(!Array.isArray(item.audio)||!item.audio.length||!item.audio.every(record=>record.closed===true&&record.state==='closed'&&record.closeCalls===1&&Array.isArray(record.worklets)&&record.worklets.length>=(worker?1:2)&&Array.isArray(record.meters)))throw Error('E_SITE_FEATURE_AUDIO');
     const meters=item.audio.flatMap(record=>record.meters);
     if(!meters.some(meter=>Number.isFinite(meter.initialPeak)&&meter.initialPeak>0.001)||!meters.some(meter=>Number.isFinite(meter.restartedPeak)&&meter.restartedPeak>0.001)||!meters.some(meter=>Number.isInteger(meter.quietSamples)&&meter.quietSamples>0)||!meters.every(meter=>Number.isFinite(meter.stoppedPeak)&&meter.stoppedPeak>=0&&meter.stoppedPeak<0.001))throw Error('E_SITE_FEATURE_AUDIO');
     if(!meters.every(meter=>{const observed=assessStoppedAudio(meter.stoppedSamples);return observed.status==='passed'&&['drainMs','quietMs','quietSamples','stoppedPeak'].every(key=>observed[key]===meter[key]);}))throw Error('E_SITE_FEATURE_AUDIO: stopped sample evidence');
    }
   }
-  if((name==='runtime'&&result.browser.name!=='chromium')||(name.startsWith('runtime.')&&result.browser.name!==name.slice('runtime.'.length)))throw Error('E_SITE_EVIDENCE_BROWSER: '+name);
-  if(name==='runtime'||name.startsWith('runtime.'))assertRuntimeEvidence(result,release);
+  if(!worker&&((suite==='runtime'&&result.browser.name!=='chromium')||(suite.startsWith('runtime.')&&result.browser.name!==suite.slice('runtime.'.length))))throw Error('E_SITE_EVIDENCE_BROWSER: '+name);
+  if(suite==='runtime'||suite.startsWith('runtime.'))assertRuntimeEvidence(result,release,manifest?.runtime);
   evidence[name]={sha256:digest(bytes),bytes:bytes.length};
  }
  const receipt={...candidate,status:'passed',evidence};

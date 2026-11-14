@@ -178,15 +178,17 @@ test('explicit and adjacent reports infer the same unset configuration and retai
  }
 });
 
-test('the product CLI infers adjacent ThinLTO/explicit release evidence before resource export',async t=>{
+test('the product CLI infers native configuration but requires Worker proof before resource export',async t=>{
  const root=await workspace(t),source=await engineBuildFixture(path.join(root,'source'),{target:'template_release',lto:'thin',moduleMode:'explicit'}),out=path.join(root,'portable');await packageBrowserEngineArtifact({report:source.reportPath,out});
  const host=path.join(root,'host');await writeFile(host,'#!/bin/sh\necho REACHED_RESOURCE_EXPORTER >&2\nexit 37\n');await chmod(host,0o755);
  const env={...process.env,GODOT:host,GODOT_IMPORTER:host,GODOT_WEB_TEMPLATE:path.join(out,'engine-template.zip')};
  for(const key of ['ENGINE_BUILD_REPORT','ENGINE_PROFILE','ENGINE_TARGET','ENGINE_LTO','ENGINE_MODULE_MODE','JOBS'])delete env[key];
  const args=['apps/playground/scripts/build.mjs','--out',path.join(root,'site'),'--work-dir',path.join(root,'work'),'--skip-sdk-build'];
+ const workerCandidate=spawnSync(process.execPath,[...args.filter(value=>value!=='--legacy-execution'),'--worker-execution'],{cwd:repo,encoding:'utf8',env});assert.equal(workerCandidate.status,1);assert.match(workerCandidate.stderr,/E_WORKER_RUNTIME_ABI/);assert.doesNotMatch(workerCandidate.stderr,/REACHED_RESOURCE_EXPORTER/);
  for(const extra of [[],['--engine-report',path.join(out,'engine-report.json')]]){
-  const result=spawnSync(process.execPath,[...args,...extra],{cwd:repo,encoding:'utf8',env});assert.equal(result.status,1);assert.match(result.stderr,/REACHED_RESOURCE_EXPORTER/);assert.doesNotMatch(result.stderr,/E_PLAYGROUND_ENGINE_REPORT/);
+  const result=spawnSync(process.execPath,[...args,...extra],{cwd:repo,encoding:'utf8',env});assert.equal(result.status,1);assert.match(result.stderr,/E_WORKER_RUNTIME_ABI/);assert.doesNotMatch(result.stderr,/REACHED_RESOURCE_EXPORTER|E_PLAYGROUND_ENGINE_REPORT/);
  }
+ const retired=spawnSync(process.execPath,[...args,'--legacy-execution'],{cwd:repo,encoding:'utf8',env});assert.equal(retired.status,1);assert.match(retired.stderr,/E_EXECUTION_BACKEND_RETIRED/);assert.doesNotMatch(retired.stderr,/REACHED_RESOURCE_EXPORTER/);
  const mismatch=spawnSync(process.execPath,[...args,'--lto','none'],{cwd:repo,encoding:'utf8',env});assert.match(mismatch.stderr,/E_PLAYGROUND_ENGINE_REPORT/);assert.doesNotMatch(mismatch.stderr,/REACHED_RESOURCE_EXPORTER/);
  await assert.rejects(access(path.join(root,'site')),{code:'ENOENT'});
 });

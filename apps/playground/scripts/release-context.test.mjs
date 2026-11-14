@@ -57,9 +57,12 @@ test('editor pins descriptor, helper and candidate bytes; stale worker and rolli
 });
 
 test('preview adapter preserves compiler manifest and refuses another release before creating an iframe',async t=>{
- const r=JSON.stringify(release()),files=new Map([['/releases/candidate-a/engine-release.json',r],['/releases/candidate-a/preview-config.json',JSON.stringify({previewOrigin:'https://preview.test'})]]);
+ const manifest={...release(),runtimeAbi:{protocolVersion:2,host:1,audio:1,presentation:1}};
+ const runtime={executionBackend:'worker',presentationBackends:['direct','bitmap'],entry:'runtime.worker.js',audioWorklet:'runtime.audio.worklet.js',assets:{'runtime.worker.js':asset,'runtime.audio.worklet.js':asset}};
+ const files=new Map([['/releases/candidate-a/engine-release.json',JSON.stringify(manifest)],['/releases/candidate-a/manifest.json',JSON.stringify({schemaVersion:3,runtimeProfile:'engine-2d-v1',engineReleaseId:'engine-r1',runtime,payloads:{}})],['/releases/candidate-a/preview-config.json',JSON.stringify({previewOrigin:'https://preview.test'})]]);
  // config fetch is relative to the document; the fetch fixture resolves it at root.
  mockFetch(t,files);
+ location.href=root+'index.html';
  const module=await moduleFor(t,'../src/engine-preview.ts');
  const preview=await module.createEnginePreview({ownerDocument:{location:{origin:'https://editor.test'}}},()=>{});
  assert.equal(preview.context.releaseRoot,root);
