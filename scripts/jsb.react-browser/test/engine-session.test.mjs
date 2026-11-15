@@ -1,0 +1,164 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import vm from 'node:vm';
+import {BrowserEngineSession,installWorkerRuntimeHost,runtimeWorkerBootstrap} from '../dist/engine-session.js';
+
+const identity={runId:'session-test',buildKey:'build-test',revision:1,generation:'gen-test'};
+function fixture(){
+ const workers=[],contexts=[],urls=new Map(),revoked=[],timers=new Map();let serial=0;
+ class Target extends EventTarget{}
+ class Worker extends Target{
+  constructor(url,options){super();this.url=url;this.options=options;this.sent=[];this.terminated=0;workers.push(this);}
+  postMessage(message){this.sent.push(message);}
+  terminate(){this.terminated++;}
+  deliver(message){this.dispatchEvent(new MessageEvent('message',{data:message}));}
+ }
+ class AudioContext{constructor(){this.state='running';this.closed=0;contexts.push(this);}async close(){this.closed++;this.state='closed';}}
+ const scope={Worker,AudioContext,EventTarget:Target,crossOriginIsolated:true,SharedArrayBuffer,
+  location:{href:'https://preview.test/preview.html'},URL:{createObjectURL(blob){const url='blob:test/'+(++serial);urls.set(url,blob);return url;},revokeObjectURL(url){revoked.push(url);}},
+  setTimeout(fn){const id=++serial;timers.set(id,fn);return id;},setInterval(fn){const id=++serial;timers.set(id,fn);return id;},clearTimeout(id){timers.delete(id);},clearInterval(id){timers.delete(id);}};
+ return{scope,Worker,workers,contexts,urls,revoked,timers,Target};
+}
+
+test('session tracks every pthread, only native engine progress counts, and stale messages cannot update it',async()=>{
+ const f=fixture(),progress=[],roles=[],projects=[];
+ const session=new BrowserEngineSession({identity,scope:f.scope,executionModel:'proxy-pthread',requiresCrossOriginIsolation:true,onProgress:value=>progress.push(value),onWorkerRole:value=>roles.push(value),onProject:value=>projects.push(value)});
+ const engine=new f.scope.Worker('https://preview.test/engine.worker.js'),script=new f.scope.Worker('https://preview.test/engine.worker.js');
+ const packet=(worker,id,type,fields={})=>worker.deliver({__godotjsRuntime:1,sessionId:identity.runId,workerId:id,type,role:'engine',...fields});
+ packet(engine,1,'role');packet(script,2,'role',{role:'script-worker'});
+ packet(script,2,'progress',{sequence:1,role:'script-worker'});packet(engine,1,'progress',{sequence:1});packet(engine,1,'progress',{sequence:1});packet(engine,1,'progress',{sequence:99,sessionId:'old-session'});
+ assert.equal(progress.length,1);assert.deepEqual(roles.map(item=>item.role),['engine','script-worker']);
+ packet(engine,1,'project',{data:{type:'chunk',text:'x'.repeat(65536)}});assert.equal(projects.length,1);
+ assert.equal(session.command({type:'controls',speed:2}),true);assert.equal(engine.sent.length,1);assert.equal(script.sent.length,0);
+ assert.equal(engine.sent[0].sessionId,identity.runId);
+ const source=await f.urls.get(engine.url).text();assert.match(source,/installWorkerRuntimeHost/);assert.match(source,/importScripts\("https:\/\/preview.test\/engine.worker.js"\)/);
+ const cleanup=await session.dispose('forced');assert.equal(cleanup.workers,2);assert.equal(cleanup.terminatedWorkers,2);assert.equal(engine.terminated,1);assert.equal(script.terminated,1);
+ assert.equal(session.command({type:'action'}),false);assert.equal(f.scope.Worker,f.Worker);assert.equal(f.revoked.length,2);
+ packet(engine,1,'progress',{sequence:2});assert.equal(progress.length,1);
+});
+
+test('whole-session disposal closes audio, pooled workers, timers, callbacks and canvas exactly once',async()=>{
+ const f=fixture();const session=new BrowserEngineSession({identity,scope:f.scope,executionModel:'proxy-pthread'});
+ new f.scope.Worker('https://preview.test/thread.js');new f.scope.Worker('https://preview.test/thread.js');
+ const audio=new f.scope.AudioContext();f.scope.setTimeout(()=>{throw Error('retired timer ran');},100);f.scope.setInterval(()=>{},100);
+ const target=new f.Target();let clicks=0;target.addEventListener('click',()=>clicks++);target.dispatchEvent(new Event('click'));assert.equal(clicks,1);
+ let pools=0,removed=0;const canvas={width:640,height:480,remove(){removed++;}};
+ session.attachEngine({rtenv:{PThread:{terminateAllThreads(){pools++;}}},config:{canvas}});
+ const first=session.dispose('clean'),second=session.dispose('forced');assert.equal(first,second);
+ const receipt=await first;target.dispatchEvent(new Event('click'));
+ assert.equal(receipt.mode,'clean');assert.equal(pools,1);assert.equal(audio.closed,1);assert.equal(receipt.closedAudioContexts,1);assert.equal(receipt.clearedTimers,2);assert.equal(f.timers.size,0);assert.equal(clicks,1);assert.equal(canvas.width,0);assert.equal(removed,1);
+ assert.deepEqual(receipt.errors,[]);
+ await new BrowserEngineSession({identity:{...identity,runId:'replacement'},scope:f.scope}).dispose();
+});
+
+test('isolation requirements fail before mutating the host realm',()=>{
+ const f=fixture();f.scope.crossOriginIsolated=false;
+ assert.throws(()=>new BrowserEngineSession({identity,scope:f.scope,executionModel:'proxy-pthread',requiresCrossOriginIsolation:true}),/E_SESSION_REQUIRES_ISOLATION/);
+ assert.equal(f.scope.Worker,f.Worker);assert.equal(f.scope.__godotjsRuntimeHost,undefined);
+});
+
+test('trusted host gestures resume proxy audio and retired sessions remove their activation handlers',async()=>{
+ const f=fixture(),listeners=new Map();let resumes=0;
+ f.scope.addEventListener=(type,callback)=>listeners.set(type,callback);
+ f.scope.removeEventListener=(type,callback)=>{if(listeners.get(type)===callback)listeners.delete(type);};
+ const session=new BrowserEngineSession({identity,scope:f.scope,executionModel:'proxy-pthread'});
+ session.attachEngine({rtenv:{resumeAudio(){resumes++;}}});
+ listeners.get('pointerdown')({isTrusted:false});assert.equal(resumes,0);
+ listeners.get('pointerdown')({isTrusted:true});listeners.get('keydown')({isTrusted:true});assert.equal(resumes,2);
+ const retired=listeners.get('pointerdown');await session.dispose();assert.equal(listeners.size,0);
+ retired({isTrusted:true});assert.equal(resumes,2);
+});
+
+test('worker bootstrap binds native role, bounded diagnostics and commands without touching native transfer messages',()=>{
+ const sent=[],listeners=[];let time=1000;
+ const scope={postMessage:message=>sent.push(message),addEventListener:(name,fn)=>listeners.push(fn),Date:{now:()=>time}};
+ scope.globalThis=scope;
+ vm.runInNewContext('('+installWorkerRuntimeHost.toString()+')('+JSON.stringify(identity.runId)+',3)',scope);
+ const host=scope.__godotjsRuntimeHost;assert.equal(host.role,'host');host.markProgress();assert.equal(sent.length,0);
+ host.assignRole('engine');host.markProgress();host.markProgress();time+=300;host.markProgress();
+ assert.deepEqual(sent.map(item=>item.type),['role','progress','progress']);assert.equal(host.reportDiagnostic({message:'error',kind:'caught'}),true);
+ assert.equal(host.emitProjectEvent({type:'chunk',part:0,text:'asset'}),true);
+ let stopped=0;listeners[0]({data:{__jsbMessage:true,data:'native'},stopImmediatePropagation(){stopped++;}});assert.equal(stopped,0);
+ const command={data:{__godotjsRuntime:1,sessionId:identity.runId,type:'project-command',json:'{"type":"reset"}'},stopImmediatePropagation(){stopped++;}};
+ listeners[0](command);let received;host.bindProjectCommand(json=>received=JSON.parse(json));assert.equal(received.type,'reset');assert.equal(stopped,1);
+ assert.throws(()=>host.assignRole('script-worker'),/E_RUNTIME_ROLE_REASSIGN/);
+ assert.match(runtimeWorkerBootstrap('https://preview.test/thread.mjs',identity.runId,4,true),/await import/);
+});
+
+test('registered script workers can report failures and logs but cannot fake engine progress or project events',async()=>{
+ const f=fixture(),diagnostics=[],logs=[],progress=[],project=[];
+ const session=new BrowserEngineSession({identity,scope:f.scope,executionModel:'proxy-pthread',onDiagnostic:item=>diagnostics.push(item),onLog:(level,text)=>logs.push({level,text}),onProgress:item=>progress.push(item),onProject:item=>project.push(item)});
+ const worker=new f.scope.Worker('https://preview.test/script.worker.js');
+ const send=(type,fields={})=>worker.deliver({__godotjsRuntime:1,sessionId:identity.runId,workerId:1,role:'script-worker',type,...fields});
+ send('role');send('diagnostic',{data:{kind:'runtime',message:'child failed',stack:'res://worker.ts:4:2'}});send('log',{data:{level:'error',text:'recoverable native error'}});send('progress',{sequence:1});send('project',{data:{type:'fake'}});
+ assert.equal(diagnostics.length,1);assert.equal(diagnostics[0].workerRole,'script-worker');assert.equal(diagnostics[0].workerId,1);assert.equal(logs.length,1);assert.equal(progress.length,0);assert.equal(project.length,0);
+ await session.dispose();
+});
+
+test('worker async failures are reported after handlers can consume them, without turning ordinary logs into fatal errors',async()=>{
+ const sent=[],listeners=new Map();
+ const scope={postMessage:message=>sent.push(message),addEventListener:(name,fn)=>listeners.set(name,fn)};scope.globalThis=scope;
+ vm.runInNewContext('('+installWorkerRuntimeHost.toString()+')('+JSON.stringify(identity.runId)+',2)',scope);
+ const host=scope.__godotjsRuntimeHost;host.assignRole('script-worker');host.reportLog('error','ordinary native error');
+ const handled={reason:new Error('handled'),defaultPrevented:false};listeners.get('unhandledrejection')(handled);handled.defaultPrevented=true;
+ const failure={reason:new Error('uncaught async worker failure'),defaultPrevented:false};listeners.get('unhandledrejection')(failure);
+ await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(sent.filter(item=>item.type==='log').length,1);
+ const diagnostics=sent.filter(item=>item.type==='diagnostic');assert.equal(diagnostics.length,1);assert.match(diagnostics[0].data.message,/uncaught async/);assert.equal(diagnostics[0].role,'script-worker');
+});
+
+test('worker console preserves DevTools output and forwards bounded safe logs without synthesizing fatal errors',()=>{
+ const sent=[],original=[];let getters=0;
+ const console=Object.fromEntries(['log','info','debug','warn','error'].map(level=>[level,(...args)=>original.push({level,args})]));
+ const scope={console,postMessage:message=>sent.push(message),addEventListener(){}};scope.globalThis=scope;
+ vm.runInNewContext('('+installWorkerRuntimeHost.toString()+')('+JSON.stringify(identity.runId)+',2)',scope);
+ scope.__godotjsRuntimeHost.assignRole('engine');
+ const object={get message(){getters++;throw Error('getter must not run');},toJSON(){getters++;throw Error('serializer must not run');}};
+ scope.console.log('WORKER_LOG',42,object);scope.console.warn('w'.repeat(5000));scope.console.error('ordinary error');scope.console.info('info');scope.console.debug('debug');
+ assert.equal(original.length,5);assert.equal(getters,0);
+ const logs=sent.filter(item=>item.type==='log');assert.equal(logs.length,5);assert.equal(logs[0].data.text,'WORKER_LOG 42 [object]');assert.equal(logs[1].data.text.length,4096);assert.equal(logs[2].data.level,'error');assert.equal(logs[3].data.level,'log');assert.equal(sent.filter(item=>item.type==='diagnostic').length,0);
+ assert.equal(scope.console.error.__godotjsConsoleForwarded,true);
+});
+
+test('forced session cleanup stops microphone tracks and closes host networking after removing callbacks',async()=>{
+ const f=fixture();let stops=0,socketEvents=0;
+ const media={getTracks(){return[{readyState:'live',stop(){stops++;}}];}};
+ f.scope.navigator={mediaDevices:{async getUserMedia(){return media;}}};
+ class WebSocket extends f.Target{constructor(){super();this.closed=0;this.onclose=()=>socketEvents++;}close(){this.closed++;this.onclose?.();this.dispatchEvent(new Event('close'));}}
+ f.scope.WebSocket=WebSocket;
+ const original=f.scope.navigator.mediaDevices.getUserMedia;
+ const session=new BrowserEngineSession({identity,scope:f.scope,executionModel:'proxy-pthread'});
+ await f.scope.navigator.mediaDevices.getUserMedia({audio:true});
+ const socket=new f.scope.WebSocket('wss://server.test');socket.addEventListener('close',()=>socketEvents++);
+ const receipt=await session.dispose('forced');assert.equal(stops,1);assert.equal(socket.closed,1);assert.equal(socketEvents,0);assert.equal(receipt.mediaStreams,1);assert.equal(receipt.stoppedMediaTracks,1);assert.equal(receipt.closedNetworkResources,1);assert.equal(f.scope.navigator.mediaDevices.getUserMedia,original);
+});
+
+test('media permission resolving after session end cannot leave a live microphone stream',async()=>{
+ const f=fixture();let resolve,stops=0;
+ f.scope.navigator={mediaDevices:{getUserMedia(){return new Promise(done=>resolve=done);}}};
+ const session=new BrowserEngineSession({identity,scope:f.scope,executionModel:'proxy-pthread'});
+ const pending=f.scope.navigator.mediaDevices.getUserMedia({audio:true});await session.dispose();
+ resolve({getTracks(){return[{stop(){stops++;}}];}});
+ await assert.rejects(pending,{name:'AbortError'});assert.equal(stops,1);
+});
+
+test('session closes both MessageChannel ends and AudioWorklet ports and loses only observed WebGL contexts',async()=>{
+ const f=fixture();let portCloses=0,lossRequests=0,getContextCalls=0,removed=0,lost=false;
+ const port=()=>({onmessage(){throw Error('retired port callback');},onmessageerror(){},close(){assert.equal(this.onmessage,null);assert.equal(this.onmessageerror,null);portCloses++;}});
+ f.scope.MessageChannel=class{constructor(){this.port1=port();this.port2=port();}};
+ f.scope.AudioWorkletNode=class{constructor(){this.port=port();}};
+ const gl={isContextLost(){return lost;},getExtension(name){assert.equal(name,'WEBGL_lose_context');return{loseContext(){lost=true;lossRequests++;}};}};
+ f.scope.HTMLCanvasElement=class extends f.Target{constructor(){super();this.width=128;this.height=128;}getContext(kind){getContextCalls++;return kind==='2d'?{}:gl;}remove(){removed++;}};
+ const session=new BrowserEngineSession({identity,scope:f.scope});
+ new f.scope.MessageChannel();new f.scope.AudioWorkletNode({},'mixer');const canvas=new f.scope.HTMLCanvasElement();canvas.getContext('2d');canvas.getContext('webgl2');
+ const callsBeforeCleanup=getContextCalls;const receipt=await session.dispose('forced');
+ assert.equal(receipt.messagePorts,3);assert.equal(receipt.closedMessagePorts,3);assert.equal(portCloses,3);assert.equal(receipt.glContexts,1);assert.equal(receipt.lostGlContexts,1);assert.equal(receipt.glLossRequested,1);assert.equal(lossRequests,1);assert.equal(getContextCalls,callsBeforeCleanup,'cleanup must not create an unrelated GL context');assert.equal(removed,1);assert.deepEqual(receipt.errors,[]);
+});
+
+test('native cleanup of a recorded GL context is idempotent at the session boundary',async()=>{
+ const f=fixture();let lost=false,extensionReads=0;
+ const gl={isContextLost(){return lost;},getExtension(){extensionReads++;throw Error('already lost context must not be queried');}};
+ f.scope.HTMLCanvasElement=class extends f.Target{getContext(){return gl;}remove(){}};
+ const session=new BrowserEngineSession({identity,scope:f.scope});new f.scope.HTMLCanvasElement().getContext('webgl');lost=true;
+ const receipt=await session.dispose('clean');assert.equal(receipt.glContexts,1);assert.equal(receipt.lostGlContexts,1);assert.equal(receipt.glLossRequested,0);assert.equal(extensionReads,0);assert.deepEqual(receipt.errors,[]);
+});

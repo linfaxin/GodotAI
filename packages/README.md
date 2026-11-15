@@ -6,11 +6,14 @@ Use `packages/<name>` for reusable GodotJS libraries. Applications belong in `ap
 
 | Package | Status | Output |
 | --- | --- | --- |
+| [`@godot-js/engine`](engine/README.md) | Private neutral engine API, execution identities and browser session SDK | ESM and declarations in `dist/` |
+| [`@godot-js/project-tools`](project-tools/README.md) | Private project preparation, build plans, resource receipts and PCK tools | ESM and declarations in `dist/` |
 | [`@godot-js/tsx`](tsx/README.md) | Private package foundation; no runtime API yet | CommonJS and declarations in `dist/` |
 | [`@godot-js/react`](../scripts/jsb.react/README.md) | Existing React renderer; kept in its current location | CommonJS and declarations in `scripts/jsb.react/dist/` |
 | [`@godot-js/react-build`](../scripts/jsb.react-build/README.md) | Existing scene compiler and toolchain; kept in its current location | ESM and declarations in `scripts/jsb.react-build/dist/` |
 
 The root ecosystem build explicitly includes the two existing React packages. Their source locations, package interfaces, and `test:react` entry point are preserved; new libraries use `packages/`.
+The old React build `core` subpaths and browser engine API/loader/session subpaths delegate to the neutral packages. React startup and rendering remain in the React packages. Engine API consumers do not need React or the compiler.
 
 ## Adding a package
 

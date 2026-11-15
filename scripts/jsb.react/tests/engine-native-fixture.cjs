@@ -2,7 +2,7 @@
 // Native semantics needed by the direct renderer. Values copy on get/set;
 // Resources and Objects preserve identity, as they do in Godot Variant.
 module.exports=function engineFixture(){
-  let serial=0;const objects=new Set(),pending=[],calls=[];
+  let serial=0;const objects=new Set(),pending=[],calls=[],roots=new Set(),emitting=new WeakSet();let autoPump=true;
   class Vector2{constructor(x=0,y=0){if(x instanceof Vector2){this.x=x.x;this.y=x.y;}else{this.x=x;this.y=y;}}}
   const copy=value=>value instanceof Vector2?new Vector2(value):value;
   class Callable{static create(callback){return callback;}}
@@ -14,6 +14,7 @@ module.exports=function engineFixture(){
     get_signal_list(){return ['pressed','value_changed','ready'].map(name=>({name}));}
     get(name){return copy(this.properties[name]);}
     set(name,value){if(!this.alive)throw Error('dead setter');this.properties[name]=copy(value);calls.push(['set',this,name,value]);if(name==='custom_value')this.emit_signal('value_changed',value);}
+    get_children(includeInternal=false){return this.children.filter(child=>includeInternal||!child.internal);}
     get_parent(){return this.parent;}
     get_index(){return this.parent?this.parent.children.indexOf(this):-1;}
     add_child(child){if(child.parent)throw Error('already parented');child.parent=this;this.children.push(child);calls.push(['add',this,child]);if(this.is_inside_tree())child.enterTree();}
@@ -27,14 +28,19 @@ module.exports=function engineFixture(){
     connect(name,callback){let slots=this.signals.get(name);if(!slots)this.signals.set(name,slots=new Set());if(slots.has(callback))return 1;slots.add(callback);calls.push(['connect',this,name]);return 0;}
     is_connected(name,callback){return !!this.signals.get(name)?.has(callback);}
     disconnect(name,callback){this.signals.get(name)?.delete(callback);calls.push(['disconnect',this,name]);}
-    emit_signal(name,...args){for(const callback of [...(this.signals.get(name)??[])])callback(...args);}
+    emit_signal(name,...args){const nested=emitting.has(this);emitting.add(this);try{for(const callback of [...(this.signals.get(name)??[])])callback(...args);}finally{if(!nested)emitting.delete(this);}if(autoPump)for(const root of roots)root.pump();}
     queue_free(){calls.push(['queue_free',this]);pending.push(this);}
-    free(){if(!this.alive)throw Error('double free');calls.push(['free',this]);for(const child of [...this.children])child.free();if(this.parent)this.parent.remove_child(this);this.alive=false;objects.delete(this);this.signals.clear();}
+    free(){if(emitting.has(this))throw Error("Object is locked and can't be freed");if(!this.alive)throw Error('double free');calls.push(['free',this]);for(const child of [...this.children])child.free();if(this.parent)this.parent.remove_child(this);this.alive=false;objects.delete(this);this.signals.clear();}
   }
   class Label extends Node{}
   class Material{}
   const tree=new Node();tree.get_signal_list=()=>['process_frame','physics_frame'].map(name=>({name}));
-  const godot={Node,Label,Material,Vector2,Callable,is_instance_valid:object=>!!object?.alive};
+  let physicsFrame=false;const godot={Node,Label,Material,Vector2,Callable,Engine:{is_in_physics_frame:()=>physicsFrame},is_instance_valid:object=>!!object?.alive};
   const container=new Node();tree.add_child(container);
-  return {godot,Node,Label,Material,Vector2,tree,container,calls,objects,flushDeletes(){while(pending.length){const object=pending.shift();if(object.alive)object.free();}},setup(options={}){const {createRoot}=require('../dist/engine');return createRoot(container,{godot,autoProcess:false,...options});}};
+  const drive=(root,immediate=true)=>{roots.add(root);if(immediate){const render=root.render.bind(root);root.render=element=>{render(element);root.flush();};}return root;};
+  return {godot,Node,Label,Material,Vector2,tree,container,calls,objects,drive,
+    setPhysics(value){physicsFrame=value;},setAutoPump(value){autoPump=value;},
+    step(){for(const root of roots)root.pump();},
+    async flushDeletes(){for(let pass=0;pass<100;pass++){await Promise.resolve();while(pending.length){const object=pending.shift();if(object.alive)object.free();}for(const root of roots){root.pump();root.getStats();}if(!pending.length&&![...roots].some(root=>root.hasRetirements()))return;}throw Error('Native retirement did not settle');},
+    setup(options={}){const {createRoot}=require('../dist/engine');const {immediate=true,...nativeOptions}=options;return drive(createRoot(container,{godot,autoProcess:false,...nativeOptions}),immediate);}};
 };

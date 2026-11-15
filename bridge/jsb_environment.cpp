@@ -498,6 +498,9 @@ namespace jsb
 
     void Environment::dispose()
     {
+#if JSB_WITH_WEB
+        Worker::finish_owned(this);
+#endif
         JSB_LOG(Verbose, "disposing Environment %s", (uintptr_t) id());
 
         flags_ |= EF_PreDispose;
@@ -586,6 +589,7 @@ namespace jsb
         // handle messages from workers
 #if JSB_WITH_WEB
         jsbi_FlushPendingWorkerMessages();
+        Worker::reap_finished(this);
 #else
         {
             std::vector<Message>& messages = inbox_.swap();

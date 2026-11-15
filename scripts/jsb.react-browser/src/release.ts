@@ -1,8 +1,10 @@
 import { BrowserBuildError, type RuntimeRelease } from './contracts.js';
 import { fetchVerifiedAsset } from './verified-loader.js';
 import { sha256, canonicalJson } from './snapshot.js';
+import {validateExecution,legacyExecution} from './execution.js';
+import {assertRuntimeTargetIdentity} from './identities.js';
 
-export async function loadRuntimeRelease(url: string, options: { expectedId?: string; expectedDescriptorSha256?: string; signal?: AbortSignal } = {}): Promise<{ release: RuntimeRelease; baseUrl: string }> {
+export async function loadRuntimeRelease(url: string, options: { expectedId?: string; expectedDescriptorSha256?: string; expectedEngineId?:string;expectedExtensionId?:string;signal?: AbortSignal } = {}): Promise<{ release: RuntimeRelease; baseUrl: string }> {
   const response = await fetch(url, { signal: options.signal, credentials: 'same-origin', redirect: 'error' });
   if (!response.ok) throw new BrowserBuildError('E_RELEASE_HTTP', `Cannot load runtime release (${response.status})`);
   const bytes = new Uint8Array(await response.arrayBuffer());
@@ -14,13 +16,25 @@ export async function loadRuntimeRelease(url: string, options: { expectedId?: st
   const identity = { ...raw }; delete identity.id; delete identity.runtimeRelease; delete identity.certified; delete identity.certification;
   const actual = await sha256(canonicalJson(identity));
   if (actual !== raw.id) throw new BrowserBuildError('E_RELEASE_ID', 'Runtime descriptor content identity is invalid');
+  if(options.expectedEngineId!==undefined)assertRuntimeTargetIdentity({engineId:raw.engineId,extensionId:raw.extensionId},{engineId:options.expectedEngineId,extensionId:options.expectedExtensionId});
+  else if(options.expectedExtensionId!==undefined&&raw.extensionId!==options.expectedExtensionId)throw new BrowserBuildError('E_RUNTIME_TARGET_EXTENSION','Release extension differs from pinned extension');
   const seen = new Set<string>();
   for (const file of raw.files) {
     if (!file || typeof file.path !== 'string' || file.path.startsWith('/') || file.path.split('/').some((part: string) => !part || part === '.' || part === '..') || !/^[a-f0-9]{64}$/.test(file.sha256) || seen.has(file.path)) throw new BrowserBuildError('E_RELEASE_FILE', 'Invalid runtime asset');
     seen.add(file.path);
   }
+  const execution=raw.execution??legacyExecution();validateExecution(execution);
+  if(raw.engine?.threads!==execution.wasmThreads)throw new BrowserBuildError('E_RELEASE_EXECUTION','Thread metadata differs from execution contract');
+  for(const worker of execution.workerAssets??[]){
+    const asset=raw.files.find((file:{path:string})=>file.path===worker.path);
+    if(!asset||asset.sha256!==worker.sha256||asset.bytes!==worker.bytes)throw new BrowserBuildError('E_RELEASE_WORKER','Worker asset is outside sealed release');
+  }
+  if(raw.engine?.host){
+    const host=raw.engine.host,asset=raw.files.find((file:{path:string})=>file.path===host.path);
+    if(!asset||asset.sha256!==host.sha256||asset.bytes!==host.bytes||!Number.isSafeInteger(host.bytes)||host.bytes<=0)throw new BrowserBuildError('E_RELEASE_HOST','Browser host is outside sealed release');
+  }
   const profiles = Array.isArray(raw.profiles) ? Object.fromEntries(raw.profiles.map((profile: { id: string }) => [profile.id, profile])) : raw.profiles;
-  return { baseUrl: response.url, release: { ...raw, profiles, engine: { ...raw.engine, engine: 'web', engineTarget: raw.engine.target ?? raw.engine.engineTarget } } };
+  return { baseUrl: response.url, release: { ...raw, execution, profiles, engine: { ...raw.engine, engine: 'web', engineTarget: raw.engine.target ?? raw.engine.engineTarget } } };
 }
 export async function fetchReleaseFiles(release: RuntimeRelease, baseUrl: string, options: { signal?: AbortSignal; includeEngine?: boolean; progress?: (loaded: number, total: number) => void } = {}): Promise<Map<string, Uint8Array>> {
   const files = release.files.filter(file => options.includeEngine || !file.kind.startsWith('engine-'));

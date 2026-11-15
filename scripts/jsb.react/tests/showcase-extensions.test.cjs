@@ -1,7 +1,7 @@
 const test=require('node:test');
 const assert=require('node:assert/strict');
 const React=require('react');
-const SDK=require('../dist');
+const SDK=require('../dist/legacy');
 const schema=require('../dist/schema');
 const {MockNativePort}=require('../dist/testing');
 const context={profileId:'showcase-v1'};

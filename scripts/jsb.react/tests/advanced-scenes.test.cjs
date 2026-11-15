@@ -1,4 +1,4 @@
-const test=require('node:test');const assert=require('node:assert/strict');const React=require('react');const SDK=require('../dist');const {MockNativePort}=require('../dist/testing');const schema=require('../dist/schema');
+const test=require('node:test');const assert=require('node:assert/strict');const React=require('react');const SDK=require('../dist/legacy');const {MockNativePort}=require('../dist/testing');const schema=require('../dist/schema');
 const context={profileId:'showcase-v1'};
 test('skeleton and native scene values are opt-in, exact, finite DTOs',()=>{
  for(const type of ['Skeleton3D','BoneAttachment3D','AnimationTree']){assert.ok(SDK[type]);assert.throws(()=>schema.getHostSchema(type),/E_HOST_UNSUPPORTED/);schema.validateHostProps(type,{},context);}

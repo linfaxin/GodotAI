@@ -1,0 +1,48 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import path from 'node:path';
+import {tmpdir} from 'node:os';
+import {mkdtemp,mkdir,writeFile,rm,chmod,access} from 'node:fs/promises';
+import {createHash} from 'node:crypto';
+import {spawnSync} from 'node:child_process';
+import {fileURLToPath} from 'node:url';
+import {productOutputPath,productExportPreset,exportedExecution} from './product-execution.mjs';
+import {legacyExecution} from '../../../scripts/release/execution-contract.mjs';
+import {canonical,digest} from '../../../scripts/release/web-release-utils.mjs';
+import {engineBuildFixture} from './fixtures/engine-build-report.mjs';
+const repo=fileURLToPath(new URL('../../../',import.meta.url));
+const sha=bytes=>createHash('sha256').update(bytes).digest('hex');
+const execution=()=>({schemaVersion:1,executionModel:'proxy-pthread',wasmThreads:true,proxyToPthread:true,requiresCrossOriginIsolation:true,hostProtocolVersion:1,workerBootstrap:'embedded',workerAssets:[]});
+test('worker product outputs are candidates and cannot replace old default sites',()=>{
+ const app='/fixture/apps/playground',artifactDirectory='/fixture/artifact';
+ assert.equal(productOutputPath({app,artifactDirectory}),app+'/dist');
+ assert.equal(productOutputPath({app,artifactDirectory,executionModel:'proxy-pthread'}),app+'/dist-worker-full-debug');
+ assert.equal(productOutputPath({app,artifactDirectory,executionModel:'proxy-pthread',runtimeProfile:'engine-2d-v1',target:'template_release'}),app+'/dist-worker-2d-release');
+ for(const name of ['dist','dist-2d-debug','dist-full-release'])assert.throws(()=>productOutputPath({app,artifactDirectory,executionModel:'proxy-pthread',explicitOutput:path.join(app,name)}),/E_WORKER_CANDIDATE_OUTPUT/);
+ assert.equal(productOutputPath({app,artifactDirectory,executionModel:'proxy-pthread',moduleMode:'explicit'}),artifactDirectory+'/site');
+});
+test('actual execution selects the export preset and remaps byte-identical worker closure',async t=>{
+ assert.match(productExportPreset({template:'/engine.zip',execution:legacyExecution()}),/variant\/thread_support=false/);
+ assert.match(productExportPreset({template:'/engine.zip',execution:execution()}),/variant\/thread_support=true/);
+ const root=await mkdtemp(path.join(tmpdir(),'worker-product-'));t.after(()=>rm(root,{recursive:true,force:true}));await mkdir(path.join(root,'engine'));
+ const main=Buffer.from('verified main'),helper=Buffer.from('verified helper'),model=execution();
+ model.workerAssets=[{path:'godot.js',sha256:sha(main),bytes:main.length,role:'engine-main'},{path:'godot.worker.js',sha256:sha(helper),bytes:helper.length,role:'pthread-runtime'}];
+ await writeFile(path.join(root,'engine/game.js'),main);await writeFile(path.join(root,'engine/game.worker.js'),helper);
+ const mapped=await exportedExecution({execution:model,siteDirectory:root});
+ assert.deepEqual(mapped.workerAssets.map(item=>item.path),['engine/game.js','engine/game.worker.js']);
+ assert.equal(mapped.workerAssets[0].sha256,model.workerAssets[0].sha256);
+ await writeFile(path.join(root,'engine/game.js'),'unexpected export change');await assert.rejects(exportedExecution({execution:model,siteDirectory:root}),/E_EXPORTED_WORKER_IDENTITY/);
+});
+test('product CLI infers pthread reports and refuses old default destinations before export',async t=>{
+ const root=await mkdtemp(path.join(tmpdir(),'worker-product-cli-'));t.after(()=>rm(root,{recursive:true,force:true}));
+ const source=await engineBuildFixture(path.join(root,'source'),{profile:'full-engine-v1'});
+ source.report.recipe.args=source.report.recipe.args.filter(arg=>!arg.startsWith('threads='));source.report.recipe.args.push('threads=yes','proxy_to_pthread=yes');
+ source.report.requestedArgs=source.report.recipe.args;source.report.recipeSha256=digest(canonical(source.report.recipe));source.report.resolvedBuildOptions={...source.report.resolvedBuildOptions,threads:true,proxy_to_pthread:true,dlink_enabled:false};source.report.execution=execution();
+ await writeFile(source.reportPath,JSON.stringify(source.report));
+ const host=path.join(root,'host');await writeFile(host,'#!/bin/sh\necho WORKER_RESOURCE_EXPORT_REACHED >&2\nexit 37\n');await chmod(host,0o755);
+ const env={...process.env,GODOT:host,GODOT_IMPORTER:host};for(const key of ['ENGINE_BUILD_REPORT','ENGINE_PROFILE','ENGINE_TARGET','ENGINE_LTO','ENGINE_MODULE_MODE','ENGINE_EXECUTION_MODEL','GODOT_WEB_TEMPLATE','JOBS'])delete env[key];
+ const base=['apps/playground/scripts/build.mjs','--engine-report',source.reportPath,'--skip-sdk-build','--work-dir',path.join(root,'work')];
+ const candidate=spawnSync(process.execPath,[...base,'--out',path.join(root,'candidate')],{cwd:repo,encoding:'utf8',env});assert.match(candidate.stderr,/WORKER_RESOURCE_EXPORT_REACHED/);assert.doesNotMatch(candidate.stderr,/E_PLAYGROUND_EXECUTION|E_PLAYGROUND_ENGINE_REPORT/);
+ const oldDefault=spawnSync(process.execPath,[...base,'--out',path.join(repo,'apps/playground/dist')],{cwd:repo,encoding:'utf8',env});assert.match(oldDefault.stderr,/E_WORKER_CANDIDATE_OUTPUT/);assert.doesNotMatch(oldDefault.stderr,/WORKER_RESOURCE_EXPORT_REACHED/);
+ await assert.rejects(access(path.join(root,'candidate')),{code:'ENOENT'});
+});

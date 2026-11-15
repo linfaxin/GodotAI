@@ -1,22 +1,32 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import {createHash} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 import {launchBrowser,withAcceptanceContext} from './browser-harness.mjs';
 import {createStaticServer} from './serve.mjs';
+import {createLocalTestTls,inspectTestSite,localDeploymentEvidence} from './browser-local-tls.mjs';
 import {getEngineProfile} from '../../../scripts/release/engine-profiles.mjs';
 import {RUNTIME_LIFECYCLE_MINIMUM} from './runtime-evidence.mjs';
 
 // Acceptance of the built production site: no runtime, compiler, or network mocks.
 const directory=path.resolve(process.env.PLAYGROUND_TEST_DIRECTORY??fileURLToPath(new URL('../dist',import.meta.url)));
-const runtimeProfile=JSON.parse(await fs.readFile(path.join(directory,'engine-release.json'),'utf8')).runtimeProfile;
+const productRelease=JSON.parse(await fs.readFile(path.join(directory,'engine-release.json'),'utf8'));
+const siteBytes=await fs.readFile(path.join(directory,'manifest.json'));
+const publicAssets=JSON.parse(siteBytes).publicAssets===true;
+const urlPrefix=publicAssets?`/releases/${createHash('sha256').update(siteBytes).digest('hex')}/`:'/';
+const runtimeProfile=productRelease.runtimeProfile;
+const isolated=(productRelease.execution??productRelease.engine?.execution)?.requiresCrossOriginIsolation===true;
+const useTls=isolated&&process.env.PLAYGROUND_TEST_TLS!=='0';
+if(useTls&&(process.env.BROWSER??'chromium')!=='chromium')throw Error('Pinned local TLS currently requires Chromium');
+const tls=useTls?await createLocalTestTls():undefined;
 const output=process.env.PLAYGROUND_FULL_ENGINE_REPORT;
 const timeout=Number(process.env.PLAYGROUND_FULL_ENGINE_TIMEOUT??180000);
 const lifecycleLoops=Number(process.env.PLAYGROUND_FULL_ENGINE_LOOPS??RUNTIME_LIFECYCLE_MINIMUM[process.env.BROWSER??'chromium']);
 assert(Number.isInteger(lifecycleLoops)&&lifecycleLoops>=1&&lifecycleLoops<=100);
-const checks=[],audio=[],errors=[],warnings=[],network=[],frames=[];
-let browser,context,page;
-const editor=createStaticServer(directory),preview=createStaticServer(directory);
+const checks=[],audio=[],errors=[],warnings=[],network=[],frames=[],sessionCleanup=[];
+let browser,context,page,deployment,permissionPolicyObservation;
+const editor=createStaticServer(directory,{publicImmutable:publicAssets,urlPrefix,tls}),preview=createStaticServer(directory,{publicImmutable:publicAssets,urlPrefix,tls});
 const listen=server=>new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
 const close=server=>new Promise(resolve=>server.close(resolve));
 const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
@@ -24,7 +34,10 @@ async function until(predicate,message){const end=Date.now()+timeout;while(Date.
 const inspect=async()=>page?await page.evaluate(()=>globalThis.__playgroundWorkbench?.inspect()):undefined;
 async function running(runtime){
  console.error(`[full-engine acceptance] waiting for ${runtime} run ${frames.length+1}`);
- await page.waitForFunction(runtime=>{const state=globalThis.__playgroundWorkbench?.inspect();if(state?.ready&&state.project.runtime===runtime&&state.diagnostics?.some(d=>d.category==='error'))throw Error(JSON.stringify(state.diagnostics));return state?.ready&&state.project.runtime===runtime&&state.engine?.state==='running';},runtime,{timeout});
+ await until(async()=>{
+  if(errors.length)throw Error('Production page failed: '+JSON.stringify(errors));
+  return page.evaluate(runtime=>{const state=globalThis.__playgroundWorkbench?.inspect();if(state?.ready&&state.project.runtime===runtime){if(state.diagnostics?.some(d=>d.category==='error'))throw Error(JSON.stringify(state.diagnostics));if(['crashed','unresponsive'].includes(state.engine?.state))throw Error(JSON.stringify({engine:state.engine,logs:document.querySelector('#logs')?.textContent}));}return state?.ready&&state.project.runtime===runtime&&state.engine?.state==='running';},runtime);
+ },`Production ${runtime} did not reach running`);
  const state=await inspect();assert.deepEqual(state.diagnostics.filter(d=>d.category==='error'),[]);
  assert.equal(await page.locator('#preview iframe').count(),1);
  const iframe=await page.locator('#preview iframe').elementHandle(),frame=await iframe.contentFrame();
@@ -33,7 +46,15 @@ async function running(runtime){
  assert.equal(new URL(frame.url()).pathname,new URL('preview.html',state.releaseContext.releaseRoot).pathname);
  assert.equal(await frame.locator('canvas').count(),1);
  assert.match(await page.locator('#preview iframe').getAttribute('sandbox'),/allow-pointer-lock/);
- assert.equal(await page.locator('#preview iframe').getAttribute('allow'),'autoplay');
+ const permissions=await page.locator('#preview iframe').getAttribute('allow');
+ if(isolated){
+  assert.match(permissions,/autoplay/);assert.match(permissions,/cross-origin-isolated/);assert.match(permissions,/fullscreen/);assert.match(permissions,/xr-spatial-tracking/);assert.equal(await page.evaluate(()=>crossOriginIsolated),true);assert.equal(await frame.evaluate(()=>crossOriginIsolated),true);
+  const observation=await frame.evaluate(()=>{const policy=document.featurePolicy;return {queryApi:typeof policy?.allowsFeature==='function',fullscreenEnabled:document.fullscreenEnabled,...(typeof policy?.allowsFeature==='function'?{fullscreen:policy.allowsFeature('fullscreen'),xrSpatialTracking:policy.allowsFeature('xr-spatial-tracking')}:{})};});
+  if(observation.queryApi){assert.equal(observation.fullscreen,true);assert.equal(observation.xrSpatialTracking,true);}
+  else assert.equal(observation.fullscreenEnabled,true,'A browser without the policy query API must still permit native fullscreen');
+  permissionPolicyObservation??=observation;
+ }
+ else assert.equal(permissions,'autoplay');
  const observation=await frame.evaluate(()=>globalThis.__fullEngineObservation);
  assert(observation?.documentId,'A fresh real preview document must be instrumented');
  assert(!frames.some(previous=>previous.documentId===observation.documentId),'Every run creates a fresh iframe');
@@ -48,7 +69,18 @@ async function stop(documentId){
  await page.waitForFunction(()=>!document.querySelector('#preview iframe'),null,{timeout});
  await until(()=>audio.some(e=>e.documentId===documentId&&e.type==='context-closed'&&e.state==='closed'),'Native engine shutdown must close its AudioContext');
  assert(!audio.some(e=>e.documentId===documentId&&e.type==='worklet-failed'));
+ const terminal=await page.evaluate(()=>globalThis.__fullEngineTerminal);
+ assert.equal(terminal.length,sessionCleanup.length+1,'Each stopped preview must deliver exactly one terminal receipt');
+ const message=terminal.at(-1);assert.equal(message.type,'exited');assert.equal(message.code,0);
+ const receipt=message.cleanup;assert(receipt);assert.equal(receipt.mode,'clean');assertCleanup(receipt);
+ assert(!sessionCleanup.some(item=>item.runId===message.runId),'Terminal identities must belong to fresh sessions');
+ sessionCleanup.push({documentId,runId:message.runId,cleanup:receipt});
  console.error(`[full-engine acceptance] stopped ${documentId}`);
+}
+function assertCleanup(receipt){
+ assert.deepEqual(receipt.errors,[]);
+ for(const [created,closed]of [['workers','terminatedWorkers'],['audioContexts','closedAudioContexts'],['messagePorts','closedMessagePorts'],['glContexts','lostGlContexts'],['mediaTracks','stoppedMediaTracks'],['networkResources','closedNetworkResources']])assert.equal(receipt[created]??0,receipt[closed]??0,`${created} must be fully released`);
+ if(isolated){assert(receipt.workers>0);assert(receipt.messagePorts>0);assert(receipt.glContexts>0);}
 }
 async function choose(id){await page.locator('#project-switcher').click();await page.locator(`[data-demo="${id}"]`).click();}
 function packedFiles(input){
@@ -115,11 +147,24 @@ try{
  const release=JSON.parse(await fs.readFile(path.join(directory,'engine-release.json'),'utf8'));
  getEngineProfile(release.runtimeProfile);assert.equal(release.engine.worklets.length,2);
  await Promise.all([listen(editor),listen(preview)]);
- const editorOrigin=`http://127.0.0.1:${editor.address().port}`,previewOrigin=`http://127.0.0.1:${preview.address().port}`;
- browser=await launchBrowser({headless:true,executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE||undefined,args:['--no-sandbox','--enable-webgl','--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader','--disable-dev-shm-usage','--autoplay-policy=no-user-gesture-required']});
+ const editorOrigin=`${tls?'https':'http'}://127.0.0.1:${editor.address().port}`,previewOrigin=`${tls?'https':'http'}://127.0.0.1:${preview.address().port}`;
+ const delivery=await inspectTestSite(editorOrigin+urlPrefix,tls);assert.equal(delivery.status,200);
+ deployment=localDeploymentEvidence({tls,editorOrigin,previewOrigin,headers:delivery.headers});
+ if(isolated){assert.equal(delivery.headers['cross-origin-opener-policy'],'same-origin');assert.equal(delivery.headers['cross-origin-embedder-policy'],'require-corp');assert.equal(delivery.headers['cross-origin-resource-policy'],'cross-origin');assert.match(delivery.headers['permissions-policy'],/cross-origin-isolated/);}
+ browser=await launchBrowser({headless:true,executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE||undefined,args:['--no-sandbox','--enable-webgl','--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader','--disable-dev-shm-usage','--autoplay-policy=no-user-gesture-required',...(tls?['--ignore-certificate-errors-spki-list='+tls.spki]:[])]});
  context=await browser.newContext({viewport:{width:1536,height:1000}});
  await context.exposeBinding('__fullAcceptanceRecord',(_source,event)=>{audio.push(event);});
  await context.addInitScript(()=>{
+  globalThis.__fullEngineTerminal=[];
+  globalThis.__fullEngineConnections=[];globalThis.__fullEngineHealth={};
+  const Channel=MessageChannel;
+  globalThis.MessageChannel=new Proxy(Channel,{construct(target,args,newTarget){const channel=Reflect.construct(target,args,newTarget);for(const port of [channel.port1,channel.port2])port.addEventListener('message',event=>{
+   const message=event.data;if(message?.protocolVersion!==1||typeof message.runId!=='string')return;
+   const health=globalThis.__fullEngineHealth[message.runId]??={host:0,engine:0};
+   if(message.type==='heartbeat')health.host++;if(message.type==='engine-progress')health.engine++;
+   if(message.type==='connected')globalThis.__fullEngineConnections.push({port,identity:message});
+   if(['exited','terminated','fatal'].includes(message.type))globalThis.__fullEngineTerminal.push(message);
+  });return channel;}});
   if(!location.pathname.endsWith('/preview.html'))return;
   const documentId=crypto.randomUUID(),contexts=[],meters=[],blobs=new Map();
   globalThis.__fullEngineObservation={documentId};
@@ -177,7 +222,7 @@ try{
   (candidates.test(text)?warnings:errors).push({kind:'console',message:text});
  }});
  page.on('request',request=>{if(/\.audio\.(?:position\.)?worklet\.js(?:$|\?)/.test(request.url()))network.push(request.url());});
- await page.goto(`${editorOrigin}/?previewOrigin=${encodeURIComponent(previewOrigin)}`,{waitUntil:'domcontentloaded'});
+ await page.goto(`${editorOrigin}${urlPrefix}?previewOrigin=${encodeURIComponent(previewOrigin+urlPrefix)}`,{waitUntil:'domcontentloaded'});
  const initial=await running('godot');
  assert.equal((await inspect()).engine.releaseId,release.id);
  assert.equal((await inspect()).project.demoId,'native');
@@ -285,6 +330,28 @@ export default class Main extends G.Node2D {_ready(){
   await stop(loop);
  }
  checks.push(`${lifecycleLoops} additional fresh audio iframe lifecycles complete without stale worklet callbacks or context leaks`);
+ if(isolated){
+  const stalled=structuredClone(nativeProject);
+  stalled.files['/src/Main.ts']=`import {Node2D,print} from "godot";export default class Main extends Node2D{_ready(){
+   const host=(globalThis as any).__godotjsRuntimeHost;if(!host)throw Error('The real Worker RuntimeHost is missing');
+   host.bindProjectCommand((raw:string)=>{if(JSON.parse(raw).type==='acceptance-hang'){print('FULL_ENGINE_HANG_ENTER');while(true){}}});
+   print('FULL_ENGINE_HANG_READY');
+  }}`;
+  await page.locator('#import').setInputFiles({name:'forced-worker.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(stalled))});
+  const stalledDocument=await running('godot');
+  await page.waitForFunction(()=>document.querySelector('#logs').textContent.includes('FULL_ENGINE_HANG_READY'),null,{timeout});
+  const before=await page.evaluate(()=>{const current=globalThis.__fullEngineConnections.at(-1),health={...globalThis.__fullEngineHealth[current.identity.runId]};current.port.postMessage({...current.identity,type:'project-command',data:{type:'acceptance-hang'}});return{runId:current.identity.runId,health};});
+  await page.waitForFunction(()=>!document.querySelector('#preview iframe'),null,{timeout});
+  const after=await page.evaluate(runId=>({health:globalThis.__fullEngineHealth[runId],terminal:globalThis.__fullEngineTerminal.at(-1),count:globalThis.__fullEngineTerminal.length}),before.runId);
+  assert.equal(after.count,sessionCleanup.length+1);assert.equal(after.terminal.runId,before.runId);assert.equal(after.terminal.type,'terminated');assert.equal(after.terminal.cleanup.mode,'forced');assertCleanup(after.terminal.cleanup);
+  assert(after.health.host>=before.health.host+5,'The preview host must stay responsive while the application Worker is stuck');
+  assert(after.health.engine<=before.health.engine+1,'A stuck application Worker must stop reporting frame progress');
+  sessionCleanup.push({documentId:stalledDocument,runId:before.runId,cleanup:after.terminal.cleanup,forced:true,health:{before:before.health,after:after.health}});
+  await page.locator('#import').setInputFiles({name:'after-force.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(audioProject(1)))});
+  const recovered=await running('godot');await page.frameLocator('#preview iframe').locator('canvas').click({position:{x:8,y:8}});
+  await until(()=>audio.some(event=>event.documentId===recovered&&event.type==='worklet-output'&&event.peak>0.01),'A fresh session after forced termination must restore real audio output');await stop(recovered);
+  checks.push('A stalled application Worker leaves the host responsive, times out with complete forced cleanup, and a fresh Worker session restores real audio');
+ }
  const hashes=new Set(release.engine.worklets.map(asset=>asset.decodedSha256??asset.sha256));
  for(const frame of frames){
   const loaded=audio.filter(event=>event.documentId===frame.documentId&&event.type==='worklet-loaded');
@@ -298,11 +365,14 @@ export default class Main extends G.Node2D {_ready(){
  assert.deepEqual(errors,[]);
  assert.deepEqual(warnings,[],'Production React imports must resolve without failed candidate paths');
  checks.push('both real audio worklets match release hashes, execute from verified Blob bytes, and every fresh session closes audio');
- const report=await withAcceptanceContext({status:'passed',releaseId:release.id,lifecycleLoops,checks,frames,audio,workletNetworkRequests:network.length,errors,warnings}, {directory,browser});
+ const report=await withAcceptanceContext({status:'passed',releaseId:release.id,lifecycleLoops,deployment,checks,frames,audio,sessionCleanup,workletNetworkRequests:network.length,errors,warnings,permissionPolicyObservation,
+  ...(permissionPolicyObservation?.queryApi===false?{limitations:['This browser has no Permissions Policy query API. Fullscreen and actual cross-origin isolation are verified; the XR allow token is present, but XR policy behavior is not attested by this test.']}:{}),
+  ...(process.env.BROWSER==='firefox'&&process.env.LIBGL_ALWAYS_SOFTWARE==='1'?{testEnvironment:{headless:process.env.BROWSER_HEADLESS!=='0',softwareGL:true,firefoxUserPrefs:{'webgl.force-enabled':true,'webgl.disabled':false,'gfx.webrender.software':true}}}:{}),
+ }, {directory,browser});
  if(output){await fs.mkdir(path.dirname(path.resolve(output)),{recursive:true});await fs.writeFile(output,JSON.stringify(report,null,2)+'\n');}
  console.log(JSON.stringify(report,null,2));
 }catch(error){
- const report={status:'failed',error:String(error),stack:error.stack,checks,frames,audio,network,errors,warnings,state:await inspect().catch(()=>undefined),logs:await page?.locator('#logs').textContent().catch(()=>undefined)};
+ const report={status:'failed',error:String(error),stack:error.stack,deployment,checks,frames,audio,sessionCleanup,network,errors,warnings,state:await inspect().catch(()=>undefined),logs:await page?.locator('#logs').textContent().catch(()=>undefined)};
  if(output){await fs.mkdir(path.dirname(path.resolve(output)),{recursive:true});await fs.writeFile(output,JSON.stringify(report,null,2)+'\n');}
  console.error(JSON.stringify(report,null,2));throw error;
-}finally{await context?.close();await browser?.close();await Promise.all([close(editor),close(preview)]);}
+}finally{await context?.close();await browser?.close();await Promise.all([close(editor),close(preview)]);await tls?.dispose();}

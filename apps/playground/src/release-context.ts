@@ -1,4 +1,5 @@
 import {getEngineProfile,isEngineProfile} from '../../../scripts/release/engine-profiles.mjs';
+import {assertRuntimeTargetIdentity} from '@godot-js/engine/identities';
 
 /** One session pins an engine/SDK/type tuple; profile names only capabilities. */
 export interface ReleaseContext {
@@ -24,6 +25,15 @@ export function assertCompiledRelease(context:ReleaseContext,manifest:unknown):v
  const value=manifest as {engineProfile?:unknown;engineReleaseId?:unknown;releaseContext?:unknown};
  if(!value||value.engineProfile!==context.engineProfile||value.engineReleaseId!==context.engineReleaseId)throw Error('E_ARTIFACT_RELEASE_MISMATCH');
  assertSameRelease(context,value.releaseContext as ReleaseContext);
+}
+/** A project may use the engine alone or require its sealed React extension. */
+export function assertArtifactTarget(release:{engineId?:string;extensionId?:string},manifest:unknown):void {
+ const project=manifest as {engineId?:string;extensionId?:string};
+ if(release.engineId===undefined){
+  if(project?.engineId!==undefined||project?.extensionId!==undefined)throw Error('E_RUNTIME_TARGET_IDENTITY: Release has no sealed target');
+  return;
+ }
+ assertRuntimeTargetIdentity({engineId:release.engineId,...(release.extensionId!==undefined?{extensionId:release.extensionId}:{})},project as {engineId:string;extensionId?:string});
 }
 export function nativeAudioEnabled(profile:string):boolean {
  return isEngineProfile(profile)&&getEngineProfile(profile).audio===true;

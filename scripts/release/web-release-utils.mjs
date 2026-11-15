@@ -4,6 +4,9 @@ import { resolve, relative, dirname, sep } from 'node:path';
 import { gunzipSync } from 'node:zlib';
 import { assertGame2dCertification } from './game-2d-evidence.mjs';
 import {isEngineProfile,getEngineProfile,validateEngineProfile} from './engine-profiles.mjs';
+import {executionFromReport,assertExecutionAssets,legacyExecution} from './execution-contract.mjs';
+import {assertExecutionCertification} from './execution-evidence.mjs';
+import {assertFullEngineIdentities} from './release-identities.mjs';
 
 export const digest = value => createHash('sha256').update(value).digest('hex');
 export function canonical(value) {
@@ -125,12 +128,32 @@ export async function inspectRelease(directory, { requireCertified = false } = {
     assertCommit(attestation.godotSource?.commit, 'Godot commit'); assertHash(attestation.godotSource?.snapshotHash, 'Godot snapshot');
     for (const source of [attestation.source, attestation.godotSource]) if (digest(canonical(source.inputs)) !== source.snapshotHash) fail('E_RELEASE_SOURCE', 'Source snapshot map does not match its hash');
     if (descriptor.target?.sourceCommit !== attestation.source.commit || descriptor.target?.sourceDiffHash !== attestation.source.snapshotHash || descriptor.target?.buildFlags?.godot_build_recipe_sha256 !== attestation.recipeSha256) fail('E_RELEASE_SOURCE', 'Runtime target does not match the actual engine source tuple');
-    if (!attestation.recipe?.args?.includes('threads=no') || !attestation.recipe.args.includes('dlink_enabled=no') || !attestation.recipe.args.includes('platform=web')) fail('E_RELEASE_RECIPE', 'Recipe must explicitly build single-thread non-dlink Web');
+    const actualExecution=executionFromReport(attestation);
+    const declaredExecution=descriptor.execution??legacyExecution();
+    for(const key of ['executionModel','wasmThreads','proxyToPthread','requiresCrossOriginIsolation','hostProtocolVersion'])if(actualExecution[key]!==declaredExecution[key])fail('E_RELEASE_EXECUTION','Execution differs from the source-bound recipe: '+key);
   }
+  const releaseExecution=descriptor.execution??legacyExecution();
+  assertExecutionAssets(releaseExecution,descriptor.files);
+  if(descriptor.engine?.host){const host=descriptor.engine.host,file=descriptor.files.find(item=>item.path===host.path);if(!file||file.sha256!==host.sha256||file.bytes!==host.bytes||!Number.isSafeInteger(host.bytes)||host.bytes<=0)fail('E_RELEASE_HOST','Browser host is outside the sealed release');}
+  if(descriptor.engine?.threads!==releaseExecution.wasmThreads)fail('E_RELEASE_EXECUTION','Engine thread metadata differs from execution contract');
   if(descriptor.runtimeProfile!==undefined&&descriptor.runtimeProfile!=='legacy-profiles-v1')getEngineProfile(descriptor.runtimeProfile);
   if(isEngineProfile(descriptor.runtimeProfile)){
     if(descriptor.legacy!==false||!descriptor.engineRelease)fail('E_RELEASE_PROFILE','Native release cannot enter the legacy path');
     const native=await json(within(root,descriptor.engineRelease));
+    if(releaseExecution.executionModel!=='window'&&!native.engine?.host)fail('E_RELEASE_HOST','Worker native descriptor has no bound host bundle');
+    if(native.engine?.host){
+      const host=native.engine.host,file=descriptor.files.find(item=>item.path===host.path),sealed=native.payloads?.[host.path];
+      if(!file||!sealed||file.sha256!==host.sha256||file.bytes!==host.bytes||sealed.sha256!==host.sha256||sealed.bytes!==host.bytes)fail('E_RELEASE_HOST','Browser host is outside the exact release closure');
+    }
+    if(native.engineId!==undefined||native.extensionId!==undefined){
+      const target=assertFullEngineIdentities(native);
+      if((descriptor.engineId!==undefined&&descriptor.engineId!==target.engineId)||(descriptor.extensionId!==undefined&&descriptor.extensionId!==target.extensionId))fail('E_RELEASE_IDENTITY','Native engine/extension identities differ from release');
+    }
+    if(native.sdk?.typesHash){
+      const types=await json(within(root,native.api.typeSnapshot.path));
+      for(const name of Object.keys(native.api.declarations))delete types[name];
+      if(digest(canonical(types))!==native.sdk.typesHash)fail('E_RELEASE_IDENTITY','Extension declarations differ from their sealed type identity');
+    }
     const nativeIdentity=structuredClone(native);delete nativeIdentity.id;delete nativeIdentity.verifiedRelease?.releaseId;
     if(native.schemaVersion!==2||native.runtimeProfile!==descriptor.runtimeProfile||native.profile!==descriptor.runtimeProfile||native.verifiedRelease?.profile!==descriptor.runtimeProfile||native.id!==digest(canonical(nativeIdentity))||native.id!==descriptor.engineReleaseId||native.verifiedRelease?.releaseId!==native.id)fail('E_RELEASE_PROFILE','Native descriptor identity/profile mismatch');
     const ir=await json(within(root,native.api.ir.path));
@@ -142,6 +165,7 @@ export async function inspectRelease(directory, { requireCertified = false } = {
   if (descriptor.certified) {
     if (!descriptor.sourceCertified || descriptor.certification?.status !== 'passed' || descriptor.certification.runtimeRelease !== descriptor.id) fail('E_RELEASE_CERTIFICATION', 'Missing source or exact-release browser certification');
     const evidence = descriptor.certification;
+    assertExecutionCertification(releaseExecution,evidence);
     assertGame2dCertification(descriptor, evidence);
     const requiredKinds = ['engine-js', 'engine-wasm', 'contracts', 'bootstrap', 'compiler-js', 'compiler-wasm', 'typescript', 'typescript-module', 'type'];
     for (const kind of requiredKinds) if (!descriptor.files.some(file => file.kind === kind)) fail('E_RELEASE_CERTIFICATION', `Missing certified ${kind} asset`);

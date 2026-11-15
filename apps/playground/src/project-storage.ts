@@ -1,4 +1,4 @@
-import {parseProject,type EditorProject} from './project-model.ts';
+import {parseProject,projectStorageDocument,type EditorProject} from './project-model.ts';
 
 export interface ProjectSnapshot {selected?:string;projects:[string,unknown][];versions?:Record<string,number>}
 type Snapshot=ProjectSnapshot;
@@ -25,7 +25,7 @@ export function createProjectStorage(database:Promise<IDBDatabase|undefined>){
    for(const row of saved.projects){
     if(!isRow(row)){invalid.set(String(projects.length),'无效项目记录');continue;}
     const [id,value]=row;if(seen.has(id))invalid.set(id,'重复项目标识；完整原始快照已保留供恢复');seen.add(id);
-    try{const project=parseProject(value);projects.push([id,project]);if((value as any)?.schemaVersion!==3||(value as any)?.runtime==='legacy-react')migrated.push(id);}
+    try{const project=parseProject(value);projects.push([id,project]);if(![3,4].includes((value as any)?.schemaVersion)||(value as any)?.runtime==='legacy-react')migrated.push(id);}
     catch(error){invalid.set(id,String(error));projects.push([id,value]);}
    }
    const snapshot={...saved,projects};versions.clear();for(const [id,version]of Object.entries(saved.versions??{}))versions.set(id,version);for(const [id]of projects)if(!versions.has(id))versions.set(id,0);
@@ -63,8 +63,8 @@ export function createProjectStorage(database:Promise<IDBDatabase|undefined>){
       for(const [id,edit] of valid){
        const currentVersion=nextVersions[id]??0;
        if(currentVersion!==(versions.get(id)??0)){conflicts.push(id);continue;}
-       const previous=projects.get(id) as any;if(previous&&(previous.schemaVersion!==3||previous.runtime==='legacy-react'))migrating=true;
-       projects.set(id,edit.project);nextVersions[id]=currentVersion+1;applied.set(id,{version:currentVersion+1,revision:edit.revision});
+       const previous=projects.get(id) as any;if(previous&&(previous.schemaVersion!==(edit.project.engineDocument?4:3)||previous.runtime==='legacy-react'))migrating=true;
+       projects.set(id,projectStorageDocument(edit.project));nextVersions[id]=currentVersion+1;applied.set(id,{version:currentVersion+1,revision:edit.revision});
       }
       if(malformed||migrating)backup(store,saved);
       store.put({selected,projects:[...projects],versions:nextVersions},'current');
@@ -97,7 +97,7 @@ export function createProjectStorage(database:Promise<IDBDatabase|undefined>){
        for(const id of ids)if((saved?.versions?.[id]??0)!==(versions.get(id)??0))conflicts.push(id);
        if(conflicts.length)return;
        const nextVersions={...saved?.versions};for(const id of ids){nextVersions[id]=(nextVersions[id]??0)+1;applied.set(id,nextVersions[id]);}
-       restored={selected:raw.selected,projects:rows,versions:nextVersions};backup(store,saved);store.put(restored,'current');
+       restored={selected:raw.selected,projects:rows.map(([id,project])=>[id,projectStorageDocument(project)]),versions:nextVersions};backup(store,saved);store.put(restored,'current');
       }catch(error){tx.abort();reject(error);}
      };
      current.onsuccess=()=>{saved=current.result;hasCurrent=true;apply();};

@@ -9,6 +9,8 @@
 
 #ifdef WEB_ENABLED
 #include <emscripten/emscripten.h>
+#include <emscripten/threading.h>
+#include <pthread.h>
 #endif
 
 #include "jsb_web_isolate.h"
@@ -83,9 +85,9 @@ JSNATIVE_API EMSCRIPTEN_KEEPALIVE void* jsni_generate_internal_data(v8::Isolate*
     return (void*)(uintptr_t) *index;
 }
 
-JSNATIVE_API EMSCRIPTEN_KEEPALIVE void jsni_on_worker_message(jsb::impl::StackPosition data_sp, uint32_t transfer_id)
+JSNATIVE_API EMSCRIPTEN_KEEPALIVE void jsni_on_worker_message(uintptr_t sender_pthread_id, jsb::impl::StackPosition data_sp, uint32_t transfer_id)
 {
-    jsb::Worker::on_web_message(data_sp, transfer_id);
+    jsb::Worker::on_web_message(sender_pthread_id, data_sp, transfer_id);
 }
 
 JSNATIVE_API EMSCRIPTEN_KEEPALIVE void jsni_on_worker_message_from_pthread(uintptr_t sender_pthread_id, jsb::impl::StackPosition data_sp, uint32_t transfer_id)
@@ -105,6 +107,12 @@ JSNATIVE_API EMSCRIPTEN_KEEPALIVE int32_t jsni_worker_get_or_add_native_transfer
     if (!env)
     {
         return static_cast<int32_t>(jsb::Worker::WebNativeTransferError::EnvMissing);
+    }
+    // Stack positions are local to this realm. Never open another thread's
+    // isolate merely because a caller supplied its environment token.
+    if (!env->is_caller_thread())
+    {
+        return static_cast<int32_t>(jsb::Worker::WebNativeTransferError::OwnerMismatch);
     }
 
     v8::Isolate* isolate = env->get_isolate();
@@ -132,7 +140,7 @@ JSNATIVE_API EMSCRIPTEN_KEEPALIVE int32_t jsni_worker_get_or_add_native_transfer
 
     uint32_t transfer_index = 0;
     jsb::Worker::WebNativeTransferError error = jsb::Worker::WebNativeTransferError::None;
-    if (!jsb::Worker::web_get_or_add_transfer(pthread_id, transfer_id, variant, transfer_index, error))
+    if (!jsb::Worker::web_get_or_add_transfer(pthread_id, engine_token, transfer_id, variant, transfer_index, error))
     {
         const jsb::Worker::WebNativeTransferError stable_error =
             error == jsb::Worker::WebNativeTransferError::None
@@ -204,7 +212,10 @@ namespace jsb::impl
                 JSNI_FUNC(on_worker_message_from_pthread),
                 JSNI_FUNC(worker_get_or_add_native_transfer),
                 CoreBind::OS::get_singleton()->is_debug_build(),
-                internal::Settings::is_bridge_logging_enabled());
+                internal::Settings::is_bridge_logging_enabled(),
+                jsb::Worker::web_is_script_thread() ? 2 : 1,
+                emscripten_is_main_runtime_thread() ? 0 : static_cast<uintptr_t>(pthread_self()),
+                jsb::Worker::web_parent_thread_id());
         }
     }
 

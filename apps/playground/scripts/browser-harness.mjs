@@ -11,7 +11,8 @@ export async function launchBrowser(options={}){
  const {args,executablePath,browser:ignored,...shared}=options;
  const configured=process.env['PLAYWRIGHT_'+name.toUpperCase()+'_EXECUTABLE'];
  const executable=configured||(name==='chromium'?(executablePath??(existsSync('/usr/bin/chromium')?'/usr/bin/chromium':undefined)):undefined);
- return playwright[name].launch({...shared,headless:process.env.BROWSER_HEADLESS==='0'?false:(shared.headless??true),...(executable?{executablePath:executable}:{}),...(name==='chromium'&&args?{args}:{})});
+ const softwareFirefox=name==='firefox'&&process.env.LIBGL_ALWAYS_SOFTWARE==='1'?{firefoxUserPrefs:{'webgl.force-enabled':true,'webgl.disabled':false,'gfx.webrender.software':true,...shared.firefoxUserPrefs}}:{};
+ return playwright[name].launch({...shared,...softwareFirefox,headless:process.env.BROWSER_HEADLESS==='0'?false:(shared.headless??true),...(executable?{executablePath:executable}:{}),...(name==='chromium'&&args?{args}:{})});
 }
 export const launchTestBrowser=launchBrowser;
 

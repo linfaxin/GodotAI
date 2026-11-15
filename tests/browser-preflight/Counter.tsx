@@ -1,6 +1,6 @@
 import * as React from 'react';
 import clsx from 'clsx';
-import { VBoxContainer, Label, Button, useNodeRef } from '@godot-js/react';
+import { VBoxContainer, Label, Button, useNodeRef } from '@godot-js/react/legacy';
 
 export default function Counter() {
   const [count, setCount] = React.useState(0);

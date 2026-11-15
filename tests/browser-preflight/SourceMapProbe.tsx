@@ -1,4 +1,4 @@
-import { Label } from '@godot-js/react';
+import { Label } from '@godot-js/react/legacy';
 
 export function crash() {
   const invoke = () => {

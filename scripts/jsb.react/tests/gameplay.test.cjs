@@ -1,4 +1,4 @@
-const test=require('node:test'),assert=require('node:assert/strict'),React=require('react'),SDK=require('../dist');
+const test=require('node:test'),assert=require('node:assert/strict'),React=require('react'),SDK=require('../dist/legacy');
 const {validateHostProps,validateValue}=require('../dist/schema'),{MockNativePort}=require('../dist/testing');
 const context={profileId:'showcase-v1'};
 test('ownership rejects codec aliases, container ColorRect geometry and overlapping layout declarations',()=>{

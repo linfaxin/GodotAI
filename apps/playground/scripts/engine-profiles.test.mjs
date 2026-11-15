@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {ENGINE_PROFILES,getEngineProfile,engineBuildArgs,validateEngineProfile} from '../../../scripts/release/engine-profiles.mjs';
+import {ENGINE_PROFILES,getEngineProfile,engineBuildArgs,validateEngineProfile,engineExecution,validateEngineExecution} from '../../../scripts/release/engine-profiles.mjs';
 
 test('official profiles reject unknown identities and keep native 2D distinct from legacy',()=>{
  assert.throws(()=>getEngineProfile('game-2d-v1'),/E_ENGINE_PROFILE/);
@@ -51,4 +51,16 @@ test('general 2D builds remove unsupported Web networking and snapshot tools wit
  assert.deepEqual(full.disabledModules,[]);
  assert.ok(full.requiredModules.includes('text_server_adv'));
  assert.equal(engineBuildArgs().some(arg=>/^module_(enet|upnp|objectdb_profiler)_enabled=no$/.test(arg)),false);
+});
+
+test('worker execution preserves the full capability profile and requires resolved upstream proxy support',()=>{
+ const window=engineBuildArgs(),worker=engineBuildArgs({executionModel:'proxy-pthread'});
+ for(const flag of ['threads=yes','proxy_to_pthread=yes','dlink_enabled=no','disable_3d=no','disable_physics_3d=no','disable_navigation_3d=no','disable_xr=no'])assert.ok(worker.includes(flag),flag);
+ assert.ok(window.includes('threads=no'));assert.equal(window.some(arg=>arg.startsWith('proxy_to_pthread=')),false);
+ assert.deepEqual(worker.filter(arg=>!arg.startsWith('threads=')&&!arg.startsWith('proxy_to_pthread=')),window.filter(arg=>!arg.startsWith('threads=')&&!arg.startsWith('proxy_to_pthread=')));
+ assert.equal(engineExecution('proxy-pthread').requiresCrossOriginIsolation,true);
+ assert.doesNotThrow(()=>validateEngineExecution('proxy-pthread',{resolvedBuildOptions:{threads:true,proxy_to_pthread:true,dlink_enabled:false}}));
+ assert.throws(()=>validateEngineExecution('proxy-pthread',{resolvedBuildOptions:{threads:true,proxy_to_pthread:false,dlink_enabled:false}}),/Resolved proxy_to_pthread/);
+ assert.throws(()=>validateEngineExecution('proxy-pthread',{resolvedBuildOptions:{threads:false,proxy_to_pthread:false,dlink_enabled:false}}),/Resolved threads/);
+ assert.throws(()=>engineBuildArgs({executionModel:'dedicated-worker'}),/E_BROWSER_EXECUTION/);
 });

@@ -1,4 +1,6 @@
 import type { RuntimeManifestV1 } from '@godot-js/react/contracts';
+import type {ExecutionContract} from './execution.js';
+export type {ExecutionContract,ExecutionWorkerAsset} from './execution.js';
 
 export type BuildMode = 'development' | 'production';
 export interface BrowserProjectConfig {
@@ -36,6 +38,7 @@ export interface RuntimeRelease {
   runtimeRelease?: string;
   version: string;
   certified: boolean;
+  execution?:ExecutionContract;
   engine: { godotVersion: string; engine: 'web'; engineTarget: string; threads: boolean; [key: string]: unknown };
   runtimeAbi: string;
   nativeBridgeAbi: string;

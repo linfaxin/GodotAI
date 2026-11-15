@@ -18,7 +18,9 @@ function fixture(){
  globalThis.MessageChannel=class{constructor(){this.port1=new Port();this.port2=new Port();this.port1.other=this.port2;this.port2.other=this.port1;channels.push(this);}};
  const document={location:{origin:'http://editor.test'},createElement(){const frame={removed:false,setAttribute(){},remove(){this.removed=true;const i=attached.indexOf(this);if(i>=0)attached.splice(i,1);},contentWindow:{postMessage(identity,origin,[remote]){assert.equal(origin,'http://preview.test');frame.remote=remote;frame.identity=identity;remote.onmessage=({data})=>{if(data.type==='stop'){remote.postMessage({...identity,protocolVersion:PREVIEW_PROTOCOL,type:'exited',code:0});remote.close();}};}}};frames.push(frame);return frame;}};
  const container={ownerDocument:document,append(frame){attached.push(frame);}};
- const runner=new PreviewRunner({container,previewUrl:'http://preview.test/preview.html',release});
+ // These pre-receipt artifacts exercise state listener reentry. The separate
+ // modern receipt suite verifies strict v2 defaults and downgrade rejection.
+ const runner=new PreviewRunner({container,previewUrl:'http://preview.test/preview.html',release,allowLegacyArtifacts:true});
  const send=(frame,fields)=>frame.remote?.postMessage({...frame.identity,protocolVersion:PREVIEW_PROTOCOL,...fields});
  const drive=async()=>{await flush();const frame=attached.at(-1);if(!frame)return;frame.onload?.();if(frame.removed)return;send(frame,{type:'connected'});for(const phase of phases){if(frame.removed)break;send(frame,{type:'phase',phase});}await flush();};
  return {runner,timers,channels,attached,frames,messages,send,drive,async close(){await runner.dispose();for(const c of channels){c.port1.close();c.port2.close();}assert.equal(timers.size,0,'No expired phase or heartbeat timer survives');for(const [k,v]of Object.entries(originals))globalThis[k]=v;}};

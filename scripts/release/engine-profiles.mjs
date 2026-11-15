@@ -71,13 +71,27 @@ export const ENGINE_PROFILES=Object.freeze({
 });
 export function isEngineProfile(id){return typeof id==='string'&&Object.hasOwn(ENGINE_PROFILES,id);}
 export function getEngineProfile(id=FULL_ENGINE_PROFILE){if(!isEngineProfile(id))throw Error('E_ENGINE_PROFILE: Unsupported official engine profile '+String(id));return ENGINE_PROFILES[id];}
-export function engineBuildArgs({profile:profileId=FULL_ENGINE_PROFILE,target='template_debug',jobs=4,lto='none',moduleMode='baseline'}={}){
+// Execution and engine capabilities are independent. Existing window archives
+// keep their contract; worker builds must request and prove the proxy flags.
+export function engineExecution(executionModel='window'){
+ if(!['window','proxy-pthread'].includes(executionModel))throw Error('E_BROWSER_EXECUTION: Unsupported build execution model '+String(executionModel));
+ const threaded=executionModel==='proxy-pthread';
+ return {schemaVersion:1,executionModel,wasmThreads:threaded,proxyToPthread:threaded,requiresCrossOriginIsolation:threaded,hostProtocolVersion:1};
+}
+export function validateEngineExecution(executionModel,{resolvedBuildOptions,requireResolved=true}={}){
+ const execution=engineExecution(executionModel);
+ if(!resolvedBuildOptions){if(requireResolved)throw Error('E_BROWSER_EXECUTION: Missing resolved build options');return execution;}
+ for(const [name,expected]of [['threads',execution.wasmThreads],['proxy_to_pthread',execution.proxyToPthread],['dlink_enabled',false]])if(resolvedBuildOptions[name]!==expected)throw Error('E_BROWSER_EXECUTION: Resolved '+name+' differs from '+executionModel);
+ return execution;
+}
+export function engineBuildArgs({profile:profileId=FULL_ENGINE_PROFILE,target='template_debug',jobs=4,lto='none',moduleMode='baseline',executionModel='window'}={}){
  const definition=getEngineProfile(profileId);
+ const execution=engineExecution(executionModel);
  if(!['template_debug','template_release'].includes(target))throw Error('E_BROWSER_TARGET: Only template_debug/template_release are supported');
  if(!['none','thin','full'].includes(lto))throw Error('E_BROWSER_LTO: Expected none, thin or full');
  if(!['baseline','explicit'].includes(moduleMode))throw Error('E_BROWSER_MODULE_MODE: Expected baseline or explicit');
  if(!Number.isSafeInteger(Number(jobs))||Number(jobs)<1||Number(jobs)>256)throw Error('E_BROWSER_JOBS: Invalid worker count');
- const args=['platform=web',`target=${target}`,'arch=wasm32','threads=no','dlink_enabled=no','use_quickjs_ng=no','skip_js_runtime=yes',`modules_enabled_by_default=${moduleMode==='explicit'?'no':'yes'}`,'module_GodotJS_enabled=yes','module_text_server_fb_enabled=yes','module_godotai_api_probe_enabled=no','opengl3=yes','vulkan=no','optimize=size','debug_symbols=no',`lto=${lto}`,'use_closure_compiler=no','tests=no'];
+ const args=['platform=web',`target=${target}`,'arch=wasm32',`threads=${execution.wasmThreads?'yes':'no'}`,...(execution.proxyToPthread?['proxy_to_pthread=yes']:[]),'dlink_enabled=no','use_quickjs_ng=no','skip_js_runtime=yes',`modules_enabled_by_default=${moduleMode==='explicit'?'no':'yes'}`,'module_GodotJS_enabled=yes','module_text_server_fb_enabled=yes','module_godotai_api_probe_enabled=no','opengl3=yes','vulkan=no','optimize=size','debug_symbols=no',`lto=${lto}`,'use_closure_compiler=no','tests=no'];
  if(lto==='thin')args.push(`linkflags=-Wl,--thinlto-jobs=${Number(jobs)}`);
  for(const [key,value]of Object.entries(definition.features))args.push(`${key}=${value?'yes':'no'}`);
  for(const name of definition.disabledModules)args.push(`module_${name}_enabled=no`);

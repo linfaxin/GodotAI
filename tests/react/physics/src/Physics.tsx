@@ -2,7 +2,7 @@ import * as React from "react";
 import {
   Node, StaticBody2D, CharacterBody2D, CollisionShape2D,
   asset, useAsset, useNodeRef, usePhysicsProcess, vec2,
-} from "@godot-js/react";
+} from "@godot-js/react/legacy";
 
 function PhysicsWorld() {
   const floorShape = useAsset(asset("floorShape", "RectangleShape2D"));

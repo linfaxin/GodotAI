@@ -56,6 +56,11 @@ export function forwardDemoInput(event:any){
 }
 function transport(){
  if(!G.OS.has_feature('web'))return undefined;
+ const host=(globalThis as any).__godotjsRuntimeHost;
+ if(host&&typeof host.bindProjectCommand==='function')return {
+  send(value:unknown){(host.emitProjectEvent??host.projectEvent).call(host,value);},
+  listen(callback:(value:any)=>void){host.bindProjectCommand((raw:string)=>{if(typeof raw==='string'&&raw.length<=262144)callback(JSON.parse(raw));});return()=>host.bindProjectCommand(null);},
+ };
  const window=G.JavaScriptBridge.get_interface('window');
  return {send(value:unknown){window.call('__godotjsProjectEvent',JSON.stringify(value));},listen(callback:(value:any)=>void){const native=G.JavaScriptBridge.create_callback(G.Callable.create((args:any)=>{const raw=args.get(0);if(typeof raw==='string'&&raw.length<=262144)callback(JSON.parse(raw));}));window.call('__godotjsSetProjectCommand',native);return ()=>{if(native)window.call('__godotjsSetProjectCommand',null);};}};
 }

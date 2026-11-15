@@ -22,7 +22,7 @@ interface InteropProtocol {
 
     generate_internal_data(opaque: IntPtr, internal_field_count: number): IntPtr;
 
-    on_worker_message(data_sp: StackPosition, transfer_id: number): void;
+    on_worker_message(sender_pthread_id: number, data_sp: StackPosition, transfer_id: number): void;
     on_worker_message_from_pthread(sender_pthread_id: number, data_sp: StackPosition, transfer_id: number): void;
     worker_get_or_add_native_transfer(pthread_id: number, engine_opaque: IntPtr, transfer_id: number, value_sp: StackPosition): number;
 }
@@ -30,6 +30,9 @@ interface InteropProtocol {
 type InitOptions = Record<keyof InteropProtocol, number> & {
     bridge_logging: boolean;
     debug_build: boolean;
+    runtime_role: number;
+    thread_id: number;
+    parent_thread_id: number;
 };
 
 enum jsbb_PropertyFlags {
@@ -65,33 +68,9 @@ interface jsbb_HandleEntry {
 // starts from zero
 type StackPosition = number;
 
-type JSWorkerOnMessage = (this: JSWorkerLike, data: unknown) => void;
-
-type JSWorkerLike = { onmessage: JSWorkerOnMessage };
-type GodotWorkerModule = { JSWorkerParent: JSWorkerLike };
-type GodotWorkerGlobal = { require?: (module_name: "godot.worker") => GodotWorkerModule };
-
-// Emscripten omits pthread globals entirely when threads=no.
+// Emscripten omits pthread globals entirely when threads=no. This only
+// controls transport installation; it never determines engine/script roles.
 const jsbb_is_pthread = typeof ENVIRONMENT_IS_PTHREAD !== "undefined" && ENVIRONMENT_IS_PTHREAD === true;
-let JSWorkerParent: null | undefined | JSWorkerLike = jsbb_is_pthread ? undefined : null;
-
-function getJSWorkerParent(): null | JSWorkerLike {
-    if (typeof JSWorkerParent !== "undefined") {
-        return JSWorkerParent;
-    }
-
-    const require = (globalThis as GodotWorkerGlobal)["require"];
-    const module = typeof require === "function" ? require("godot.worker") : undefined;
-    const worker_parent_candidate = module?.["JSWorkerParent"];
-
-    if (worker_parent_candidate && typeof worker_parent_candidate.onmessage === "function") {
-        JSWorkerParent = worker_parent_candidate;
-    } else {
-        JSWorkerParent = null;
-    }
-
-    return JSWorkerParent;
-}
 
 // A recommended warning threshold (not a hard limit).
 const jsbb_kMaxStackSize = 4096;
@@ -141,6 +120,7 @@ const enum jsbb_WorkerTransferErrorCode {
     VariantConversionFailed = -5,
     VariantCloneFailed = -6,
     TransferAppendFailed = -7,
+    OwnerMismatch = -8,
 }
 
 const enum jsbb_PostMessageResult {
@@ -173,7 +153,12 @@ function jsbb_is_transfer_marker(value: unknown): value is jsbb_TransferMarker {
 }
 
 function jsbb_is_worker_message(value: unknown): value is WorkerMessage {
-    return typeof value === "object" && (value as null | Partial<WorkerMessage>)?.["__jsbMessage"] || false;
+    const message = value as Partial<WorkerMessage> | null;
+    const route = message?.route;
+    return typeof value === "object" && message?.__jsbMessage === true && message.version === 1
+        && Number.isInteger(message.transfer_id) && message.transfer_id! >= 0 && message.transfer_id! <= 0xffffffff
+        && !!route && [route.source, route.target, route.channel].every(id => Number.isSafeInteger(id) && id >= 0)
+        && typeof route.epoch === "string" && ["to-child", "to-parent"].includes(route.direction);
 }
 
 function jsbb_IsTraceable(o: any): boolean {
@@ -1465,7 +1450,13 @@ class _jsbb_ {
     static engine: jsbb_Engine | undefined;
     private static _i64: BigInt64Array;
     private static _pending_worker_messages: Array<QueuedWorkerMessage> = [];
-    private static _worker_owner_cache_by_pthread = new Map<number, JSWorkerLike>();
+    // Emscripten pthreads are a transport, not a runtime role. The page may
+    // relay traffic without ever creating a GodotJS environment of its own.
+    private static _runtime: WorkerRuntime = { role: "host", thread: 0, parent: 0, epoch: "host" };
+    private static _runtime_serial = 0;
+    private static _routes = new Map<number, WorkerRuntime>();
+    private static _relay_pending: WorkerMessage[] = [];
+    private static _listening_workers = new WeakSet<Worker>();
 
     static queue_worker_message(message: QueuedWorkerMessage): void {
         this._pending_worker_messages.push(message);
@@ -1504,6 +1495,13 @@ class _jsbb_ {
     }
 
     static init(interop: InitOptions) {
+        // Emscripten reuses browser Workers for new pthreads. A completed
+        // environment has released its engine, so rebinding native callbacks
+        // for that new pthread is expected rather than an initialization error.
+        if (typeof this.interop !== "undefined" && this.engine) {
+            throw new Error("E_WORKER_ACTIVE_ENGINE_REINITIALIZATION");
+        }
+        this.ConfigureThread(interop.runtime_role, interop.thread_id, interop.parent_thread_id);
         if (!interop.debug_build) {
             jsbb_console.debug = function() {};
         }
@@ -1516,9 +1514,6 @@ class _jsbb_ {
 
         if (typeof interop === "undefined") {
             jsbb_console.error("invalid interop");
-        }
-        if (typeof this.interop !== "undefined") {
-            jsbb_console.error("Already initialized, do not call it twice");
         }
         try {
             this.interop = {
@@ -1554,7 +1549,8 @@ class _jsbb_ {
         // currectly, engine_id is hardcoded.
         // only one single engine is supported to new simultaneously
         this.engine = new jsbb_Engine(0, opaque);
-        this.flush_pending_worker_messages();
+        // Environment construction has not installed the script's handlers yet.
+        // Drain only at the explicit native update checkpoint.
         return 0;
     }
 
@@ -1563,8 +1559,11 @@ class _jsbb_ {
             jsbb_console.error("invalid engine id");
             return;
         }
-        this.engine!.Release();
+        if (!this.engine) return;
+        this.engine.Release();
         this.engine = undefined;
+        this._pending_worker_messages.length = 0;
+        this.publish_runtime("unregister");
     }
 
     static GetEngine(engine_id: EngineID) {
@@ -1601,7 +1600,10 @@ class _jsbb_ {
         if (typeof UTF8ToString === "function") {
             let str = UTF8ToString(ptr);
             if (typeof str === "string" && str.length > 0) {
+                const forwarded = (console.error as any).__godotjsConsoleForwarded === true;
                 console.error(str);
+                const host = (globalThis as any).__godotjsRuntimeHost;
+                if (!forwarded && typeof host?.reportLog === "function") host.reportLog("error", str);
             }
         }
     }
@@ -1950,113 +1952,117 @@ class _jsbb_ {
         return rewritten_object;
     }
 
-    static post_message_to_worker(pthread_id: number, data: unknown, transfer_id?: number): boolean {
-        try {
-            const worker = typeof PThread !== "undefined" ? PThread?.pthreads[pthread_id] : undefined;
+    static ConfigureThread(role: number, thread: number, parent: number): void {
+        const name: WorkerRuntime["role"] = role === 2 ? "script-worker" : role === 1 ? "engine" : "host";
+        if (![0, 1, 2].includes(role) || !Number.isSafeInteger(thread) || thread < 0 || !Number.isSafeInteger(parent) || parent < 0
+            || (name === "script-worker" && (!thread || thread === parent))) throw new Error("E_WORKER_ROLE");
+        const previous = this._runtime;
+        if (previous.role === name && previous.thread === thread && previous.parent === parent
+            && this._routes.get(thread)?.epoch === previous.epoch) return;
+        this._runtime = { role: name, thread, parent, epoch: `${thread}:${++this._runtime_serial}:${Math.random()}` };
+        this._routes.set(thread, this._runtime);
+        this._pending_worker_messages.length = 0;
+        const host = (globalThis as any).__godotjsRuntimeHost;
+        if (typeof host?.assignRole === "function") host.assignRole(name);
+        this.install_pthread_worker_listener_hook();
+        this.publish_runtime("register");
+    }
 
-            if (!worker) {
-                return false;
-            }
+    private static publish_runtime(action: "register" | "unregister"): void {
+        const message: WorkerControl = { __jsbWorkerControl: true, version: 1, action, runtime: this._runtime };
+        if (jsbb_is_pthread) globalThis.postMessage(message);
+        else this.accept_worker_control(message);
+        if (action === "unregister") this._routes.delete(this._runtime.thread);
+    }
 
-            const payload: WorkerMessage = {
-                "__jsbMessage": true,
-                "data": data,
-            };
+    private static accept_worker_control(message: WorkerControl, worker?: EmscriptenPThreadWorker): void {
+        const runtime = message.runtime;
+        if (message.version !== 1 || !runtime || !Number.isSafeInteger(runtime.thread)
+            || runtime.thread < 0 || !Number.isSafeInteger(runtime.parent) || runtime.parent < 0
+            || !["engine", "script-worker"].includes(runtime.role) || typeof runtime.epoch !== "string"
+            || (worker && worker.pthread_ptr !== runtime.thread)
+            || (runtime.role === "script-worker" && (!runtime.thread || runtime.thread === runtime.parent))) return;
+        if (message.action === "register") this._routes.set(runtime.thread, { ...runtime });
+        else if (message.action === "unregister" && this._routes.get(runtime.thread)?.epoch === runtime.epoch) {
+            this._routes.delete(runtime.thread);
+            this._relay_pending = this._relay_pending.filter(item => item.route.source !== runtime.thread && item.route.target !== runtime.thread);
+        } else return;
+        const pending = this._relay_pending.splice(0);
+        for (const item of pending) this.relay_worker_message(item);
+    }
 
-            if (typeof transfer_id === "number") {
-                payload["transfer_id"] = transfer_id;
-            }
-
-            worker.postMessage(payload);
-
+    // Only the page owns PThread.pthreads. It forwards browser-cloneable bytes;
+    // native Variant restoration always runs on the destination environment.
+    private static relay_worker_message(message: WorkerMessage, worker?: EmscriptenPThreadWorker): boolean {
+        if (!jsbb_is_worker_message(message)) return false;
+        const route = message.route;
+        const source = this._routes.get(route.source), target = this._routes.get(route.target);
+        if ((worker && worker.pthread_ptr !== route.source) || !source || source.epoch !== route.epoch) return false;
+        if (!target) {
+            if (this._relay_pending.length >= 256) return false;
+            this._relay_pending.push(message);
             return true;
-        } catch (err) {
-            jsbb_console.error("post_message_to_worker failed:", err);
-            return false;
         }
-    }
-
-    private static install_pthread_worker_listener_hook(): void {
-        if (jsbb_is_pthread || typeof PThread === "undefined" || !PThread) {
-            return;
+        const related = route.direction === "to-child"
+            ? target.role === "script-worker" && target.parent === source.thread && route.channel === target.thread
+            : source.role === "script-worker" && source.parent === target.thread && route.channel === source.thread;
+        if (!related) return false;
+        const delivered = { ...message, route: { ...route, targetEpoch: target.epoch } };
+        if (target.thread === this._runtime.thread) {
+            this.queue_worker_message(delivered);
+            return true;
         }
-
-        const original_get_new_worker = PThread.getNewWorker;
-
-        if (original_get_new_worker.__jsb_wrapped) {
-            return;
-        }
-
-        const wrapped_get_new_worker: typeof original_get_new_worker = (() => {
-            const worker = original_get_new_worker.call(PThread);
-
-            if (worker) {
-				// Install our own message listener (in addition to what Emscripten puts in place)
-				worker.addEventListener("message", (event: MessageEvent) => {
-					if (event.data?.["__jsbMessage"] !== true) {
-						return;
-					}
-
-					const sender_pthread_id = typeof event.data["sender_pthread_id"] === "number"
-						? event.data["sender_pthread_id"]
-						: undefined;
-
-					this.queue_worker_message({
-						data: event.data["data"],
-						transfer_id: event.data["transfer_id"],
-						sender_pthread_id,
-					});
-
-					event.stopImmediatePropagation();
-				});
-            }
-
-            return worker;
-        });
-        wrapped_get_new_worker.__jsb_wrapped = true;
-
-        PThread.getNewWorker = wrapped_get_new_worker;
-    }
-
-    private static dispatch_direct_worker_message(data: unknown, sender_pthread_id?: number): void {
-        if (jsbb_is_pthread) {
-            const worker_parent = getJSWorkerParent();
-
-            if (!worker_parent) {
-                return;
-            }
-
-            worker_parent.onmessage.call(worker_parent, data);
-            return;
-        }
-
-        if (typeof sender_pthread_id === "number") {
-            const worker_owner = this._worker_owner_cache_by_pthread.get(sender_pthread_id);
-
-            if (!worker_owner) {
-                throw new Error(`JSWorker owner was not registered for pthread id ${String(sender_pthread_id)}`);
-            }
-
-            worker_owner.onmessage.call(worker_owner, data);
-        }
-    }
-
-    static RegisterWorkerOwner(pthread_id: number, _engine_opaque: IntPtr, worker_owner_sp: StackPosition): boolean {
-        const engine = this.engine;
-        if (!engine) {
-            return false;
-        }
-
-        if (worker_owner_sp < jsbb_StackPos._Num) {
-            return false;
-        }
-
-        const worker_owner = engine.stack.GetValue(worker_owner_sp) as JSWorkerLike;
-        if (typeof worker_owner?.onmessage !== "function") {
-            return false;
-        }
-        this._worker_owner_cache_by_pthread.set(pthread_id, worker_owner);
+        const destination = typeof PThread !== "undefined" ? PThread?.pthreads[target.thread] : undefined;
+        if (!destination) return false;
+        destination.postMessage(delivered);
         return true;
+    }
+
+    private static listen_to_worker(worker: EmscriptenPThreadWorker): void {
+        if (this._listening_workers.has(worker)) return;
+        this._listening_workers.add(worker);
+        worker.addEventListener("message", (event: MessageEvent) => {
+            if (event.data?.__jsbWorkerControl === true) this.accept_worker_control(event.data, worker);
+            else if (jsbb_is_worker_message(event.data)) this.relay_worker_message(event.data, worker);
+            else return;
+            event.stopImmediatePropagation();
+        }, true);
+    }
+
+    static install_pthread_worker_listener_hook(): void {
+        if (jsbb_is_pthread || typeof PThread === "undefined" || !PThread) return;
+        if (this._runtime.role === "host") {
+            const host = (globalThis as any).__godotjsRuntimeHost;
+            if (typeof host?.assignRole === "function") host.assignRole("host");
+        }
+        for (const worker of [...Object.values(PThread.pthreads), ...(PThread.unusedWorkers ?? []), ...(PThread.runningWorkers ?? [])]) this.listen_to_worker(worker);
+        const original = PThread.getNewWorker;
+        if (original.__jsb_wrapped) return;
+        const wrapped: typeof original = () => {
+            const worker = original.call(PThread);
+            if (worker) this.listen_to_worker(worker);
+            return worker;
+        };
+        wrapped.__jsb_wrapped = true;
+        PThread.getNewWorker = wrapped;
+    }
+
+    static post_message_to_worker(pthread_id: number, data: unknown, transfer_id = 0, to_parent = false): boolean {
+        const runtime = this._runtime;
+        if (runtime.role === "host" || (to_parent && runtime.role !== "script-worker")) return false;
+        const target = to_parent ? runtime.parent : pthread_id;
+        const payload: WorkerMessage = {
+            __jsbMessage: true, version: 1, data, transfer_id,
+            route: { source: runtime.thread, target, channel: pthread_id, epoch: runtime.epoch, direction: to_parent ? "to-parent" : "to-child" },
+        };
+        try {
+            if (jsbb_is_pthread) globalThis.postMessage(payload);
+            else if (!this.relay_worker_message(payload)) return false;
+            return true;
+        } catch (error) {
+            jsbb_console.error("post_message_to_worker failed:", error);
+            return false;
+        }
     }
 
     static PostMessage(
@@ -2064,7 +2070,8 @@ class _jsbb_ {
         engine_opaque: IntPtr,
         data_sp: StackPosition,
         transfer_id: number,
-        native_transfers_stack_position: StackPosition): number {
+        native_transfers_stack_position: StackPosition,
+        to_parent: boolean): number {
         const engine = this.engine;
 
         if (!engine) {
@@ -2090,34 +2097,11 @@ class _jsbb_ {
                 message
             );
 
-            const is_ready_sentinel_transfer_id = jsbb_is_pthread && transfer_id === 0;
-            const outbound_transfer_id = (transfer_context.native_transfers_used || is_ready_sentinel_transfer_id)
-                ? transfer_id
-                : undefined;
-
-            if (jsbb_is_pthread) {
-                const payload: WorkerMessage = {
-                    "__jsbMessage": true,
-                    "data": rewritten,
-                    "sender_pthread_id": pthread_id,
-                };
-                if (typeof outbound_transfer_id === "number") {
-                    payload["transfer_id"] = outbound_transfer_id;
-                }
-                postMessage(payload);
-
-                return typeof outbound_transfer_id === "number"
-                    ? jsbb_PostMessageResult.Success
-                    : jsbb_PostMessageResult.NativeTransfersUnused;
-                }
-
-            if (!this.post_message_to_worker(pthread_id, rewritten, outbound_transfer_id)) {
-                return jsbb_PostMessageResult.Failed;
-            }
-
-            return typeof outbound_transfer_id === "number"
-                ? jsbb_PostMessageResult.Success
-                : jsbb_PostMessageResult.NativeTransfersUnused;
+            // Keep the native receipt even for plain structured-clone messages.
+            // Its queue proves the destination still owns this channel and lets
+            // disposal reject late messages after pthread/slot reuse.
+            if (!this.post_message_to_worker(pthread_id, rewritten, transfer_id, to_parent)) return jsbb_PostMessageResult.Failed;
+            return jsbb_PostMessageResult.Success;
         } finally {
             engine.stack.ExitScope();
         }
@@ -2136,59 +2120,39 @@ class _jsbb_ {
     }
 
     static FlushPendingWorkerMessages(): void {
+        if (this._runtime.role === "engine") {
+            const host = (globalThis as any).__godotjsRuntimeHost;
+            if (typeof host?.markProgress === "function") host.markProgress();
+        }
         this.flush_pending_worker_messages();
     }
 
     static handle_message(message: QueuedWorkerMessage): void {
-        const { data, transfer_id, sender_pthread_id } = message;
-
+        const { data, transfer_id, route } = message;
+        if (route.target !== this._runtime.thread || route.targetEpoch !== this._runtime.epoch) return;
         if (!this.engine || !this.interop) {
             this._pending_worker_messages.push(message);
             return;
         }
-
-        if (typeof transfer_id !== "number") {
-            this.dispatch_direct_worker_message(data, sender_pthread_id);
-            return;
-        }
-
         this.engine.stack.EnterScope();
-
         try {
             const data_sp = this.engine.stack.Push(data);
-
-            if (typeof sender_pthread_id === "number") {
-                this.interop.on_worker_message_from_pthread(sender_pthread_id, data_sp, transfer_id);
-            } else {
-                this.interop.on_worker_message(data_sp, transfer_id);
-            }
+            if (route.direction === "to-parent") this.interop.on_worker_message_from_pthread(route.channel, data_sp, transfer_id);
+            else this.interop.on_worker_message(route.source, data_sp, transfer_id);
         } finally {
             this.engine.stack.ExitScope();
         }
     }
+
 }
 
-// Sent via postMessage to/from a Worker.
-interface WorkerMessage {
-    __jsbMessage: true;
-    /**
-     * Worker messages are split into two parts. This is the browser-compatible component of the message that can safely
-     * be delivered by a browser's postMessage. Any Godot variants that may have been present are replaced by markers
-     * and delivered via a WASM-side message side-channel.
-     */
-    data: unknown;
-    /**
-     * Corresponding WASM-side message where Godot variants can be restored from.
-     */
-    transfer_id?: number;
-    sender_pthread_id?: number;
-}
-
-interface QueuedWorkerMessage {
-    data: unknown;
-    transfer_id?: number;
-    sender_pthread_id?: number;
-}
+// A realm epoch prevents messages from an earlier use of a pooled pthread from
+// entering a newly created JS environment in the same browser Worker.
+interface WorkerRuntime { role: "host" | "engine" | "script-worker"; thread: number; parent: number; epoch: string }
+interface WorkerControl { __jsbWorkerControl: true; version: 1; action: "register" | "unregister"; runtime: WorkerRuntime }
+interface WorkerRoute { source: number; target: number; channel: number; epoch: string; targetEpoch?: string; direction: "to-child" | "to-parent" }
+interface WorkerMessage { __jsbMessage: true; version: 1; data: unknown; transfer_id: number; route: WorkerRoute }
+type QueuedWorkerMessage = WorkerMessage;
 
 interface GodotRuntime {
     get_func(ptr: number): (...args: any[]) => any;
@@ -2204,6 +2168,8 @@ interface EmscriptenPThreadWorker extends Worker {
 interface EmscriptenPThread {
 	getNewWorker: (() => Worker) & { __jsb_wrapped?: true };
     pthreads: Record<PThreadPointer, EmscriptenPThreadWorker>;
+    unusedWorkers?: EmscriptenPThreadWorker[];
+    runningWorkers?: EmscriptenPThreadWorker[];
 }
 
 // all symbols from godot generated wasm glue code
@@ -2221,22 +2187,10 @@ declare const PThread: undefined | EmscriptenPThread;
 declare const ENVIRONMENT_IS_PTHREAD: undefined | boolean;
 
 if (jsbb_is_pthread && typeof globalThis.addEventListener === "function") {
-    globalThis.addEventListener('message', (e: MessageEvent) => {
-        if (!jsbb_is_worker_message(e.data)) {
-            return;
-        }
-
-        const sender_pthread_id = typeof e.data["sender_pthread_id"] === "number"
-            ? e.data["sender_pthread_id"]
-            : undefined;
-
-        _jsbb_.queue_worker_message({
-            data: e.data["data"],
-            transfer_id: e.data["transfer_id"],
-            sender_pthread_id,
-        });
-
-        e.stopImmediatePropagation();
+    globalThis.addEventListener("message", (event: MessageEvent) => {
+        if (!jsbb_is_worker_message(event.data)) return;
+        _jsbb_.queue_worker_message(event.data);
+        event.stopImmediatePropagation();
     }, true);
 }
 

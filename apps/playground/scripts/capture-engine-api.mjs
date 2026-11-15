@@ -26,8 +26,15 @@ exports.default=class EngineApiCapture extends G[names.get_class('Node')]{
   for(const cls of ir.classes){const original=cls.nativeName??cls.name,alias=names.get_class(original);try{if(!G[alias])throw Error('Unresolved class');bindable++;if(names.get_internal_mapping(alias)!==original)nameMismatches.push({original,alias});}catch(error){classFailures.push({original,alias,error:String(error)});}}
   const inventory={classes:ir.classes.length,bindable,classFailures,nameMismatches};
   if(bindingAudit.status!=='passed'||classFailures.length||nameMismatches.length)throw Error('Binding audit failed: '+JSON.stringify({bindingAudit,inventory}));
-  const window=call(G[names.get_class('JavaScriptBridge')],'get_interface','window');
-  call(window,'call','__captureEngineApi',JSON.stringify(ir),JSON.stringify({bindingAudit,inventory}));this.exitCode=0;
+  const host=globalThis.__godotjsRuntimeHost;
+  if(host&&typeof host.emitProjectEvent==='function'){
+   const payload=JSON.stringify({ir,audit:{bindingAudit,inventory}}),total=Math.ceil(payload.length/65536);
+   for(let index=0;index<total;index++)host.emitProjectEvent({type:'engine-api-capture-chunk',index,total,data:payload.slice(index*65536,(index+1)*65536)});
+  }else{
+   const window=call(G[names.get_class('JavaScriptBridge')],'get_interface','window');
+   call(window,'call','__captureEngineApi',JSON.stringify(ir),JSON.stringify({bindingAudit,inventory}));
+  }
+  this.exitCode=0;
  }catch(error){console.error('ENGINE_API_CAPTURE_ERROR '+String(error));}}
  _process(){if(++this.frames===3)call(call(this,'get_tree'),'quit',this.exitCode);}
 };`;
@@ -40,23 +47,32 @@ exports.default=class EngineApiCapture extends G[names.get_class('Node')]{
  ]);
 }
 
-export async function captureEngineApi({engineJs,engineWasm,output,reportPath=output+'.capture.json',naming='snake',timeout=120000,executablePath=process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE??(existsSync('/usr/bin/chromium')?'/usr/bin/chromium':undefined)}){
- const [{chromium},{packProject}]=await Promise.all([import('playwright'),import(path.join(repo,'scripts/jsb.react-browser/dist/pck.js'))]);
+export async function captureEngineApi({engineJs,engineWasm,output,reportPath=output+'.capture.json',naming='snake',timeout=120000,execution,executablePath=process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE??(existsSync('/usr/bin/chromium')?'/usr/bin/chromium':undefined)}){
+ const [{chromium},{packProject}]=await Promise.all([import('playwright'),import('@godot-js/project-tools/pck')]);
  const [javascript,wasm]=await Promise.all([readFile(engineJs),readFile(engineWasm)]);
  const {pack}=packProject(engineApiCaptureFiles(naming));
  const worklets={};
  for(const suffix of ['.audio.worklet.js','.audio.position.worklet.js'])worklets['/engine/godot'+suffix]=await readFile(engineJs.replace(/\.js$/,suffix));
+ const {build}=await import('esbuild');
+ const bundled=await build({entryPoints:[path.join(repo,'packages/engine/src/browser/engine-session.ts')],bundle:true,format:'iife',globalName:'EngineHost',platform:'browser',target:'es2022',write:false});
  const routes=new Map([
-  ['/',{type:'text/html',bytes:'<!doctype html><canvas id="canvas" width="64" height="64"></canvas><script src="/engine/godot.js"></script>'}],
+  ['/',{type:'text/html',bytes:'<!doctype html><canvas id="canvas" width="64" height="64"></canvas><script src="/session.js"></script><script src="/engine/godot.js"></script>'}],
+  ['/session.js',{type:'application/javascript',bytes:bundled.outputFiles[0].contents}],
   ['/engine/godot.js',{type:'application/javascript',bytes:javascript}],
   ['/engine/godot.wasm',{type:'application/wasm',bytes:wasm}],
   ['/capture.pck',{type:'application/octet-stream',bytes:pack}],
   ...Object.entries(worklets).map(([name,bytes])=>[name,{type:'application/javascript',bytes}]),
  ]);
+ for(const asset of execution?.workerAssets??[]){
+  const name=path.basename(asset.path);if(name===path.basename(engineJs)||name==='godot.js')continue;
+  const bytes=await readFile(path.join(path.dirname(engineJs),name));
+  if(hash(bytes)!==asset.sha256)throw Error('E_ENGINE_API_WORKER_HASH: '+name);
+  routes.set('/engine/'+name,{type:'application/javascript',bytes});
+ }
  const server=createServer((request,response)=>{
   const route=routes.get(new URL(request.url,'http://localhost').pathname);
   if(!route){response.writeHead(404).end();return;}
-  response.writeHead(200,{'content-type':route.type,'cache-control':'no-store'}).end(route.bytes);
+  response.writeHead(200,{'content-type':route.type,'cache-control':'no-store',...(execution?.requiresCrossOriginIsolation?{'cross-origin-opener-policy':'same-origin','cross-origin-embedder-policy':'require-corp','cross-origin-resource-policy':'same-origin'}:{})}).end(route.bytes);
  });
  await new Promise((done,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',done);});
  let browser;const errors=[];
@@ -66,24 +82,32 @@ export async function captureEngineApi({engineJs,engineWasm,output,reportPath=ou
   page.on('pageerror',error=>errors.push(String(error)));
   page.on('console',message=>{if(message.text().includes('ENGINE_API_CAPTURE_ERROR'))errors.push(message.text());});
   await page.goto(`http://127.0.0.1:${server.address().port}/`);
-  await page.evaluate(async(timeout)=>{
+  await page.evaluate(async({timeout,execution})=>{
    window.__engineApiCapture={ir:null,audit:null,exitCode:null};
    window.__captureEngineApi=(raw,audit)=>{window.__engineApiCapture.ir=JSON.parse(raw);window.__engineApiCapture.audit=JSON.parse(audit);};
+   const chunks=[];let total;
+   const session=new EngineHost.BrowserEngineSession({identity:{runId:crypto.randomUUID(),revision:1,generation:'capture',buildKey:'capture'},executionModel:execution?.executionModel??'window',requiresCrossOriginIsolation:!!execution?.requiresCrossOriginIsolation,onDiagnostic:item=>{throw Error(item.message);},onProject:item=>{
+    if(item.type!=='engine-api-capture-chunk')return;
+    if(!Number.isSafeInteger(item.index)||!Number.isSafeInteger(item.total)||item.total<1||item.total>1024||item.index<0||item.index>=item.total||typeof item.data!=='string'||item.data.length>65536||total!==undefined&&total!==item.total||chunks[item.index]!==undefined)throw Error('E_ENGINE_API_CHUNKS');
+    total=item.total;chunks[item.index]=item.data;
+    if(chunks.filter(value=>value!==undefined).length===total){const result=JSON.parse(chunks.join(''));window.__engineApiCapture.ir=result.ir;window.__engineApiCapture.audit=result.audit;}
+   }});
+   window.__captureSession=session;
    let exited,timer;const exit=new Promise(resolve=>{exited=resolve;});
    const deadline=new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('E_ENGINE_API_CAPTURE_TIMEOUT')),timeout);});
    const initialize=async()=>{
-    const engine=new Engine({canvas:document.querySelector('canvas'),executable:'/engine/godot',persistentPaths:[],persistentDrops:false,onExit:code=>{window.__engineApiCapture.exitCode=code;exited();}});
+    const engine=new Engine({canvas:document.querySelector('canvas'),executable:'/engine/godot',emscriptenPoolSize:2,persistentPaths:[],persistentDrops:false,onExit:code=>{window.__engineApiCapture.exitCode=code;exited();}});
     const pack=new Uint8Array(await(await fetch('/capture.pck')).arrayBuffer());
-    await engine.preloadFile(pack,'/capture.pck');await engine.init('/engine/godot');
+    await engine.preloadFile(pack,'/capture.pck');await engine.init('/engine/godot');session.attachEngine(engine);
     await Promise.race([engine.start({args:['--main-pack','/capture.pck','--rendering-method','gl_compatibility']}),exit]);
    };
    try{await Promise.race([initialize(),deadline]);}finally{clearTimeout(timer);}
-  },timeout);
+  },{timeout,execution});
   await page.waitForFunction(()=>window.__engineApiCapture.exitCode!==null,null,{timeout});
-  const result=await page.evaluate(()=>window.__engineApiCapture);
+  const result=await page.evaluate(async()=>{const result=window.__engineApiCapture;result.session=window.__captureSession.getStats();result.cleanup=await window.__captureSession.dispose('clean');return result;});
   if(result.exitCode!==0||!result.ir||!result.audit||errors.length)throw Error('E_ENGINE_API_CAPTURE: '+JSON.stringify({exitCode:result.exitCode,errors}));
   if(result.ir.bindingNaming!==naming)throw Error('E_ENGINE_API_NAMING: Native snapshot did not apply '+naming+' bindings');
-  const report={schemaVersion:1,kind:'godotjs-production-engine-api-capture',status:'captured',naming,entry:'godot-jsb.internal.get_engine_api',engineJsSha256:hash(javascript),engineWasmSha256:hash(wasm),bindingAudit:result.audit.bindingAudit,classInventory:result.audit.inventory,capturePackSha256:hash(pack),browser:browser.version(),worklets:Object.fromEntries(Object.entries(worklets).map(([name,bytes])=>[path.basename(engineJs).replace(/\.js$/,name.slice('/engine/godot'.length)),hash(bytes)]))};
+  const report={schemaVersion:1,kind:'godotjs-production-engine-api-capture',status:'captured',naming,entry:'godot-jsb.internal.get_engine_api',engineJsSha256:hash(javascript),engineWasmSha256:hash(wasm),bindingAudit:result.audit.bindingAudit,classInventory:result.audit.inventory,capturePackSha256:hash(pack),browser:browser.version(),...(execution?{execution,session:result.session,cleanup:result.cleanup}:{}),worklets:Object.fromEntries(Object.entries(worklets).map(([name,bytes])=>[path.basename(engineJs).replace(/\.js$/,name.slice('/engine/godot'.length)),hash(bytes)]))};
   const bytes=JSON.stringify(result.ir,null,2)+'\n';report.irSha256=hash(bytes);
   // Recheck disk identity after running the exact in-memory inputs.
   if(hash(await readFile(engineJs))!==report.engineJsSha256||hash(await readFile(engineWasm))!==report.engineWasmSha256)throw Error('E_ENGINE_API_CAPTURE: Engine changed during capture');

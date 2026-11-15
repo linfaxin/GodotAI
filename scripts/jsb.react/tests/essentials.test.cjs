@@ -1,4 +1,4 @@
-const test=require('node:test'),assert=require('node:assert/strict'),React=require('react'),SDK=require('../dist');
+const test=require('node:test'),assert=require('node:assert/strict'),React=require('react'),SDK=require('../dist/legacy');
 const {MockNativePort}=require('../dist/testing'),{SHOWCASE_HOST_SCHEMA:s,validateHostProps,validateValue}=require('../dist/schema');
 const context={profileId:'showcase-v1'};
 test('derived hosts keep Control focus and dimension-correct transform commands',()=>{

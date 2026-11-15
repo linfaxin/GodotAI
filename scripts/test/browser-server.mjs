@@ -1,4 +1,5 @@
 import { createServer } from 'node:http';
+import { createServer as createSecureServer } from 'node:https';
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { resolve, extname, sep } from 'node:path';
 
@@ -14,18 +15,27 @@ const mime = {
 
 /** Static, read-only fixture server. No COOP or COEP is emitted. Run two
  * instances with host localhost and 127.0.0.1 to exercise cross-site previews. */
-export async function serveBrowserSite({ root, host = '127.0.0.1', port = 0, csp, corsOrigin = '*', headers = {}, authorize }) {
-  for (const name of Object.keys(headers)) if (/^cross-origin-(?:opener|embedder)-policy$/i.test(name)) throw new Error('Browser fixture must remain explicitly non-isolated');
+export async function serveBrowserSite({ root, host = '127.0.0.1', port = 0, csp, corsOrigin = '*', headers = {}, authorize, isolation = false, tls }) {
+  if (isolation !== false && isolation !== 'require-corp') throw Error('E_BROWSER_ISOLATION: Unsupported isolation policy');
+  if(!isolation&&typeof headers==='function')throw Error('Browser fixture must remain explicitly non-isolated; dynamic headers require isolation');
+  if (!isolation) for (const name of Object.keys(headers)) if (/^cross-origin-(?:opener|embedder)-policy$/i.test(name)) throw new Error('Browser fixture must remain explicitly non-isolated');
+  if (tls && (!tls.key || !tls.cert)) throw Error('E_BROWSER_TLS: Explicit key and certificate are required');
   const directory = await realpath(resolve(root)), requests = [];
-  const server = createServer(async (request, response) => {
+  const handler = async (request, response) => {
     const entry = { method: request.method, url: request.url, status: 500, cookiePresent: !!request.headers.cookie }; requests.push(entry);
     const finish = (status, body = '') => { entry.status = status; response.statusCode = status; response.end(request.method === 'HEAD' ? undefined : body); };
     response.setHeader('Cache-Control', 'no-store');
     response.setHeader('X-Content-Type-Options', 'nosniff');
     response.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    if (isolation) {
+      response.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+      response.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
+      response.setHeader('Permissions-Policy', 'cross-origin-isolated=(self)');
+    }
     if (corsOrigin) response.setHeader('Access-Control-Allow-Origin', corsOrigin);
     if (csp) response.setHeader('Content-Security-Policy', csp);
-    for (const [name, value] of Object.entries(headers)) {
+    for (const [name, value] of Object.entries(typeof headers === 'function' ? headers(request) : headers)) {
+      if(isolation && /^cross-origin-(?:opener|embedder)-policy$/i.test(name) && value !== (name.toLowerCase().includes('opener')?'same-origin':'require-corp')) throw Error('E_BROWSER_ISOLATION: Conflicting header');
       response.setHeader(name, value);
     }
     if (!['GET', 'HEAD'].includes(request.method)) { response.setHeader('Allow', 'GET, HEAD'); finish(405, 'Read-only static server'); return; }
@@ -43,12 +53,25 @@ export async function serveBrowserSite({ root, host = '127.0.0.1', port = 0, csp
       response.setHeader('Content-Length', bytes.length);
       finish(200, bytes);
     } catch (error) { finish(error.code === 'ENOENT' || error.code === 'ENOTDIR' ? 404 : error instanceof URIError ? 400 : 500, 'Static file unavailable'); }
-  });
+  };
+  const server = tls ? createSecureServer(tls, handler) : createServer(handler);
   await new Promise((resolveReady, reject) => { server.once('error', reject); server.listen(port, host, resolveReady); });
   const address = server.address();
-  const origin = `http://${host.includes(':') ? `[${host}]` : host}:${address.port}`;
+  const origin = `${tls?'https':'http'}://${host.includes(':') ? `[${host}]` : host}:${address.port}`;
   return { server, root: directory, url: origin, origin, requests,
     close: () => new Promise((resolveClosed, reject) => server.close(error => error ? reject(error) : resolveClosed())) };
+}
+
+/** The caller supplies a certificate trusted by its browser. TLS/header tests
+ * alone do not certify browser isolation; record actual contexts in G0. */
+export async function serveIsolatedBrowserPair({root, previewRoot=root, tls, host='127.0.0.1', previewHost=host, csp, authorize}) {
+  if(!tls?.key||!tls?.cert)throw Error('E_BROWSER_TLS: Isolated pair requires explicit TLS');
+  let preview;
+  const editor=await serveBrowserSite({root,host,tls,csp,authorize,isolation:'require-corp',headers:()=>({'Permissions-Policy':'cross-origin-isolated=(self '+JSON.stringify(preview?.origin??'https://invalid.local')+')'})});
+  try {
+    preview=await serveBrowserSite({root:previewRoot,host:previewHost,tls,csp,authorize,isolation:'require-corp',headers:{'Permissions-Policy':'cross-origin-isolated=(self)'}});
+    return {editor,preview,iframeAllow:'autoplay; cross-origin-isolated',close:()=>Promise.all([editor.close(),preview.close()])};
+  }catch(error){await editor.close();throw error;}
 }
 
 export const serve = (root, options = {}) => serveBrowserSite({ root, ...options });

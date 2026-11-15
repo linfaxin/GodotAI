@@ -14,6 +14,8 @@ import {createTypeSnapshot} from '../../apps/playground/scripts/build-shell.mjs'
 import { assertGame2dCertification } from './game-2d-evidence.mjs';
 import {getEngineProfile,validateEngineProfile,isEngineProfile} from './engine-profiles.mjs';
 import {isSourceCertified} from './engine-build-proof.mjs';
+import {executionFromReport,legacyExecution,validateExecutionContract} from './execution-contract.mjs';
+import {assertExecutionCertification} from './execution-evidence.mjs';
 export {isSourceCertified} from './engine-build-proof.mjs';
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -37,11 +39,12 @@ export async function buildRelease(configuration) {
   }
   const root = dirname(configPath), output = resolve(configuration.out ?? 'scripts/jsb.web-engine/dist');
   const sourceCertified = !configuration.development && !!isSourceCertified(report);
+  const sourceExecution = report.execution || report.status === 'built' ? executionFromReport(report) : legacyExecution();
   if (configuration['raw-wasm'] && !configuration.development) fail('E_RELEASE_ENCODING', '--raw-wasm is reserved for development compatibility');
   if (!sourceCertified && !configuration.development) fail('E_RELEASE_SOURCE', 'A source-certified engine build report is required; use --development for an explicitly uncertified local template');
   if (!report.template?.path || !report.template?.sha256) fail('E_RELEASE_ENGINE', 'Engine report must identify actual template bytes');
   const archive = resolve(dirname(reportPath), report.template.path), archiveBytes = await readFile(archive);
-  for (const input of [reportPath, configPath, archive, ...Object.values(config.sdk ?? {}), ...Object.values(config.compiler ?? {}), config.types, config.contracts, config.bootstrap, config.engineApi?.ir, config.engineApi?.captureReport, ...Object.values(config.engineApi?.namingProfiles ?? {}).flatMap(profile => [profile.ir, profile.captureReport])].filter(Boolean).map(path => resolve(root, path))) {
+  for (const input of [reportPath, configPath, archive, ...Object.values(config.sdk ?? {}), ...Object.values(config.compiler ?? {}), config.types, config.contracts, config.bootstrap, config.engineHost?.source, config.engineApi?.ir, config.engineApi?.captureReport, ...Object.values(config.engineApi?.namingProfiles ?? {}).flatMap(profile => [profile.ir, profile.captureReport])].filter(Boolean).map(path => resolve(root, path))) {
     if (input === output || input.startsWith(`${output}/`)) fail('E_RELEASE_OUTPUT', 'Output directory must not contain release inputs');
   }
   if (output === repository || repository.startsWith(`${output}/`) || output === '/') fail('E_RELEASE_OUTPUT', 'Output must be a dedicated release directory');
@@ -82,6 +85,20 @@ export async function buildRelease(configuration) {
         await asset('assets/godot.wasm.gz', gzipSync(bytes, { level: 9 }), 'engine-wasm', { encoding: 'gzip', decodedSha256: digest(bytes), decodedBytes: bytes.length });
       } else await asset(`assets/${name}`, bytes, name.endsWith('.wasm') ? 'engine-wasm' : name === 'godot.js' ? 'engine-js' : 'engine-worklet');
     }
+    // Seal every external pthread helper. Embedded bootstraps reuse the sealed
+    // main engine JS and are represented by that exact final asset identity.
+    const execution={...sourceExecution,workerAssets:[]};
+    for(const worker of sourceExecution.workerAssets??[]){
+      const matches=entries.filter(path=>path===worker.path||path.endsWith('/'+worker.path));
+      if(matches.length!==1)fail('E_RELEASE_WORKER','Missing or ambiguous helper '+worker.path);
+      const originalBytes=run('unzip',['-p',archive,matches[0]],{encoding:null});
+      if(digest(originalBytes)!==worker.sha256||originalBytes.length!==worker.bytes)fail('E_RELEASE_WORKER','Template worker differs from report '+worker.path);
+      const path='assets/'+basename(worker.path);
+      let sealed=files.find(file=>file.path===path);
+      if(!sealed){await asset(path,originalBytes,'engine-worker');sealed=files.find(file=>file.path===path);}
+      execution.workerAssets.push({path,sha256:sealed.sha256,bytes:sealed.bytes,role:worker.role});
+    }
+    validateExecutionContract(execution,{requireWorkerAssets:true});
     for (const mode of ['development', 'production']) {
       const source = config.sdk?.[mode];
       if (!source && !configuration.development) fail('E_RELEASE_SDK', `Missing ${mode} SDK asset`);
@@ -127,18 +144,20 @@ export async function buildRelease(configuration) {
     if (metadata.dependencies && canonical(metadata.dependencies) !== canonical(dependencies)) fail('E_RELEASE_METADATA', 'Dependencies and canonical React tuple differ');
     let fullRelease;
     if (nativeEngine) {
+      if(execution.executionModel!=='window'&&!config.engineHost?.source)fail('E_RELEASE_HOST','Worker native release requires the actual consumed host bundle as engineHost');
+      if(config.engineHost){if(typeof config.engineHost.source!=='string'||typeof config.engineHost.path!=='string')fail('E_RELEASE_HOST','engineHost requires source and release path');await input(config.engineHost.path,config.engineHost.source,'engine-host');}
       const captureDirectory = resolve(staging, '.production-capture');
       const captureInputs = Object.fromEntries(['snake', 'camel'].map(naming => {
         const source = config.engineApi?.namingProfiles?.[naming] ?? (naming === 'snake' ? config.engineApi : undefined);
         return [naming, source?.ir ? { irPath: resolve(root, source.ir), reportPath: source.captureReport && resolve(root, source.captureReport) } : {}];
       }));
-      const namingProfiles = await loadProductionApiProfiles({ engineJs: resolve(staging, 'assets/godot.js'), engineWasm: resolve(captureDirectory, 'godot.wasm'), captureDirectory, namingProfiles: captureInputs });
+      const namingProfiles = await loadProductionApiProfiles({ engineJs: resolve(staging, 'assets/godot.js'), engineWasm: resolve(captureDirectory, 'godot.wasm'), captureDirectory, namingProfiles: captureInputs,execution });
       await Promise.all(Object.values(namingProfiles).map(async profile => { profile.typeSnapshot = await createTypeSnapshot({ engineFiles: profile.declarations.files }); }));
       const api = namingProfiles.snake;
-      const engine = { javascript: files.find(file => file.kind === 'engine-js'), wasm: files.find(file => file.kind === 'engine-wasm'), worklets: files.filter(file => file.kind === 'engine-worklet') };
+      const engine = { javascript: files.find(file => file.kind === 'engine-js'), wasm: files.find(file => file.kind === 'engine-wasm'), worklets: files.filter(file => file.kind === 'engine-worklet'),...(config.engineHost?{host:files.find(file=>file.kind==='engine-host')}:{}),execution,workerAssets:execution.workerAssets.map(worker=>files.find(file=>file.path===worker.path)) };
       if (report.modules && canonical([...report.modules].sort()) !== canonical([...api.ir.modules].sort())) fail('E_RELEASE_MODULES', 'Built module header and production native API disagree');
       const [vendor, developmentVendor] = await Promise.all([buildEngineVendor(), buildEngineVendor({ mode: 'development' })]);
-      const prepared = assembleFullEngineRelease({ ...api, namingProfiles, engine, sdkVersion: metadata.sdkVersion ?? createRequire(resolve(repository, 'scripts/jsb.react/package.json'))('./package.json').version,
+      const prepared = assembleFullEngineRelease({ ...api, namingProfiles, engine, execution, sdkVersion: metadata.sdkVersion ?? createRequire(resolve(repository, 'scripts/jsb.react/package.json'))('./package.json').version,
         vendor, developmentVendor, runtimeProfile, build: { actualAPIHash: api.actualAPIHash, sourceCertified, engineReportSha256: digest(await readFile(reportPath)), engineTemplateSha256: report.template.sha256, recipeSha256: report.recipeSha256 } });
       fullRelease = prepared.manifest;
       for (const [path, bytes] of prepared.outputs) {
@@ -156,7 +175,7 @@ export async function buildRelease(configuration) {
       recipeSha256: report.recipeSha256 ?? digest(canonical(report.recipe)), builder: report.builder,
       toolchains: report.toolchains, versionEvidence: report.versionEvidence,
       engineReportSha256: digest(await readFile(reportPath)), templateSha256: report.template.sha256,
-      sourceCertified, requestedArgs:report.requestedArgs??report.recipe?.args, resolvedFeatures:report.resolvedFeatures, resolvedBuildOptions:report.resolvedBuildOptions, featuresEvidence:report.featuresEvidence, modulesEvidence:report.modulesEvidence, modules:report.modules, runtimeProfile, jsGluePatches, notes: sourceCertified ? [] : ['Development template; source-to-template provenance was not established.'],
+      sourceCertified, requestedArgs:report.requestedArgs??report.recipe?.args, resolvedFeatures:report.resolvedFeatures, resolvedBuildOptions:report.resolvedBuildOptions??report.resolvedOptions, execution:sourceExecution, featuresEvidence:report.featuresEvidence, modulesEvidence:report.modulesEvidence, modules:report.modules, runtimeProfile, jsGluePatches, notes: sourceCertified ? [] : ['Development template; source-to-template provenance was not established.'],
     };
     await asset('attestation.json', `${JSON.stringify(attestation, null, 2)}\n`, 'attestation');
     files.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
@@ -167,15 +186,16 @@ export async function buildRelease(configuration) {
     }
     const resolvedBuildFlags=report.resolvedBuildOptions??{};
     if (sourceCertified) Object.assign(buildFlags, { godot_source_commit: report.godotSource.commit, godot_source_snapshot_sha256: report.godotSource.snapshotHash, godot_build_recipe_sha256: report.recipeSha256 });
-    else Object.assign(buildFlags, { threads: false, development_template: true });
+    else Object.assign(buildFlags, { threads: execution.wasmThreads, proxy_to_pthread:execution.proxyToPthread, development_template: true });
     // Schema 1 consumers still interpret target.godotSchemaHash as their legacy
     // React capability schema. Native API identity lives in schema 2's api.
     const defaultProfile = metadata.profiles.find(profile => profile.id === 'core-ui-v1') ?? metadata.profiles[0];
     const descriptor = {
       ...metadata, schemaVersion: 1, version: configuration.version ?? metadata.version ?? '0.1.0', sourceCertified,
       runtimeProfile, legacy: !nativeEngine,
-      ...(fullRelease ? { engineRelease: 'engine-release.json', engineReleaseId: fullRelease.id, engineApi: fullRelease.api } : {}),
-      engine: { backend: 'browser', godotVersion: report.godotVersion ?? 'unknown', target: report.engineTarget ?? 'unknown', threads: false, dlink: false, pckVersion: report.pckVersion ?? 3, archiveSha256: report.template.sha256, ...(fullRelease ? { modules: fullRelease.modules } : {}) },
+      ...(fullRelease ? { engineRelease: 'engine-release.json', engineReleaseId: fullRelease.id, engineId:fullRelease.engineId,extensionId:fullRelease.extensionId,engineApi: fullRelease.api } : {}),
+      execution,
+      engine: { backend: 'browser', godotVersion: report.godotVersion ?? 'unknown', target: report.engineTarget ?? 'unknown', threads: execution.wasmThreads, dlink: false, pckVersion: report.pckVersion ?? 3, archiveSha256: report.template.sha256, ...(fullRelease ? { modules: fullRelease.modules,...(fullRelease.engine.host?{host:fullRelease.engine.host}:{}) } : {}) },
       dependencies, sdkPackageRoot: metadata.sdkPackageRoot ?? '/node_modules/@godot-js/react',
       target: { sourceCommit: sourceCertified ? report.source.commit : 'unknown', sourceDiffHash: sourceCertified ? report.source.snapshotHash : '0'.repeat(64), godotVersion: report.godotVersion ?? 'unknown',
         buildFlags, resolvedBuildFlags, platform: 'web', arch: 'wasm32', engine: 'web', godotSchemaHash: defaultProfile.hash },
@@ -194,11 +214,12 @@ export async function buildRelease(configuration) {
       const covered = files.filter(file => file.kind !== 'attestation').every(file => validation.artifactHashes?.[file.path] === file.sha256);
       if (validation.runtimeRelease !== descriptor.id || validation.status !== 'passed' || !Array.isArray(checks) || !checks.length || checks.some(check => check.status !== 'passed') || !covered) fail('E_RELEASE_VALIDATION', 'Browser validation must match this exact runtimeRelease, pass and bind every engine, SDK, compiler and declaration asset hash');
       assertGame2dCertification(descriptor, validation);
+      assertExecutionCertification(execution,validation);
       for (const [name, hash] of Object.entries(validation.evidenceHashes ?? {})) assertHash(hash, `specialist evidence ${name}`);
       descriptor.certified = sourceCertified;
       descriptor.certification = { status: 'passed', runtimeRelease: validation.runtimeRelease, scope: validation.scope ?? {}, coverage: validation.coverage ?? [], checks, artifactHashes: validation.artifactHashes,
         siteArtifactHashes: validation.siteArtifactHashes, generatedArtifacts: validation.generatedArtifacts,
-        evidenceHashes: validation.evidenceHashes,
+        evidenceHashes: validation.evidenceHashes,...(validation.execution?{execution:validation.execution}:{}),
         evidenceSha256: digest(await readFile(resolve(configuration['validation-report']))) };
     }
     await writeJson(resolve(staging, 'release.json'), descriptor);

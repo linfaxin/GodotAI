@@ -83,7 +83,7 @@ export async function buildShell(dist=path.join(app,'dist'),options={}){
   // mutable build-workspace directory surviving deployment.
   await buildDemoRuntime(dist,{project:path.join(dist,'resource-inputs'),runtimeProfile});
  }
- await buildFrontend(dist,undefined,{runtimeProfile});
+ await buildFrontend(dist,undefined,{runtimeProfile,...(existing?.engine?.host?{previewHost:existing.engine.host}:{})});
  await fs.writeFile(path.join(dist,'shell-profile.json'),JSON.stringify({schemaVersion:2,runtimeProfile,shellOnly}));
  await refreshSiteManifests(dist);
 }

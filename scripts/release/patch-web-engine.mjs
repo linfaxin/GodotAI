@@ -9,6 +9,9 @@ import {patchAudioLifecycle} from './patch-web-audio-lifecycle.mjs';
 import {patchOptionalPwa} from './patch-web-optional-pwa.mjs';
 import {patchThreadlessGroups} from './patch-web-threadless-groups.mjs';
 import {patchPresentationBoundary} from './patch-web-presentation-boundary.mjs';
+import {patchProxyEntry} from './patch-web-proxy-entry.mjs';
+import {patchShaderUtf8} from './patch-web-shader-utf8.mjs';
+import {patchAudioServerFinish} from './patch-web-audio-server-finish.mjs';
 
 const repo=fileURLToPath(new URL('../../',import.meta.url));
 const execute=promisify(execFile),hash=value=>createHash('sha256').update(value).digest('hex');
@@ -34,8 +37,11 @@ export async function applyWebEnginePatches(root,{python='python3'}={}) {
   }
  }
  for(const [path,apply,implementation]of [
+  ['platform/web/detect.py',patchProxyEntry,'scripts/release/patch-web-proxy-entry.mjs'],
+  ['platform/web/js/patches/patch_em_gl.js',patchShaderUtf8,'scripts/release/patch-web-shader-utf8.mjs'],
   ['platform/web/js/libs/library_godot_os.js',patchOptionalPwa,'scripts/release/patch-web-optional-pwa.mjs'],
   ['platform/web/js/libs/library_godot_audio.js',patchAudioLifecycle,'scripts/release/patch-web-audio-lifecycle.mjs'],
+  ['servers/audio/audio_server.cpp',patchAudioServerFinish,'scripts/release/patch-web-audio-server-finish.mjs'],
   ['core/object/worker_thread_pool.cpp',patchThreadlessGroups,'scripts/release/patch-web-threadless-groups.mjs'],
   ['platform/web/js/engine/config.js',patchPresentationBoundary,'scripts/release/patch-web-presentation-boundary.mjs'],
  ]) {

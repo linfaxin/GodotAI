@@ -1,5 +1,5 @@
 import * as React from 'react';
-import {Node2D,Node3D,SubViewport,Camera2D,Camera3D,CanvasLayer,Parallax2D,Sprite2D,ColorRect,Label,Control,PanelContainer,TextureRect,LineEdit,AnimatedSprite3D,TextureProgressBar,GPUParticles2D,GPUParticles3D,useNodeRef,useProcess} from '@godot-js/react';
+import {Node2D,Node3D,SubViewport,Camera2D,Camera3D,CanvasLayer,Parallax2D,Sprite2D,ColorRect,Label,Control,PanelContainer,TextureRect,LineEdit,AnimatedSprite3D,TextureProgressBar,GPUParticles2D,GPUParticles3D,useNodeRef,useProcess} from '@godot-js/react/legacy';
 import {useDemo,useResource,ProjectScene} from '@playground/api';
 const checks:Record<string,boolean>={resourceGraph:false,spriteDisplay:false,spriteTween:false,spritePixels:false,lineSelection:false,lineUnicode:false,lineEditing:false,lineLimit:false,lineControlled:false,lineInput:false,progressConfig:false,progressPixels:false,styleConfig:false,stylePixels:false,parallaxCamera:false,parallaxAuto:false,parallaxRepeat:false,layerFollow:false,gpuConfig:false,gpuRatio:false,gpuRestart:false};
 const metrics:Record<string,number|string>={inputX:150,inputY:340,inputText:''};const near=(a:number,b:number)=>Math.abs(a-b)<.06;

@@ -18,12 +18,14 @@ test('single-thread bridge loads and skips worker hooks with omitted Emscripten 
 
 test('threaded main realm still wraps new workers once', () => {
   const listeners = [], messages = [];
-  const worker = { addEventListener: (...args) => listeners.push(args), postMessage: data => messages.push(data) };
+  const worker = { pthread_ptr: 7, addEventListener: (...args) => listeners.push(args), postMessage: data => messages.push(data) };
   const context = createContext({ console, ENVIRONMENT_IS_PTHREAD: false, PThread: { getNewWorker() { return worker; }, pthreads: { 7: worker } } });
   runInContext(source, context);
   runInContext('_jsbb_.install_pthread_worker_listener_hook(); _jsbb_.install_pthread_worker_listener_hook(); PThread.getNewWorker()', context);
   assert.equal(listeners.length, 1);
   assert.equal(listeners[0][0], 'message');
+  runInContext('_jsbb_.ConfigureThread(1, 0, 0)', context);
+  listeners[0][1]({data:{__jsbWorkerControl:true,version:1,action:'register',runtime:{role:'script-worker',thread:7,parent:0,epoch:'child7'}},stopImmediatePropagation(){}});
   assert.equal(runInContext('_jsbb_.post_message_to_worker(7, "hello", 9)', context), true);
   assert.equal(messages[0].data, 'hello');
   assert.equal(messages[0].transfer_id, 9);

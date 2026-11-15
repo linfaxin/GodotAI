@@ -3,6 +3,7 @@ export * from './snapshot.js';
 export * from './pck.js';
 export * from './protocol.js';
 export * from './runner.js';
+export * from './engine-session.js';
 export * from './verified-loader.js';
 export * from './release.js';
 export * from './compiler.js';

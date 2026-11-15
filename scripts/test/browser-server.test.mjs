@@ -3,7 +3,10 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
-import { serveBrowserSite } from './browser-server.mjs';
+import { serveBrowserSite,serveIsolatedBrowserPair } from './browser-server.mjs';
+import {execFileSync} from 'node:child_process';
+import {get} from 'node:https';
+import {readFile} from 'node:fs/promises';
 
 test('browser fixture is static, non-isolated, correctly typed and cannot escape its root', async t => {
   const root = await mkdtemp(resolve(tmpdir(), 'browser-server-'));
@@ -40,4 +43,17 @@ test('optional static cookie gate denies anonymous requests and records no cooki
   assert.equal((await fetch(server.url, { headers: { cookie: 'fixture=owner' } })).status, 200);
   assert.deepEqual(server.requests.map(request => [request.status, request.cookiePresent]), [[401, false], [200, true]]);
   assert(!JSON.stringify(server.requests).includes('owner'));
+});
+
+test('explicit TLS isolated pair serves independent origins and delegates cross-origin isolation',async t=>{
+  const root=await mkdtemp(resolve(tmpdir(),'browser-isolated-'));t.after(()=>rm(root,{recursive:true,force:true}));
+  await writeFile(resolve(root,'index.html'),'<title>isolated fixture</title>');
+  execFileSync('openssl',['req','-x509','-newkey','rsa:2048','-nodes','-keyout',resolve(root,'key.pem'),'-out',resolve(root,'cert.pem'),'-days','1','-subj','/CN=localhost','-addext','subjectAltName=DNS:localhost,IP:127.0.0.1'],{stdio:'ignore'});
+  const pair=await serveIsolatedBrowserPair({root,tls:{key:await readFile(resolve(root,'key.pem')),cert:await readFile(resolve(root,'cert.pem'))}});t.after(()=>pair.close());
+  const request=url=>new Promise((done,reject)=>get(url,{rejectUnauthorized:false},response=>{response.resume();response.on('end',()=>done(response));}).on('error',reject));
+  assert.notEqual(pair.editor.origin,pair.preview.origin);assert.match(pair.editor.origin,/^https:/);
+  const editor=await request(pair.editor.origin),preview=await request(pair.preview.origin);
+  for(const response of [editor,preview]){assert.equal(response.statusCode,200);assert.equal(response.headers['cross-origin-opener-policy'],'same-origin');assert.equal(response.headers['cross-origin-embedder-policy'],'require-corp');}
+  assert(editor.headers['permissions-policy'].includes(pair.preview.origin));assert.match(pair.iframeAllow,/cross-origin-isolated/);
+  await assert.rejects(serveIsolatedBrowserPair({root}),/TLS/);
 });

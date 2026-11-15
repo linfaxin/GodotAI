@@ -8,7 +8,7 @@ import { acquirePublisher } from "../dist/publication.js";
 import { sha256 } from "../dist/fs.js";
 import { validateRuntimeManifest } from "@godot-js/react/contracts";
 
-async function project(t, source = 'import {Node,Label} from "@godot-js/react";export default function App(){return <Node name="App"><Label text="hello"/></Node>}') {
+async function project(t, source = 'import {Node,Label} from "@godot-js/react/legacy";export default function App(){return <Node name="App"><Label text="hello"/></Node>}') {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "react-build-test-")); t.after(() => fs.rm(root, { recursive: true, force: true }));
   await fs.mkdir(path.join(root, "src")); await fs.writeFile(path.join(root, "src/App.tsx"), source);
   await fs.writeFile(path.join(root, "godot-react.config.mjs"), 'export default {entries:{app:"src/App.tsx"}};');
@@ -16,7 +16,7 @@ async function project(t, source = 'import {Node,Label} from "@godot-js/react";e
   return root;
 }
 test("Program rejects invalid host props and unresolved dependencies before output", async t => {
-  const root = await project(t, 'import {Label} from "@godot-js/react";import {missing} from "missing-library";export default function App(){return <Label text={123} unexpected="x"/>}');
+  const root = await project(t, 'import {Label} from "@godot-js/react/legacy";import {missing} from "missing-library";export default function App(){return <Label text={123} unexpected="x"/>}');
   await assert.rejects(checkProject({ projectRoot: root }), e => e.code === "E_TYPESCRIPT" && /missing-library/.test(e.message) && /number/.test(e.message));
   await assert.rejects(fs.access(path.join(root, "generated/react/active.json")));
 });
@@ -54,5 +54,31 @@ test("template preflight rejects executable and black-box scene inputs", async t
   await assert.rejects(checkProject({ projectRoot: root }), e => e.code === "E_IMPORT_SCRIPT");
 });
 test("project policy rejects business autoloads and unmanaged main scenes without executing them",async t=>{const root=await project(t);await fs.appendFile(path.join(root,"project.godot"),'\n[autoload]\nRogue="*res://rogue.gd"\n');await assert.rejects(checkProject({projectRoot:root}),e=>e.code==="E_UNMANAGED_AUTOLOAD");await fs.writeFile(path.join(root,"project.godot"),'config_version=5\n[application]\nrun/main_scene="res://legacy.tscn"\n');await assert.rejects(checkProject({projectRoot:root}),e=>e.code==="E_ROOT_SCENE");});
-test("entry registration checks required React props",async t=>{const root=await project(t,'import {Label} from "@godot-js/react";export default function App({title}:{title:string}){return <Label text={title}/>;}');await assert.rejects(checkProject({projectRoot:root}),e=>e.code==="E_TYPESCRIPT"&&/title/.test(e.message));});
-test("default profile rejects directly authored physics hosts",async t=>{const root=await project(t,'import {CharacterBody2D} from "@godot-js/react";export default function App(){return <CharacterBody2D name="Actor"/>;}');await assert.rejects(checkProject({projectRoot:root}),e=>e.code==="E_PROFILE_UNSUPPORTED");});
+test("entry registration checks required React props",async t=>{const root=await project(t,'import {Label} from "@godot-js/react/legacy";export default function App({title}:{title:string}){return <Label text={title}/>;}');await assert.rejects(checkProject({projectRoot:root}),e=>e.code==="E_TYPESCRIPT"&&/title/.test(e.message));});
+test("default profile rejects directly authored physics hosts",async t=>{const root=await project(t,'import {CharacterBody2D} from "@godot-js/react/legacy";export default function App(){return <CharacterBody2D name="Actor"/>;}');await assert.rejects(checkProject({projectRoot:root}),e=>e.code==="E_PROFILE_UNSUPPORTED");});
+
+test('NativePort CLI requires explicit legacy runtime imports instead of remapping the engine default',async t=>{
+ for(const source of [
+  'import {EngineNode} from "@godot-js/react";export default function App(){return <EngineNode ctor={class{}}/>}',
+  'import {EngineNode} from "@godot-js/react/engine";export default function App(){return <EngineNode ctor={class{}}/>}',
+  'declare const require:(id:string)=>any;const SDK=require("@godot-js/react");export default function App(){return null}',
+ ]){
+  const root=await project(t,source);
+  await assert.rejects(checkProject({projectRoot:root}),error=>error.code==='E_LEGACY_ENTRY'&&/legacy/.test(error.message));
+  await assert.rejects(fs.access(path.join(root,'generated/react/active.json')));
+ }
+ const root=await project(t,'import type {EngineRoot} from "@godot-js/react";import {Label} from "@godot-js/react/legacy";let native:EngineRoot|undefined;void native;export default function App(){return <Label text="explicit legacy"/>}');
+ assert.equal((await checkProject({projectRoot:root})).ok,true);
+ const shadowed=await project(t,'import {Label} from "@godot-js/react/legacy";function text(){const require=(name:string)=>name;return require("@godot-js/react");}export default function App(){return <Label text={text()}/>}');
+ assert.equal((await checkProject({projectRoot:shadowed})).ok,true);
+});
+
+test('bundled dependencies cannot silently import the engine root as the legacy SDK',async t=>{
+ const root=await project(t,'import {Label} from "@godot-js/react/legacy";import * as helper from "engine-helper";export default function App(){return <Label text={String(helper)}/>}');
+ const dependency=path.join(root,'node_modules/engine-helper');await fs.mkdir(dependency,{recursive:true});
+ await fs.writeFile(path.join(dependency,'package.json'),JSON.stringify({name:'engine-helper',main:'index.js',types:'index.d.ts'}));
+ await fs.writeFile(path.join(dependency,'index.d.ts'),'export const marker:string;');
+ await fs.writeFile(path.join(dependency,'index.js'),'module.exports = require("@godot-js/react");');
+ await assert.rejects(buildProject({projectRoot:root}),/E_LEGACY_ENTRY/);
+ await assert.rejects(fs.access(path.join(root,'generated/react/active.json')));
+});

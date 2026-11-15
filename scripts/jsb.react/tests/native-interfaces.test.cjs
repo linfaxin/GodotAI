@@ -133,7 +133,7 @@ test('committed refs wait for a later host, skip detached refs and rebind after 
 });
 
 test('a real Suspense child can materialize after its parent native-interface Hook committed',async()=>{
-  const React=require('react'),sdk=require('../dist/index.js'),{MockNativePort}=require('../dist/testing.js');
+  const React=require('react'),sdk=require('../dist/legacy.js'),{MockNativePort}=require('../dist/testing.js');
   const port=new MockNativePort(),container=port.createContainer(),t=token();let resolve;const waiting=new Promise(done=>{resolve=done;});
   const ref=React.createRef(),seen=[];
   const root=sdk.createRoot(port,container,{generation:'suspense-native',nativeScriptProfiles:{player:{type:'Node2D',script:'res://generated/react/native/player.ts',schemaHash:t.schemaHash}}});
@@ -163,7 +163,7 @@ test('thenable frame and input callbacks revoke the endpoint lease before more w
 
 test('public Hook types reject async and Promise-or-void handlers while accepting typed DTO callbacks',()=>{
   const filename=path.join(__dirname,'native-interfaces-typecheck.ts');
-  const source=`import {Button,useProcess,usePhysicsProcess,useInput,useNativeInterface,defineNativeInterface,type NodeRef} from '../dist/index';
+  const source=`import {Button,useProcess,usePhysicsProcess,useInput,useNativeInterface,defineNativeInterface,type NodeRef} from '../dist/legacy';
 declare const ref:NodeRef<'Node2D'>;
 const token=defineNativeInterface('typecheck',{version:1,nativeLeaf:'Node2D',callbacks:['_process','_input'],rpc:{rpcPing:{arguments:['integer']}}});
 useNativeInterface(ref,token,{_process:(delta:number)=>{delta.toFixed();},rpcPing:(count:number)=>{count.toFixed();}});

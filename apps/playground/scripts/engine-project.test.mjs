@@ -11,6 +11,8 @@ import {compileEngineProject,EngineProjectBuildError} from '../src/engine-projec
 import {defaultProject} from '../src/project-templates.ts';
 import {renameProjectFile} from '../src/project-model.ts';
 import {prepareScriptRename} from '@godot-js/react-build/script-renames';
+import {hashBytes} from '@godot-js/project-tools/hash';
+import {createImportReceipt} from '@godot-js/project-tools/import-receipts';
 
 const bytes=value=>new TextEncoder().encode(value);
 const read=(result,name)=>{const entry=result.index[name];assert.ok(entry,'Missing packed file: '+name);return new TextDecoder().decode(result.pack.subarray(entry.offset,entry.offset+entry.size));};
@@ -25,6 +27,38 @@ function withNativeNamespace(result,external){
 const scene='[gd_scene format=3 uid="uid://d1t"]\n[node name="Main" type="Node2D"]\n';
 const config='config_version=5\n[application]\nconfig/name="Original native project"\nrun/main_scene="uid://d1t"\n[autoload]\nServices="*res://Services.ts"\n[GodotJS]\nruntime/core/camel_case_bindings_enabled=true\n[physics]\n3d/physics_engine="GodotPhysics3D"\n';
 const existingCache=()=>{const name=bytes('res://kept.tres'),out=new Uint8Array(16+name.length),view=new DataView(out.buffer);view.setUint32(0,1,true);view.setBigUint64(4,99n,true);view.setUint32(12,name.length,true);out.set(name,16);return [...out];};
+
+test('product compilation emits a content-bound plan receipt and audited artifact overlay',async()=>{
+ const files={'/project.godot':'[application]\nrun/main_scene="res://main.tscn"\n','/main.tscn':scene,'/other.tscn':scene.replace('d1t','other'),'/asset.bin':[0,255]};
+ const original=JSON.stringify(files),options={runtime:'godot',mainScene:'/other.tscn',files,identityInputs:{engineId:'a'.repeat(64)}};
+ const first=await compileEngineProject(options),second=await compileEngineProject({...options,files:Object.fromEntries(Object.entries(files).reverse())});
+ assert.equal(first.buildKey,second.buildKey);assert.equal(first.receipt.buildKey,first.buildKey);assert.equal(first.receipt.packSha256,await hashBytes(first.pack));
+ assert(first.overlay.some(item=>item.path==='res://project.godot'&&item.disposition==='replaced'&&item.inputHash&&item.outputHash));
+ assert(first.overlay.some(item=>item.path==='res://asset.bin'&&item.disposition==='unchanged'));
+ assert.notEqual(first.buildKey,(await compileEngineProject({...options,identityInputs:{engineId:'b'.repeat(64)}})).buildKey);
+ assert.equal(JSON.stringify(files),original);
+});
+
+test('explicit engine launch uses the new ordinary script contract while keeping source settings',async()=>{
+ const source='[application]\nrun/main_scene="res://main.tscn"\n';
+ const files={'/project.godot':source,'/main.tscn':scene,'/src/start.ts':'export function start(ctx:any){return()=>{}}'};
+ const result=await compileEngineProject({runtime:'engine',launch:{kind:'script',module:'/src/start.ts'},files});
+ assert.match(read(result,'res://project.godot'),/engine-bootstrap.tscn/);assert.match(read(result,'res://.playground/engine-bootstrap.ts'),/Script entry must export a start function/);
+ assert.equal(files['/project.godot'],source);
+ await assert.rejects(compileEngineProject({runtime:'engine',files}),/explicit scene or script launch/);
+});
+
+test('product compilation rechecks import receipts against the immutable source and final outputs',async()=>{
+ const source='res://picture.png',output='res://.godot/imported/picture.ctex';
+ const originals=new Map([[source,bytes('source')]]),converted=new Map([[output,bytes('converted')]]);
+ const inspection={resource:source,sourcePaths:[source],converter:{id:'test-png',version:'1'},target:{resourceAbi:'godot/4.6',features:{}},parameters:{quality:1}};
+ const receipt=await createImportReceipt({...inspection,files:originals,outputFiles:converted,outputPaths:[output]});
+ const files={'/main.tscn':scene,'/picture.png':[...originals.get(source)],'/.godot/imported/picture.ctex':[...converted.get(output)],'/picture.png.import':'[remap]\npath="'+output+'"\n'};
+ const options={runtime:'godot',mainScene:'/main.tscn',files,importChecks:[{receipt,inspection}]};
+ const valid=await compileEngineProject(options);assert(valid.receipt.packSha256);
+ await assert.rejects(compileEngineProject({...options,importChecks:[{receipt,inspection:{...inspection,parameters:{quality:2}}}]}),error=>error instanceof EngineProjectBuildError&&error.diagnostics.some(item=>item.code==='E_IMPORT_STALE'));
+ const unknown=await compileEngineProject({...options,importChecks:[{inspection}]});assert(unknown.diagnostics.some(item=>item.code==='W_ENGINE_IMPORT_UNVERIFIED'));
+});
 
 test('native startup loads res URIs and every supported source extension from the output index',{timeout:30000},async t=>{
  const engine=process.env.GODOT??fileURLToPath(new URL('../../../tests/bin/godot-host-qjs',import.meta.url));
@@ -119,7 +153,8 @@ test('native project packing preserves configuration, UIDs, imported resources a
  assert.match(read(result,'res://.godot/GodotJS/src/main.js'),/require\("res:\/\/\.godot\/GodotJS\/src\/helper.js"\)/);
  const sourceMap=JSON.parse(read(result,'res://.godot/GodotJS/src/main.js.map'));
  assert.deepEqual(sourceMap.sources,['res://src/main.ts']);assert.deepEqual(sourceMap.sourcesContent,[files['/src/main.ts']]);
- assert.deepEqual(result.diagnostics.map(d=>d.code),['W_ENGINE_STALE_PROJECT_BINARY']);
+ assert.deepEqual(result.diagnostics.map(d=>d.code),['W_ENGINE_STALE_PROJECT_BINARY','W_ENGINE_IMPORT_UNVERIFIED']);
+ assert.equal(result.diagnostics[1].file,'res://assets/picture.png');
 });
 
 test('native relative modules and JSON stay separate rather than using a handwritten module loader',async()=>{
@@ -143,7 +178,7 @@ test('react bootstrap owns lifecycle once and keeps user autoload/native setting
  assert.match(project,/run\/main_scene="res:\/\/\.playground\/engine-bootstrap.tscn"/);
  for(const specifier of ['@godot-js/react','@godot-js/react/engine'])assert.match(read(result,'res://.godot/GodotJS/node_modules/'+specifier+'/index.js'),/\["engineReact"\]/);
  assert.equal(result.index['res://.godot/GodotJS/node_modules/godot/index.js'],undefined);
- const calls=[],root={render:value=>calls.push(['render',value]),pump:d=>calls.push(['pump',d]),process:d=>calls.push(['process',d]),physics:d=>calls.push(['physics',d]),shutdown:reason=>calls.push(['shutdown',reason])};
+ const calls=[],root={render:value=>calls.push(['render',value]),flush:()=>calls.push(['flush']),pump:d=>calls.push(['pump',d]),process:d=>calls.push(['process',d]),physics:d=>calls.push(['physics',d]),shutdown:reason=>calls.push(['shutdown',reason])};
  class Node {}
  function App(){}
  const entry={default:App};
@@ -158,7 +193,7 @@ test('react bootstrap owns lifecycle once and keeps user autoload/native setting
  vm.runInNewContext(read(result,'res://.godot/GodotJS/.playground/engine-bootstrap.js'),{require,module,exports:module.exports});
  const bootstrap=new module.exports.default();bootstrap._ready();bootstrap._process(.1);bootstrap._physics_process(.2);bootstrap._exit_tree();bootstrap._exit_tree();bootstrap._process(.3);
  assert.equal(calls[0][0],'createRoot');assert.equal(calls[0][2].autoProcess,false);
- assert.deepEqual(calls.map(call=>call[0]),['createRoot','render','process','physics','shutdown']);
+ assert.deepEqual(calls.map(call=>call[0]),['createRoot','render','flush','process','physics','shutdown']);
  assert.equal(calls[1][1].type,App);
  const original=Error('original startup failure'),cleanup=Error('cleanup failure'),secondary=[];
  root.render=()=>{throw original;};root.shutdown=()=>{throw cleanup;};
@@ -210,7 +245,7 @@ test('unimported known resources warn, native/unknown binary files remain availa
   '/music.ogg':[1,2,3],'/picture.png':[137,80],'/font.ttf':[0,1],'/game.res':[0,255],'/custom.dat':[3,4],
   '/broken.glb':[0,1],'/broken.glb.import':'[remap]\npath="res://.godot/imported/missing.scn"\n'}});
  assert.deepEqual(result.diagnostics.map(item=>[item.file,item.code]),[
-  ['res://music.ogg','W_ENGINE_IMPORT_REQUIRED'],['res://picture.png','W_ENGINE_IMPORT_REQUIRED'],['res://font.ttf','W_ENGINE_IMPORT_REQUIRED'],['res://broken.glb','W_ENGINE_IMPORT_CACHE_MISSING']]);
+  ['res://music.ogg','W_ENGINE_IMPORT_REQUIRED'],['res://picture.png','W_ENGINE_IMPORT_REQUIRED'],['res://font.ttf','W_ENGINE_IMPORT_REQUIRED'],['res://broken.glb','W_ENGINE_IMPORT_CACHE_MISSING'],['res://broken.glb','W_ENGINE_IMPORT_UNVERIFIED']]);
  assert.ok(result.index['res://game.res']);assert.ok(result.index['res://custom.dat']);
  assert.ok(result.diagnostics.every(item=>item.category==='warning'));
 });

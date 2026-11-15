@@ -32,3 +32,7 @@ jobs:
       - name: React contracts, renderer and compiler tests
         run: pnpm test:react
         shell: bash
+
+      - name: Neutral engine API and project tools
+        run: pnpm test:engine
+        shell: bash

@@ -31,7 +31,7 @@ test('header, sidecar and import identities merge with valid native cache entrie
  const result=project(original),values=records(result.files.get(cachePath));
  assert.deepEqual([...values],[[36n,'res://material.tres'],[37n,'res://src/main.ts'],[38n,'res://image.png'],[999n,'res://already.res'],[1000n,'user://saved.tres'],[4371n,'res://scene.tscn']]);
  assert.equal(values.has(1n),false,'ext_resource references must not claim the containing scene');
- assert.deepEqual(result.diagnostics,[]);
+ assert.deepEqual(result.diagnostics.map(({file,code,category})=>({file,code,category})),[{file:'res://image.png',code:'W_ENGINE_IMPORT_UNVERIFIED',category:'warning'}]);
  assert.equal(new TextDecoder().decode(result.files.get('res://scene.tscn')),original['/scene.tscn']);
 });
 

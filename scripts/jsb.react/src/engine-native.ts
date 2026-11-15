@@ -81,3 +81,36 @@ export function sameValue(previous: CapturedValue, next: CapturedValue): boolean
   }
   return Object.is(previous.value, next.value);
 }
+
+export interface NativePropertyWrite { accepted: boolean; value: unknown }
+export type NativePropertyWriter = (object: any, name: string, value: unknown) => NativePropertyWrite;
+declare const require: (name: string) => any;
+let bridgeWriter: NativePropertyWriter | undefined;
+let bridgeWriterLookedUp = false;
+function nativePropertyWriter(): NativePropertyWriter | undefined {
+  if (!bridgeWriterLookedUp) {
+    bridgeWriterLookedUp = true;
+    try {
+      const internal = require('godot-jsb').internal;
+      const candidate = internal.try_set_property ?? internal.trySetProperty;
+      if (typeof candidate === 'function') bridgeWriter = candidate.bind(internal);
+    } catch { /* Older engines and injected native fixtures keep their set/get ABI. */ }
+  }
+  return bridgeWriter;
+}
+
+/** accepted is Object::set/readback validity, not proof of arbitrary setter side effects. */
+export function writeNativeProperty(godot: any, object: any, name: string, value: unknown, writer?: NativePropertyWriter): NativePropertyWrite {
+  const write = writer ?? nativePropertyWriter();
+  if (write) {
+    const result = write(object, name, value);
+    if (!result || typeof result.accepted !== 'boolean' || !('value' in result)) throw new Error(`E_ENGINE_PROPERTY_WRITE: Invalid write receipt for ${name}`);
+    if (!result.accepted) throw new Error(`E_ENGINE_PROPERTY_WRITE: Native object rejected ${name} or became invalid`);
+    return result;
+  }
+  // Compatibility only: set/get cannot prove Object::set accepted a field.
+  // Never infer refusal by exact float comparison; retain native normalization.
+  nativeCall(object, 'set', name, value);
+  if (!nativeAlive(godot, object)) throw new Error(`E_ENGINE_PROPERTY_WRITE: Native object disappeared while writing ${name}`);
+  return {accepted: true, value: nativeCall(object, 'get', name)};
+}

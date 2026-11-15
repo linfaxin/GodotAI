@@ -31,11 +31,23 @@ export function assertRuntimeEvidence(result,release){
    if(close?.state!=='closed'||!Array.isArray(close.output)||loaded.length!==worklets.length||new Set(loaded.map(event=>event.sha256)).size!==worklets.length||loaded.some(event=>!worklets.includes(event.sha256)||typeof event.url!=='string'||!event.url.startsWith('blob:')))fail('unclosed context or unverified worklet');
   }
  }
- // The producer appends the additional pressure runs after its 13 baseline
- // sessions. A claimed count alone cannot stand in for actual fresh sessions.
- for(const frame of frames.slice(-result.lifecycleLoops)){
+ // This producer contract has 13 baseline sessions, then the claimed pressure
+ // interval. New Worker producers append a forced hang and clean recovery;
+ // neither may replace a missing pressure session or shift its audio proof.
+ const pressureEnd=RUNTIME_BASELINE_FRAMES+result.lifecycleLoops;
+ const pressure=frames.slice(RUNTIME_BASELINE_FRAMES,pressureEnd),tail=frames.slice(pressureEnd);
+ const cleanup=result.sessionCleanup;
+ if(tail.length){
+  if(tail.length!==2||!Array.isArray(cleanup)||cleanup.length!==frames.length)fail('unexpected post-pressure sessions');
+  const receipts=new Map();
+  for(const item of cleanup){if(!item||!ids.has(item.documentId)||receipts.has(item.documentId))fail('invalid session receipt');receipts.set(item.documentId,item);}
+  const [forced,recovered]=tail,forcedReceipt=receipts.get(forced.documentId),recoveryReceipt=receipts.get(recovered.documentId);
+  if(forced.runtime!=='godot'||recovered.runtime!=='godot'||forcedReceipt?.forced!==true||forcedReceipt.cleanup?.mode!=='forced'||recoveryReceipt?.forced===true||recoveryReceipt?.cleanup?.mode!=='clean')fail('forced or recovery session boundary');
+  if(cleanup.some(item=>item.documentId!==forced.documentId&&(item.forced===true||item.cleanup?.mode!=='clean')))fail('forced session inside pressure or baseline');
+ }else if(Array.isArray(cleanup)&&cleanup.some(item=>item.forced===true||item.cleanup?.mode==='forced'))fail('missing forced recovery frames');
+ for(const frame of [...pressure,...tail.slice(1)]){
   const events=result.audio.filter(event=>event.documentId===frame.documentId);
   const audible=value=>value.name==='godot-processor'&&Number.isFinite(value.peak)&&value.peak>0.01&&Number.isSafeInteger(value.checks)&&value.checks>0;
-  if(frame.runtime!=='godot'||!events.some(event=>event.type==='worklet-output'&&audible(event))||!events.some(event=>event.type==='context-closed'&&event.output.some(audible)))fail('missing pressure playback');
+  if(frame.runtime!=='godot'||!events.some(event=>event.type==='worklet-output'&&audible(event))||!events.some(event=>event.type==='context-closed'&&event.output.some(audible)))fail('missing pressure or recovery playback');
  }
 }

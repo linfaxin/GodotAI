@@ -1,0 +1,113 @@
+{
+  "name": "@godot-js/project-tools",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Browser-neutral Godot project preparation, build plans, resource receipts and PCK packing",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./engine-project": {
+      "types": "./dist/engine-project.d.ts",
+      "import": "./dist/engine-project.js"
+    },
+    "./project-settings": {
+      "types": "./dist/project-settings.d.ts",
+      "import": "./dist/project-settings.js"
+    },
+    "./project-modules": {
+      "types": "./dist/project-modules.d.ts",
+      "import": "./dist/project-modules.js"
+    },
+    "./resource-uids": {
+      "types": "./dist/resource-uids.d.ts",
+      "import": "./dist/resource-uids.js"
+    },
+    "./script-renames": {
+      "types": "./dist/script-renames.d.ts",
+      "import": "./dist/script-renames.js"
+    },
+    "./script-bindings": {
+      "types": "./dist/script-bindings.d.ts",
+      "import": "./dist/script-bindings.js"
+    },
+    "./scene-text": {
+      "types": "./dist/scene-text.d.ts",
+      "import": "./dist/scene-text.js"
+    },
+    "./module-loading": {
+      "types": "./dist/module-loading.d.ts",
+      "import": "./dist/module-loading.js"
+    },
+    "./native-module-exports": {
+      "types": "./dist/native-module-exports.d.ts",
+      "import": "./dist/native-module-exports.js"
+    },
+    "./errors": {
+      "types": "./dist/errors.d.ts",
+      "import": "./dist/errors.js"
+    },
+    "./hash": {
+      "types": "./dist/hash.d.ts",
+      "import": "./dist/hash.js"
+    },
+    "./build-plan": {
+      "types": "./dist/build-plan.d.ts",
+      "import": "./dist/build-plan.js"
+    },
+    "./import-receipts": {
+      "types": "./dist/import-receipts.d.ts",
+      "import": "./dist/import-receipts.js"
+    },
+    "./project-document": {
+      "types": "./dist/project-document.d.ts",
+      "import": "./dist/project-document.js"
+    },
+    "./pck": {
+      "types": "./dist/pck.d.ts",
+      "import": "./dist/pck.js"
+    },
+    "./paths": {
+      "types": "./dist/paths.d.ts",
+      "import": "./dist/paths.js"
+    },
+    "./launch": {
+      "types": "./dist/launch.d.ts",
+      "import": "./dist/launch.js"
+    },
+    "./resource-formats": {
+      "types": "./dist/resource-formats.d.ts",
+      "import": "./dist/resource-formats.js"
+    },
+    "./resource-converters": {
+      "types": "./dist/resource-converters.d.ts",
+      "import": "./dist/resource-converters.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "pnpm build && node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "typescript": "6.0.3",
+    "spark-md5": "3.0.2",
+    "esbuild": "^0.25.0",
+    "@godot-js/engine": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/spark-md5": "3.0.5",
+    "@types/node": "^24.12.2"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

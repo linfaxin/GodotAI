@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Node, Node2D, Label, CanvasLayer, useNodeRef, useProcess, usePhysicsProcess, useInput, useNativeReady, type NodeReadHandle } from "@godot-js/react";
+import { Node, Node2D, Label, CanvasLayer, useNodeRef, useProcess, usePhysicsProcess, useInput, useNativeReady, type NodeReadHandle } from "@godot-js/react/legacy";
 
 let changeActor:(version:number|null)=>void;
 let changeInitial:(text:string)=>void;

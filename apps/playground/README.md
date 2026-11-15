@@ -1,6 +1,8 @@
 # GodotJS browser playground
 
-A static Monaco workbench, TypeScript compiler worker and real single-thread GodotJS Web runner. Godot 4.6.1's normal Web module set supplies engine capabilities. React supplies scene composition through the generic native renderer.
+A static Monaco workbench, TypeScript compiler worker and real GodotJS Web runner. Godot 4.6.1's normal Web module set supplies engine capabilities. React is an optional reactive syntax layer using the same engine. The existing default uses `window` execution; an opt-in `proxy-pthread` candidate runs engine logic, business scripts and React in the engine Worker.
+
+See the [complete Worker engine guide](../../docs/browser-worker-engine.zh-CN.md) for neutral package entry points, compatibility, actual HTTPS isolation, evidence collection and default activation gates.
 
 ## Engine profiles
 
@@ -78,13 +80,15 @@ Explicit and adjacent reports both supply unspecified profile, target, LTO and m
 
 CI includes a portable `browser-engine-artifact/` containing the exact ZIP, the original report, a portable report, compiler log and integrity manifest. After downloading it, run `node scripts/test/package-browser-engine-artifact.mjs --out /path/to/browser-engine-artifact --verify`, then `node scripts/test/measure-browser-engine.mjs --report /path/to/browser-engine-artifact/engine-report.json --out /path/to/measurement.json`. No original build-machine paths are needed.
 
-The release captures snake and camel declarations from the actual exported Web engine. Types, SDK modules, engine JavaScript/WASM and audio worklets are bound to that release. Local and CI engine builders share seven checked source patches: GLES3 Alpha Hash, small CanvasGroup backbuffers, private native tooltips, optional PWA discovery, audio shutdown, threadless group waits and the WebKit presentation boundary.
+The release captures snake and camel declarations from the actual exported Web engine. Types, SDK modules, engine JavaScript/WASM, worklets and pthread helper assets are bound to that release. Local and CI engine builders share checked, source-bound patches, including presentation/audio lifecycle, pthread entry compatibility and shader UTF-8 decoding. The build report records the exact patch set and resulting hashes.
 
 The WebKit patch parks the default framebuffer between engine loops and restores Godot's separate READ/DRAW bindings before the next loop. It changes the JavaScript config wrapper; each rebuild still checks the actual WASM identity. Public JavaScriptBridge callbacks remain available: real asynchronous viewport readback, ImageTexture creation and Sprite updates have been checked with resulting pixels. Host code that directly mixes raw WebGL rendering must respect ownership of the engine context. Feature acceptance rejects actual browser console errors, including WebGL validation errors; successful native assertions alone are insufficient. Reports from an earlier wrapper or candidate cannot certify a rebuilt release, even when its WASM bytes are unchanged.
 
 ## Preview deployment
 
 Serve the editor and preview from distinct HTTP(S) origins. Set `previewOrigin` in `web/preview-config.json`, or pass `?previewOrigin=https://preview.example.com`. Localhost development can use the localhost/127.0.0.1 alias pair. The single-thread build does not require COOP/COEP.
+
+The Worker candidate instead requires trusted HTTPS and actual cross-origin isolation at both page origins and the engine Worker, with COOP/COEP, Permissions-Policy/iframe delegation, and compatible asset CORS/CORP/CSP. Build it explicitly with `--engine-report /path/to/worker-report.json --execution-model proxy-pthread`; the full debug output is `dist-worker-full-debug/`. This separate namespace cannot overwrite the old default. A static HTTP dev server alone does not satisfy the candidate's threaded deployment contract.
 
 Each preview verifies its engine and worklet bytes, receives the compiled project over a private MessagePort and starts a fresh Godot instance. Startup, cancellation, stop, failure and telemetry are scoped to the current run. Source maps carry native React failures back to the editor.
 
@@ -100,7 +104,7 @@ pnpm --filter @godot-js/playground test:browser
 
 Browser suites cover control edits during startup, input for dynamically mounted components, native scripts importing demo helpers, the actual compiler, native and React startup, all eight demo interactions, controls and JSON export, persistence/migration, workbench layout and fresh-session stop/rerun. The older browser SDK conformance workbench remains an independent library fixture (`build:conformance`), rather than a selectable Playground runtime.
 
-Full engine capability is bounded by the Web target: browser restrictions, WebGL 2 and single-thread operation still apply. Editor-imported resource formats require their import metadata and generated cache; the browser does not run the Godot editor importer. General npm installation, complex dynamic-import expressions and local `require` interactions remain outside this framework pass.
+Full engine capability is bounded by the actual Web target: browser restrictions, WebGL 2 and the selected execution model still apply. Editor-imported resource formats require their import metadata and generated cache; the browser does not run the Godot editor importer. General npm installation, complex dynamic-import expressions and local `require` interactions remain outside this framework pass. Worker G0 probes and legacy browser suites do not by themselves grant the new product G1/G2 acceptance or default activation.
 
 ## Upstream attribution
 

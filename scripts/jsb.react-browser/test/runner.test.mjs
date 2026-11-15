@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { gzipSync } from 'node:zlib';
+import {createHash} from 'node:crypto';
+import {createArtifactIdentity} from '@godot-js/engine/identities';
 import { PreviewRunner } from '../dist/runner.js';
 import { PREVIEW_PROTOCOL, isPreviewEnvelope, isProjectData } from '../dist/protocol.js';
 import { fetchVerifiedAsset, injectVerifiedWasm } from '../dist/verified-loader.js';
@@ -9,10 +11,10 @@ import { patchOptionalPwa } from '../../release/patch-web-optional-pwa.mjs';
 const release = { releaseId: 'test', profile: 'core-ui-v1', engineJs: { url: 'http://preview.test/godot.js', sha256: 'a'.repeat(64) }, engineWasm: { url: 'http://preview.test/godot.wasm', sha256: 'b'.repeat(64) } };
 const artifact = { revision: 'revision-1', buildKey: 'build-1', generation: 42, pack: new Uint8Array([1, 2, 3]), manifest: { generation: 42 } };
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
-function fixture({ pauseAt, heartbeat = true, exitOnStop = true, connect = true, frameLoad = true, deadlines = {} } = {}) {
+function fixture({ pauseAt, heartbeat = true, engineProgress = true, exitOnStop = true, exitOnForce = true, runtimeRelease = release, allowLegacyArtifacts = true, connect = true, frameLoad = true, deadlines = {} } = {}) {
   const resources = [], remotePorts = [], frames = [], events = [], messages = [];
   let remote, identity, send;
-  const document = { location: { origin: 'http://editor.test' }, createElement() {
+  const document = { location: { origin: 'http://editor.test' }, defaultView:{crossOriginIsolated:true}, createElement() {
     const frame = { attributes: {}, setAttribute(name, value) { frame.attributes[name] = value; }, remove() { frame.removed = true; }, contentWindow: {
       postMessage(data, origin, ports) {
         assert.equal(origin, 'http://preview.test');
@@ -22,9 +24,11 @@ function fixture({ pauseAt, heartbeat = true, exitOnStop = true, connect = true,
         remote.onmessage = event => {
           messages.push(event.data);
           if (event.data.type === 'stop') { if (exitOnStop) send({ type: 'exited', code: 0 }); return; }
+          if(event.data.type==='force-stop'){if(exitOnForce)send({type:'terminated',cleanup:{mode:'forced',workers:3,terminatedWorkers:3,audioContexts:1,closedAudioContexts:1,clearedTimers:2,removedListeners:4,errors:[]}});return;}
           if (event.data.type !== 'run') return;
           assert.equal(event.data.artifact.manifest.generation, event.data.generation);
           if (heartbeat) resources.push(setInterval(() => send({ type: 'heartbeat' }), 5));
+          if(engineProgress&&runtimeRelease.execution?.executionModel==='proxy-pthread'){let sequence=0;resources.push(setInterval(()=>send({type:'engine-progress',role:'engine',workerId:1,sequence:++sequence}),5));}
           if (pauseAt === 'downloading') return;
           for (const phase of ['preloading', 'initializing', 'starting', 'waiting-ready', 'running']) {
             send({ type: 'phase', phase });
@@ -38,13 +42,39 @@ function fixture({ pauseAt, heartbeat = true, exitOnStop = true, connect = true,
     frames.push(frame); return frame;
   } };
   const container = { ownerDocument: document, append(frame) { if (frameLoad) setTimeout(() => frame.onload?.(), 0); } };
-  const runner = new PreviewRunner({ container, previewUrl: 'http://preview.test/preview.html', release,
+  const runner = new PreviewRunner({ container, previewUrl: 'http://preview.test/preview.html', release:runtimeRelease, allowLegacyArtifacts,
     deadlines: { 'loading-frame': 100, handshaking: 100, downloading: 200, preloading: 200, initializing: 200,
       starting: 200, 'waiting-ready': 200, running: 0, heartbeat: 100, stopping: 30, ...deadlines } });
   runner.subscribe(event => events.push(event));
   return { runner, frames, events, messages, send: (...args) => send(...args), get identity() { return identity; },
     async cleanup() { resources.forEach(clearInterval); await runner.dispose(); remotePorts.forEach(port => port.close()); } };
 }
+
+test('modern runners verify receipt identity and pack before creating a frame; compatibility cannot downgrade a v2 release',async()=>{
+ const sha=value=>createHash('sha256').update(value).digest('hex'),pack=artifact.pack.slice();
+ const body={schemaVersion:2,buildKey:sha('build'),sourceHash:sha('source'),packSha256:sha(pack),outputs:[{path:'res://main.js',disposition:'generated',reason:'compile',outputHash:sha('main')}]};
+ const receipt={...body,artifactId:await createArtifactIdentity(body)},modern={...artifact,buildKey:body.buildKey,artifactId:receipt.artifactId,manifest:{generation:42,buildKey:body.buildKey,artifactId:receipt.artifactId,artifactReceipt:receipt}};
+ const f=fixture({allowLegacyArtifacts:true,runtimeRelease:{...release,artifactReceiptVersion:2}});
+ try{
+  await assert.rejects(f.runner.run(artifact),/E_ARTIFACT_RECEIPT/);assert.equal(f.frames.length,0);
+  await assert.rejects(f.runner.run({...modern,pack:new Uint8Array([4])}),/E_ARTIFACT_PACK_HASH/);assert.equal(f.frames.length,0);
+  await assert.rejects(f.runner.run({...modern,manifest:{...modern.manifest,artifactReceipt:{...receipt,outputs:[]}}}),/E_ARTIFACT_IDENTITY/);
+  await assert.rejects(f.runner.run({...modern,manifest:{...modern.manifest,artifactId:sha('wrong outer label')}}),/E_ARTIFACT_IDENTITY/);
+  await f.runner.run(modern);assert.equal(f.frames.length,1);assert.equal(f.messages.find(message=>message.type==='run').artifact.artifactId,receipt.artifactId);
+ }finally{await f.cleanup();}
+ const strict=fixture({allowLegacyArtifacts:false});try{await assert.rejects(strict.runner.run(artifact),/E_ARTIFACT_RECEIPT/);}finally{await strict.cleanup();}
+});
+test('a synchronous replacement retires the old phase before asynchronous receipt rejection',async()=>{
+ const sha=value=>createHash('sha256').update(value).digest('hex'),body={schemaVersion:2,buildKey:sha('replacement'),sourceHash:sha('source'),packSha256:sha(artifact.pack),outputs:[]};
+ const replacement={...artifact,revision:2,buildKey:body.buildKey,manifest:{generation:42,buildKey:body.buildKey,artifactReceipt:{...body,artifactId:'0'.repeat(64)}}};
+ const f=fixture();let second,observed=false;
+ f.runner.subscribe(event=>{if(event.type==='state'&&event.state==='running'&&!observed){observed=true;second=f.runner.run(replacement);void second.catch(()=>{});}});
+ try{
+  await assert.rejects(f.runner.run(artifact),/E_RUN_ENDED/);assert(observed);
+  await assert.rejects(second,/E_ARTIFACT_IDENTITY/);
+  assert.equal(f.frames.length,1,'Receipt validation must not allocate an unverified replacement frame');assert(f.frames[0].removed);
+ }finally{await f.cleanup();}
+});
 
 test('project UI commands and telemetry stay on the live run and accept only bounded plain data',async()=>{
  const f=fixture();let reads=0;
@@ -283,4 +313,48 @@ test('public immutable caching is opt-in, versioned and omits authentication cre
  await assert.rejects(fetchVerifiedAsset({url:'https://assets.test/release.wasm',sha256},{fetch:fetcher,cachePolicy:'public-immutable'}),/E_RELEASE_IMMUTABLE_URL/);
  await fetchVerifiedAsset({url:'https://assets.test/releases/candidate123/release.wasm',sha256},{fetch:fetcher,cachePolicy:'public-immutable'});
  assert.equal(calls[1].options.credentials,'omit');assert.equal(calls[1].options.cache,'force-cache');assert.equal(calls[1].options.redirect,'error');
+});
+
+
+const workerRelease={...release,execution:{schemaVersion:1,executionModel:'proxy-pthread',wasmThreads:true,proxyToPthread:true,requiresCrossOriginIsolation:true,hostProtocolVersion:1,workerBootstrap:'embedded'}};
+
+test('a live host cannot hide a stalled engine, and cleanup acknowledgement covers the whole pool',async()=>{
+ const f=fixture({runtimeRelease:workerRelease,engineProgress:false,deadlines:{heartbeat:35,stopping:30}});
+ try{
+  await f.runner.run(artifact);
+  assert.match(f.frames[0].attributes.allow,/cross-origin-isolated/);
+  assert.match(f.frames[0].attributes.allow,/fullscreen/);
+  assert.match(f.frames[0].attributes.allow,/xr-spatial-tracking/);
+  while(f.runner.state!=='exited')await pause(5);
+  const report=f.events.find(event=>event.type==='exit').report;
+  assert.equal(report.reason,'unresponsive');assert.match(report.detail,/Engine progress/);
+  assert.equal(report.cleanup.terminatedWorkers,3);assert.equal(report.cleanup.closedAudioContexts,1);
+  assert.equal(f.messages.filter(message=>message.type==='force-stop').length,1);
+ }finally{await f.cleanup();}
+});
+
+test('pthread stop timeout terminates the session and never reports a cooperative exit',async()=>{
+ const f=fixture({runtimeRelease:workerRelease,exitOnStop:false});
+ try{
+  await f.runner.run(artifact);await pause(10);assert.equal(f.runner.getHealth().engineWorkers,1);
+  const report=await f.runner.stop();assert.equal(report.reason,'forced-session-termination');assert.equal(report.code,undefined);assert.equal(report.cleanup.mode,'forced');
+ }finally{await f.cleanup();}
+});
+
+test('missing whole-session cleanup acknowledgement stays unresponsive rather than becoming clean',async()=>{
+ const f=fixture({runtimeRelease:workerRelease,exitOnStop:false,exitOnForce:false});
+ try{
+  await f.runner.run(artifact);const report=await f.runner.stop();
+  assert.equal(report.reason,'unresponsive');assert.equal(report.cleanup,undefined);assert.match(report.detail,/unconfirmed|not acknowledged/);
+ }finally{await f.cleanup();}
+});
+
+test('an exit code of zero cannot conceal incomplete host cleanup',async()=>{
+ const f=fixture({runtimeRelease:workerRelease});
+ try{
+  await f.runner.run(artifact);
+  f.send({type:'exited',code:0,cleanup:{mode:'clean',workers:3,terminatedWorkers:2,audioContexts:1,closedAudioContexts:0,clearedTimers:0,removedListeners:0,errors:['audio close failed']}});
+  while(f.runner.state!=='exited')await pause(1);
+  const report=f.events.find(event=>event.type==='exit').report;assert.equal(report.reason,'crashed');assert.match(report.detail,/cleanup/);
+ }finally{await f.cleanup();}
 });

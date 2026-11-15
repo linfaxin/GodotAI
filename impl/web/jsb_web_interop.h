@@ -57,7 +57,13 @@ JSBROWSER_API void jsbi_init(
     jsb::impl::FunctionPointer on_worker_message_from_pthread,
     jsb::impl::FunctionPointer worker_get_or_add_native_transfer,
     bool debug_build,
-    bool bridge_logging);
+    bool bridge_logging,
+    int runtime_role,
+    uintptr_t thread_id,
+    uintptr_t parent_thread_id);
+
+// Explicit native execution role: 0 host, 1 engine, 2 game script worker.
+JSBROWSER_API void jsbi_ConfigureThread(int role, uintptr_t thread_id, uintptr_t parent_thread_id);
 
 // engine
 JSBROWSER_API jsb::impl::JSRuntime jsbi_NewEngine(void* opaque);
@@ -183,7 +189,6 @@ JSBROWSER_API jsb::impl::StackPosition jsbi_NewSet(jsb::impl::JSRuntime engine_i
 JSBROWSER_API jsb::impl::StackPosition jsbi_SetAsArray(jsb::impl::JSRuntime engine_id, jsb::impl::StackPosition stack_pos);
 JSBROWSER_API jsb::impl::ResultValue jsbi_SetAdd(jsb::impl::JSRuntime engine_id, jsb::impl::StackPosition set_sp, jsb::impl::StackPosition value_sp);
 
-JSBROWSER_API int jsbi_PostMessage(uintptr_t pthread_id, jsb::impl::JSRuntime engine_id, jsb::impl::StackPosition data_sp, uint32_t native_message_id, jsb::impl::StackPosition transfer_sp);
-JSBROWSER_API bool jsbi_RegisterWorkerOwner(uintptr_t pthread_id, jsb::impl::JSRuntime engine_id, jsb::impl::StackPosition worker_owner_sp);
+JSBROWSER_API int jsbi_PostMessage(uintptr_t pthread_id, jsb::impl::JSRuntime engine_id, jsb::impl::StackPosition data_sp, uint32_t native_message_id, jsb::impl::StackPosition transfer_sp, bool to_parent);
 
 #endif

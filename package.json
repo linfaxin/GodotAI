@@ -17,7 +17,7 @@
     "test": "node scripts/test/run-runtime-matrix.mts",
     "test:skip-builds": "node scripts/test/run-runtime-matrix.mts --skip-builds",
     "test:react": "pnpm --filter @godot-js/react test && pnpm --filter @godot-js/react-build test",
-    "test:browser:unit": "pnpm --filter @godot-js/web-bridge test && pnpm --filter @godot-js/react-browser test && node --test scripts/release/test/web-release.test.mjs scripts/test/browser-server.test.mjs",
+    "test:browser:unit": "pnpm --filter @godot-js/web-bridge test && pnpm --filter @godot-js/react-browser test && node --test scripts/release/test/web-release.test.mjs scripts/release/test/execution-readiness.test.mjs scripts/release/test/collect-worker-g0.test.mjs scripts/test/browser-server.test.mjs apps/playground/scripts/full-engine-release.test.mjs apps/playground/scripts/build-preview-host.test.mjs apps/playground/scripts/release-context.test.mjs apps/playground/scripts/product-execution.test.mjs",
     "test:browser:real": "node scripts/test/browser-playground.mjs",
     "test:browser:stress": "node scripts/test/browser-stress.mjs",
     "browser:engine": "node scripts/test/build-browser-engine.mjs",
@@ -32,10 +32,15 @@
     "ci:publish": "node scripts/release/publish.js",
     "ci:test-project": "node scripts/release/test-project.js",
     "ci:version": "changeset version && node scripts/release/version.js",
-    "test:showcase:native": "node scripts/test/showcase-native.mjs"
+    "test:showcase:native": "node scripts/test/showcase-native.mjs",
+    "test:engine": "pnpm --filter @godot-js/engine test && pnpm --filter @godot-js/project-tools test",
+    "browser:engine:worker": "node scripts/test/build-browser-engine.mjs --execution-model proxy-pthread",
+    "test:browser:worker": "node scripts/test/browser-worker-integration.mjs"
   },
   "devDependencies": {
     "@changesets/cli": "^2.29.4",
-    "@types/node": "^24.12.2"
+    "@types/node": "^24.12.2",
+    "@godot-js/engine": "workspace:*",
+    "@godot-js/project-tools": "workspace:*"
   }
 }

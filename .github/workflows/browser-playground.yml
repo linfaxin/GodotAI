@@ -3,6 +3,7 @@ name: Browser Playground
 on:
   pull_request:
     paths:
+      - 'packages/**'
       - 'scripts/jsb.react*/**'
       - 'scripts/jsb.web-engine/**'
       - 'scripts/release/**'

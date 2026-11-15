@@ -22,13 +22,17 @@
     "test:browser:resources": "node scripts/browser-react-demos-test.mjs",
     "test:browser:2d:features": "node scripts/browser-2d-features-test.mjs --site dist-2d-debug",
     "test:browser:release-context": "node scripts/browser-release-context-test.mjs",
-    "test:browser:regressions": "node scripts/browser-demo-regressions-test.mjs"
+    "test:browser:regressions": "node scripts/browser-demo-regressions-test.mjs",
+    "test:browser:schema4": "node scripts/browser-schema4-flow-test.mjs",
+    "test:browser:resource-converters": "node scripts/browser-resource-converters-test.mjs"
   },
   "dependencies": {
     "@godot-js/react": "workspace:*",
     "react": "19.3.1",
     "@godot-js/react-browser": "workspace:*",
-    "@godot-js/react-build": "workspace:*"
+    "@godot-js/react-build": "workspace:*",
+    "@godot-js/engine": "workspace:*",
+    "@godot-js/project-tools": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^24.12.2",

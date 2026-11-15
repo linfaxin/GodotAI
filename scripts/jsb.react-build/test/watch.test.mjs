@@ -7,7 +7,7 @@ import { buildProject, loadConfig, watchProject } from '../dist/index.js';
 import { startManagedPreview } from '../dist/preview.js';
 import { activeRunLeases, processAlive } from '../dist/publication.js';
 
-const source = text => `import {Label} from "@godot-js/react";export default function App(){return <Label text=${JSON.stringify(text)}/>}`;
+const source = text => `import {Label} from "@godot-js/react/legacy";export default function App(){return <Label text=${JSON.stringify(text)}/>}`;
 async function waitFor(predicate, timeout = 45000) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) { const value = await predicate(); if (value) return value; await new Promise(r => setTimeout(r, 25)); }
@@ -44,7 +44,7 @@ test('watch shuts down before rebuilding, waits through a failed build and resta
   const watching = watchProject({ projectRoot: root, entry: 'app', headless: true, signal: abort.signal, pollMs: 25, onEvent: e => events.push(e) });
   try {
     const [first] = await waitFor(async () => { const runs = await processes(); return runs.length === 1 && runs; });
-    await fs.writeFile(path.join(root, 'src/App.tsx'), 'import {Label} from "@godot-js/react";export default function App(){return <Label text={123}/>}');
+    await fs.writeFile(path.join(root, 'src/App.tsx'), 'import {Label} from "@godot-js/react/legacy";export default function App(){return <Label text={123}/>}');
     await waitFor(() => events.some(e => e.event === 'error' && e.error.includes('E_TYPESCRIPT')));
     assert.equal(processAlive(first.pid), false); assert.equal((await processes()).length, 1);
     await fs.writeFile(path.join(root, 'src/App.tsx'), source('fixed'));

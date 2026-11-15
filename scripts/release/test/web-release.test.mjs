@@ -111,6 +111,23 @@ test('descriptor and recipe tampering are rejected', async t => {
   await assert.rejects(inspectRelease(f.dir), /E_RELEASE_IDENTITY/);
 });
 
+test('proxy-pthread release binds resolved switches and the final verified main-worker bytes',async t=>{
+  const f=await fixture(t,true),main=await readFile(resolve(f.root,'engine/godot.js'));
+  f.report.recipe.args=['platform=web','threads=yes','proxy_to_pthread=yes','dlink_enabled=no','use_quickjs_ng=no'];
+  f.report.recipeSha256=digest(canonical(f.report.recipe));
+  f.report.resolvedBuildOptions={threads:true,proxy_to_pthread:true,dlink_enabled:false};
+  f.report.execution={schemaVersion:1,executionModel:'proxy-pthread',wasmThreads:true,proxyToPthread:true,requiresCrossOriginIsolation:true,hostProtocolVersion:1,workerBootstrap:'embedded',workerAssets:[{path:'godot.js',sha256:digest(main),bytes:main.length,role:'engine-main'}]};
+  await writeJson(resolve(f.root,'engine-report.json'),f.report);
+  await buildRelease(f.configuration);const release=await inspectRelease(f.dir);
+  assert.equal(release.engine.threads,true);assert.equal(release.execution.executionModel,'proxy-pthread');
+  const sealed=release.files.find(file=>file.kind==='engine-js');
+  assert.deepEqual(release.execution.workerAssets,[{path:sealed.path,sha256:sealed.sha256,bytes:sealed.bytes,role:'engine-main'}]);
+  release.engine.threads=false;release.id=release.runtimeRelease=identity(release);await writeJson(resolve(f.dir,'release.json'),release);
+  await assert.rejects(inspectRelease(f.dir),/E_RELEASE_EXECUTION/);
+  f.report.resolvedBuildOptions.proxy_to_pthread=false;await writeJson(resolve(f.root,'engine-report.json'),f.report);
+  await assert.rejects(buildRelease(f.configuration),/Resolved proxy|E_RELEASE_SOURCE/);
+});
+
 test('encoded WASM verifies decoded bytes and raw mode is development-only', async t => {
   const f = await fixture(t); await buildRelease(f.configuration);
   const path = resolve(f.dir, 'release.json'), release = await json(path);

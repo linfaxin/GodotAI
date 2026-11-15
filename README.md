@@ -8,7 +8,7 @@
 # **GodotJS**
 
 <p align="center">
-  TypeScript/JavaScript Support for Godot 4.x by leveraging the high-performance capabilities of V8 to bring the delightful development experience of TypeScript into Godot.
+  TypeScript/JavaScript support for Godot 4.x, including the browser's JavaScript runtime and a complete Godot Web engine.
 </p>
 
 <p align="center">
@@ -22,6 +22,7 @@ For full documentation, visit [godotjs.github.io](https://godotjs.github.io/docu
 
 For the React / TSX renderer and scene migration workflow, see the [React / TSX guide](docs/react-tsx.zh-CN.md).
 The [implementation and support matrix](docs/react-tsx-implementation.zh-CN.md) lists the available profiles and their limits.
+The [browser Worker engine guide](docs/browser-worker-engine.zh-CN.md) describes the complete-engine Worker candidate, neutral engine/project tools, compatibility paths, HTTPS isolation and activation gates. React is an optional reactive syntax layer over the same engine.
 
 ## Repository development
 

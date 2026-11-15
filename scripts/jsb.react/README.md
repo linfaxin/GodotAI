@@ -26,7 +26,7 @@ export default function App() {
 ```
 
 `EngineNode` accepts any native **Node** constructor through `ctor`, optional
-constructor `args`, controlled properties in `native`, signals in `on`, and a
+constructor `args`, declarative property values in `native`, signals in `on`, and a
 real native `ref`. `createNativeComponent(ctor)` binds a constructor while
 preserving its property, signal argument and ref types. Resources and other
 non-Node objects are constructed or loaded through `godot` and passed directly
@@ -37,11 +37,26 @@ the native property. Unsetting it restores the original snapshot. Godot Array
 and Dictionary retain their native reference semantics. Native property/signal
 names and the binding's public names are accepted at runtime.
 
+JSX infers property, signal and ref types from `ctor`, or from `object` when
+adopting an existing node. Native values and refs cannot widen that inferred
+instance type. React's `createElement(EngineNode, props)` erases the unspecialized
+component's generic relationship; use `createNativeComponent(ctor)` to retain
+constructor inference, or explicitly select the props type when adopting:
+
+```ts
+import { EngineNode, type AdoptedNodeProps } from '@godot-js/react';
+React.createElement<AdoptedNodeProps<G.Label>>(EngineNode, {
+  object: existingLabel, ownership: 'adopt', native: { text: 'Existing label' },
+});
+```
+
 Removing a `native` property, or setting it to `undefined`, restores the native
-value captured when that property first became controlled. Leave a property
+value captured when that property first became declared. Values reconcile at actual
+host commits; they are not continuously forced back each frame. Leave a property
 out of `native` when frame callbacks or native engine systems should manage it.
-Signals use the current committed callback; removing a handler disconnects it.
-Constructor or adopted-object changes require a new React key.
+Signals enqueue the current committed callback and are delivered after their native
+callback stack returns. Removing a handler disconnects it. Constructor, constructor
+argument or adopted-object changes require a new React key.
 
 ### Native refs and frame callbacks
 
@@ -82,6 +97,7 @@ export default class ReactMount extends G.Node {
   _ready() {
     this.reactRoot = createRoot(this, { autoProcess: false });
     this.reactRoot.render(<App />);
+    this.reactRoot.flush(); // Explicit initial safe-point commit.
   }
   _process(delta: number) { this.reactRoot?.process(delta); }
   _physics_process(delta: number) { this.reactRoot?.physics(delta); }
@@ -91,16 +107,18 @@ export default class ReactMount extends G.Node {
 
 | Method | Behavior |
 | --- | --- |
-| `render(element)` | Reconcile the root; allocate native Nodes only when committing. |
+| `render(element)` | Enqueue the latest element; allocate native Nodes only at a safe commit. |
+| `flush()` | Explicitly pump the session at an allowed point; physics cannot be overridden. |
 | `pump()` | Advance scheduled React work and deferred signal callbacks. |
 | `process(delta)` / `physics(delta)` | Forward frame callbacks; `process` also pumps. |
-| `unmount()` | Remove rendered children and keep the root reusable. |
+| `unmount()` | Enqueue removal of rendered children and keep the root reusable. |
 | `shutdown()` | Unmount, release owned Nodes and subscriptions, and close the root; repeated calls are safe. |
 | `portal(element, nativeTarget, key?)` | Render into a borrowed native mount. |
 | `getStats()` / `getErrors()` | Inspect lifecycle counters and captured errors. |
 
-Root and portal mounts are borrowed: shutdown preserves the mount and its
-external children. Nodes created by `EngineNode` are owned and released by
+Root and portal mounts are borrowed: React does not directly free the mount or
+its external siblings. A portal beneath an opaque native owner still follows that
+owner's lifetime; its React content cleans up before the owner destroys the mount. Nodes created by `EngineNode` are owned and released by
 React. To transfer a detached native Node into React ownership, use
 `<EngineNode object={existingNode} ownership="adopt" />`; React will release
 that object on removal. Native allocation waits for commit, including under
@@ -112,9 +130,66 @@ Godot's validity API when retained outside a component's lifetime.
 Multiple direct native roots can coexist on distinct mounts. They share React's
 scheduler ingress, and each root retains its own subscriptions and ownership.
 `@godot-js/react/engine` exports only this renderer and avoids loading the legacy
-runtime. The package root exports the same native API alongside compatibility
-exports. Importing the SDK in Node does not import Godot until a native root is
+runtime. The package root exports exactly the same native API. Legacy applications
+import the explicit `/legacy` entry. Importing the SDK in Node does not import Godot until a native root is
 created; tests can inject a native implementation with `options.godot`.
+
+### Shared session, structure and cleanup
+
+Every root in one native world shares an `EngineSession`. Its stage gate covers
+all roots, the pinned reconciler, scheduler and signal queues. `render()` queues;
+`flush()`/`pump()` perform work only when the session and native
+`Engine.is_in_physics_frame()` allow it. A host can inject
+`new EngineSession(G, { canCommit, requestPump })` via `options.session` and call
+`session.pump()` at its engine safe point. `runSafe()` cannot override physics.
+This permission governs React work; arbitrary direct Godot calls still follow
+Godot's own phase rules. The default browser integration requests a microtask
+pump after native JS/WASM callbacks return.
+
+`childScope` defaults to `react-managed`: public children are tracked by React.
+Composite native constructors/scripts that create public children use
+`childScope="native-owned-opaque"`; their internal public subtrees follow the
+native parent's lifetime. Opaque hosts do not accept React `children`. Insert
+React content through `root.portal(element, borrowedChildMount)`; the mount is
+registered against its opaque owner and its React content cleans up before that
+owner is destroyed. Unregistered nested roots are rejected. Borrowed mounts
+preserve external siblings. Godot internal children retain native lifecycle.
+
+Unregistered changes to managed public children/order, native reparenting or
+identity replacement fault and close the affected root. The entire affected
+ownership island is retained, including foreign nodes; React does not seize or
+free it. `cleanExit` is false and `orphaned`/errors explain that session-level
+recovery is needed. Changes inside opaque native subtrees are allowed.
+
+Host removal first retires the record. Ref/layout/passive cleanup runs while the
+native object is alive. The fixed reconciler's `detachDeletedInstance` callback
+marks a deletion receipt; destruction waits for that receipt, the complete
+reconciler/native callback stack to return, and a session safe point. The callback
+itself never frees a node. StrictMode effect replay and Suspense hiding do not
+retire hosts. Hiding propagates through nonvisual nodes and opaque subtrees.
+`flush()`, `pump()` and `shutdown()` may synchronously commit React cleanup, but
+native destruction runs only at the session's private asynchronous checkpoint.
+This also protects raw Godot signal connections that do not use React's `on`
+handlers. A custom `requestPump` hook is a wakeup notification and cannot bypass
+that barrier. A rejected or unconfirmed immediate free retains the ownership
+island and reports a non-clean exit for session teardown; it is never counted as
+an accepted release request or retried as if nothing happened.
+`releaseRequested` counts native free requests, `pendingReleases` counts queued
+objects awaiting native destruction, and `freed` counts observed destruction.
+
+Property writes use `godot-jsb.internal.try_set_property` when available and retain
+its stored value for normalized comparisons. Its acceptance flag proves native
+field/readback validity, not arbitrary business effects. Older engines fall back
+to set/get without claiming that validity receipt.
+
+Native mutation is not transactional. A partially failed commit faults the root
+and performs teardown rather than attempting rollback. Unpublished allocations
+can be reclaimed after the stack/safe-point barrier; published hosts require
+deletion cleanup receipts. If safe cleanup cannot be established the root remains
+non-clean for the owning session to terminate; an empty queue is not a receipt.
+Asynchronous effect cleanup is not awaited. Construct/load resources outside
+render or through application caches; the allocation guarantee covers renderer
+host creation, not arbitrary user `new G.Resource()` calls during render.
 
 See [the usage and migration guide](../../docs/react-tsx.zh-CN.md) for native
 integration and the existing compiler workflow.
@@ -142,15 +217,11 @@ const root = createRoot(port, containerKey, {
 });
 ```
 
-The package root also preserves the explicit three-argument
-`createRoot(port, containerKey, options)` overload. One or two arguments always
-select the native renderer; they do not infer a legacy NativePort. Legacy
-projects retain their single-active-root rule and private ABI/profile checks.
-Those restrictions do not apply to direct native roots. The existing
-`@godot-js/react-build` CLI owns the legacy bootstrap, templates and generation
-manifest; `@godot-js/react/testing` supplies its mock NativePort.
-The legacy CLI examples below retain package-root imports for its canonical
-vendor aliases; their generated bootstrap selects the three-argument overload.
+The package root has no NativePort overload or legacy host exports. Legacy projects
+retain their single-active-root rule and private ABI/profile checks. The existing
+legacy toolchain owns its bootstrap, templates and generation manifest;
+`@godot-js/react/testing` supplies its mock NativePort. Legacy templates and module
+aliases must explicitly resolve to `/legacy`, including their declaration inputs.
 
 ## Legacy host values and refs
 

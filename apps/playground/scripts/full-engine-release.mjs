@@ -5,13 +5,16 @@ import {createRequire} from 'node:module';
 import {createHash} from 'node:crypto';
 import {captureEngineApi} from './capture-engine-api.mjs';
 import {getEngineProfile,validateEngineProfile} from '../../../scripts/release/engine-profiles.mjs';
+import {legacyExecution,validateExecutionContract} from '../../../scripts/release/execution-contract.mjs';
+import {createEngineIdentity,createExtensionIdentity,nativeEngineIdentityInputs} from '../../../scripts/release/release-identities.mjs';
+import {nativeExtensionIdentityInputs} from '../../../packages/engine/src/identities.ts';
 
 const repo=fileURLToPath(new URL('../../../',import.meta.url));
 const sdk=path.join(repo,'scripts/jsb.react');
 const sdkRequire=createRequire(path.join(sdk,'package.json'));
 export const FULL_ENGINE_PROFILE='full-engine-v1';
 const {ENGINE_SDK_MODULES}=sdkRequire('@godot-js/react/engine-modules');
-export const FULL_ENGINE_MODULE_EXPORTS=Object.freeze(Object.fromEntries(Object.entries(ENGINE_SDK_MODULES).map(([name,entry])=>[name,entry.exportName])));
+export const FULL_ENGINE_MODULE_EXPORTS=Object.freeze(Object.fromEntries(Object.entries(ENGINE_SDK_MODULES).filter(([,entry])=>entry.scope==='engine'||entry.scope==='shared').map(([name,entry])=>[name,entry.exportName])));
 export const sha256=value=>createHash('sha256').update(value).digest('hex');
 export function canonical(value){
  if(Array.isArray(value))return '['+value.map(canonical).join(',')+']';
@@ -48,10 +51,11 @@ function validateBindingAudit(ir,capture){
  if(!record(inventory)||!Number.isSafeInteger(inventory.classes)||inventory.classes!==expected.classes||!Number.isSafeInteger(inventory.bindable)||inventory.bindable!==expected.classes||!Array.isArray(inventory.classFailures)||inventory.classFailures.length||!Array.isArray(inventory.nameMismatches)||inventory.nameMismatches.length)reject('Class inventory must resolve every captured class without failures or name mismatches');
 }
 
-export async function buildEngineVendor({mode='production'}={}){
+export async function buildEngineVendor({mode='production',includeLegacy=false}={}){
  if(!['production','development'].includes(mode))throw Error('E_FULL_ENGINE_SDK_MODE: '+mode);
  const {build}=await import('esbuild');
- const members={engineModules:sdkRequire.resolve('@godot-js/react/engine-modules'),React:sdkRequire.resolve('react'),jsxRuntime:sdkRequire.resolve('react/jsx-runtime'),jsxDevRuntime:sdkRequire.resolve('react/jsx-dev-runtime'),sdk:sdkRequire.resolve('./dist/index.js'),legacy:sdkRequire.resolve('./dist/legacy.js'),godot:sdkRequire.resolve('./dist/godot.js'),engineReact:sdkRequire.resolve('./dist/engine.js'),scheduler:sdkRequire.resolve('./dist/scheduler.js'),contracts:sdkRequire.resolve('./dist/contracts/index.js'),schema:sdkRequire.resolve('./dist/schema/index.js'),nativeInterfaces:sdkRequire.resolve('./dist/native-interfaces.js'),ui:sdkRequire.resolve('./dist/ui.js'),testing:sdkRequire.resolve('./dist/testing.js')};
+ const members={engineModules:sdkRequire.resolve('@godot-js/react/engine-modules'),React:sdkRequire.resolve('react'),jsxRuntime:sdkRequire.resolve('react/jsx-runtime'),jsxDevRuntime:sdkRequire.resolve('react/jsx-dev-runtime'),engineReact:sdkRequire.resolve('./dist/engine.js'),scheduler:sdkRequire.resolve('./dist/scheduler.js'),contracts:sdkRequire.resolve('./dist/contracts/index.js')};
+ if(includeLegacy)Object.assign(members,{legacy:sdkRequire.resolve('./dist/legacy.js'),godot:sdkRequire.resolve('./dist/godot.js'),schema:sdkRequire.resolve('./dist/schema/index.js'),nativeInterfaces:sdkRequire.resolve('./dist/native-interfaces.js'),ui:sdkRequire.resolve('./dist/ui.js'),testing:sdkRequire.resolve('./dist/testing.js')});
  const result=await build({stdin:{contents:Object.entries(members).map(([key,filename])=>`exports.${key}=require(${JSON.stringify(filename)});`).join('\n')+'\nexports.engine=exports.engineReact;\n',resolveDir:sdk,sourcefile:'full-engine-vendor.js'},bundle:true,write:false,platform:'neutral',format:'cjs',target:'es2022',define:{'process.env.NODE_ENV':JSON.stringify(mode)},external:['godot','godot-jsb'],inject:[path.join(sdk,'dist/internal/performance.mjs')]});
  return result.outputFiles[0].contents;
 }
@@ -89,6 +93,9 @@ function validateGeneratedProfile({ir,capture,irBytes,declarations,namingVersion
 
 /** Both naming snapshots are captured from the same production engine bytes. */
 export function assembleFullEngineRelease({engine,ir,capture,irBytes,declarations,namingVersion,codegenVersion,sdkVersion,vendor,developmentVendor,typeSnapshot,namingProfiles,strictTypechecks,build={},runtimeProfile=FULL_ENGINE_PROFILE}){
+ const execution=engine.execution??legacyExecution();validateExecutionContract(execution,{requireWorkerAssets:execution.executionModel!=='window'});
+ if(execution.executionModel!=='window'&&!engine.host)throw Error('E_FULL_ENGINE_HOST: Worker release requires the actual browser host bundle');
+ if(engine.host&&(!/^[a-f0-9]{64}$/.test(engine.host.sha256??'')||!Number.isSafeInteger(engine.host.bytes)||engine.host.bytes<=0||!engine.host.path||engine.host.path.startsWith('/')||engine.host.path.split('/').some(part=>!part||part==='.'||part==='..')))throw Error('E_FULL_ENGINE_HOST: Invalid browser host asset');
  const definition=getEngineProfile(runtimeProfile);
  const profiles={snake:{ir,capture,irBytes,declarations,namingVersion,codegenVersion,typeSnapshot,strictTypechecks,actualAPIHash:build.actualAPIHash},camel:namingProfiles?.camel};
  if(!profiles.camel)throw Error('E_FULL_ENGINE_NAMING: Both snake and camel captures are required');
@@ -102,7 +109,7 @@ export function assembleFullEngineRelease({engine,ir,capture,irBytes,declaration
  if(!vendor?.length||!developmentVendor?.length)throw Error('E_FULL_ENGINE_SDK_MODE: Both production and development vendors are required');
  const outputs=new Map(),payloads={};
  const add=(name,bytes,extra={})=>{const buffer=Buffer.from(bytes);outputs.set(safe(name),buffer);const item=describeAsset(name,buffer,extra);payloads[name]=item;return item;};
- for(const item of [engine.javascript,engine.wasm,...engine.worklets])payloads[item.path]=item;
+ for(const item of [engine.javascript,engine.wasm,...engine.worklets,...(execution.workerAssets??[]),...(engine.host?[engine.host]:[])])payloads[item.path]=item;
  const apiProfiles={};
  for(const [naming,profile]of Object.entries(profiles)){
   const prefix=naming==='snake'?'api/':'api/camel/';
@@ -123,11 +130,15 @@ export function assembleFullEngineRelease({engine,ir,capture,irBytes,declaration
  const runtimeModules={};
  for(const [specifier,key]of Object.entries(FULL_ENGINE_MODULE_EXPORTS))runtimeModules[specifier]=add('.playground/runtime-modules/'+sha256(specifier)+'.js',runtimeModuleSource(key));
  const verifiedAsset=item=>({url:item.path,sha256:item.sha256,...(item.encoding?{encoding:item.encoding,decodedSha256:item.decodedSha256,decodedBytes:item.decodedBytes}:{})});
- const manifest={schemaVersion:2,runtimeProfile,profile:runtimeProfile,runtimeFamily:definition.runtimeFamily,capabilities:{audio:definition.audio,dimensions:runtimeProfile==='engine-2d-v1'?2:3},
+ const engineId=createEngineIdentity(nativeEngineIdentityInputs({engine,execution,modules:ir.modules,api:{bindingVersion:ir.bindingVersion,namingVersion,codegenVersion,namingProfiles:apiProfiles}}));
+ const sdkTypesHash=sha256(canonical(sdkTypes(profiles.snake)));
+ const sdkIdentity={identityVersion:2,version:sdkVersion,typesHash:sdkTypesHash,vendor:vendorAsset,vendors:{production:vendorAsset,development:developmentVendorAsset},moduleExports:FULL_ENGINE_MODULE_EXPORTS,moduleContract:ENGINE_SDK_MODULES,runtimeModules};
+ const extensionId=createExtensionIdentity(nativeExtensionIdentityInputs({sdk:sdkIdentity,api:{bindingVersion:ir.bindingVersion}}));
+ const manifest={schemaVersion:2,artifactReceiptVersion:2,engineId,extensionId,execution,runtimeProfile,profile:runtimeProfile,runtimeFamily:definition.runtimeFamily,capabilities:{audio:definition.audio,dimensions:runtimeProfile==='engine-2d-v1'?2:3},
   engine:{...engine,version:ir.engineVersion,modules:ir.modules},modules:ir.modules,
   api:{...apiProfiles.snake,namingProfiles:apiProfiles},
-  sdk:{version:sdkVersion,vendor:vendorAsset,vendors:{production:vendorAsset,development:developmentVendorAsset},moduleExports:FULL_ENGINE_MODULE_EXPORTS,moduleContract:ENGINE_SDK_MODULES,runtimeModules},payloads,build,
-  verifiedRelease:{profile:runtimeProfile,engineJs:verifiedAsset(engine.javascript),engineWasm:verifiedAsset(engine.wasm),worklets:engine.worklets.map(item=>({...verifiedAsset(item),name:path.basename(item.path)})),allowedOrigins:[]},
+  sdk:sdkIdentity,payloads,build,
+  verifiedRelease:{artifactReceiptVersion:2,profile:runtimeProfile,execution,engineJs:verifiedAsset(engine.javascript),engineWasm:verifiedAsset(engine.wasm),worklets:engine.worklets.map(item=>({...verifiedAsset(item),name:path.basename(item.path)})),workerAssets:(execution.workerAssets??[]).map(item=>({...verifiedAsset(item),name:path.basename(item.path),role:item.role})),allowedOrigins:[]},
  };
  const id=sha256(canonical(manifest));manifest.id=id;manifest.verifiedRelease.releaseId=id;
  add('engine-release.json',JSON.stringify(manifest,null,2)+'\n');
@@ -137,8 +148,8 @@ export function assembleFullEngineRelease({engine,ir,capture,irBytes,declaration
  return {manifest,outputs};
 }
 
-export async function loadProductionApi({engineJs,engineWasm,irPath,reportPath,captureDirectory,naming='snake'}){
- if(!irPath){irPath=path.join(captureDirectory,'engine-ir.json');reportPath=irPath+'.capture.json';await captureEngineApi({engineJs,engineWasm,output:irPath,reportPath,naming});}
+export async function loadProductionApi({engineJs,engineWasm,irPath,reportPath,captureDirectory,naming='snake',execution}){
+ if(!irPath){irPath=path.join(captureDirectory,'engine-ir.json');reportPath=irPath+'.capture.json';await captureEngineApi({engineJs,engineWasm,output:irPath,reportPath,naming,execution});}
  if(!reportPath)throw Error('E_FULL_ENGINE_CAPTURE: An existing IR requires its exact production capture report');
  const [irBytes,captureBytes,api]=await Promise.all([readFile(irPath),readFile(reportPath),import(path.join(repo,'scripts/jsb.react-browser/dist/engine-api.js'))]);
  const ir=api.parseEngineApi(JSON.parse(irBytes.toString('utf8'))),capture=JSON.parse(captureBytes.toString('utf8'));
@@ -150,10 +161,10 @@ export async function loadProductionApi({engineJs,engineWasm,irPath,reportPath,c
  return {ir,capture,irBytes,declarations,strictTypechecks,namingVersion:api.ENGINE_NAMING_VERSION,codegenVersion:api.ENGINE_DECLARATIONS_VERSION,actualAPIHash:sha256(api.canonicalEngineApi(ir))};
 }
 
-export async function loadProductionApiProfiles({engineJs,engineWasm,captureDirectory,namingProfiles={}}){
+export async function loadProductionApiProfiles({engineJs,engineWasm,captureDirectory,namingProfiles={},execution}){
  const result={};
  // Each browser is fully retired before loading the same large WASM again.
- for(const naming of ['snake','camel'])result[naming]=await loadProductionApi({engineJs,engineWasm,captureDirectory:path.join(captureDirectory,naming),...namingProfiles[naming],naming});
+ for(const naming of ['snake','camel'])result[naming]=await loadProductionApi({engineJs,engineWasm,captureDirectory:path.join(captureDirectory,naming),...namingProfiles[naming],naming,execution});
  return result;
 }
 

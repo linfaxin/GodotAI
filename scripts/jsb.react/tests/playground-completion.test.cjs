@@ -1,4 +1,4 @@
-const test=require('node:test');const assert=require('node:assert/strict');const React=require('react');const SDK=require('../dist');const {MockNativePort}=require('../dist/testing');const {validateHostProps,validateValue,getHostSchema}=require('../dist/schema');
+const test=require('node:test');const assert=require('node:assert/strict');const React=require('react');const SDK=require('../dist/legacy');const {MockNativePort}=require('../dist/testing');const {validateHostProps,validateValue,getHostSchema}=require('../dist/schema');
 test('input maps retain independent process/physics edges, combine held bindings and release on reset',()=>{
  const a=SDK.createInputActions({jump:{bindings:[{key:74},{joyButton:0}]},right:{deadzone:.25,bindings:[{axis:0,direction:1}]},left:{bindings:[{key:65}]},up:{bindings:[{key:87}]},down:{bindings:[{key:83}]}});
  a.feed({type:'InputEventKey',physical_keycode:74,pressed:true});a.beginFrame();assert.ok(a.isJustPressed('jump'));a.beginFrame('physics');assert.ok(a.isJustPressed('jump'));a.beginFrame();assert.equal(a.isJustPressed('jump'),false);

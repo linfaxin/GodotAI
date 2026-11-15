@@ -2,7 +2,7 @@ import {createWorkbench} from './workbench/workbench';
 import {createExplorer} from './workbench/explorer';
 import {createCodeEditor} from './workbench/code-editor';
 import {createFileMenu} from './workbench/file-menu';
-import {filePath,parseProject,addProjectFiles,renameProjectFile,canRenameProjectFile,MAX_PROJECT_DOCUMENT_BYTES,exportProject,type EditorProject} from './project-model';
+import {filePath,parseProject,addProjectFiles,renameProjectFile,canRenameProjectFile,MAX_PROJECT_DOCUMENT_BYTES,exportProject,projectCompileRequest,newEngineProject,type EditorProject} from './project-model';
 import {createProjectStorage,openProjectDatabase} from './project-storage';
 import type {TypeDiagnostic} from './compiler-types';
 import {defaultProject,demoProject,migrateDemoProject as migrateDemo} from './project-templates';
@@ -10,7 +10,7 @@ import {createEnginePreview} from './engine-preview';
 import {loadReleaseContext,loadSiteConfiguration,type ReleaseContext} from './engine-assets';
 import {assertCompiledRelease} from './release-context';
 import {getEngineProfile} from '../../../scripts/release/engine-profiles.mjs';
-import type {RunnerEvent} from '@godot-js/react-browser/protocol';
+import type {RunnerEvent} from '@godot-js/engine/browser/protocol';
 import {suppressBrowserSave} from './browser-shortcuts';
 suppressBrowserSave(window);
 interface Control {key:string;label:string;min:number;max:number;step:number;value:number}
@@ -38,7 +38,7 @@ function send(data:Record<string,unknown>){nativePreview?.runner.command(data);}
 function rpc(kind:string,extra:Record<string,unknown>={}):Promise<any>{
  if(current.engineProfile!==siteEngineProfile)return Promise.reject(Error('当前项目需要 '+current.engineProfile+'；原文已保留，请在匹配站点打开或另存兼容副本'));
  const id=++serial,files=current.files;
- return new Promise((resolve,reject)=>{requests.set(id,{resolve,reject});worker.postMessage({id,kind,files,entry:current.entry,runtime:current.runtime,mainScene:current.mainSceneSource==='project'?undefined:current.mainScene,mode:current.mode,controls:current.controls,engineProfile:current.engineProfile,demoApiVersion:current.demoApiVersion,releaseContext:sessionReleaseContext,...extra});});
+ return new Promise((resolve,reject)=>{requests.set(id,{resolve,reject});worker.postMessage({id,kind,files,entry:current.entry,mainScene:current.mainSceneSource==='project'?undefined:current.mainScene,...projectCompileRequest(current),mode:current.mode,controls:current.controls,engineProfile:current.engineProfile,demoApiVersion:current.demoApiVersion,releaseContext:sessionReleaseContext,...extra});});
 }
 worker.onmessage=({data})=>{const pending=requests.get(data.id);if(pending){requests.delete(data.id);pending.resolve(data);}};
 worker.onerror=event=>{for(const request of requests.values())request.reject(Error(event.message));requests.clear();log(event.message,'error');status('编译器异常','error');$('run').removeAttribute('disabled');workbench.setReady();};
@@ -135,7 +135,7 @@ function controls(){
 function select(demo:Demo,run=true){
  if(protectedProjectIds.has(demo.id)&&!projects.has(demo.id)){const id='project-'+crypto.randomUUID(),project=initialProject(demo);projects.set(id,project);storage.stage(id,project);select(registerProjectDemo(id,project),run);return;}
  projectEvents.length=0;activeEngineRevision=-1;
- clearTimeout(checkTimer);runSerial++;checking++;revision++;selected=demo;$('current-project-label').textContent=`(当前：${demo.name})`;$('project-switcher').title=`切换项目 (当前：${demo.name})`;$('project-switcher').setAttribute('aria-label',`切换项目 (当前：${demo.name})`);current=projects.get(demo.id)??initialProject(demo);if(!projects.has(demo.id))storage.stage(demo.id,current);projects.set(demo.id,current);workbench.resetTabs();editor.reset();explorer.reset();setDiagnostics([]);selectFile(current.selected);$('export-original').hidden=!current.migration;controls();$<HTMLSelectElement>('mode').value=current.mode;
+ clearTimeout(checkTimer);runSerial++;checking++;revision++;selected=demo;$('current-project-label').textContent=`(当前：${demo.name})`;$('project-switcher').title=`切换项目 (当前：${demo.name})`;$('project-switcher').setAttribute('aria-label',`切换项目 (当前：${demo.name})`);current=projects.get(demo.id)??initialProject(demo);if(!projects.has(demo.id))storage.stage(demo.id,current);projects.set(demo.id,current);workbench.resetTabs();editor.reset();explorer.reset();setDiagnostics([]);selectFile(current.selected);$('export-original').hidden=!current.migration&&!current.engineDocument;controls();$<HTMLSelectElement>('mode').value=current.mode;
  for(const tab of document.querySelectorAll<HTMLElement>('[data-demo]')){const active=tab.dataset.demo===demo.id;tab.classList.toggle('active',active);tab.setAttribute('aria-checked',String(active));}
  $<HTMLSelectElement>('profile').replaceChildren(new Option(getEngineProfile(siteEngineProfile).label,siteEngineProfile));
  $('release-info').textContent='Godot 4.6.1 · '+getEngineProfile(siteEngineProfile).label;
@@ -170,7 +170,8 @@ $<HTMLInputElement>('asset-import').onchange=async event=>{
  }catch(error){toast(String(error));}finally{input.value='';}
 };
 function download(name:string,value:unknown){let text=JSON.stringify(value);if(text.length<=16*1024*1024)text=JSON.stringify(value,null,2);const url=URL.createObjectURL(new Blob([text],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
-$('export').onclick=()=>download('godot-playground-project.json',current);
+$('export').onclick=()=>download('godot-playground-project.json',exportProject(current));
+$('new-engine-project').onclick=()=>{const project=newEngineProject(siteEngineProfile),id='project-'+crypto.randomUUID();projects.set(id,project);storage.stage(id,project);select(registerProjectDemo(id,project));menu.open=false;};
 $('export-original').onclick=()=>download('godot-playground-original.json',exportProject(current,'original'));
 $('restore-recovery').onclick=async()=>{try{const recovery=recoverySnapshot??await storage.recovery();if(!await save())throw Error('当前编辑尚未安全保存，请先导出修改');const result=await storage.restore(recovery as any);if(!result.snapshot)throw Error(result.interrupted?'恢复期间有新编辑或未保存项目，已取消切换；请先保存或导出修改':'本地项目存在保存冲突，未恢复任何内容');const snapshot=result.snapshot;persistenceBlocked=false;recoverySnapshot=await storage.recovery();projects.clear();for(const [id,document]of snapshot.projects){try{const parsed=parseProject(document),demo=demos.find(item=>item.id===id),project=demo&&parsed.engineProfile===siteEngineProfile?migrateDemo(parsed,demo):parsed;projects.set(id,project);registerProjectDemo(id,project);if(project!==parsed)storage.stage(id,project);}catch{}}const demo=demos.find(d=>d.id===snapshot.selected)??demos[0];select(demo);toast('已从恢复备份还原项目');}catch(error){toast(String(error));}};
 $('export-recovery').onclick=()=>download('godot-playground-recovery.json',recoverySnapshot);

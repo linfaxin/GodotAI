@@ -8,6 +8,7 @@
 #include "../internal/jsb_double_buffered.h"
 
 #if JSB_WITH_WEB
+#include "core/templates/hash_set.h"
 #include <pthread.h>
 #include <emscripten/emscripten.h>
 #include <emscripten/threading.h>
@@ -72,6 +73,18 @@ namespace jsb
 
 #if JSB_WITH_WEB
     static SafeNumeric<uint32_t> s_next_transfer_id;
+    static thread_local bool s_web_script_thread = false;
+    static thread_local uintptr_t s_web_parent_thread = 0;
+
+    bool Worker::web_is_script_thread() { return s_web_script_thread; }
+    uintptr_t Worker::web_parent_thread_id() { return s_web_parent_thread; }
+    void Worker::web_configure_script_thread(uintptr_t p_parent_thread_id)
+    {
+        s_web_script_thread = true;
+        s_web_parent_thread = p_parent_thread_id;
+        jsbi_ConfigureThread(2, static_cast<uintptr_t>(pthread_self()), p_parent_thread_id);
+    }
+
     constexpr int kPostMessageFailed = -1;
     // constexpr int kPostMessageSuccess = 0;
     constexpr int kPostMessageNativeTransfersUnused = 1;
@@ -93,11 +106,17 @@ namespace jsb
 
 #if JSB_WITH_WEB
         pthread_t pthread_id_ = 0;
+        const uintptr_t owner_pthread_id_ = emscripten_is_main_runtime_thread() ? 0 : static_cast<uintptr_t>(pthread_self());
         v8::Global<v8::Object> context_obj_handle_;
         uint64_t web_last_ticks_ = 0;
+        bool web_loop_started_ = false;
+        bool web_callbacks_entered_ = false;
+        SafeFlag completed_ = SafeFlag(false);
+        SafeFlag terminated_by_owner_ = SafeFlag(false);
 
         SpinLock transfers_lock_;
         HashMap<uint32_t, std::vector<TransferData>> transfers_;
+        HashSet<uint32_t> outgoing_receipts_;
 #else
         internal::DoubleBuffered<WorkerMessage> inbox_;
 #endif
@@ -120,15 +139,37 @@ namespace jsb
         jsb_force_inline void* get_token() const { return token_; }
 
         jsb_force_inline Thread::ID get_thread_id() const { return thread_.get_id(); }
+        bool is_finish_requested() const { return interrupt_requested_.is_set(); }
 
 #if JSB_WITH_WEB
         jsb_force_inline pthread_t get_pthread_id() const { return pthread_id_; }
+        bool is_completed() const { return completed_.is_set(); }
+        bool is_terminated_by_owner() const { return terminated_by_owner_.is_set(); }
+        void close_from_worker() { interrupt_requested_.set(); }
+        bool can_reap()
+        {
+            if (!is_completed()) return false;
+            transfers_lock_.lock();
+            // Incoming messages can no longer run after close. Only messages
+            // already sent to the owner retain the channel until consumed.
+            const bool ready = is_terminated_by_owner() || outgoing_receipts_.is_empty();
+            transfers_lock_.unlock();
+            return ready;
+        }
+        jsb_force_inline uintptr_t get_owner_pthread_id() const { return owner_pthread_id_; }
+        bool owns_environment(uintptr_t p_token) const
+        {
+            return p_token == reinterpret_cast<uintptr_t>(token_)
+                || (Thread::get_caller_id() == get_thread_id() && p_token == reinterpret_cast<uintptr_t>(env_.get()));
+        }
 
-        // Queue transfers for a native postMessage (called from main thread)
-        bool queue_transfers(uint32_t msg_id, std::vector<TransferData>&& transfers)
+        // A channel receipt is retained even for plain structured-clone payloads.
+        // Both endpoints enqueue from their own environment thread.
+        bool queue_transfers(uint32_t msg_id, std::vector<TransferData>&& transfers, bool p_to_parent = false)
         {
             transfers_lock_.lock();
             transfers_.insert(msg_id, std::move(transfers));
+            if (p_to_parent) outgoing_receipts_.insert(msg_id);
             transfers_lock_.unlock();
             return true;
         }
@@ -141,24 +182,27 @@ namespace jsb
             if (exists)
             {
                 transfers_.erase(msg_id);
+                outgoing_receipts_.erase(msg_id);
             }
 
             transfers_lock_.unlock();
             return exists;
         }
 
-        // Take transfers for a native postMessage (called from worker thread)
-        std::vector<TransferData> take_transfers(uint32_t msg_id)
+        // Consume on the receiving endpoint only; absence rejects stale messages.
+        bool take_transfers(uint32_t msg_id, std::vector<TransferData>& result)
         {
-            std::vector<TransferData> result;
+            bool found = false;
             transfers_lock_.lock();
             if (auto* ptr = transfers_.getptr(msg_id))
             {
                 result = std::move(*ptr);
                 transfers_.erase(msg_id);
+                outgoing_receipts_.erase(msg_id);
+                found = true;
             }
             transfers_lock_.unlock();
-            return result;
+            return found;
         }
 
         bool get_or_add_transfer(uint32_t msg_id, const Variant& variant, uint32_t& r_transfer_index, Worker::WebNativeTransferError& r_error)
@@ -236,14 +280,9 @@ namespace jsb
             v8::Context::Scope context_scope(context);
             const v8::Local<v8::Object> context_obj = context_obj_handle_.Get(isolate);
 
-            v8::Local<v8::Value> callback;
-            if (!context_obj->Get(context, jsb_name(env_, onmessage)).ToLocal(&callback) || !callback->IsFunction())
-            {
-                return;
-            }
-
             v8::Local<v8::Value> data = v8::Local<v8::Value>(v8::Data(isolate, data_sp));
-            std::vector<TransferData> transfers = take_transfers(transfer_id);
+            std::vector<TransferData> transfers;
+            if (!take_transfers(transfer_id, transfers)) return;
 
             if (!transfers.empty())
             {
@@ -263,6 +302,12 @@ namespace jsb
                 data = Worker::web_restore_transfer_markers(isolate, context, data, transfers);
             }
 
+            v8::Local<v8::Value> callback;
+            if (!context_obj->Get(context, jsb_name(env_, onmessage)).ToLocal(&callback) || !callback->IsFunction())
+            {
+                return;
+            }
+
             const impl::TryCatch try_catch(isolate);
             v8::Local<v8::Value> argv[] = { data };
             const v8::MaybeLocal<v8::Value> rval = callback.As<v8::Function>()->Call(context, context_obj, 1, argv);
@@ -275,6 +320,17 @@ namespace jsb
 
         bool _web_tick()
         {
+            // _run returns normally after scheduling this loop, so the Godot
+            // Thread wrapper has balanced its initial thread_enter/exit and
+            // released all C++ startup ownership. Re-enter for async callbacks.
+            if (!web_callbacks_entered_)
+            {
+                ScriptServer::thread_enter();
+                Worker::lock_.lock();
+                Worker::workers_.insert(Thread::get_caller_id(), id_);
+                Worker::lock_.unlock();
+                web_callbacks_entered_ = true;
+            }
             const std::shared_ptr<Environment> env = env_;
             if (!env)
             {
@@ -305,6 +361,11 @@ namespace jsb
             if (!impl || !impl->_web_tick())
             {
                 emscripten_cancel_main_loop();
+                if (impl)
+                {
+                    ScriptServer::thread_exit();
+                    impl->completed_.set();
+                }
             }
         }
 #else
@@ -385,6 +446,7 @@ namespace jsb
 
 #if JSB_WITH_WEB
             impl->pthread_id_ = pthread_self();
+            Worker::web_configure_script_thread(impl->owner_pthread_id_);
 #else
             const OS* os = OS::get_singleton();
             uint64_t last_ticks = os->get_ticks_msec();
@@ -451,7 +513,7 @@ namespace jsb
                     .Check();
                 }
 
-                if (env->load(impl->path_) == OK)
+                if (env->load(impl->path_) == OK && !impl->interrupt_requested_.is_set())
                 {
                     // notify master
                     impl->_on_ready();
@@ -465,7 +527,12 @@ namespace jsb
                     {
                         impl->web_last_ticks_ = 0;
                     }
-                    emscripten_set_main_loop_arg(&WorkerImpl::_web_loop_tick, impl, 0, true);
+                    // simulate_infinite_loop=true throws a JS unwind through
+                    // live C++ shared_ptr/Global and std::thread startup frames.
+                    // Return normally so their destructors run; Emscripten's
+                    // loop keepalive retains the pthread until cancellation.
+                    emscripten_set_main_loop_arg(&WorkerImpl::_web_loop_tick, impl, 0, false);
+                    impl->web_loop_started_ = true;
 #else
                     while (!impl->interrupt_requested_.is_set())
                     {
@@ -476,8 +543,16 @@ namespace jsb
 #endif
                 }
 
+#if JSB_WITH_WEB
+                context_obj_handle.Reset();
+                if (!impl->web_loop_started_) impl->_shutdown_environment(nullptr);
+#else
                 impl->_shutdown_environment(&context_obj_handle);
+#endif
             }
+#if JSB_WITH_WEB
+            if (!impl->web_loop_started_) impl->completed_.set();
+#endif
             // impl->finished_.post();
             JSB_WORKER_LOG(VeryVerbose, "thread.run exited %d", impl->id_);
         }
@@ -509,12 +584,18 @@ namespace jsb
 
         void finish()
         {
+#if JSB_WITH_WEB
+            // Owner termination also cancels messages from a worker that has
+            // already self-closed. Set this before the interrupt fast path.
+            terminated_by_owner_.set();
+#endif
             if (interrupt_requested_.is_set())
             {
                 return;
             }
 
             interrupt_requested_.set();
+#if !JSB_WITH_WEB
             if (const std::shared_ptr<Environment> env = env_)
             {
                 v8::Isolate* isolate = env->get_isolate();
@@ -525,6 +606,7 @@ namespace jsb
                 }
                 isolate->TerminateExecution();
             }
+#endif
         }
 
     private:
@@ -623,14 +705,17 @@ namespace jsb
             }
 
             const uintptr_t env_token = reinterpret_cast<uintptr_t>(env_.get());
+            queue_transfers(0, {}, true);
             const int message_result = jsbi_PostMessage(
                 sender_pthread_id,
                 static_cast<jsb::impl::JSRuntime>(env_token),
                 jsb::impl::StackBase::Undefined,
                 0,
-                jsb::impl::StackBase::Undefined);
+                jsb::impl::StackBase::Undefined,
+                true);
             if (message_result == kPostMessageFailed)
             {
+                discard_transfers(0);
                 jsb_throw(isolate, "ready: native web postMessage failed");
             }
 #else
@@ -652,7 +737,12 @@ namespace jsb
             v8::HandleScope handle_scope(isolate);
             v8::Isolate::Scope isolate_scope(isolate);
             const WorkerID worker_id = (WorkerID) info.Data().As<v8::Uint32>()->Value();
+#if JSB_WITH_WEB
+            WorkerImplPtr worker;
+            if (Worker::try_get_worker(worker_id, worker)) worker->close_from_worker();
+#else
             Worker::terminate(worker_id);
+#endif
         }
 
         // worker -> master (run in worker env)
@@ -758,7 +848,8 @@ namespace jsb
                 static_cast<jsb::impl::JSRuntime>(env_token),
                 data_sp,
                 transfer_id,
-                transfer_sp);
+                transfer_sp,
+                true);
 
             if (message_result == kPostMessageFailed)
             {
@@ -859,16 +950,72 @@ namespace jsb
         return id;
     }
 
+#if JSB_WITH_WEB
+    void Worker::reap_finished(Environment* p_owner)
+    {
+        std::vector<Pair<WorkerID, WorkerImplPtr>> completed;
+        lock_.lock();
+        for (WorkerID id = worker_list_.get_first_index(); id; id = worker_list_.get_next_index(id))
+        {
+            WorkerImplPtr impl;
+            if (worker_list_.try_get_value(id, impl) && impl->get_token() == p_owner && impl->can_reap())
+                completed.emplace_back(id, impl);
+        }
+        lock_.unlock();
+        for (const auto& item : completed)
+        {
+            item.second->join();
+            lock_.lock();
+            WorkerImplPtr current;
+            if (worker_list_.try_get_value(item.first, current) && current == item.second)
+                worker_list_.remove_at(item.first);
+            lock_.unlock();
+        }
+    }
+
+    void Worker::finish_owned(Environment* p_owner)
+    {
+        std::vector<Pair<WorkerID, WorkerImplPtr>> owned;
+        lock_.lock();
+        for (WorkerID id = worker_list_.get_first_index(); id; id = worker_list_.get_next_index(id))
+        {
+            WorkerImplPtr impl;
+            if (worker_list_.try_get_value(id, impl) && impl->get_token() == p_owner)
+                owned.emplace_back(id, impl);
+        }
+        lock_.unlock();
+        // No registry/ObjectDB/language mutex may be held while joining. Each
+        // child disposes its own environment (and children) on its own thread.
+        // A wedged user script cannot cooperate; the page's session deadline
+        // then forces teardown, rather than pretending this was a clean exit.
+        for (const auto& item : owned) item.second->finish();
+        for (const auto& item : owned)
+        {
+            item.second->join();
+            lock_.lock();
+            WorkerImplPtr current;
+            if (worker_list_.try_get_value(item.first, current) && current == item.second)
+                worker_list_.remove_at(item.first);
+            lock_.unlock();
+        }
+    }
+#endif
+
     bool Worker::is_valid(WorkerID p_id)
     {
         lock_.lock();
+#if JSB_WITH_WEB
+        WorkerImplPtr worker;
+        const bool valid = worker_list_.try_get_value(p_id, worker) && !worker->is_finish_requested();
+#else
         const bool valid = worker_list_.is_valid_index(p_id);
+#endif
         lock_.unlock();
         return valid;
     }
 
 #if JSB_WITH_WEB
-    void Worker::on_web_message(jsb::impl::StackPosition p_data_sp, uint32_t p_transfer_id)
+    void Worker::on_web_message(uintptr_t p_sender_pthread_id, jsb::impl::StackPosition p_data_sp, uint32_t p_transfer_id)
     {
         const Thread::ID thread_id = Thread::get_caller_id();
         lock_.lock();
@@ -886,6 +1033,7 @@ namespace jsb
             return;
         }
         lock_.unlock();
+        if (impl->get_owner_pthread_id() != p_sender_pthread_id) return;
         impl->on_web_message(p_data_sp, p_transfer_id);
     }
 
@@ -898,11 +1046,16 @@ namespace jsb
             return;
         }
 
-        const std::shared_ptr<Environment> master = Environment::_access(worker->get_token());
-
-        if (!master)
+        if (worker->is_terminated_by_owner())
         {
             worker->discard_transfers(p_transfer_id);
+            return;
+        }
+        const std::shared_ptr<Environment> master = Environment::_access(worker->get_token());
+
+        if (!master || !master->is_caller_thread()
+            || worker->get_owner_pthread_id() != (emscripten_is_main_runtime_thread() ? 0 : static_cast<uintptr_t>(pthread_self())))
+        {
             return;
         }
 
@@ -921,14 +1074,7 @@ namespace jsb
 
         if (p_transfer_id == 0)
         {
-            const uintptr_t env_token = reinterpret_cast<uintptr_t>(master.get());
-            const impl::StackPosition worker_owner_sp = static_cast<impl::StackPosition>(worker_obj);
-            if (!jsbi_RegisterWorkerOwner(p_sender_pthread_id, static_cast<jsb::impl::JSRuntime>(env_token), worker_owner_sp))
-            {
-                JSB_WORKER_LOG(Error, "failed to register worker owner for pthread %s", String::num_uint64(p_sender_pthread_id));
-                return;
-            }
-
+            if (!worker->discard_transfers(0)) return;
             v8::Local<v8::Value> callback;
             if (!worker_obj->Get(context, jsb_name(master.get(), onready)).ToLocal(&callback) || !callback->IsFunction())
             {
@@ -946,15 +1092,9 @@ namespace jsb
             return;
         }
 
-        v8::Local<v8::Value> callback;
-        if (!worker_obj->Get(context, jsb_name(master.get(), onmessage)).ToLocal(&callback) || !callback->IsFunction())
-        {
-            worker->discard_transfers(p_transfer_id);
-            return;
-        }
-
         v8::Local<v8::Value> data = v8::Local<v8::Value>(v8::Data(isolate, p_data_sp));
-        std::vector<TransferData> transfers = worker->take_transfers(p_transfer_id);
+        std::vector<TransferData> transfers;
+        if (!worker->take_transfers(p_transfer_id, transfers)) return;
 
         if (!transfers.empty())
         {
@@ -972,6 +1112,12 @@ namespace jsb
             }
 
             data = Worker::web_restore_transfer_markers(isolate, context, data, transfers);
+        }
+
+        v8::Local<v8::Value> callback;
+        if (!worker_obj->Get(context, jsb_name(master.get(), onmessage)).ToLocal(&callback) || !callback->IsFunction())
+        {
+            return;
         }
 
         const impl::TryCatch try_catch(isolate);
@@ -995,7 +1141,7 @@ namespace jsb
             return false;
         }
 
-        return worker->queue_transfers(p_transfer_id, std::move(p_transfers));
+        return worker->queue_transfers(p_transfer_id, std::move(p_transfers), true);
     }
 
     bool Worker::web_discard_transfers(uintptr_t p_pthread_id, uint32_t p_transfer_id)
@@ -1010,7 +1156,7 @@ namespace jsb
         return worker->discard_transfers(p_transfer_id);
     }
 
-    bool Worker::web_get_or_add_transfer(uintptr_t p_pthread_id, uint32_t p_transfer_id, const Variant& p_variant, uint32_t& r_transfer_index, WebNativeTransferError& r_error)
+    bool Worker::web_get_or_add_transfer(uintptr_t p_pthread_id, uintptr_t p_environment_token, uint32_t p_transfer_id, const Variant& p_variant, uint32_t& r_transfer_index, WebNativeTransferError& r_error)
     {
         r_error = WebNativeTransferError::None;
         WorkerImplPtr worker;
@@ -1021,6 +1167,11 @@ namespace jsb
             return false;
         }
 
+        if (!worker->owns_environment(p_environment_token))
+        {
+            r_error = WebNativeTransferError::OwnerMismatch;
+            return false;
+        }
         return worker->get_or_add_transfer(p_transfer_id, p_variant, r_transfer_index, r_error);
     }
 
@@ -1135,9 +1286,10 @@ namespace jsb
     void Worker::finalizer(Environment*, void* pointer, FinalizationType /* p_finalize */)
     {
         Worker* self = (Worker*) pointer;
-        if (Worker::is_valid(self->id_))
+        WorkerImplPtr impl;
+        if (Worker::try_get_worker(self->id_, impl))
         {
-            JSB_WORKER_LOG(Debug, "worker is not explicitly terminated before garbage collected");
+            if (!impl->is_finish_requested()) JSB_WORKER_LOG(Debug, "worker is not explicitly terminated before garbage collected");
             Worker::terminate(self->id_);
         }
         JSB_WORKER_LOG(VeryVerbose, "deleting Worker %d", self->id_);
@@ -1255,7 +1407,8 @@ namespace jsb
             static_cast<jsb::impl::JSRuntime>(env_token),
             data_sp,
             transfer_id,
-            transfer_sp);
+            transfer_sp,
+            false);
 
         if (message_result == kPostMessageFailed)
         {
@@ -1309,10 +1462,12 @@ namespace jsb
             jsb_throw(isolate, "bad this");
             return;
         }
-        const Worker* worker = static_cast<const Worker*>(Environment::wrap(isolate)->get_verified_object(self, NativeClassType::Worker));
-        if (!worker || !Worker::terminate(worker->id_))
+        Worker* worker = static_cast<Worker*>(Environment::wrap(isolate)->get_verified_object(self, NativeClassType::Worker));
+        if (!worker) return;
+        if (worker->id_)
         {
-            JSB_WORKER_LOG(Warning, "can not terminate a dead worker");
+            Worker::terminate(worker->id_);
+            worker->id_ = {};
         }
     }
 
