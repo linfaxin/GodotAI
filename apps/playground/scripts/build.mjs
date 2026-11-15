@@ -17,8 +17,12 @@ import {describeResourceTool} from './prepare-assets.mjs';
 import {invalidateSiteDelivery} from './site-delivery-state.mjs';
 import {executionFromReport,legacyExecution} from '../../../scripts/release/execution-contract.mjs';
 import {productOutputPath,productExportPreset,exportedExecution} from './product-execution.mjs';
+import {describeWorkerCandidate,assertWorkerBuildProof} from './worker-candidate.mjs';
+import {WORKER_RUNTIME_ABI} from '../../../scripts/release/engine-profiles.mjs';
+import {proveWorkerSdkBuild,assertWorkerSdkBuildFrozen} from './worker-sdk-proof.mjs';
 
 const argument=name=>{const index=process.argv.indexOf(name);if(index<0)return undefined;const value=process.argv[index+1];if(!value||value.startsWith('--'))throw Error('Missing '+name+' value');return value;};
+if(process.argv.includes('--legacy-execution'))throw Error('E_EXECUTION_BACKEND_RETIRED: legacy execution has been removed; ordinary builds use Worker');
 const app=path.resolve(path.dirname(fileURLToPath(import.meta.url)),".."),repo=path.resolve(app,"../.."),seedProject=path.join(app,"project");
 const sdk=path.join(repo,"scripts/jsb.react"),host=process.env.GODOT??path.join(repo,"tests/bin/godot-host-qjs");
 const requestedJobs=argument('--jobs')??process.env.JOBS;
@@ -26,6 +30,7 @@ const inputs=await resolvePlaygroundEngine({repository:repo,profile:argument('--
 const {profile:runtimeProfile,target,lto,moduleMode,executionModel}=inputs.configuration;
 const {reportPath:engineReportPath,report:engineReport,reportSha256:engineReportSha256,template,templateHash}=inputs;
 const execution=engineReport?.execution||engineReport?.status==='built'?executionFromReport(engineReport,{requireWorkerAssets:executionModel!=='window'}):legacyExecution();
+if(executionModel==='window')assertWorkerBuildProof(engineReport);
 if(execution.executionModel!==executionModel)throw Error('E_PLAYGROUND_EXECUTION: Requested model has no matching build evidence');
 const dist=productOutputPath({app,runtimeProfile,target,lto,moduleMode,executionModel,artifactDirectory:inputs.defaults.artifactDirectory,explicitOutput:argument('--out')});
 if(dist===repo||dist===app||dist===seedProject||repo.startsWith(dist+path.sep))throw Error('Output must be a dedicated site directory');
@@ -43,6 +48,7 @@ await fs.mkdir(dist,{recursive:true});await fs.mkdir(path.join(project,".godot/G
 await invalidateSiteDelivery(dist);
 await fs.rm(path.join(dist,'engine-release.json'),{force:true});
 if(!process.argv.includes("--skip-sdk-build")){console.log("Building React SDK");console.log(run(process.execPath,["build.mjs"],sdk));console.log(run('pnpm',['--filter','@godot-js/react-build','build'],repo));console.log(run('pnpm',['--filter','@godot-js/react-browser','build'],repo));}
+const sdkBuild=await proveWorkerSdkBuild(repo);
 if(!process.argv.includes("--skip-assets"))await prepareAssets({runtimeProfile,project,workDirectory:path.join(workspace,'asset-project'),importer:process.env.GODOT_IMPORTER??host});
 const publicCatalog=await Promise.all(profileCatalog(catalog,runtimeProfile).map(async demo=>({...demo,runtime:'react',source:await fs.readFile(path.join(app,'src/demos',demo.file),'utf8')})));
 await write('catalog.json',JSON.stringify(publicCatalog));
@@ -56,7 +62,7 @@ await verifyTemplate();
 await fs.cp(path.join(app,"web"),dist,{recursive:true});
 // Build the exact browser host before calculating engineId. This bundle has no
 // manifest/engine identity input; the later HTML supplies its SRI independently.
-const previewHost=await buildPreviewHost(dist);
+const previewHost=await buildPreviewHost(dist,{executionModel});
 let fullRelease;
 {
  console.log('Capturing API from the production Web engine');
@@ -69,7 +75,7 @@ let fullRelease;
  const describe=async name=>describeAsset(name,await fs.readFile(path.join(dist,name)));
  const engine={javascript:await describe('engine/game.js'),wasm:await describe('engine/game.wasm'),worklets:await Promise.all(['engine/game.audio.worklet.js','engine/game.audio.position.worklet.js'].map(describe)),host:previewHost,execution:productExecution,workerAssets:productExecution.workerAssets};
  const [vendor,developmentVendor]=await Promise.all([buildEngineVendor(),buildEngineVendor({mode:'development'})]);
- const release=assembleFullEngineRelease({...api,namingProfiles,engine,runtimeProfile,sdkVersion:JSON.parse(await fs.readFile(path.join(sdk,'package.json'),'utf8')).version,vendor,developmentVendor,build:{actualAPIHash:api.actualAPIHash,engineTemplateSha256:templateHash,sourceCertified:inputs.sourceCertified,provenance:inputs.sourceCertified?'exact-template-and-native-api-capture':'uncertified-local-development',...(engineReport?{engineReportSha256,engineSource:engineReport.source,godotSource:engineReport.godotSource,recipeSha256:engineReport.recipeSha256}:{} )}});
+ const release=assembleFullEngineRelease({...api,namingProfiles,engine,runtimeProfile,...(executionModel==='window'?{runtimeAbi:WORKER_RUNTIME_ABI,engineBuildReport:engineReport}:{}),sdkVersion:JSON.parse(await fs.readFile(path.join(sdk,'package.json'),'utf8')).version,vendor,developmentVendor,build:{actualAPIHash:api.actualAPIHash,engineTemplateSha256:templateHash,sourceCertified:inputs.sourceCertified,sdkBuild,provenance:inputs.sourceCertified?'exact-template-and-native-api-capture':'uncertified-local-development',...(engineReport?{engineReportSha256,engineSource:engineReport.source,godotSource:engineReport.godotSource,recipeSha256:engineReport.recipeSha256}:{} )}});
  await writeFullEngineOutputs(dist,release.outputs);fullRelease=release.manifest;
  await fs.rm(path.join(dist,'api/capture'),{recursive:true,force:true});
 }
@@ -81,7 +87,7 @@ for(const source of JSON.parse(await fs.readFile(path.join(app,"third-party/sour
 await fs.mkdir(path.join(dist,'resource-inputs/generated'),{recursive:true});
 await fs.copyFile(path.join(project,'generated/assets.js'),path.join(dist,'resource-inputs/generated/assets.js'));
 await buildDemoRuntime(dist,{project:path.join(dist,'resource-inputs'),runtimeProfile});
-await buildFrontend(dist,undefined,{runtimeProfile,previewHost});
+await buildFrontend(dist,undefined,{runtimeProfile,previewHost,executionModel});
 await write('shell-profile.json',JSON.stringify({schemaVersion:2,runtimeProfile,executionModel,shellOnly:false}));
 const resourceInputs=JSON.parse(await fs.readFile(path.join(project,'generated/resource-inputs.json'),'utf8'));
 const resourceReport={...resourceInputs,conversionImporter:runtimeProfile==='engine-2d-v1'?null:resourceInputs.importer,importer:exporter,exporter,template:{sha256:templateHash,target},engineReleaseId:fullRelease.id,generatedManifest:{path:'resource-inputs/generated/assets.js',sha256:sha(await fs.readFile(path.join(dist,'resource-inputs/generated/assets.js')))},output:{path:'engine/game.pck',bytes:(await fs.stat(path.join(dist,'engine/game.pck'))).size,sha256:sha(await fs.readFile(path.join(dist,'engine/game.pck')))},demoPack:{path:'demo-resources.pck',sha256:sha(await fs.readFile(path.join(dist,'demo-resources.pck')))}};
@@ -89,7 +95,9 @@ await write('resource-build.json',JSON.stringify(resourceReport,null,2)+'\n');
 await fs.mkdir(path.join(dist,'assets'),{recursive:true});
 for(const name of ['LICENSE','ThirdPartyNotices.txt'])await fs.copyFile(path.join(app,'node_modules/monaco-editor',name),path.join(dist,'assets','monaco-'+name+(name.endsWith('.txt')?'':'.txt')));
 const payloads=await collectManifestPayloads(dist);
+await assertWorkerSdkBuildFrozen(repo,sdkBuild);
 await verifyTemplate();
 if(sha(await fs.readFile(exporter.path))!==exporter.sha256)throw Error('Resource exporter changed during the build');
-await write('manifest.json',JSON.stringify({schemaVersion:2,runtimeProfile,executionModel,engineTarget:target,publicAssets:process.argv.includes('--public-assets'),resourceBuild:'resource-build.json',engineRelease:'engine-release.json',engineReleaseId:fullRelease.id,engineId:fullRelease.engineId,extensionId:fullRelease.extensionId,engineTemplateSha256:templateHash,payloads},null,2));
+const runtime=executionModel==='window'?await describeWorkerCandidate(dist,fullRelease):undefined;
+await write('manifest.json',JSON.stringify({schemaVersion:runtime?3:2,...(runtime?{runtime}:{}),runtimeProfile,executionModel,engineTarget:target,publicAssets:process.argv.includes('--public-assets'),resourceBuild:'resource-build.json',engineRelease:'engine-release.json',engineReleaseId:fullRelease.id,engineId:fullRelease.engineId,extensionId:fullRelease.extensionId,engineTemplateSha256:templateHash,payloads},null,2));
 console.log(`Playground built: ${dist}`);

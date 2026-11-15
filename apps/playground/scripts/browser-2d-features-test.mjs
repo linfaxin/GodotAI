@@ -6,8 +6,13 @@ import {gunzipSync} from 'node:zlib';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {packProject} from '@godot-js/react-browser/pck';
-import {launchTestBrowser, withAcceptanceContext} from './browser-harness.mjs';
+import {launchTestBrowser, withAcceptanceContext,isBrowserConsoleWarning} from './browser-harness.mjs';
 import {assessStoppedAudio} from './feature-audio-evidence.mjs';
+import {createStaticServer} from './serve.mjs';
+import {runtimeTestContext} from './runtime-test-context.mjs';
+import {siteIdentity} from './site-evidence.mjs';
+import {assertWorkerCandidate} from './worker-candidate.mjs';
+import {observedWorkerSessions,installPassiveRecorder} from './browser-harness.mjs';
 
 const repo = fileURLToPath(new URL('../../../', import.meta.url));
 const marker = 'GODOTJS_2D_FEATURES';
@@ -20,11 +25,20 @@ export function validateFeatureNamings(namings) {
  return namings;
 }
 
+export function featureExecutionMode(site,release){
+ if(site?.schemaVersion===3||site?.runtime?.executionBackend==='worker'||release?.runtimeAbi){
+  if(site?.schemaVersion!==3||site.runtime?.executionBackend!=='worker'||!release?.runtimeAbi)throw Error('E_FEATURE_WORKER_CANDIDATE');
+  return 'worker';
+ }
+ return 'legacy';
+}
+
 export function observeFeaturePage(page){
- const observed={logs:[],errors:[],consoleErrors:[]};
+ const observed={logs:[],errors:[],consoleErrors:[],warnings:[]};
  page.on('console',event=>{
   const message=event.text();observed.logs.push(message);
   if(event.type()==='error')observed.consoleErrors.push(message);
+  if(isBrowserConsoleWarning(event.type(),message))observed.warnings.push(message);
  });
  page.on('pageerror',error=>observed.errors.push(String(error)));
  return observed;
@@ -76,6 +90,14 @@ function observeAudio() {
  const records = [], Native = globalThis.AudioContext ?? globalThis.webkitAudioContext;
  globalThis.__featureAudio = records;
  globalThis.__featureAudioPhase = 'initial'; globalThis.__featureAudioPhaseAt = performance.now();
+ globalThis.__featureReadAudio = () => records.map(record => ({state: record.context.state, closed: record.closed, closeCalls: record.closeCalls, worklets: record.worklets,
+  meters: record.meters.map(({timer, ...meter}) => meter)}));
+ // Only the synthetic editor's test observer sends this. The production host
+ // and its candidate script bytes are served unchanged on their own origin.
+ addEventListener('message',event=>{
+  if(event.source!==parent||event.data?.type!=='2d-feature-audio-phase'||!['stopped','restarted'].includes(event.data.phase))return;
+  globalThis.__featureAudioPhase=event.data.phase;globalThis.__featureAudioPhaseAt=performance.now();
+ });
  if (!Native) return;
  globalThis.AudioContext = new Proxy(Native, {construct(target, args, newTarget) {
   const context = Reflect.construct(target, args, newTarget);
@@ -86,6 +108,10 @@ function observeAudio() {
   context.close = async (...input) => {
    record.closeCalls++; for (const meter of record.meters) clearInterval(meter.timer);
    await close(...input); record.closed = context.state === 'closed';
+   if(globalThis.__recordFeatureAudio){
+    const current=globalThis.__playgroundRuntimeSession,session=typeof current==='function'?current():current;
+    await globalThis.__recordFeatureAudio({documentId:session?.documentId,audio:globalThis.__featureReadAudio()});
+   }
   };
   return context;
  }});
@@ -111,15 +137,152 @@ function observeAudio() {
  }});
 }
 
+const workerFeatureEditorSource=`
+import {WorkerPreviewRunner} from './scripts/jsb.react-browser/dist/worker-runner.js';
+globalThis.__startWorkerFeatureFixture=async({release,manifest,previewUrl,presentationBackend,timeout})=>{
+ const state=globalThis.__features={events:[],warnings:[],exitCode:null,exit:null,identity:null,state:'idle'};
+ const runner=new WorkerPreviewRunner({container:document.getElementById('feature-host'),previewUrl,
+  release,configuration:{presentationBackend},deadlines:{downloading:timeout,initializing:timeout,starting:timeout}});
+ state.runner=runner;
+ runner.subscribe(event=>{
+  if(event.type==='state'){state.state=event.state;state.identity={runId:event.runId,documentId:event.documentId,workerId:event.workerId,runConfigurationHash:event.runConfigurationHash};}
+  if(event.type==='log'){
+   state.events.push((event.level==='error'?'ERROR ':'')+event.text);
+   if(event.level==='warn')state.warnings.push(event.text);
+   if(event.text.includes('GODOTJS_2D_FEATURES_AUDIO_STOPPED')||event.text.includes('GODOTJS_2D_FEATURES_AUDIO_RESTARTED')){
+    const phase=event.text.includes('_AUDIO_STOPPED')?'stopped':'restarted';
+    document.querySelector('iframe')?.contentWindow.postMessage({type:'2d-feature-audio-phase',phase},new URL(release.engineJs.url).origin);
+   }
+  }
+  if(event.type==='exit'){state.exit=event.report;state.exitCode=event.report.engineOutcome?.kind==='native-exit'?event.report.engineOutcome.code:-1;}
+ });
+ const pack=new Uint8Array(await(await fetch('/fixture.pck')).arrayBuffer());
+ const digest=await crypto.subtle.digest('SHA-256',pack.slice().buffer),buildKey=Array.from(new Uint8Array(digest),value=>value.toString(16).padStart(2,'0')).join('');
+ const generation=crypto.randomUUID();
+ return runner.run({pack,revision:1,buildKey,generation,manifest:{...manifest,generation}});
+};
+`;
+
+/** The synthetic editor is test code. Every SDK input must be a byte declared
+ * by the candidate's frozen SDK proof; the official preview is never replaced. */
+export async function buildWorkerFeatureHarness(release){
+ const proof=release?.build?.sdkBuild;if(!proof)throw Error('E_FEATURE_WORKER_SDK_PROOF');
+ const {assertWorkerSdkBuildFrozen}=await import('./worker-sdk-proof.mjs');await assertWorkerSdkBuildFrozen(repo,proof);
+ const {build}=await import('esbuild');
+ const bundle=await build({absWorkingDir:repo,stdin:{contents:workerFeatureEditorSource,resolveDir:repo,sourcefile:'2d-feature-editor.mjs'},bundle:true,write:false,metafile:true,format:'iife',platform:'browser',target:'es2022'});
+ const sourceAssets=[];
+ for(const name of Object.keys(bundle.metafile.inputs)){
+  if(name==='2d-feature-editor.mjs')continue;
+  const filename=path.resolve(repo,name),relative=path.relative(repo,filename).split(path.sep).join('/'),bytes=await readFile(filename),declared=proof.outputs?.[relative];
+  if(!declared||declared.sha256!==hash(bytes)||declared.bytes!==bytes.length)throw Error('E_FEATURE_WORKER_HARNESS_INPUT: '+relative);
+  sourceAssets.push({path:relative,sha256:hash(bytes),bytes:bytes.length});
+ }
+ if(!sourceAssets.some(asset=>asset.path.endsWith('/dist/worker-runner.js')))throw Error('E_FEATURE_WORKER_HARNESS_RUNNER');
+ const bytes=bundle.outputFiles[0].contents;
+ return {bytes,identity:{kind:'synthetic-editor-official-preview',sha256:hash(bytes),sourceSha256:hash(workerFeatureEditorSource),sdkSourceSnapshotHash:proof.sourceSnapshotHash,sdkOutputSnapshotHash:proof.outputSnapshotHash,sourceAssets}};
+}
+
+export function assertFeatureWorkerSession(session,identity,packSha256){
+ assert(session,'A real Worker session must be observed');
+ for(const key of ['runId','documentId','workerId','runConfigurationHash']){assert.equal(typeof session[key],'string');assert(session[key].length>0);assert.equal(session[key],identity[key],'Actual host session identity: '+key);}
+ assert.match(session.runConfigurationHash,/^[a-f0-9]{64}$/);
+ assert.equal(session.buildKey,packSha256,'Worker must receive the exact fixture PCK');
+ assert.equal(session.executionBackend,'worker');assert.equal(session.runtime,'godot');assert.equal(session.workerState,'native-exited');
+ assert.equal(session.exit?.reason,'clean-exit');assert.equal(session.exit?.engineOutcome?.kind,'native-exit');assert.equal(session.exit.engineOutcome.code,0);assert.equal(session.exit.hostCleanup.status,'complete');
+ assert.deepEqual(session.workerErrors,[]);assert.deepEqual(session.glErrors,[]);
+ assert.equal(session.audio?.closed,true);assert.equal(session.audio.contextsCreated,1);assert.equal(session.audio.contextsClosed,1);assert.equal(session.audio.liveNodes,0);assert.equal(session.audio.transferredChunksOwned,0);
+}
+
+function assertWorkerFeatureObservation(entry,observed){
+ Object.assign(entry,observed);
+ const line=observed.events.find(value=>value.includes(marker+' '));entry.result=line?JSON.parse(line.slice(line.indexOf(marker+' ')+marker.length+1)):undefined;
+ assert.equal(observed.exitCode,0,JSON.stringify(entry));assert.equal(entry.result?.status,'passed',JSON.stringify(entry));assert.deepEqual(entry.errors,[]);assert.deepEqual(entry.consoleErrors,[]);assert.deepEqual(entry.warnings,[],'Worker feature acceptance rejects every browser and native warning');
+ entry.nativeErrors=observed.events.filter(value=>/^ERROR (?:ERROR|SCRIPT ERROR):/.test(value));assert.deepEqual(entry.nativeErrors,[]);
+ entry.lifecycleWarnings=observed.events.filter(value=>/WARNING:.*(?:leaked|orphan)|Pages in use exist/.test(value));assert.deepEqual(entry.lifecycleWarnings,[]);
+ assert(observed.audio.length>0,'A real AudioContext must be observed on the preview host');
+ assert(observed.audio.every(record=>record.closed&&record.closeCalls===1&&record.worklets.length>=1),'Each Worker host must load its verified runtime worklet and close audio exactly once');
+ const meters=observed.audio.flatMap(record=>record.meters);
+ for(const meter of meters){meter.stoppedEvidence=assessStoppedAudio(meter.stoppedSamples);if(meter.stoppedEvidence.status==='passed')for(const key of ['drainMs','quietMs','quietSamples','stoppedPeak'])meter[key]=meter.stoppedEvidence[key];}
+ assert(meters.some(meter=>meter.initialPeak>0.001),'Initial real audio output must be nonzero after the browser gesture');
+ assert(meters.some(meter=>meter.restartedPeak>0.001),'Restarted real audio output must be nonzero');
+ assert(meters.length&&meters.every(meter=>meter.stoppedEvidence.status==='passed'),'Stopped playback must drain within 300 ms and remain silent for 500 ms: '+JSON.stringify(meters.map(meter=>meter.stoppedEvidence)));
+}
+
+async function runWorker2dFeatureAcceptance({directory,release,site,engine,font,out,reportFile,requireChinese,namings,sessions,timeout,browserName}){
+ for(const destination of [out,reportFile])if(destination===directory||destination.startsWith(directory+path.sep))throw Error('E_FEATURE_OUTPUT_INSIDE_CANDIDATE');
+ const candidate=await siteIdentity(directory);assertWorkerCandidate(site,release,candidate.payloads);
+ const harness=await buildWorkerFeatureHarness(release);await writeFile(path.join(out,'worker-feature-editor.js'),harness.bytes);
+ const presentationBackend=process.env.PLAYGROUND_PRESENTATION_BACKEND??'direct';if(!['direct','bitmap'].includes(presentationBackend))throw Error('E_TEST_PRESENTATION_BACKEND');
+ let pack;const staticEditor=createStaticServer(directory),preview=createStaticServer(directory);
+ const editor=createServer((request,response)=>{
+  const pathname=new URL(request.url,'http://localhost').pathname;
+  const route=pathname==='/__2d_feature_fixture.html'?{type:'text/html',bytes:'<!doctype html><link rel="icon" href="data:,"><style>html,body{margin:0;overflow:hidden}#feature-host{width:320px;height:240px}iframe{display:block;border:0;width:100%;height:100%}</style><div id="feature-host"></div><script src="/__2d_feature_editor.js"></script>'}
+   :pathname==='/__2d_feature_editor.js'?{type:'text/javascript',bytes:harness.bytes}:pathname==='/fixture.pck'?{type:'application/octet-stream',bytes:pack}:undefined;
+  if(route){response.writeHead(200,{'content-type':route.type,'cache-control':'no-store'}).end(route.bytes);return;}staticEditor.emit('request',request,response);
+ });
+ const listen=server=>new Promise((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve);});
+ const report={schemaVersion:3,suite:'2d-features',status:'running',testMode:'real-engine',executionBackend:'worker',harness:harness.identity,engine,
+  font:{path:font.filename,sha256:hash(font.bytes),bytes:font.bytes.length,cjkRequired:requireChinese},warnings:[],cases:[]};
+ let browser;
+ try{
+  await Promise.all([listen(editor),listen(preview)]);
+  const editorRoot=`http://127.0.0.1:${editor.address().port}/`,previewRoot=`http://127.0.0.1:${preview.address().port}/`,releaseContext=await runtimeTestContext(directory,editorRoot);
+  report.origins={editor:editorRoot,preview:previewRoot};
+  const resolve=asset=>({...asset,url:new URL(asset.path,previewRoot).href});
+  const verifiedRelease={releaseId:release.id,profile:release.runtimeProfile,releaseContext,engineJs:resolve(release.engine.javascript),engineWasm:resolve(release.engine.wasm),
+   worklets:(release.engine.worklets??[]).map(asset=>({...resolve(asset),name:asset.path.split('/').at(-1)})),runtimeAbi:release.runtimeAbi,
+   runtimeWorker:resolve({...site.runtime.assets[site.runtime.entry],path:site.runtime.entry}),runtimeAudioWorklet:resolve({...site.runtime.assets[site.runtime.audioWorklet],path:site.runtime.audioWorklet}),allowedOrigins:[new URL(previewRoot).origin]};
+  browser=await launchTestBrowser({browser:browserName,headless:true,args:['--no-sandbox','--enable-webgl','--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader','--disable-dev-shm-usage']});
+  report.browser={name:browser.browserType().name(),version:browser.version()};
+  for(const naming of namings)for(let session=1;session<=sessions;session++){
+   const fixture=await create2dFeatureFixture({naming,fontBytes:font.bytes,requireCjk:requireChinese});pack=packProject(fixture.files,{maxBytes:64*1024*1024}).pack;
+   const context=await browser.newContext({viewport:{width:320,height:240}}),audioRecords=[];
+   await installPassiveRecorder(context,'__recordFeatureAudio',(_source,value)=>{if(value?.audio?.length)audioRecords.push(value);});await context.addInitScript(observeAudio);
+   const page=await context.newPage(),{logs,errors,consoleErrors,warnings:browserWarnings}=observeFeaturePage(page);
+   const entry={naming,session,packSha256:hash(pack),sourceSha256:fixture.sourceSha256,resourceSha256:Object.fromEntries([...fixture.files].map(([name,bytes])=>[name,hash(bytes)])),screenshot:naming+'-'+session+'.png',errors,consoleErrors,logs};report.cases.push(entry);
+   await writeFile(path.join(out,naming+'-'+session+'.fixture.pck'),pack);
+   try{
+    await page.goto(editorRoot+'__2d_feature_fixture.html');
+    const manifest={runtime:'godot',engineProfile:release.runtimeProfile,engineReleaseId:release.id,releaseContext};
+    await page.evaluate(options=>globalThis.__startWorkerFeatureFixture(options),{release:verifiedRelease,manifest,previewUrl:new URL('preview.html',previewRoot).href,presentationBackend,timeout});
+    await page.waitForFunction(()=>globalThis.__features.events.some(value=>value.includes('GODOTJS_2D_FEATURES_READY'))||globalThis.__features.exitCode!==null,null,{timeout});
+    if(await page.evaluate(()=>globalThis.__features.exitCode===null)){
+     await page.frameLocator('#feature-host iframe').locator('canvas').click({position:{x:245,y:185}});
+     await page.waitForFunction(()=>globalThis.__features.events.some(value=>value.includes('GODOTJS_2D_FEATURES_RENDERED'))||globalThis.__features.exitCode!==null,null,{timeout});
+     if(await page.evaluate(()=>globalThis.__features.exitCode===null))await page.screenshot({path:path.join(out,entry.screenshot)});
+    }
+    await page.waitForFunction(()=>globalThis.__features.exitCode!==null,null,{timeout});
+    const observed=await page.evaluate(()=>({events:globalThis.__features.events,runnerWarnings:globalThis.__features.warnings,exitCode:globalThis.__features.exitCode,exit:globalThis.__features.exit,identity:globalThis.__features.identity}));
+    const deadline=Date.now()+5000;let actual;
+    while(!(actual=observedWorkerSessions(browser).find(value=>value.runId===observed.identity.runId&&value.exit))&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,10));
+    entry.session=actual;assertFeatureWorkerSession(actual,observed.identity,entry.packSha256);
+    entry.warnings=[...browserWarnings,...observed.runnerWarnings,...observed.events.filter(value=>/(?:^|\n)\s*(?:ERROR\s+)?(?:WARNING:|\[WARN\])/.test(value))];
+    report.warnings.push(...entry.warnings.map(message=>({naming,session,message})));
+    observed.audio=audioRecords.findLast(value=>value.documentId===actual.documentId)?.audio??[];
+    assertWorkerFeatureObservation(entry,observed);entry.status='passed';
+   }catch(error){entry.status='failed';entry.error=String(error.stack??error);entry.state=await page.evaluate(()=>({events:globalThis.__features?.events,exit:globalThis.__features?.exit,state:globalThis.__features?.state})).catch(()=>undefined);throw error;}
+   finally{await context.close();await writeFile(reportFile,JSON.stringify(report,null,2)+'\n');}
+  }
+  assert.deepEqual(await siteIdentity(directory),candidate,'Candidate bytes changed during feature acceptance');
+  report.status='passed';Object.assign(report,await withAcceptanceContext(report,{directory,browser,testMode:'real-engine'}));
+ }catch(error){report.status='failed';report.error=String(error.stack??error);throw error;}
+ finally{await browser?.close();await Promise.all([editor,preview].map(server=>new Promise(resolve=>server.close(resolve))));await writeFile(reportFile,JSON.stringify(report,null,2)+'\n');}
+ return report;
+}
+
 export async function run2dFeatureAcceptance({directory, engineJs, engineWasm, out, reportFile, browser: browserName = 'chromium', font: fontPath, requireCjk, namings = ['snake', 'camel'], sessions = 2, timeout = 120000} = {}) {
  validateFeatureNamings(namings);
  if (!Number.isInteger(sessions) || sessions < 1 || sessions > 10) throw Error('E_FEATURE_SESSIONS');
  directory = directory ? path.resolve(directory) : undefined;
  const release = directory ? JSON.parse(await readFile(path.join(directory, 'engine-release.json'), 'utf8')) : undefined;
+ let site;if(directory)try{site=JSON.parse(await readFile(path.join(directory,'manifest.json'),'utf8'));}catch(error){if(error.code!=='ENOENT')throw error;}
+ const executionMode=featureExecutionMode(site,release);
  engineJs = path.resolve(engineJs ?? (release ? path.join(directory, release.engine.javascript.path) : path.join(repo, 'apps/playground/dist/engine/game.js')));
  engineWasm = path.resolve(engineWasm ?? (release ? path.join(directory, release.engine.wasm.path) : engineJs.replace(/\.js$/, '.wasm')));
- out = path.resolve(out ?? (reportFile ? path.dirname(reportFile) : path.join(repo, 'work/2d-engine/features'))); await mkdir(out, {recursive: true});
- reportFile = path.resolve(reportFile ?? path.join(out, 'features.json')); await mkdir(path.dirname(reportFile), {recursive: true});
+ out = path.resolve(out ?? (reportFile ? path.dirname(reportFile) : path.join(repo, 'work/2d-engine/features')));
+ reportFile = path.resolve(reportFile ?? path.join(out, 'features.json'));
+ if(executionMode==='worker')for(const destination of [out,reportFile])if(destination===directory||destination.startsWith(directory+path.sep))throw Error('E_FEATURE_OUTPUT_INSIDE_CANDIDATE');
+ await mkdir(out, {recursive: true});await mkdir(path.dirname(reportFile), {recursive: true});
  const [javascript, servedWasm, font] = await Promise.all([readFile(engineJs), readFile(engineWasm), testFont(fontPath)]);
  const wasm = release?.engine.wasm.encoding === 'gzip' ? gunzipSync(servedWasm) : servedWasm;
  if (release) {
@@ -136,6 +299,8 @@ export async function run2dFeatureAcceptance({directory, engineJs, engineWasm, o
   if (release) { assert(descriptor, 'Site worklet descriptor: ' + suffix); assert.equal(hash(bytes), descriptor.sha256, 'Test worklet identity'); }
   worklets.set('/engine/godot' + suffix, bytes);
  }
+ if(executionMode==='worker')return runWorker2dFeatureAcceptance({directory,release,site,engine:{javascript:hash(javascript),wasm:hash(wasm),wasmBytes:wasm.length,
+  worklets:Object.fromEntries([...worklets].map(([name,bytes])=>[name,hash(bytes)]))},font,out,reportFile,requireChinese,namings,sessions,timeout,browserName});
  let pack;
  const server = createServer((request, response) => {
   const pathname = new URL(request.url, 'http://localhost').pathname;

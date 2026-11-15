@@ -1,282 +1,212 @@
-import {readFile,writeFile,mkdir,copyFile,readdir} from 'node:fs/promises';
-import {readFileSync} from 'node:fs';
-import {spawnSync} from 'node:child_process';
-import {createHash,randomUUID} from 'node:crypto';
+/** Integration of an unchanged built production candidate, through its real UI.
+ * No routes, module replacement, product capability probes or prototype assets.
+ * Run once per PLAYGROUND_PRESENTATION_BACKEND=direct|bitmap and browser. */
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {createRequire} from 'node:module';
-import {serveIsolatedBrowserPair} from './browser-server.mjs';
-import {buildEngineVendor} from '../../apps/playground/scripts/full-engine-release.mjs';
-import {resolveBrowserExecutable} from './browser-launch.mjs';
+import {inflateSync} from 'node:zlib';
+import {createHash} from 'node:crypto';
+import {launchBrowser,withAcceptanceContext,installPassiveRecorder} from '../../apps/playground/scripts/browser-harness.mjs';
+import {createStaticServer} from '../../apps/playground/scripts/serve.mjs';
+import {siteIdentity} from '../../apps/playground/scripts/site-evidence.mjs';
 
 const repository=fileURLToPath(new URL('../../',import.meta.url));
-const request=createRequire(path.join(repository,'apps/playground/package.json'));
-const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
-const utf8=value=>new TextEncoder().encode(value);
-const cleanupComplete=value=>value&&value.errors.length===0&&value.workers===value.terminatedWorkers&&value.audioContexts===value.closedAudioContexts&&(value.messagePorts??0)===(value.closedMessagePorts??0)&&(value.glContexts??0)===(value.lostGlContexts??0)&&(value.mediaTracks??0)===(value.stoppedMediaTracks??0)&&(value.networkResources??0)===(value.closedNetworkResources??0);
-async function deadline(operation,label,ms=90000){let timer;try{return await Promise.race([operation,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('E_WORKER_DEADLINE: '+label)),ms);})]);}finally{clearTimeout(timer);}}
-const parse=values=>Object.fromEntries(values.reduce((rows,value,index)=>value.startsWith('--')?[...rows,[value.slice(2),values[index+1]?.startsWith('--')?true:values[index+1]??true]]:rows,[]));
+const directory=path.resolve(process.env.PLAYGROUND_TEST_DIRECTORY??path.join(repository,'apps/playground/dist'));
+const presenter=process.env.PLAYGROUND_PRESENTATION_BACKEND??'direct';
+assert(['direct','bitmap'].includes(presenter));
+const timeout=Number(process.env.PLAYGROUND_WORKER_INTEGRATION_TIMEOUT??120000);
+const imeCommitDelayMs=Number(process.env.PLAYGROUND_WORKER_IME_COMMIT_DELAY_MS??150);
+assert(Number.isFinite(imeCommitDelayMs)&&imeCommitDelayMs>=0&&imeCommitDelayMs<=1000);
+const imeIterations=Number(process.env.PLAYGROUND_WORKER_IME_ITERATIONS??3);assert(Number.isSafeInteger(imeIterations)&&imeIterations>=1&&imeIterations<=10);
+const output=path.resolve(process.env.PLAYGROUND_WORKER_INTEGRATION_REPORT??path.join(repository,`work/worker-migration/integration-${process.env.BROWSER??'chromium'}-${presenter}.json`));
+const screenshotDirectory=output.replace(/\.json$/,'')+'-screenshots';
+const checks=[],screenshots=[],sessions=new Map(),sessionHistory=[],browserErrors=[],requests=[],contextLossOutcomes=[],imeTraces=[],projectTelemetry=[];
+let browser,context,page,activeStage='startup';
+const servers=[createStaticServer(directory),createStaticServer(directory)];
+const listen=server=>new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+const close=server=>new Promise(resolve=>{server.closeAllConnections();server.close(resolve);});
+const inspect=()=>page.evaluate(()=>globalThis.__playgroundWorkbench?.inspect());
+const snapshot=()=>page.evaluate(()=>({state:globalThis.__playgroundWorkbench?.inspect(),status:document.querySelector('#status')?.textContent,logs:document.querySelector('#logs')?.textContent?.slice(-20000)}));
+const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+const sha=bytes=>createHash('sha256').update(bytes).digest('hex');
+async function until(predicate,label,limit=timeout){const end=Date.now()+limit;while(Date.now()<end){const value=await predicate();if(value)return value;await sleep(25);}throw Error(label);}
+async function check(name,callback){activeStage=name;console.error('[worker integration] '+name);const start=Date.now();await callback();checks.push({name,status:'passed',durationMs:Date.now()-start});}
+async function event(type,predicate=()=>true){await page.waitForFunction(({type,source})=>{
+ const state=globalThis.__playgroundWorkbench?.inspect();
+ if(state?.diagnostics.some(d=>d.category==='error'))throw Error(JSON.stringify(state.diagnostics));
+ if(state?.engine?.state==='exited'&&document.querySelector('#status')?.textContent==='运行错误')throw Error(document.querySelector('#logs')?.textContent);
+ return state?.events.some(value=>value.type===type&&Function('value','return ('+source+')(value)')(value));
+ },{type,source:String(predicate)},{timeout:Math.min(timeout,15000)});
+ const observed=(await inspect()).events.filter(value=>value.type===type).findLast(predicate);projectTelemetry.push({stage:activeStage,event:observed});return observed;
+}
+async function frame(){const handle=await page.locator('#preview iframe').elementHandle();assert(handle);try{return await handle.contentFrame();}finally{await handle.dispose();}}
+async function currentSession(){const preview=await frame();return preview.evaluate(()=>{const current=globalThis.__playgroundRuntimeSession;return typeof current==='function'?current():current;});}
+async function running(){await page.waitForFunction(()=>{
+ const state=globalThis.__playgroundWorkbench?.inspect();if(state?.diagnostics.some(d=>d.category==='error'))throw Error(JSON.stringify(state.diagnostics));
+ if(state?.engine?.state==='exited'&&document.querySelector('#status')?.textContent==='运行错误')throw Error(document.querySelector('#logs')?.textContent);
+ return state?.ready&&state.engine?.state==='running';
+ },null,{timeout});const session=await currentSession();assert.equal(session.executionBackend,'worker');assert.equal(session.presentationBackend,presenter);return session;}
+async function imported(project){await page.locator('#import').setInputFiles({name:'worker-integration.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(project))});
+ await page.waitForFunction(source=>{const state=globalThis.__playgroundWorkbench?.inspect();return state?.project.files[state.project.entry]===source;},project.files[project.entry],{timeout});}
+async function exited(workerId){await page.waitForFunction(()=>globalThis.__playgroundWorkbench?.inspect().engine?.state==='exited'&&!document.querySelector('#preview iframe'),null,{timeout:20000});
+ return until(()=>sessions.get(workerId)?.exit?.hostCleanup?sessions.get(workerId):false,'The real host must publish its cleanup receipt',5000);}
+async function stop(workerId){await page.locator('#stop').click();const stopped=await exited(workerId);assert.equal(stopped.exit.hostCleanup.status,'complete');return stopped;}
 
-export function workerProbeFiles(vendor,{hang=false,stopAudioBeforeQuit=false}={}) {
- const main=`const G=require('godot'),J=require('godot-jsb'),React=require('res://.playground/vendor.js').React,R=require('res://.playground/vendor.js').engineReact;
-const host=globalThis.__godotjsRuntimeHost;
-const assert=(value,message)=>{if(!value)throw Error('WORKER_PROBE '+message);};
-exports.default=class WorkerProbe extends G.Node2D{
+// Decode externally captured Playwright PNGs, never read native GL pixels or
+// alter product startup. Chromium/WebKit screenshots use RGB/RGBA 8-bit PNGs.
+function pixels(png){
+ assert.equal(png.subarray(0,8).toString('hex'),'89504e470d0a1a0a');let offset=8,width,height,channels;const compressed=[];
+ while(offset<png.length){const length=png.readUInt32BE(offset),kind=png.toString('ascii',offset+4,offset+8),data=png.subarray(offset+8,offset+8+length);offset+=length+12;
+  if(kind==='IHDR'){width=data.readUInt32BE(0);height=data.readUInt32BE(4);assert.equal(data[8],8);assert([2,6].includes(data[9]));assert.equal(data[12],0);channels=data[9]===6?4:3;}if(kind==='IDAT')compressed.push(data);if(kind==='IEND')break;
+ }
+ assert(width&&height&&channels);const raw=inflateSync(Buffer.concat(compressed)),stride=width*channels,decoded=Buffer.alloc(stride*height);let cursor=0;
+ const paeth=(a,b,c)=>{const p=a+b-c,pa=Math.abs(p-a),pb=Math.abs(p-b),pc=Math.abs(p-c);return pa<=pb&&pa<=pc?a:pb<=pc?b:c;};
+ for(let y=0;y<height;y++){const filter=raw[cursor++];assert(filter<=4);for(let x=0;x<stride;x++){
+  const left=x>=channels?decoded[y*stride+x-channels]:0,up=y?decoded[(y-1)*stride+x]:0,upperLeft=y&&x>=channels?decoded[(y-1)*stride+x-channels]:0;
+  decoded[y*stride+x]=(raw[cursor++]+(filter===0?0:filter===1?left:filter===2?up:filter===3?Math.floor((left+up)/2):paeth(left,up,upperLeft)))&255;
+ }}return {width,height,channels,decoded};
+}
+async function screenshot(name,color){
+ const preview=await frame(),canvas=preview.locator('canvas');let observation;
+ await until(async()=>{const png=await canvas.screenshot({timeout:10000}),decoded=pixels(png);let red=0,green=0;
+  for(let index=0;index<decoded.decoded.length;index+=decoded.channels){const r=decoded.decoded[index],g=decoded.decoded[index+1],b=decoded.decoded[index+2];if(r>180&&g<80&&b<80)red++;if(g>180&&r<80&&b<80)green++;}
+  observation={name,width:decoded.width,height:decoded.height,red,green,sha256:sha(png),path:path.join(screenshotDirectory,name+'.png')};
+  if((color==='red'?red:green)<3000)return false;await fs.writeFile(observation.path,png);return true;
+ },`External ${presenter} compositor screenshot must contain the ${color} native rectangle`,10000);
+ screenshots.push(observation);return observation;
+}
+const baseProject={schemaVersion:3,engineProfile:'full-engine-v1',runtime:'godot',demoId:'native',entry:'/src/Main.ts',selected:'/src/Main.ts',mode:'production',controls:{},files:{
+ '/project.godot':'config_version=5\n[application]\nconfig/name="Official Worker integration"\nrun/main_scene="res://main.tscn"\n[display]\nwindow/size/viewport_width=320\nwindow/size/viewport_height=240\n[rendering]\nrenderer/rendering_method="gl_compatibility"\nenvironment/defaults/default_clear_color=Color(0.03,0.06,0.12,1)\n',
+ '/main.tscn':'[gd_scene load_steps=2 format=3]\n[ext_resource type="Script" path="res://src/Main.ts" id="1"]\n[node name="Main" type="Node2D"]\nscript=ExtResource("1")\n',
+ '/src/Main.ts':'',
+}};
+const nativeSource=marker=>`import {Node2D,ColorRect,Color,Vector2,LineEdit,JavaScriptBridge,Callable,FileAccess} from 'godot';
+const host=()=>JavaScriptBridge.get_interface('window')!;
+const send=(type:string,data:any={})=>host().call('__godotjsProjectEvent',JSON.stringify({type,fixture:${JSON.stringify(marker)},...data}));
+export default class Main extends Node2D{
+ rect!:ColorRect;edit!:LineEdit;frames=0;lastSize='';lastText='';realm:any;
  _ready(){
-  assert(typeof document==='undefined','business code must execute without DOM');assert(host&&host.role==='engine','explicit engine role');
-  this.frames=0;this.physicsFrames=0;this.collided=false;this.echo=false;this.inputs=0;this.reactValue=0;
-  this.lifecycle=require('res://worker-react-probe.js').run(G,R,React);
-  const ir=J.internal.get_engine_api();assert(ir.modules.includes('GodotJS')&&ir.modules.includes('gltf')&&ir.modules.includes('godot_physics_3d'),'full module set');
-  this.mount=new G.Node();this.add_child(this.mount);
-  this.root=R.createRoot(this.mount,{autoProcess:false,onError:(error,info)=>host.reportDiagnostic({kind:info.kind,message:String(error),stack:info.stack})});
-  const self=this;
-  function App(){const [value,set]=React.useState(0);self.setReact=set;React.useLayoutEffect(()=>{self.reactValue=value;},[value]);return React.createElement(R.EngineNode,{ctor:G.Label,native:{text:'Worker '+value}});}
-  this.root.render(React.createElement(App));this.root.flush();
-  this.body=new G.CharacterBody2D();const hit=new G.CollisionShape2D();hit.shape=new G.RectangleShape2D();hit.shape.size=new G.Vector2(20,20);this.body.add_child(hit);this.body.position=new G.Vector2(100,30);this.add_child(this.body);
-  const floor=new G.StaticBody2D(),shape=new G.CollisionShape2D();shape.shape=new G.RectangleShape2D();shape.shape.size=new G.Vector2(300,20);floor.add_child(shape);floor.position=new G.Vector2(100,120);this.add_child(floor);
-  const player=new G.AudioStreamPlayer(),stream=new G.AudioStreamGenerator();stream.mix_rate=22050;stream.buffer_length=0.2;player.stream=stream;player.playback_type=G.AudioServer.PlaybackType.PLAYBACK_TYPE_STREAM;this.audioPlayer=player;this.add_child(player);player.play();this.playback=player.get_stream_playback();this.audioPhase=0;
-  this.echoCount=0;this.workerRealms=[];this.spawnEchoWorker();
-  host.bindProjectCommand(raw=>{const command=JSON.parse(raw);if(command.type==='hang'){host.emitProjectEvent({type:'hang-entered'});for(;;){}}else if(command.type==='stop'){this.cleanupProbe();this.stopAt=this.frames+6;}else if(command.type==='stale-packet'){postMessage({__godotjsRuntime:1,sessionId:command.oldSession,workerId:command.workerId,type:'project',role:'engine',data:{type:'stale-must-not-arrive'}});host.emitProjectEvent({type:'stale-probe-complete'});}});
-  const screen=G.DisplayServer.screen_get_size();assert(screen.x>0&&screen.y>0,'synchronous host display query');
-  host.emitProjectEvent({type:'probe-start',role:host.role,documentAbsent:typeof document==='undefined',workerIsolated:crossOriginIsolated,workerSecure:isSecureContext,sab:typeof SharedArrayBuffer==='function',syncHost:{display:G.DisplayServer.get_name(),screen:{x:screen.x,y:screen.y}},modules:ir.modules.length,has3D:!!G.Node3D,hasXR:!!G.WebXRInterface});
+  this.rect=new ColorRect();this.rect.position=new Vector2(20,20);this.rect.size=new Vector2(130,100);this.rect.color=new Color(1,0,0,1);this.add_child(this.rect);
+  this.edit=new LineEdit();this.edit.position=new Vector2(20,160);this.edit.size=new Vector2(260,40);this.add_child(this.edit);
+  this.get_window()!.files_dropped.connect(Callable.create((files:any)=>{const count=typeof files.size==='function'?files.size():files.length,paths:string[]=[];
+   for(let index=0;index<count;index++)paths.push(String(typeof files.get==='function'?files.get(index):files[index]));
+   send('native-drop',{paths,contents:paths.map(path=>FileAccess.get_file_as_string(path))});
+  }));
+  this.realm=JSON.parse(String(JavaScriptBridge.eval('JSON.stringify({worker:typeof WorkerGlobalScope!=="undefined"&&globalThis instanceof WorkerGlobalScope,shared:typeof SharedArrayBuffer,crossOriginIsolated:globalThis.crossOriginIsolated,canvasType:document.getElementById("canvas").constructor.name})',true)));
+  const interfaces:any={};for(const name of ['Array','JSON','Promise','WebSocket','RTCPeerConnection'])interfaces[name]=JavaScriptBridge.get_interface(name)!==null;
+  send('native-ready',{realm:this.realm,interfaces});
  }
- _input(event){if(event instanceof G.InputEventKey&&event.pressed)this.inputs++;}
- _physics_process(delta){this.physicsFrames++;this.body.velocity=new G.Vector2(0,220);this.body.move_and_slide();if(this.body.get_slide_collision_count()>0)this.collided=true;this.root.physics(delta);this.lifecycle.physics();}
- _process(delta){
-  this.frames++;if(this.stopAt&&this.frames>=this.stopAt){this.get_tree().quit(0);return;}if(this.restartWorkerAt&&this.frames>=this.restartWorkerAt){this.restartWorkerAt=0;this.spawnEchoWorker();}this.root.process(delta);this.lifecycle.process();if(this.frames===4)this.setReact(7);
-  if(this.echo&&!this.closeProbe)this.closeProbe=require('res://worker-close-probe.js').run(G);if(this.closeProbe)this.closeProbe.process();
-  if(this.playback){const count=Math.min(this.playback.get_frames_available(),1024);for(let i=0;i<count;i++){const value=Math.sin(this.audioPhase++*Math.PI*2*440/22050)*0.2;this.playback.push_frame(new G.Vector2(value,value));}}
-  if(this.closeProbe&&this.closeProbe.results().done&&!this.closeProbe.results().passed)throw Error(JSON.stringify(this.closeProbe.results()));
-  if(this.frames>20&&this.collided&&this.echo&&this.closeProbe?.results().passed&&this.reactValue===7&&this.inputs>0&&!this.sent){assert(this.lifecycle.results().passed&&this.lifecycle.results().extendedPassed===true,JSON.stringify(this.lifecycle.results()));this.sent=true;host.emitProjectEvent({type:'probe-ready',frames:this.frames,physicsFrames:this.physicsFrames,collided:this.collided,echo:this.echo,workerReuse:{count:this.echoCount,realms:this.workerRealms},workerClose:this.closeProbe.results(),reactValue:this.reactValue,inputs:this.inputs,reactLifecycle:this.lifecycle.results()});${hang?'for(;;){}':''}}
+ _process(){
+  const size=this.get_viewport()!.get_visible_rect().size,key=size.x+','+size.y;if(key!==this.lastSize){this.lastSize=key;send('native-size',{width:size.x,height:size.y});}
+  if(this.edit.text!==this.lastText){this.lastText=this.edit.text;send('native-text',{text:this.lastText});}
+  if(++this.frames===20)send('native-frames',{frames:this.frames});
  }
- spawnEchoWorker(){
-  const {JSWorker}=require('godot.worker');this.worker=new JSWorker('src/echo.worker');
-  this.worker.onready=()=>this.worker.postMessage({kind:'echo',vector:new G.Vector2(3,4)});
-  this.worker.onmessage=data=>{
-   assert(data.kind==='echo'&&data.vector instanceof G.Vector2&&data.vector.x===3&&data.vector.y===4,'Variant roundtrip');
-   this.echoCount++;this.workerRealms.push({tag:data.realmTag,incarnation:data.incarnation});
-   if(this.echoCount===1){this.worker.terminate();this.worker=null;this.restartWorkerAt=this.frames+4;}
-   else{assert(this.workerRealms[0].tag===data.realmTag&&data.incarnation>this.workerRealms[0].incarnation,'pooled browser Worker reinitialized after native join');this.echo=true;}
-  };
+ _input(event:any){const kind=event.get_class();
+  if(kind==='InputEventKey'){send('native-key',{pressed:event.pressed,key:event.keycode,unicode:event.unicode});
+   if(event.pressed&&event.keycode===74)this.rect.color=new Color(0,1,0,1);
+   if(event.pressed&&event.keycode===67){send('context-loss-requested');JavaScriptBridge.eval('(()=>{const gl=document.getElementById("canvas").getContext("webgl2");const loss=gl.getExtension("WEBGL_lose_context");if(!loss)throw Error("Missing WEBGL_lose_context test extension");loss.loseContext();})()',true);}
+   if(event.pressed&&event.keycode===76){send('loop-entered');while(true){}}
+  }else if(kind==='InputEventMouseButton')send('native-mouse',{pressed:event.pressed,button:event.button_index,x:event.position.x,y:event.position.y});
  }
- cleanupProbe(){if(this.cleaned)return;this.restartWorkerAt=0;this.cleaned=true;${stopAudioBeforeQuit?'if(this.audioPlayer){this.audioPlayer.stop();this.playback=null;}':''}if(this.worker){this.worker.terminate();this.worker=null;}if(this.closeProbe)this.closeProbe.dispose();if(this.root)this.root.shutdown();if(this.lifecycle)this.lifecycle.dispose();}
- _exit_tree(){this.cleanupProbe();}
-};`;
- const echo=`const G=require('godot'),{JSWorkerParent}=require('godot.worker');if(!JSWorkerParent)throw Error('missing worker parent');globalThis.__workerProbeRealmTag??='realm-'+Math.random();globalThis.__workerProbeIncarnation=(globalThis.__workerProbeIncarnation??0)+1;JSWorkerParent.onmessage=data=>{if(!(data.vector instanceof G.Vector2))throw Error('worker Variant decode');JSWorkerParent.postMessage({kind:data.kind,vector:data.vector,realmTag:globalThis.__workerProbeRealmTag,incarnation:globalThis.__workerProbeIncarnation});JSWorkerParent.close();};`;
- const closeProbe=request(path.join(repository,'scripts/test/fixtures/worker-close-probe.cjs'));
- return new Map([
-  ['res://project.godot',utf8('config_version=5\n[application]\nconfig/name="Full Worker integration"\nrun/main_scene="res://Main.tscn"\n[display]\nwindow/size/viewport_width=320\nwindow/size/viewport_height=240\n[rendering]\nrenderer/rendering_method="gl_compatibility"\n[GodotJS]\nruntime/debugger/debugger_port=0\n')],
-  ['res://Main.tscn',utf8('[gd_scene load_steps=2 format=3]\n[ext_resource type="Script" path="res://src/Main.ts" id="1"]\n[node name="Main" type="Node2D"]\nscript = ExtResource("1")\n')],
-  ['res://src/Main.ts',utf8('export default class WorkerProbe {}\n')],
-  ['res://.godot/GodotJS/src/Main.js',utf8(main)],
-  ['res://.godot/GodotJS/src/echo.worker.js',utf8(echo)],
-  ['res://src/echo.worker.js',utf8(echo)],
-  ['res://.playground/vendor.js',vendor],
-  ['res://worker-react-probe.js',readFileSync(path.join(repository,'scripts/test/fixtures/worker-react-probe.cjs'))],
-  ['res://worker-close-probe.js',readFileSync(path.join(repository,'scripts/test/fixtures/worker-close-probe.cjs'))],
-  ['res://src/p1-close-startup.worker.js',utf8(closeProbe.startupSource)],
-  ['res://.godot/GodotJS/src/p1-close-startup.worker.js',utf8(closeProbe.startupSource)],
-  ['res://src/p1-close-message.worker.js',utf8(closeProbe.messageSource)],
-  ['res://.godot/GodotJS/src/p1-close-message.worker.js',utf8(closeProbe.messageSource)],
-  ['res://.godot/global_script_class_cache.cfg',utf8('list=Array[Dictionary]([])\n')],
- ]);
-}
+}`;
+function nativeProject(marker){const project=structuredClone(baseProject);project.files['/src/Main.ts']=nativeSource(marker);return project;}
+function reactProject(){const project=structuredClone(baseProject);project.runtime='react';project.demoId='react';project.entry=project.selected='/src/App.tsx';delete project.files['/main.tscn'];delete project.files['/src/Main.ts'];project.files['/project.godot']=project.files['/project.godot'].replace('run/main_scene="res://main.tscn"\n','');
+ project.files['/package.json']=JSON.stringify({private:true,dependencies:{react:'19.3.1','@godot-js/react':'0.1.0'}});
+ project.files['/src/App.tsx']=`import * as React from 'react';import {EngineNode,useFrame} from '@godot-js/react/engine';import {Button,ColorRect,Color,Vector2,JavaScriptBridge} from 'godot';
+const send=(type:string,data:any={})=>JavaScriptBridge.get_interface('window')!.call('__godotjsProjectEvent',JSON.stringify({type,...data}));
+export default function App(){const [count,setCount]=React.useState(0);const frames=React.useRef(0);
+ React.useLayoutEffect(()=>{const scope=globalThis as any;send('react-commit',{count,realm:{worker:typeof scope.WorkerGlobalScope!=='undefined'&&scope instanceof scope.WorkerGlobalScope,shared:typeof scope.SharedArrayBuffer},stack:new Error('React Worker callback').stack});},[count]);
+ useFrame('process',()=>{if(++frames.current===20)send('react-frames',{frames:frames.current});});
+ return <><EngineNode ctor={ColorRect} native={{position:new Vector2(20,20),size:new Vector2(130,100),color:count?new Color(0,1,0,1):new Color(1,0,0,1)}}/>
+ <EngineNode ctor={Button} native={{position:new Vector2(20,140),size:new Vector2(150,40),text:'Increment '+count}} on={{pressed:()=>setCount(value=>value+1)}}/></>;
+}`;return project;}
 
-async function certificate(directory) {
- const key=path.join(directory,'key.pem'),cert=path.join(directory,'cert.pem');
- const generated=spawnSync('openssl',['req','-x509','-newkey','rsa:2048','-nodes','-keyout',key,'-out',cert,'-days','2','-subj','/CN=localhost','-addext','subjectAltName=DNS:localhost,IP:127.0.0.1'],{encoding:'utf8'});
- if(generated.status!==0)throw Error('E_WORKER_TLS: '+generated.stderr);
- const publicKey=spawnSync('openssl',['x509','-in',cert,'-pubkey','-noout'],{encoding:'utf8'});
- const der=spawnSync('openssl',['pkey','-pubin','-outform','DER'],{input:publicKey.stdout});
- if(der.status!==0)throw Error('E_WORKER_TLS_SPKI');
- return {key:await readFile(key),cert:await readFile(cert),spki:createHash('sha256').update(der.stdout).digest('base64')};
-}
-
-export async function runWorkerIntegration({engineReport,out,loops=3,browserName='chromium',verbose=process.env.GODOTJS_WORKER_VERBOSE==='1',stopAudioBeforeQuit=process.env.GODOTJS_WORKER_PRESTOP_AUDIO==='1'}={}) {
- const harnessBytes=await readFile(fileURLToPath(import.meta.url));
- if(!['chromium','firefox','webkit'].includes(browserName))throw Error('E_WORKER_BROWSER: Expected chromium, firefox or webkit');
- if(!engineReport)throw Error('Pass --engine-report with an actual source-bound proxy-pthread build');
- const report=JSON.parse(await readFile(engineReport,'utf8'));
- if(report.status!=='built'||report.execution?.executionModel!=='proxy-pthread')throw Error('E_WORKER_ENGINE_REPORT');
- const directory=path.resolve(out??'/workspace/output/engine-worker-implementation/runtime');await mkdir(directory,{recursive:true});
- await mkdir(path.join(directory,'producer'),{recursive:true});await writeFile(path.join(directory,'producer/harness.mjs'),harnessBytes);
- const site=path.join(directory,'site');await mkdir(path.join(site,'engine'),{recursive:true});
- const archive=path.resolve(path.dirname(path.resolve(engineReport)),report.template.path);
- const archiveBytes=await readFile(archive);if(hash(archiveBytes)!==report.template.sha256)throw Error('E_WORKER_TEMPLATE_HASH');
- const extracted=spawnSync('python3',['-c','import zipfile,sys\nwith zipfile.ZipFile(sys.argv[1]) as z:\n z.extractall(sys.argv[2])',archive,path.join(site,'engine')],{encoding:'utf8'});
- if(extracted.status!==0)throw Error('E_WORKER_TEMPLATE: '+extracted.stderr);
- const {build}=request('esbuild'),playwright=request('playwright');
- await build({entryPoints:[path.join(repository,'packages/engine/src/browser/engine-session.ts')],bundle:true,format:'iife',globalName:'EngineHost',platform:'browser',target:'es2022',outfile:path.join(site,'session.js')});
- const {packProject}=await import('@godot-js/project-tools/pck');
- const vendor=await buildEngineVendor();
- const files=workerProbeFiles(vendor,{stopAudioBeforeQuit}),pack=packProject(files).pack;
- await writeFile(path.join(site,'project.pck'),pack);
- await writeFile(path.join(site,'preview.html'),`<!doctype html><link rel="icon" href="data:,"><button id="unlock" style="position:fixed;top:0;left:0;z-index:10000">Enable audio</button><canvas id="canvas" width="320" height="240" tabindex="0"></canvas><script src="session.js"></script><script src="engine/godot.js"></script><script>
- window.probe={documentId:crypto.randomUUID(),events:[],roles:[],progress:[],errors:[],exits:[],sessions:[],ready:false};
- // Preserve real native execution but hold final packets long enough for the
- // receiver to attempt reaping a completed sender before delivery.
- const postWorkerMessage=Worker.prototype.postMessage;
- Worker.prototype.postMessage=function(message,...args){
-  if(message?.__jsbMessage===true&&message.route?.direction==='to-parent'&&message.data?.kind==='p1-close-final'){
-   probe.delayedClosePackets=(probe.delayedClosePackets??0)+1;
-   setTimeout(()=>postWorkerMessage.call(this,message,...args),300);return;
-  }
-  return postWorkerMessage.call(this,message,...args);
- };
- window.addEventListener('error',event=>probe.errors.push(String(event.message)));
- window.startProbe=async function(){
-  if(probe.sessions.length||probe.session)throw Error('E_PROBE_ONE_SESSION_PER_DOCUMENT');
-  const id=crypto.randomUUID(),identity={runId:id,revision:1,generation:id,buildKey:'probe'};
-  probe.ready=false;probe.current=id;
-  const session=new EngineHost.BrowserEngineSession({identity,executionModel:'proxy-pthread',requiresCrossOriginIsolation:true,onProject:data=>{probe.events.push({runId:id,...data});if(data.type==='probe-ready')probe.ready=true;},onWorkerRole:data=>probe.roles.push({runId:id,...data}),onProgress:data=>probe.progress.push({runId:id,...data}),onDiagnostic:data=>{probe.errors.push(JSON.stringify(data));console.error(JSON.stringify(data));},onLog:(level,text)=>{if(level==='error')probe.errors.push(text);}});
-  probe.session=session;
-  const previous=document.querySelector('canvas'),canvas=document.createElement('canvas');canvas.id='canvas';canvas.width=320;canvas.height=240;canvas.tabIndex=0;if(previous)previous.replaceWith(canvas);else document.body.append(canvas);
-  const engine=new Engine({canvas,executable:'engine/godot',emscriptenPoolSize:3,persistentPaths:[],persistentDrops:false,focusCanvas:false,onPrintError:text=>probe.errors.push(String(text)),onExit:code=>{probe.exits.push({runId:id,code});}});probe.engine=engine;
-  await engine.preloadFile(new Uint8Array(await(await fetch('project.pck')).arrayBuffer()),'/project.pck');await engine.init('engine/godot');session.attachEngine(engine);await engine.start({args:[${verbose?"'--verbose',":''}'--main-pack','/project.pck','--rendering-method','gl_compatibility']});
-  probe.sessions.push(id);return id;
- };
- document.querySelector('#unlock').onclick=()=>{const runtime=probe.engine?.rtenv;if(runtime?.resumeAudio)runtime.resumeAudio();document.querySelector('canvas').focus();};
- window.stopProbe=async function(mode='clean'){if(mode==='clean'){probe.session.command({type:'stop'});for(let i=0;i<200&&!probe.exits.some(item=>item.runId===probe.current);i++)await new Promise(resolve=>setTimeout(resolve,20));if(!probe.exits.some(item=>item.runId===probe.current))throw Error('E_PROBE_COOPERATIVE_STOP_TIMEOUT');}const result=await probe.session.dispose(mode);probe.cleanup=result;return result;};
- </script>`);
- const tls=await certificate(directory),pair=await serveIsolatedBrowserPair({root:site,tls});
- await writeFile(path.join(site,'index.html'),`<!doctype html><link rel="icon" href="data:,"><title>Full Worker lifecycle integration</title><main id="sessions"></main>`);
- const launchArgs=['--no-sandbox','--enable-webgl','--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader','--disable-dev-shm-usage','--ignore-certificate-errors-spki-list='+tls.spki];
- const headless=process.env.BROWSER_HEADLESS!=='0';
- const firefoxUserPrefs={'webgl.force-enabled':true,'webgl.disabled':false,'gfx.webrender.software':true};
- const launchEnvironment={headless,display:process.env.DISPLAY??null,audioServer:process.env.PULSE_SERVER??null,...(browserName==='firefox'?{firefoxUserPrefs}:{})};
- let browser,selectedBrowser;
- try{selectedBrowser=resolveBrowserExecutable(playwright[browserName],browserName);browser=await playwright[browserName].launch({headless,executablePath:selectedBrowser.executablePath,...(browserName==='chromium'?{args:launchArgs}:{}),...(browserName==='firefox'?{firefoxUserPrefs}:{})});}
- catch(error){await writeFile(path.join(directory,'worker-integration.json'),JSON.stringify({schemaVersion:1,kind:'godotjs-worker-integration',status:'failed',phase:'browser-launch',browser:{name:browserName,playwrightVersion:request('playwright/package.json').version,...selectedBrowser},launchEnvironment,engineReport:path.resolve(engineReport),error:String(error?.stack??error)},null,2)+'\n');await pair.close();throw error;}
- const producerInputs={harness:hash(harnessBytes),host:hash(await readFile(path.join(site,'session.js'))),vendor:hash(vendor),pack:hash(pack),projectFiles:Object.fromEntries([...files].map(([name,bytes])=>[name,hash(bytes)])),editorHtml:hash(await readFile(path.join(site,'index.html'))),previewHtml:hash(await readFile(path.join(site,'preview.html')))};
- const result={schemaVersion:1,kind:'godotjs-worker-integration',status:'running',contextLifecycle:'fresh-document-per-session',verbose:!!verbose,stopAudioBeforeQuit:!!stopAudioBeforeQuit,validationBatchId:randomUUID(),sourceSnapshotHash:report.source.snapshotHash,producerHash:hash(JSON.stringify(producerInputs)),producerInputs,engineReport:path.resolve(engineReport),engineReportHash:hash(await readFile(engineReport)),templateSha256:report.template.sha256,os:process.platform,browser:{name:browserName,version:browser.version(),playwrightVersion:request('playwright/package.json').version,...selectedBrowser},launchEnvironment,origins:{editor:pair.editor.origin,preview:pair.preview.origin},cases:[],limitations:[],launchArgs:browserName==='chromium'?launchArgs:[],startedAt:new Date().toISOString()};
- try {
-  const context=await browser.newContext(browserName==='chromium'?{}:{ignoreHTTPSErrors:true});
-  await context.addInitScript(()=>{
-   const gl=[];globalThis.__workerGLEvidence=gl;
-   if(typeof HTMLCanvasElement!=='undefined'){
-    const getContext=HTMLCanvasElement.prototype.getContext;
-    HTMLCanvasElement.prototype.getContext=function(type,...args){const value=getContext.call(this,type,...args);if(value&&['webgl','webgl2','experimental-webgl'].includes(type)&&!gl.some(item=>item.context===value))gl.push({context:value,type,owner:'host',offscreen:false});return value;};
-   }
-   const records=[];globalThis.__workerAudioEvidence=records;
-   if(typeof AudioNode==='undefined')return;
-   const connect=AudioNode.prototype.connect,observed=new WeakSet(),analysers=new WeakSet();
-   AudioNode.prototype.connect=function(destination,...args){
-    if(destination===this.context.destination&&!analysers.has(this)&&!observed.has(this)){
-     observed.add(this);const analyser=this.context.createAnalyser();analysers.add(analyser);analyser.fftSize=256;
-     const record={context:this.context,analyser,peak:0,checks:0};records.push(record);
-     connect.call(this,analyser,...args);connect.call(analyser,destination);return destination;
-    }
-    return connect.call(this,destination,...args);
-   };
-   setInterval(()=>{for(const item of records){if(item.context.state!=='running')continue;const values=new Float32Array(item.analyser.fftSize);item.analyser.getFloatTimeDomainData(values);item.peak=Math.max(item.peak,...values.map(Math.abs));item.checks++;}},25);
+let initialIdentity;
+try{
+ await fs.mkdir(screenshotDirectory,{recursive:true});
+ initialIdentity=await siteIdentity(directory);const manifest=JSON.parse(await fs.readFile(path.join(directory,'manifest.json'),'utf8'));
+ assert.equal(manifest.schemaVersion,3);assert.equal(manifest.runtime.executionBackend,'worker');assert(manifest.runtime.presentationBackends.includes(presenter));
+ baseProject.engineProfile=initialIdentity.profile;
+ await Promise.all(servers.map(listen));const [editorOrigin,previewOrigin]=servers.map(server=>'http://127.0.0.1:'+server.address().port);
+ browser=await launchBrowser({headless:true,args:['--no-sandbox','--enable-webgl','--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader','--disable-dev-shm-usage','--autoplay-policy=no-user-gesture-required']});
+ context=await browser.newContext({viewport:{width:1440,height:1000},deviceScaleFactor:1});
+ await installPassiveRecorder(context,'__recordWorkerIntegrationSession',(_source,session)=>{if(session?.workerId){sessions.set(session.workerId,structuredClone(session));sessionHistory.push({at:Date.now(),workerId:session.workerId,state:session.workerState,closing:session.closing,exit:session.exit});}});
+ await context.addInitScript(()=>{addEventListener('playground-runtime-session',event=>{void globalThis.__recordWorkerIntegrationSession(event.detail);});if(window===window.top){globalThis.__workerIntegrationTicks=0;setInterval(()=>globalThis.__workerIntegrationTicks++,20);}});
+ page=await context.newPage();page.setDefaultTimeout(timeout);page.on('pageerror',error=>browserErrors.push(String(error)));page.on('request',request=>{if(request.resourceType()==='script'||/\.wasm(?:\.gz)?$/.test(request.url()))requests.push(request.url());});
+ await page.goto(`${editorOrigin}/?project=native&executionBackend=worker&presentationBackend=${presenter}&previewOrigin=${encodeURIComponent(previewOrigin)}`,{waitUntil:'domcontentloaded'});
+ await page.waitForFunction(()=>globalThis.__playgroundWorkbench?.inspect().ready,null,{timeout});
+ let nativeSession;
+ await check('official UI compiles/imports native PCK and runs in a dedicated non-shared Worker',async()=>{
+  await imported(nativeProject('native-main'));nativeSession=await running();const ready=await event('native-ready');assert.equal(ready.fixture,'native-main');assert.equal(ready.realm.worker,true);assert.equal(ready.realm.shared,'undefined');assert.equal(ready.realm.crossOriginIsolated,false);assert.equal(ready.realm.canvasType,'OffscreenCanvas');assert.deepEqual(ready.interfaces,{Array:true,JSON:true,Promise:true,WebSocket:true,RTCPeerConnection:true});await event('native-frames');
+  const preview=await frame();assert.notEqual(new URL(preview.url()).origin,editorOrigin);const main=await preview.evaluate(()=>({jsbb:typeof globalThis._jsbb_,shared:typeof SharedArrayBuffer,canvas:document.querySelector('canvas').constructor.name}));assert.equal(main.jsbb,'undefined');assert.equal(main.canvas,'HTMLCanvasElement');
+ });
+ await check('external compositor screenshot proves native drawing and native mouse/key events change pixels',async()=>{
+  await screenshot('native-initial','red');const preview=await frame();await preview.locator('canvas').click({position:{x:250,y:80}});await event('native-mouse',value=>value.pressed&&value.button===1);await page.keyboard.press('j');await event('native-key',value=>value.pressed&&value.key===74);await event('native-key',value=>!value.pressed&&value.key===74);await screenshot('native-key-changed','green');
+ });
+ await check('resize updates the native framebuffer and keeps presenting nonblank committed frames',async()=>{
+  const size=await event('native-size'),before=await screenshot('native-before-resize','green');await page.setViewportSize({width:1200,height:850});
+  await page.waitForFunction(({width,height})=>globalThis.__playgroundWorkbench.inspect().events.some(value=>value.type==='native-size'&&(value.width!==width||value.height!==height)),size,{timeout});
+  const after=await screenshot('native-after-resize','green');assert(before.width!==after.width||before.height!==after.height);const current=await currentSession();assert.equal(current.workerId,nativeSession.workerId);
+ });
+ await check('browser DataTransfer File drop reaches native files_dropped and FileAccess reads its bytes',async()=>{
+  const preview=await frame(),text='Official Worker drop 中文 bytes';
+  const prevented=await preview.evaluate(text=>{const transfer=new DataTransfer();transfer.items.add(new File([text],'worker-drop.txt',{type:'text/plain'}));
+   const event=new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:transfer});document.querySelector('canvas').dispatchEvent(event);return event.defaultPrevented;
+  },text);assert.equal(prevented,true);const dropped=await event('native-drop');assert.equal(dropped.paths.length,1);assert.match(dropped.paths[0],/\/worker-drop\.txt$/);assert.deepEqual(dropped.contents,[text]);
+ });
+ await check('real browser IME composition reaches the native LineEdit through the host editable node',async()=>{
+  assert.equal(browser.browserType().name(),'chromium','This IME automation requires the Chromium DevTools input driver; run other browser IME acceptance manually.');
+  const preview=await frame();await preview.locator('canvas').click({position:{x:80,y:180}});
+  await preview.waitForFunction(()=>document.activeElement?.className==='ime',null,{timeout:10000});
+  await preview.evaluate(()=>{const ime=document.querySelector('.ime'),events=[];globalThis.__workerIntegrationImeTrace=events;
+   const record=(kind,event)=>{events.push({kind,time:performance.now(),data:event?.data??null,trusted:event?.isTrusted??null,inputType:event?.inputType??null,text:ime.textContent,active:document.activeElement?.className,hasFocus:document.hasFocus()});if(events.length>100)events.shift();};
+   record('before-driver');for(const type of ['compositionstart','compositionupdate','compositionend','beforeinput','input','focus','blur'])ime.addEventListener(type,event=>record(type,event),true);
+   new MutationObserver(()=>record('mutation')).observe(ime,{childList:true,subtree:true,characterData:true});
   });
-  const page=await context.newPage();const browserErrors=[];result.browserErrors=browserErrors;
-  if(browserName==='firefox'&&!headless)await page.bringToFront();
-  let rejectBrowser;const browserFailure=new Promise((_,reject)=>{rejectBrowser=reject;});void browserFailure.catch(()=>{});
-  const step=(operation,label)=>deadline(Promise.race([operation,browserFailure]),label);
-  page.on('pageerror',error=>{const detail=error.stack??String(error);browserErrors.push(detail);rejectBrowser(Error(detail));});
-  page.on('console',message=>{process.stderr.write('[browser:'+message.type()+'] '+message.text()+'\n');if(message.type()==='error'){browserErrors.push(message.text());rejectBrowser(Error(message.text()));}});
-  const browserWorkers={created:0,closed:0};
-  page.on('worker',worker=>{browserWorkers.created++;worker.once('close',()=>browserWorkers.closed++);process.stderr.write('[worker] '+worker.url()+'\n');});
-  const headers={};page.on('response',response=>{if([pair.editor.origin+'/index.html',pair.preview.origin+'/preview.html'].includes(response.url()))headers[response.url()]=response.headers();});
-  await page.goto(pair.editor.origin+'/index.html');result.responseHeaders=headers;
-  const documentIds=new Set(),allErrors=[];
-  let previousSessionId;
-  const openPreview=async label=>{
-   if(page.workers().length||await page.locator('#preview').count())throw Error('E_WORKER_PREVIOUS_SCOPE_LIVE');
-   await page.evaluate(src=>{const frame=document.createElement('iframe');frame.id='preview';frame.width='400';frame.height='320';frame.src=src;frame.allow='autoplay; cross-origin-isolated; xr-spatial-tracking; fullscreen';frame.setAttribute('sandbox','allow-scripts allow-same-origin allow-pointer-lock');document.querySelector('#sessions').append(frame);},pair.preview.origin+'/preview.html');
-   const handle=await page.locator('#preview').elementHandle(),frame=await handle.contentFrame();await handle.dispose();if(!frame)throw Error('E_WORKER_FRAME');
-   await step(frame.waitForFunction(()=>!!globalThis.probe?.documentId,null,{timeout:90000}),'preview document '+label);
-   const isolation=await frame.evaluate(()=>({documentId:probe.documentId,isolated:crossOriginIsolated,secure:isSecureContext,sab:typeof SharedArrayBuffer==='function'}));
-   if(!isolation.isolated||!isolation.secure||!isolation.sab||documentIds.has(isolation.documentId))throw Error('E_WORKER_ISOLATION_OR_DOCUMENT_REUSE '+JSON.stringify(isolation));documentIds.add(isolation.documentId);
-   result.isolation??={top:await page.evaluate(()=>({isolated:crossOriginIsolated,secure:isSecureContext,sab:typeof SharedArrayBuffer==='function'})),preview:isolation};
-   result.platformProbe??=await frame.evaluate(async()=>({ime:{compositionEvent:typeof CompositionEvent==='function',beforeInput:typeof InputEvent==='function',virtualKeyboard:!!navigator.virtualKeyboard},xr:{api:!!navigator.xr,immersiveVR:navigator.xr?await navigator.xr.isSessionSupported('immersive-vr').catch(()=>false):false}}));
-   return {frame,documentId:isolation.documentId,workersAtStart:{...browserWorkers}};
-  };
-  const retirePreview=async opened=>{
-   const {frame,workersAtStart}=opened;
-   // Worker close is observed through Playwright before destroying the iframe;
-   // removing the document must not conceal an incomplete session disposal.
-   await deadline((async()=>{while(page.workers().length){await new Promise(resolve=>setTimeout(resolve,20));}})(),'browser Worker close before iframe disposal',10000);
-   const workers={created:browserWorkers.created-workersAtStart.created,closed:browserWorkers.closed-workersAtStart.closed,remaining:page.workers().length};
-   if(!workers.created||workers.created!==workers.closed||workers.remaining)throw Error('E_WORKER_BROWSER_LIFECYCLE '+JSON.stringify(workers));
-   allErrors.push(...await frame.evaluate(()=>[...probe.errors]));
-   await frame.evaluate(()=>{globalThis.__workerAudioEvidence.length=0;globalThis.__workerGLEvidence.length=0;probe.engine=undefined;probe.session=undefined;});
-   await page.locator('#preview').evaluate(frame=>frame.remove());
-   await deadline((async()=>{while(!frame.isDetached())await new Promise(resolve=>setTimeout(resolve,20));})(),'preview document removal',10000);
-   return {...workers,closedBeforeFrameRemoval:true,documentDetached:frame.isDetached()};
-  };
-  for(let index=0;index<Number(loops);index++){
-   const opened=await openPreview(index),{frame,documentId}=opened;
-   const sessionStartedAt=Date.now();
-   const audioStart=await frame.evaluate(()=>globalThis.__workerAudioEvidence.length);
-   process.stderr.write('[probe] starting session '+index+'\n');
-   await step(frame.evaluate(()=>startProbe()),'start session '+index);
-   await step(frame.waitForFunction(()=>probe.events.some(item=>item.runId===probe.current&&item.type==='probe-start'),null,{timeout:90000}),'engine scene ready '+index);
-   await frame.locator('#unlock').click();await frame.locator('canvas').click();await frame.locator('canvas').press('Space');
-   await step(frame.waitForFunction(()=>probe.ready,null,{timeout:90000}),'systems ready '+index);
-   await frame.waitForFunction(offset=>globalThis.__workerAudioEvidence?.slice(offset).some(item=>item.peak>0.01),audioStart,{timeout:10000});
-   const state=await frame.evaluate(()=>({ready:probe.events.filter(item=>item.runId===probe.current&&item.type==='probe-ready').at(-1),delayedClosePackets:probe.delayedClosePackets??0,start:probe.events.filter(item=>item.runId===probe.current&&item.type==='probe-start').at(-1),roles:probe.roles.filter(item=>item.runId===probe.current),progress:probe.progress.filter(item=>item.runId===probe.current),gl:globalThis.__workerGLEvidence.map(item=>({type:item.type,owner:item.owner,offscreen:item.offscreen,vendor:item.context.getParameter(item.context.VENDOR),renderer:item.context.getParameter(item.context.RENDERER)})),errors:[...probe.errors]}));
-   if(browserErrors.length||state.errors.length||!state.ready?.collided||!state.ready?.echo||state.ready.reactValue!==7||state.ready.inputs<1||!state.start?.documentAbsent||!state.roles.some(item=>item.role==='engine')||!state.roles.some(item=>item.role==='script-worker'))throw Error('E_WORKER_ASSERT '+JSON.stringify({...state,browserErrors}));
-   if(!state.ready?.workerClose?.passed||state.delayedClosePackets!==6)throw Error('E_WORKER_CLOSE_ASSERT '+JSON.stringify(state));
-   // Preserve completed P1 assertions if an unrelated shutdown step fails.
-   result.activeCase={id:'session-'+index,...state};
-   const staleSessionId=previousSessionId??'obsolete-session';
-   const staleSessionRejected=await frame.evaluate(async oldSession=>{
-    const role=probe.roles.find(item=>item.runId===probe.current&&item.role==='engine');
-    probe.session.command({type:'stale-packet',oldSession,workerId:role.workerId});
-    for(let i=0;i<200&&!probe.events.some(item=>item.runId===probe.current&&item.type==='stale-probe-complete');i++)await new Promise(resolve=>setTimeout(resolve,10));
-    return probe.events.some(item=>item.runId===probe.current&&item.type==='stale-probe-complete')&&!probe.events.some(item=>item.type==='stale-must-not-arrive');
-   },staleSessionId);
-   if(!staleSessionRejected)throw Error('E_WORKER_STALE_MESSAGE');
-   let cleanup,termination;
-   if(index===Number(loops)-1){
-    await frame.evaluate(()=>probe.session.command({type:'hang'}));
-    await step(frame.waitForFunction(()=>probe.events.some(item=>item.runId===probe.current&&item.type==='hang-entered'),null,{timeout:10000}),'hang entered');
-    const before=await frame.evaluate(()=>probe.progress.at(-1)?.sequence);await page.waitForTimeout(500);
-    termination=await frame.evaluate(previous=>({engineHung:probe.events.some(item=>item.runId===probe.current&&item.type==='hang-entered')&&probe.progress.at(-1)?.sequence===previous,hostResponsive:true}),before);
-    if(!termination.engineHung)throw Error('E_WORKER_HANG_PROBE');
-    cleanup=await step(frame.evaluate(()=>stopProbe('forced')),'forced session cleanup');
-   }
-   else cleanup=await deadline(frame.evaluate(()=>stopProbe('clean')),'stop session '+index);
-   if(!cleanupComplete(cleanup))throw Error('E_WORKER_CLEANUP '+JSON.stringify(cleanup));
-   const audio=await frame.evaluate(()=>globalThis.__workerAudioEvidence.map(item=>({state:item.context.state,peak:item.peak,checks:item.checks})));
-   if(audio.some(item=>item.state!=='closed'))throw Error('E_WORKER_AUDIO_CLEANUP '+JSON.stringify(audio));
-   const memory=await frame.evaluate(()=>performance.memory?{usedJSHeapSize:performance.memory.usedJSHeapSize,totalJSHeapSize:performance.memory.totalJSHeapSize,jsHeapSizeLimit:performance.memory.jsHeapSizeLimit}:undefined);
-   const independentWorkers=await retirePreview(opened);
-   result.cases.push({id:'session-'+index,status:'passed',documentId,...state,staleSessionRejected,staleSessionId,staleSessionSource:previousSessionId?'retired-browser-session':'invalid-sentinel',...(termination?{termination}:{}),cleanup,audio,browserWorkers:independentWorkers,elapsedMs:Date.now()-sessionStartedAt,...(memory?{memory}:{})});
-   delete result.activeCase;
-   previousSessionId=state.start.runId;
-   await writeFile(path.join(directory,'worker-integration.json'),JSON.stringify(result,null,2)+'\n');
-  }
-  // The hang case must be followed by a fresh successful session.
-  const recovered=await openPreview('after-forced-restart'),{frame}=recovered;
-  await step(frame.evaluate(()=>startProbe()),'restart after forced termination');await step(frame.waitForFunction(()=>probe.events.some(item=>item.runId===probe.current&&item.type==='probe-start'),null,{timeout:90000}),'restart scene ready');await frame.locator('#unlock').click();await frame.locator('canvas').click();await frame.locator('canvas').press('Space');await step(frame.waitForFunction(()=>probe.ready,null,{timeout:90000}),'restart systems ready');
-  result.afterForcedRestartWorkerClose=await frame.evaluate(()=>({results:probe.events.filter(item=>item.runId===probe.current&&item.type==='probe-ready').at(-1)?.workerClose,delayedClosePackets:probe.delayedClosePackets??0}));
-  if(!result.afterForcedRestartWorkerClose.results?.passed||result.afterForcedRestartWorkerClose.delayedClosePackets!==6)throw Error('E_WORKER_RESTART_CLOSE_ASSERT');
-  const recoveredStaleRejected=await frame.evaluate(async oldSession=>{
-   const role=probe.roles.find(item=>item.runId===probe.current&&item.role==='engine');
-   probe.session.command({type:'stale-packet',oldSession,workerId:role.workerId});
-   for(let i=0;i<200&&!probe.events.some(item=>item.runId===probe.current&&item.type==='stale-probe-complete');i++)await new Promise(resolve=>setTimeout(resolve,10));
-   return probe.events.some(item=>item.runId===probe.current&&item.type==='stale-probe-complete')&&!probe.events.some(item=>item.type==='stale-must-not-arrive');
-  },previousSessionId);
-  if(!recoveredStaleRejected)throw Error('E_WORKER_RESTART_STALE_MESSAGE');
-  result.afterForcedRestart=await step(frame.evaluate(()=>stopProbe('clean')),'restart cooperative cleanup');
-  await page.waitForTimeout(200);
-  const recoveryAudio=await frame.evaluate(()=>globalThis.__workerAudioEvidence.map(item=>({state:item.context.state,peak:item.peak,checks:item.checks})));
-  if(recoveryAudio.some(item=>item.state!=='closed'))throw Error('E_WORKER_RESTART_AUDIO_CLEANUP');
-  result.afterForcedRestartDocument={documentId:recovered.documentId,staleSessionRejected:recoveredStaleRejected,staleSessionId:previousSessionId,staleSessionSource:'forced-retired-browser-session',audio:recoveryAudio,browserWorkers:await retirePreview(recovered)};
-  result.documentCount=documentIds.size;result.finalErrors=allErrors;
-  if(result.documentCount!==Number(loops)+1)throw Error('E_WORKER_DOCUMENT_COUNT');
-  if(!cleanupComplete(result.afterForcedRestart)||result.finalErrors.length)throw Error('E_WORKER_RESTART_CLEANUP '+JSON.stringify({cleanup:result.afterForcedRestart,errors:result.finalErrors}));
-  result.status='passed';
-  result.limitations.push('This fixture proves its stated systems; it does not certify all resource importers, IME composition, XR hardware, Safari, or GPU reclamation.');
- }catch(error){result.status='failed';result.error=String(error?.stack??error);throw error;}
- finally {result.finishedAt=new Date().toISOString();result.network={editor:pair.editor.requests,preview:pair.preview.requests};await writeFile(path.join(directory,'worker-integration.json'),JSON.stringify(result,null,2)+'\n');await browser.close();await pair.close();}
- return result;
-}
-
-if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
- const values=parse(process.argv.slice(2));
- runWorkerIntegration({engineReport:values['engine-report'],out:values.out,loops:values.loops??3,browserName:values.browser??'chromium',...(values.verbose?{verbose:true}:{}),...(values['active-audio-at-quit']?{stopAudioBeforeQuit:false}:{}),...(values['stop-audio-before-quit']?{stopAudioBeforeQuit:true}:{})}).then(result=>console.log(JSON.stringify({status:result.status,cases:result.cases.length}))).catch(error=>{console.error(error);process.exitCode=1;});
-}
+  const cdp=await context.newCDPSession(page);try{for(let iteration=1;iteration<=imeIterations;iteration++){
+   await cdp.send('Input.imeSetComposition',{text:'中文',selectionStart:2,selectionEnd:2});if(imeCommitDelayMs)await sleep(imeCommitDelayMs);await cdp.send('Input.insertText',{text:'中文'});
+   await event('native-text',new Function('value','return value.text === '+JSON.stringify('中文'.repeat(iteration))));
+  }}finally{await cdp.detach();}
+  imeTraces.push({imeCommitDelayMs,imeIterations,events:await preview.evaluate(()=>globalThis.__workerIntegrationImeTrace)});
+ });
+ await check('real WEBGL_lose_context event closes the run and a fresh Worker recovers',async()=>{
+  const preview=await frame();await preview.locator('canvas').click({position:{x:250,y:80}});await page.keyboard.press('c');
+  const lost=await exited(nativeSession.workerId);assert.equal(lost.exit.hostCleanup.status,'complete');assert.notEqual(lost.exit.reason,'clean-exit');
+  const logs=await page.locator('#logs').textContent();
+  assert.equal(lost.runId,nativeSession.runId);assert.equal(lost.documentId,nativeSession.documentId);
+  // UI may omit a native Error stack. The same run's actual host observation
+  // retains its Worker diagnostic; never borrow another session's errors.
+  const lossDiagnostics=[logs,...(lost.workerErrors??[])].join('\n');
+  // loseContext invalidates the backing context immediately; the native
+  // webglcontextlost event is queued. A bitmap transfer can observe that real
+  // invalidation first in the same committed iteration. Both failures must
+  // clean up and recover; unrelated capture errors remain failures.
+  assert.match(lossDiagnostics,/E_WORKER_WEBGL_CONTEXT_LOST|InvalidStateError:[\s\S]*transferToImageBitmap[\s\S]*WebGL context is lost/);
+  assert((await inspect()).events.some(value=>value.type==='context-loss-requested'));
+  contextLossOutcomes.push({workerId:nativeSession.workerId,detectedBy:/E_WORKER_WEBGL_CONTEXT_LOST/.test(lossDiagnostics)?'native-contextlost-event':'bitmap-transfer-observed-lost-context',workerErrors:lost.workerErrors??[],exit:lost.exit});
+  await page.locator('#run').click();const recovered=await running();assert.notEqual(recovered.workerId,nativeSession.workerId);assert.notEqual(recovered.documentId,nativeSession.documentId);await event('native-ready');await screenshot('native-context-recovered','red');nativeSession=recovered;
+ });
+ await check('infinite native project loop leaves the main page responsive and forced termination never invents exit zero',async()=>{
+  const preview=await frame();await preview.locator('canvas').click({position:{x:250,y:80}});await page.keyboard.press('l');
+  await page.waitForFunction(()=>globalThis.__playgroundWorkbench.inspect().events.some(value=>value.type==='loop-entered'),null,{timeout:5000});
+  const before=await page.evaluate(()=>globalThis.__workerIntegrationTicks);await page.waitForFunction(before=>globalThis.__workerIntegrationTicks>before+3,before,{timeout:2000});
+  const stopped=await stop(nativeSession.workerId);assert.equal(stopped.exit.engineOutcome.kind,'terminate-issued');assert.equal(stopped.exit.reason,'forced-worker-termination');assert.equal(Object.hasOwn(stopped.exit,'code'),false);assert.equal(stopped.workerState,'terminated');
+  await page.locator('#run').click();const restarted=await running();assert.notEqual(restarted.workerId,nativeSession.workerId);await event('native-ready');await screenshot('native-loop-recovered','red');await stop(restarted.workerId);
+ });
+ await check('real React useState/native signal commit execute in the Worker and update compositor pixels',async()=>{
+  await imported(reactProject());const react=await running(),first=await event('react-commit',value=>value.count===0);assert.equal(first.realm.worker,true);assert.equal(first.realm.shared,'undefined');assert.match(first.stack,/React Worker callback/);await event('react-frames');await screenshot('react-initial','red');
+  const preview=await frame();await preview.locator('canvas').click({position:{x:80,y:160}});const changed=await event('react-commit',value=>value.count===1);assert.equal(changed.realm.worker,true);await screenshot('react-state-changed','green');await stop(react.workerId);
+ });
+ await check('rapid project replacement cancels startup and only the new fresh session reaches the active UI',async()=>{
+  await imported(nativeProject('cancel-first'));
+  await page.waitForFunction(()=>{const state=globalThis.__playgroundWorkbench.inspect().engine?.state;return document.querySelector('#preview iframe')&&['loading-frame','handshaking','downloading','preloading','initializing','starting'].includes(state);},null,{timeout});
+  const cancelled=await currentSession().catch(()=>undefined);await imported(nativeProject('cancel-final'));const replacement=await running();const ready=await event('native-ready',value=>value.fixture==='cancel-final');assert.equal(ready.fixture,'cancel-final');
+  if(cancelled?.workerId)assert.notEqual(replacement.workerId,cancelled.workerId);assert.equal(await page.locator('#preview iframe').count(),1);await screenshot('native-cancel-recovered','red');await stop(replacement.workerId);
+ });
+ const identityAfter=await siteIdentity(directory);assert.equal(identityAfter.siteHash,initialIdentity.siteHash,'Candidate assets changed during integration');
+ const report=await withAcceptanceContext({status:'passed',kind:'worker-integration',candidateId:initialIdentity.candidateId,siteHash:initialIdentity.siteHash,presentationBackend:presenter,checks,screenshots,sessions:[...sessions.values()],sessionHistory,browserErrors,requests,contextLossOutcomes,imeTraces,projectTelemetry}, {directory,browser});
+ await fs.mkdir(path.dirname(output),{recursive:true});await fs.writeFile(output,JSON.stringify(report,null,2)+'\n');console.log(JSON.stringify(report,null,2));
+}catch(error){const report={status:'failed',kind:'worker-integration',presentationBackend:presenter,activeStage,error:String(error),stack:error.stack,candidate:initialIdentity?{candidateId:initialIdentity.candidateId,siteHash:initialIdentity.siteHash,releaseId:initialIdentity.releaseId}:null,checks,screenshots,sessions:[...sessions.values()],sessionHistory,browserErrors,requests,imeTraces,imeCommitDelayMs,imeIterations,projectTelemetry,currentImeTrace:await(await frame().catch(()=>null))?.evaluate(()=>globalThis.__workerIntegrationImeTrace).catch(()=>null),last:await snapshot().catch(()=>null)};
+ await fs.mkdir(path.dirname(output),{recursive:true});await fs.writeFile(output,JSON.stringify(report,null,2)+'\n');console.error(JSON.stringify(report,null,2));process.exitCode=1;
+}finally{await context?.close();await browser?.close();await Promise.all(servers.map(close));}

@@ -1,6 +1,6 @@
 import {parseProject,type EditorProject} from './project-model.ts';
 
-/** New projects opt into the engine runtime; imported v1 projects never use these defaults. */
+/** Native scripts and React scenes share the Worker runtime; imported v1 projects keep their data. */
 export function defaultProject(runtime:'godot'|'react'='godot',engineProfile='full-engine-v1'):EditorProject {
  const native=runtime==='godot';
  const entry=native?'/src/Main.ts':'/src/App.tsx';
@@ -27,14 +27,14 @@ export default function App() {
   ...(native?{'/main.tscn':'[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://src/Main.ts" id="1_main"]\n\n[node name="Main" type="Node2D"]\nscript = ExtResource("1_main")\n'}:{}),
   '/project.godot':`config_version=5\n\n[application]\nconfig/name="${native?'Godot':'React + Godot'} Playground"\n${native?'run/main_scene="res://main.tscn"\n':''}\n[display]\nwindow/size/viewport_width=960\nwindow/size/viewport_height=640\nwindow/stretch/mode="canvas_items"\n\n[rendering]\nrenderer/rendering_method="gl_compatibility"\n`,
   '/package.json':JSON.stringify({private:true,...(native?{}:{dependencies:{react:'19.3.1','@godot-js/react':'0.1.0'}})},null,2),
-  '/README.md':native?'# Godot Playground\n\nEdit src/Main.ts and run the native Godot scene. Add .tscn, .tres and binary assets as normal project files.\n':'# React + Godot Playground\n\nEdit src/App.tsx. React renders into the same native Godot engine.\n',
+  '/README.md':native?'# Godot Playground\n\nEdit src/Main.ts and run the native Godot scene in a Worker. Add .tscn, .tres and binary assets as normal project files.\n':'# React + Godot Playground\n\nEdit src/App.tsx. React and the native Godot engine run together in a Worker.\n',
  },controls:{},mode:'production'});
 }
 
 export function demoProject(demo:{id:string;file:string;source:string;name:string;hint:string;controls:readonly {key:string;value:number;min?:number;max?:number}[]},engineProfile='full-engine-v1'):EditorProject {
  const project=defaultProject('react',engineProfile);project.demoApiVersion=1;project.demoId=demo.id;delete project.files[project.entry];project.entry=project.selected='/src/'+demo.file;project.files[project.entry]=demo.source;
  project.controls=Object.fromEntries(demo.controls.map(control=>[control.key,control.value]));
- project.files['/README.md']='# '+demo.name+'\n\n'+demo.hint+'\n\nUses the native React renderer and Godot resources.\n';
+ project.files['/README.md']='# '+demo.name+'\n\n'+demo.hint+'\n\nReact and Godot run together in a Worker, using the native renderer and Godot resources.\n';
  return parseProject(project);
 }
 

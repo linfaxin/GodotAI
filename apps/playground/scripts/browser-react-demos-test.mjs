@@ -1,21 +1,27 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import {launchBrowser,withAcceptanceContext} from './browser-harness.mjs';
+import {launchBrowser,withAcceptanceContext,defaultTestDirectory} from './browser-harness.mjs';
 import {createStaticServer} from './serve.mjs';
-const directory=path.resolve(process.env.PLAYGROUND_TEST_DIRECTORY??new URL('../dist',import.meta.url).pathname),servers=[createStaticServer(directory),createStaticServer(directory)];
+const directory=defaultTestDirectory(),servers=[createStaticServer(directory),createStaticServer(directory)];
 const release=JSON.parse(await fs.readFile(path.join(directory,'engine-release.json'),'utf8'));
 for(const server of servers)await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
 const [editor,preview]=servers.map(s=>'http://127.0.0.1:'+s.address().port);
 const browser=await launchBrowser({headless:true,executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE??'/usr/bin/chromium',args:['--no-sandbox','--disable-dev-shm-usage','--enable-webgl','--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader','--autoplay-policy=no-user-gesture-required']});
-const checks=[],errors=[];let page;
+ const checks=[],errors=[],demoSessions=[];let page;
 try{
  page=await browser.newPage({viewport:{width:1536,height:1000}});page.on('pageerror',e=>errors.push(String(e)));page.setDefaultTimeout(90000);
  const inspect=()=>page.evaluate(()=>globalThis.__playgroundWorkbench.inspect());
  const latest=async()=>(await inspect()).events.filter(e=>e.type==='stats').at(-1);
- async function running(id,previous){await page.waitForFunction(({id,previous})=>{const s=globalThis.__playgroundWorkbench?.inspect();if(s?.project?.demoId!==id)return false;if(s.diagnostics.some(d=>d.category==='error'))throw Error(JSON.stringify(s.diagnostics));const event=s.events.filter(e=>e.type==='stats').at(-1);if(s.engine?.state==='exited'&&document.querySelector('#status').textContent==='运行错误')throw Error(document.querySelector('#logs').textContent);return s.project.runtime==='react'&&s.engine?.state==='running'&&event?.frames>20&&event.generation!==previous;},{id,previous},{timeout:120000});}
+ async function recordWorkerSession(id){
+  const handle=await page.locator('#preview iframe').elementHandle(),frame=await handle.contentFrame();await handle.dispose();assert(frame);
+  const session=await frame.evaluate(()=>globalThis.__playgroundRuntimeSession);
+  assert.equal(session?.executionBackend,'worker');assert.equal(session.runtime,'react');assert.equal(session.workerState,'running');assert(session.workerId&&session.documentId&&session.runConfigurationHash);
+  demoSessions.push({demoId:id,runId:session.runId,documentId:session.documentId,workerId:session.workerId,runConfigurationHash:session.runConfigurationHash,presentationBackend:session.presentationBackend});
+ }
+ async function running(id,previous){await page.waitForFunction(({id,previous})=>{const s=globalThis.__playgroundWorkbench?.inspect();if(s?.project?.demoId!==id)return false;if(s.diagnostics.some(d=>d.category==='error'))throw Error(JSON.stringify(s.diagnostics));const event=s.events.filter(e=>e.type==='stats').at(-1);if(s.engine?.state==='exited'&&document.querySelector('#status').textContent==='运行错误')throw Error(document.querySelector('#logs').textContent);return s.project.runtime==='react'&&s.engine?.state==='running'&&event?.frames>20&&event.generation!==previous;},{id,previous},{timeout:120000});await recordWorkerSession(id);}
  async function stats(predicate){await page.waitForFunction(source=>{const event=globalThis.__playgroundWorkbench.inspect().events.filter(e=>e.type==='stats').at(-1);return event&&Function('s','return ('+source+')(s)')(event.stats)},predicate.toString(),{timeout:30000});return (await latest()).stats;}
- async function choose(id){const previous=(await latest())?.generation;await page.locator('#project-switcher').click();await page.locator('[data-demo="'+id+'"]').click();await running(id,previous);checks.push(id+' runs in the native React renderer');}
+ async function choose(id){const previous=(await latest())?.generation;await page.locator('#project-switcher').click();await page.locator('[data-demo="'+id+'"]').click();await running(id,previous);checks.push(id+' runs with React and Godot in a Worker');}
  async function settings(){if(!await page.locator('#settings-section').evaluate(n=>n.open))await page.locator('#settings-section summary').click();}
  async function action(key){await settings();await page.locator('[data-action="'+key+'"]').click();}
  const canvas=()=>page.frameLocator('#preview iframe').locator('canvas');
@@ -31,6 +37,6 @@ try{
  await choose('match3');await stats(s=>s.tiles===64);await action('hint');await action('shuffle');await stats(s=>s.seed>=43);checks.push('match-3 board actions work');
  await choose('dungeon');const seed=(await latest()).stats.seed;await action('generate');await page.waitForFunction(seed=>globalThis.__playgroundWorkbench.inspect().events.filter(e=>e.type==='stats').at(-1)?.stats.seed!==seed,seed);checks.push('BSP generation remains deterministic and interactive');
  const generation=(await latest()).generation;await page.locator('#stop').click();await page.waitForFunction(()=>globalThis.__playgroundWorkbench.inspect().engine.state==='exited');assert.equal(await page.locator('#preview iframe').count(),0);await page.locator('#run').click();await running('dungeon',generation);checks.push('stop/rerun replaces the preview session');
- assert.deepEqual(errors,[]);const report=await withAcceptanceContext({status:'passed',checks,errors}, {directory,browser});if(process.env.PLAYGROUND_REACT_DEMOS_REPORT)await fs.writeFile(process.env.PLAYGROUND_REACT_DEMOS_REPORT,JSON.stringify(report,null,2)+'\n');console.log(JSON.stringify(report,null,2));
+ assert.deepEqual(errors,[]);const report=await withAcceptanceContext({status:'passed',checks,errors,demoSessions}, {directory,browser});if(process.env.PLAYGROUND_REACT_DEMOS_REPORT)await fs.writeFile(process.env.PLAYGROUND_REACT_DEMOS_REPORT,JSON.stringify(report,null,2)+'\n');console.log(JSON.stringify(report,null,2));
 }catch(error){console.error(JSON.stringify({error:String(error),checks,state:await page?.evaluate(()=>globalThis.__playgroundWorkbench?.inspect()).catch(()=>null),logs:await page?.locator('#logs').textContent().catch(()=>null)},null,2));throw error;}
 finally{await browser.close();await Promise.all(servers.map(server=>new Promise(resolve=>server.close(resolve))));}

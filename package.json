@@ -35,7 +35,7 @@
     "test:showcase:native": "node scripts/test/showcase-native.mjs",
     "test:engine": "pnpm --filter @godot-js/engine test && pnpm --filter @godot-js/project-tools test",
     "browser:engine:worker": "node scripts/test/build-browser-engine.mjs --execution-model proxy-pthread",
-    "test:browser:worker": "node scripts/test/browser-worker-integration.mjs"
+    "test:browser:worker": "node scripts/test/browser-pthread-integration.mjs"
   },
   "devDependencies": {
     "@changesets/cli": "^2.29.4",

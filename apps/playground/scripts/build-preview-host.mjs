@@ -6,8 +6,8 @@ import {fileURLToPath} from 'node:url';
 const app=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const digest=bytes=>createHash('sha256').update(bytes).digest('hex');
 /** This bundle contains no embedded release ID, manifest or React runtime. */
-export async function buildPreviewHost(dist){
- const result=await build({entryPoints:[path.join(app,'preview.ts')],outfile:path.join(dist,'preview.js'),bundle:true,format:'iife',platform:'browser',target:'es2022',minify:true,sourcemap:true,metafile:true,define:{'process.env.NODE_ENV':'"production"'}});
+export async function buildPreviewHost(dist,{executionModel='window'}={}){
+ const result=await build({entryPoints:[path.join(app,executionModel==='proxy-pthread'?'preview-pthread.ts':'preview.ts')],outfile:path.join(dist,'preview.js'),bundle:true,format:'iife',platform:'browser',target:'es2022',minify:true,sourcemap:true,metafile:true,define:{'process.env.NODE_ENV':'"production"'}});
  if(Object.keys(result.metafile.inputs).some(name=>/(?:^|\/)scripts\/jsb\.react\/|(?:^|\/)node_modules\/(?:\.pnpm\/)?react(?:-reconciler)?[@/]|(?:^|\/)src\/demos\//.test(name.replaceAll('\\','/'))))throw Error('E_ENGINE_HOST_DEPENDENCY: Browser host must not embed React or project code');
  const bytes=await readFile(path.join(dist,'preview.js'));
  return {path:'preview.js',sha256:digest(bytes),bytes:bytes.length};

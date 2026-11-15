@@ -1,3 +1,5 @@
+> 合并说明：主干默认产品使用普通 Dedicated Worker 及其宿主、音频和呈现桥。本文的 `proxy-pthread` 是独立选择、独立构建和验收的 pthread 候选。历史原生执行字段 `window` 对应无线程 WASM 配方；Schema 3 站点的 `runtimeAbi` 决定其普通 Worker 宿主，不表示默认产品在页面线程执行引擎。
+
 # 浏览器完整引擎 Worker 路线
 
 浏览器产品把完整 Godot Web 内建运行时、业务 JS/TS 和 React 放在同一个引擎执行 realm。React 是可选的响应式语法和生命周期层，普通脚本与 React 使用同一份原生 API。编辑器页面管理项目与存储，编译 Worker 负责编译与打包，独立来源的预览 iframe 负责浏览器宿主能力与会话。
@@ -104,7 +106,7 @@ Linux CI 的固定工具链、Firefox Xvfb/PulseAudio 环境、执行命令和 W
 pnpm test:engine
 pnpm test:react
 pnpm test:browser:unit
-node scripts/test/browser-worker-integration.mjs \
+node scripts/test/browser-pthread-integration.mjs \
   --engine-report /artifacts/worker-engine-report.json \
   --out /artifacts/worker-runtime --loops 3
 node scripts/release/collect-worker-g0.mjs \

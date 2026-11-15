@@ -30,7 +30,7 @@ try{
  if(browser==='webkit'){
   await check('unsupported-guard','browser-worker-unsupported-test.mjs','PLAYGROUND_UNSUPPORTED_REPORT');report.status='unsupported';report.workerExecutionSupported=false;report.blocker='WK-01';process.exitCode=1;
  }else{
-  await check('runtime','browser-full-engine-test.mjs','PLAYGROUND_FULL_ENGINE_REPORT',{PLAYGROUND_FULL_ENGINE_LOOPS:String(loops)});
+  await check('runtime','browser-pthread-full-engine-test.mjs','PLAYGROUND_FULL_ENGINE_REPORT',{PLAYGROUND_FULL_ENGINE_LOOPS:String(loops)});
   await check('source-maps','browser-worker-source-map-test.mjs','PLAYGROUND_SOURCE_MAP_REPORT');
   await check('raw-native-signal','browser-worker-release-barrier-test.mjs','PLAYGROUND_RELEASE_BARRIER_REPORT');
   await check('schema4','browser-schema4-flow-test.mjs','PLAYGROUND_SCHEMA4_REPORT');

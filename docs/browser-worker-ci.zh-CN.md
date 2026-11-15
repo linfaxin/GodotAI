@@ -60,7 +60,7 @@ export PLAYWRIGHT_BROWSERS_PATH="$PWD/../work/playwright-browsers"
 pnpm --filter @godot-js/playground exec playwright install --with-deps firefox
 
 bash scripts/test/run-browser-worker-linux.sh firefox /tmp/worker-firefox -- \
-  node scripts/test/browser-worker-integration.mjs \
+  node scripts/test/browser-pthread-integration.mjs \
   --engine-report /artifacts/worker-engine-report.json \
   --out /tmp/worker-firefox --browser firefox --loops 3
 ```

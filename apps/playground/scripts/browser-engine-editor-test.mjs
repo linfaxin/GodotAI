@@ -2,11 +2,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {launchBrowser,withAcceptanceContext} from './browser-harness.mjs';
+import {launchBrowser,withAcceptanceContext,defaultTestDirectory} from './browser-harness.mjs';
 import {createStaticServer} from './serve.mjs';
 import {runtimeTestContext} from './runtime-test-context.mjs';
 
-const directory=path.resolve(process.env.PLAYGROUND_TEST_DIRECTORY??fileURLToPath(new URL('../dist',import.meta.url)));
+const directory=defaultTestDirectory();
 const release=JSON.parse(await fs.readFile(path.join(directory,'engine-release.json'),'utf8'));
 const profiles={};
 for(const naming of ['snake','camel'])profiles[naming]=JSON.parse(await fs.readFile(path.join(directory,release.api.namingProfiles[naming].ir.path),'utf8'));
@@ -48,7 +48,7 @@ try{
    return result;
   }finally{worker.terminate();}
  },runtimeContext);
- const report={status:'passed',releaseId:release.id,profiles:{}};
+ const report={status:'passed',executionScope:'compiler-worker',releaseId:release.id,profiles:{}};
  for(const naming of ['snake','camel']){
   const result=results[naming],names=new Set(result.completion.map(item=>item.name));
   const missing=profiles[naming].classes.filter(cls=>!names.has(cls.publicName)).map(cls=>cls.publicName);

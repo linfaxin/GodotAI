@@ -1,13 +1,14 @@
 import {PreviewRunner} from '@godot-js/engine/browser/runner';
+import {WorkerPreviewRunner} from '@godot-js/react-browser/worker-runner';
 import type {RunnerEvent} from '@godot-js/engine/browser/protocol';
 import type {VerifiedRelease} from '@godot-js/engine/browser/verified-loader';
-import {loadEngineRelease,loadReleaseContext,type ReleaseContext} from './engine-assets';
+import {loadEngineRelease,loadReleaseContext,loadRuntimeCandidate,type ReleaseContext} from './engine-assets';
 import {assertCompiledRelease,assertArtifactTarget} from './release-context';
 import {assertArtifactReceipt} from '@godot-js/engine/identities';
 
 /** A fresh cross-origin preview consumes the editor's pinned release tuple. */
 export async function createEnginePreview(container:HTMLElement, listener:(event:RunnerEvent)=>void,options:{allowLegacyArtifacts?:boolean}={}) {
- const manifest=await loadEngineRelease(),context=await loadReleaseContext();
+ const manifest=await loadEngineRelease(),context=Object.freeze({...await loadReleaseContext()});
  let configured:string|undefined;
  const config=await fetch('./preview-config.json',{cache:'no-cache'});
  if(config.ok){const value=await config.json();configured=value.previewOrigin;}
@@ -19,6 +20,10 @@ export async function createEnginePreview(container:HTMLElement, listener:(event
  if(!configured)throw Error('请在 preview-config.json 配置独立的预览站点 previewOrigin');
  const previewRoot=new URL(configured.replace(/\/$/,'')+'/');
  if(previewRoot.pathname==='/')previewRoot.pathname=new URL(context.releaseRoot).pathname;
+ const requested=new URL(location.href).searchParams;
+ if(requested.has('executionBackend')&&requested.get('executionBackend')!=='worker')throw Error('E_EXECUTION_BACKEND_RETIRED: this playground runs in Worker only');
+ const presentationBackend=requested.get('presentationBackend')??'direct';
+ if(!['direct','bitmap'].includes(presentationBackend))throw Error('E_PRESENTATION_BACKEND');
  const preview=new URL('preview.html',previewRoot);
  if(preview.origin===location.origin)throw Error('预览站点须使用独立域名或端口');
  const resolve=(asset:any)=>({...asset,url:new URL(asset.url??asset.path,previewRoot).href,sha256:asset.sha256});
@@ -29,29 +34,43 @@ export async function createEnginePreview(container:HTMLElement, listener:(event
   execution:manifest.execution??manifest.engine.execution,
   artifactReceiptVersion:manifest.artifactReceiptVersion,
   workerAssets:(manifest.engine.workerAssets??(manifest.execution??manifest.engine.execution)?.workerAssets??[]).map((asset:any)=>({...resolve(asset),name:asset.path.split('/').at(-1).replace(/\.gz$/,''),role:asset.role})),
-  allowedOrigins:[preview.origin],
-  cachePolicy:context.publicAssets?'public-immutable':'revalidate',
+  allowedOrigins:[preview.origin],cachePolicy:context.publicAssets?'public-immutable':'revalidate',
  };
  const allowLegacyArtifacts=options.allowLegacyArtifacts===true&&manifest.artifactReceiptVersion!==2;
- const runner=new PreviewRunner({container,previewUrl:preview.href,release,allowLegacyArtifacts,deadlines:{initializing:120_000,starting:60_000,downloading:120_000}});
+ const runnerOptions={container,previewUrl:preview.href,release,deadlines:{initializing:120_000,starting:60_000,downloading:120_000}};
+ const runtime=release.execution?.executionModel==='proxy-pthread'?undefined:await loadRuntimeCandidate();
+ let runner:PreviewRunner|WorkerPreviewRunner;
+ if(runtime?.executionBackend==='worker'){
+  if(!context.candidateId||!manifest.runtimeAbi||!runtime.presentationBackends?.includes(presentationBackend))throw Error('E_WORKER_CANDIDATE_ABI');
+  release.runtimeAbi=manifest.runtimeAbi;
+  const asset=(name:string)=>{const value=runtime.assets?.[name];if(!value)throw Error('E_WORKER_CANDIDATE_ASSET: '+name);return resolve({...value,path:name});};
+  release.runtimeWorker=asset(runtime.entry);release.runtimeAudioWorklet=asset(runtime.audioWorklet);
+  const benchmark=requested.get('benchmarkTimings')==='1';
+  runner=new WorkerPreviewRunner({...runnerOptions,configuration:{presentationBackend:presentationBackend as 'direct'|'bitmap',...(benchmark?{budgets:{benchmarkTimingSamples:512}}:{})}});
+ }else{
+  if(manifest.runtimeAbi)throw Error('E_WORKER_CANDIDATE_ABI');
+  runner=new PreviewRunner({...runnerOptions,allowLegacyArtifacts});
+ }
  runner.subscribe(listener);
+ let operationSequence=0,disposed=false;
  return {manifest,context,runner,async run(pack:Uint8Array,revision:number,details:unknown){
-  assertCompiledRelease(context,details);
-  assertArtifactTarget(manifest,details);
-  const bytes=new Uint8Array(await crypto.subtle.digest('SHA-256',pack.slice().buffer));
+  if(disposed)throw Error('E_RUNNER_DISPOSED');
+  const snapshot=pack.slice(),compiled=structuredClone(details) as {buildKey?:unknown;generation?:unknown;packSha256?:unknown;artifactId?:string;artifactReceipt?:{buildKey?:unknown;packSha256?:unknown}};
+  assertCompiledRelease(context,compiled);assertArtifactTarget(manifest,compiled);
+  const operation=++operationSequence;
+  const bytes=new Uint8Array(await crypto.subtle.digest('SHA-256',snapshot.buffer));
+  if(disposed||operation!==operationSequence)throw new DOMException('Superseded','AbortError');
   const packSha256=Array.from(bytes,n=>n.toString(16).padStart(2,'0')).join('');
-  const compiled=details as {buildKey?:unknown;generation?:unknown;packSha256?:unknown;artifactId?:string;artifactReceipt?:{buildKey?:unknown;packSha256?:unknown}};
   if(compiled.packSha256!==undefined&&compiled.packSha256!==packSha256)throw Error('E_ARTIFACT_PACK_HASH');
   if(compiled.artifactReceipt!==undefined){
    if(!compiled.artifactReceipt||compiled.artifactReceipt.packSha256!==packSha256)throw Error('E_ARTIFACT_PACK_HASH');
    if(compiled.artifactReceipt.buildKey!==compiled.buildKey)throw Error('E_ARTIFACT_BUILD_KEY');
   }
   const buildKey=typeof compiled.buildKey==='string'&&/^[a-f0-9]{64}$/i.test(compiled.buildKey)?compiled.buildKey:packSha256;
-  const receipt=await assertArtifactReceipt(compiled.artifactReceipt,{pack,buildKey,artifactId:compiled.artifactId,allowLegacy:allowLegacyArtifacts});
+  const receipt=await assertArtifactReceipt(compiled.artifactReceipt,{pack:snapshot,buildKey,artifactId:compiled.artifactId,allowLegacy:allowLegacyArtifacts||(!manifest.artifactReceiptVersion&&!!runtime)});
+  if(disposed||operation!==operationSequence)throw new DOMException('Superseded','AbortError');
   const generation=compiled.generation??crypto.randomUUID();
   if(!(typeof generation==='string'&&generation.length>0&&generation.length<=256)&&!(typeof generation==='number'&&Number.isSafeInteger(generation)&&generation>=0))throw Error('E_ARTIFACT_GENERATION');
-  // Preserve the compiler's actual release identity; never replace it with the
-  // preview's current release ID during rolling updates.
-  return runner.run({revision,buildKey,generation,packSha256,artifactId:receipt?.artifactId,pack,manifest:{...(details as object),generation}});
- },stop:()=>runner.stop(),dispose:()=>runner.dispose()};
+  return runner.run({revision,buildKey,generation,packSha256,artifactId:receipt?.artifactId,pack:snapshot,manifest:{...compiled,generation}});
+ },stop:()=>{++operationSequence;return runner.stop();},dispose:()=>{disposed=true;++operationSequence;return runner.dispose();}};
 }

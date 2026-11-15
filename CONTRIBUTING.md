@@ -1,5 +1,20 @@
 # Contributing
 
+## Framework development stage and reviews
+
+The React/browser Worker framework and its Playground are in the initial construction phase and will continue to undergo broad refactoring. The current development principle is:
+
+> 现在在框架初步搭建阶段，还会持续大范围重构，不用过度追求边界。
+
+Apply this review standard until the framework explicitly enters stabilization or the user changes these priorities:
+
+- Prioritize working core flows: build, startup, rendering, input, stop/restart and error isolation. Review execution ownership, module responsibilities and the cost of further refactoring.
+- Let internal structure and interfaces evolve, updating their callers and relevant checks together. Avoid premature compatibility layers, extension points and abstractions for hypothetical future requirements.
+- Run validation proportional to the change. Rare edge cases, exhaustive browser/device matrices, strict performance budgets and release-evidence hardening can follow once the affected design settles; they are not prerequisites for every framework iteration.
+- Keep known gaps and deferred work visible. Defer nonblocking acceptance-tool issues without declaring them fixed or marking unverified behavior as passed.
+
+Problems that break ordinary development or core execution, corrupt data, or undermine the chosen architecture still need to be addressed promptly.
+
 ## Installation
 
 - Clone the source code of [godot](https://github.com/godotengine/godot):

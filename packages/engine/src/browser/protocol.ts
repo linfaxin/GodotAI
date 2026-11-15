@@ -22,7 +22,7 @@ export interface BrowserArtifact {
 }
 export type RunPhase = 'downloading' | 'preloading' | 'initializing' | 'starting' | 'waiting-ready' | 'running';
 export type RunnerState = 'idle' | 'loading-frame' | 'handshaking' | RunPhase | 'stopping' | 'exited';
-export type ExitReason = 'clean-exit' | 'forced-frame-disposal' | 'forced-session-termination' | 'crashed' | 'unresponsive';
+export type ExitReason = 'clean-exit' | 'forced-frame-disposal' | 'forced-worker-termination' | 'forced-session-termination' | 'crashed' | 'unresponsive';
 export interface PreviewDiagnostic {
   source: 'browser' | 'godotjs' | 'godot';
   message: string;

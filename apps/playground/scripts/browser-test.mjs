@@ -1,15 +1,18 @@
-import {launchBrowser,withAcceptanceContext} from './browser-harness.mjs';
+import {installParentPortReceiptObserver} from './parent-port-outcome-evidence.mjs';
+import {launchBrowser,withAcceptanceContext,defaultTestDirectory,observedWorkerSessions,observedWorkerOutcomes} from './browser-harness.mjs';
 import assert from 'node:assert/strict';
 import {createStaticServer} from './serve.mjs';
 import {promises as fs} from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
-const directory=path.resolve(process.env.PLAYGROUND_TEST_DIRECTORY??fileURLToPath(new URL('../dist',import.meta.url)));
+const directory=defaultTestDirectory();
+const workerRuntime=Boolean(JSON.parse(await fs.readFile(path.join(directory,'engine-release.json'),'utf8')).runtimeAbi),expectedFailures=new Map();
 const catalog=JSON.parse(await fs.readFile(path.join(directory,'catalog.json'),'utf8'));
 const expectedDemos=['native','react',...catalog.map(demo=>demo.id)];
 const server=createStaticServer(directory);await new Promise(r=>server.listen(0,'127.0.0.1',r));const port=server.address().port;
 const browser=await launchBrowser({headless:true,executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE||undefined,args:['--no-sandbox','--enable-webgl','--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader','--disable-dev-shm-usage']});
 const page=await browser.newPage({viewport:{width:1536,height:1000}}),errors=[],messages=[];
+const terminalObserver=await installParentPortReceiptObserver(page.context());
 page.on('pageerror',e=>errors.push(String(e)));page.on('console',m=>{if(m.type()==='error')messages.push(m.text());});
 
 const events=()=>page.evaluate(()=>window.__playgroundWorkbench.inspect().events),state=()=>page.evaluate(()=>window.__playgroundWorkbench.inspect());
@@ -78,7 +81,16 @@ try{
  await page.locator('#project-switcher').click();await page.locator('[data-demo="dungeon"]').click();await waitRunning('dungeon');assert.equal(await page.locator('body').evaluate(n=>n.classList.contains('preview-focus')),true);await canvas.click();await page.keyboard.press('Escape');await page.waitForFunction(()=>!document.body.classList.contains('preview-focus'));await screenshot('mobile');
  await page.setViewportSize({width:1536,height:1000});await switchDemo('lights');assert.deepEqual(errors,[]);assert.deepEqual(messages,[]);
  await page.locator('#credits-open').click();const notices=await page.locator('#credits a[href^="third-party/"]').evaluateAll(v=>v.map(a=>a.getAttribute('href')));assert.ok(notices.length>=8);for(const notice of notices)assert.equal((await page.request.get(`http://127.0.0.1:${port}/${notice}`)).status(),200);await page.locator('#credits-close').click();
- await edit('export default function Broken(){throw new Error("PLAYGROUND_EXPECTED_FAILURE");}');await page.locator('#run').click();await page.waitForFunction(()=>document.querySelector('#status').textContent==='运行错误'&&window.__playgroundWorkbench?.inspect().engine?.state==='exited');assert.equal(await page.locator('#preview iframe').count(),0);assert.deepEqual(messages.filter(m=>!m.includes('PLAYGROUND_EXPECTED_FAILURE')),[]);await projectMenu('reset');await waitRunning('lights');assert.equal((await state()).diagnostics.length,0);assert.deepEqual(errors,[]);
- console.log(JSON.stringify(await withAcceptanceContext({status:'passed',runtime:'react',projectCards:expectedDemos.length,demos:catalog.length,checks:['ff8da42 workbench geometry and theme','top project cards and keyboard switching','Monaco, explorer, tabs, create/rename/delete/search','multi-file imports, diagnostics and source navigation','autosave and project export','splitter drag, dock resize, sidebar toggle and preview focus','development/production mode','all selected native Godot demos and gameplay','stable Root disposal and stop/restart','mobile drawer, stacked panes and menus','upstream notices','runtime failure disposal and recovery'],unexpectedConsoleErrors:messages.filter(m=>!m.includes('PLAYGROUND_EXPECTED_FAILURE'))},{directory,browser}),null,2));
+ const authoredSourcePath='res://'+(await state()).project.entry.replace(/^\/+/, '');
+ await edit('export default function Broken(){throw new Error("PLAYGROUND_EXPECTED_FAILURE");}');await page.locator('#run').click();await page.waitForFunction(()=>document.querySelector('#status').textContent==='运行错误'&&window.__playgroundWorkbench?.inspect().engine?.state==='exited');assert.equal(await page.locator('#preview iframe').count(),0);assert.deepEqual(messages.filter(m=>!m.includes('PLAYGROUND_EXPECTED_FAILURE')),[]);if(workerRuntime){
+  const initialOutcome=observedWorkerOutcomes(browser).findLast(session=>session.workerErrors?.some(value=>String(value).includes('PLAYGROUND_EXPECTED_FAILURE'))),logs=await page.locator('#logs').textContent();
+  assert(initialOutcome,'The expected workbench failure must retain its real Worker identity');
+  const outcome=await terminalObserver.join(initialOutcome);
+  assert(outcome,'The expected workbench failure must retain its real Worker outcome');assert(logs.includes(authoredSourcePath+':'),'The expected failure must retain its authored source stack');
+  expectedFailures.set(outcome.workerId,{...outcome,expectedFailure:{kind:'render',marker:'PLAYGROUND_EXPECTED_FAILURE',logs,sourcePath:authoredSourcePath,authoredSource:true,iframeDisposed:true}});
+ }
+ await projectMenu('reset');await waitRunning('lights');assert.equal((await state()).diagnostics.length,0);assert.deepEqual(errors,[]);
+ const sessionMap=new Map(observedWorkerSessions(browser).map(session=>[session.workerId,session]));for(const [id,session]of expectedFailures)sessionMap.set(id,session);
+ console.log(JSON.stringify(await withAcceptanceContext({status:'passed',suite:'workbench',...(workerRuntime?{sessions:[...sessionMap.values()]}:{}),runtime:'react',projectCards:expectedDemos.length,demos:catalog.length,checks:['ff8da42 workbench geometry and theme','top project cards and keyboard switching','Monaco, explorer, tabs, create/rename/delete/search','multi-file imports, diagnostics and source navigation','autosave and project export','splitter drag, dock resize, sidebar toggle and preview focus','development/production mode','all selected native Godot demos and gameplay','stable Root disposal and stop/restart','mobile drawer, stacked panes and menus','upstream notices','runtime failure disposal and recovery'],unexpectedConsoleErrors:messages.filter(m=>!m.includes('PLAYGROUND_EXPECTED_FAILURE'))},{directory,browser}),null,2));
 }catch(error){console.error(String(error));console.error(JSON.stringify({events:(await events()).slice(-3).map(e=>({type:e.type,stats:e.stats,resources:e.resources,message:e.message})),logs:(await page.locator('#logs').textContent())?.slice(-4000),errors,messages:messages.slice(-5)},null,2));await fs.mkdir(shotDir,{recursive:true});await screenshot('failure');throw error;}
 finally{await browser.close();await new Promise(r=>server.close(r));}

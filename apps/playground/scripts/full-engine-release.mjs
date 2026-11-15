@@ -4,10 +4,13 @@ import {fileURLToPath} from 'node:url';
 import {createRequire} from 'node:module';
 import {createHash} from 'node:crypto';
 import {captureEngineApi} from './capture-engine-api.mjs';
-import {getEngineProfile,validateEngineProfile} from '../../../scripts/release/engine-profiles.mjs';
+import {getEngineProfile,validateEngineProfile,assertWorkerRuntimeAbi} from '../../../scripts/release/engine-profiles.mjs';
 import {legacyExecution,validateExecutionContract} from '../../../scripts/release/execution-contract.mjs';
 import {createEngineIdentity,createExtensionIdentity,nativeEngineIdentityInputs} from '../../../scripts/release/release-identities.mjs';
 import {nativeExtensionIdentityInputs} from '../../../packages/engine/src/identities.ts';
+
+import {assertWorkerBuildProof} from './worker-candidate.mjs';
+import {assertWorkerSdkProof} from './worker-sdk-proof.mjs';
 
 const repo=fileURLToPath(new URL('../../../',import.meta.url));
 const sdk=path.join(repo,'scripts/jsb.react');
@@ -92,10 +95,12 @@ function validateGeneratedProfile({ir,capture,irBytes,declarations,namingVersion
 }
 
 /** Both naming snapshots are captured from the same production engine bytes. */
-export function assembleFullEngineRelease({engine,ir,capture,irBytes,declarations,namingVersion,codegenVersion,sdkVersion,vendor,developmentVendor,typeSnapshot,namingProfiles,strictTypechecks,build={},runtimeProfile=FULL_ENGINE_PROFILE}){
+export function assembleFullEngineRelease({engine,ir,capture,irBytes,declarations,namingVersion,codegenVersion,sdkVersion,vendor,developmentVendor,typeSnapshot,namingProfiles,strictTypechecks,build={},runtimeProfile=FULL_ENGINE_PROFILE,runtimeAbi,engineBuildReport}){
  const execution=engine.execution??legacyExecution();validateExecutionContract(execution,{requireWorkerAssets:execution.executionModel!=='window'});
  if(execution.executionModel!=='window'&&!engine.host)throw Error('E_FULL_ENGINE_HOST: Worker release requires the actual browser host bundle');
  if(engine.host&&(!/^[a-f0-9]{64}$/.test(engine.host.sha256??'')||!Number.isSafeInteger(engine.host.bytes)||engine.host.bytes<=0||!engine.host.path||engine.host.path.startsWith('/')||engine.host.path.split('/').some(part=>!part||part==='.'||part==='..')))throw Error('E_FULL_ENGINE_HOST: Invalid browser host asset');
+
+ if(runtimeAbi){assertWorkerRuntimeAbi(runtimeAbi);assertWorkerBuildProof(engineBuildReport);assertWorkerSdkProof(build.sdkBuild);if(canonical(runtimeAbi)!==canonical(engineBuildReport.runtimeAbi))throw Error('E_WORKER_BUILD_ABI');build={...build,workerPatch:engineBuildReport.workerPatch,engineRecipe:engineBuildReport.recipe};}
  const definition=getEngineProfile(runtimeProfile);
  const profiles={snake:{ir,capture,irBytes,declarations,namingVersion,codegenVersion,typeSnapshot,strictTypechecks,actualAPIHash:build.actualAPIHash},camel:namingProfiles?.camel};
  if(!profiles.camel)throw Error('E_FULL_ENGINE_NAMING: Both snake and camel captures are required');
@@ -134,7 +139,7 @@ export function assembleFullEngineRelease({engine,ir,capture,irBytes,declaration
  const sdkTypesHash=sha256(canonical(sdkTypes(profiles.snake)));
  const sdkIdentity={identityVersion:2,version:sdkVersion,typesHash:sdkTypesHash,vendor:vendorAsset,vendors:{production:vendorAsset,development:developmentVendorAsset},moduleExports:FULL_ENGINE_MODULE_EXPORTS,moduleContract:ENGINE_SDK_MODULES,runtimeModules};
  const extensionId=createExtensionIdentity(nativeExtensionIdentityInputs({sdk:sdkIdentity,api:{bindingVersion:ir.bindingVersion}}));
- const manifest={schemaVersion:2,artifactReceiptVersion:2,engineId,extensionId,execution,runtimeProfile,profile:runtimeProfile,runtimeFamily:definition.runtimeFamily,capabilities:{audio:definition.audio,dimensions:runtimeProfile==='engine-2d-v1'?2:3},
+ const manifest={schemaVersion:2,artifactReceiptVersion:2,engineId,extensionId,execution,...(runtimeAbi?{runtimeAbi:{...runtimeAbi}}:{}),runtimeProfile,profile:runtimeProfile,runtimeFamily:definition.runtimeFamily,capabilities:{audio:definition.audio,dimensions:runtimeProfile==='engine-2d-v1'?2:3},
   engine:{...engine,version:ir.engineVersion,modules:ir.modules},modules:ir.modules,
   api:{...apiProfiles.snake,namingProfiles:apiProfiles},
   sdk:sdkIdentity,payloads,build,

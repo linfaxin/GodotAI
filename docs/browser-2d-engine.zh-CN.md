@@ -2,6 +2,8 @@
 
 本指南说明 `engine-2d-v1` 的构建、项目兼容、本地调试与验收流程。当前工作仅进行本地开发和验证，不部署到外部站点。它使用与完整引擎相同的原生 GodotJS 和原生 React 运行链路。是否通过验收应以具体候选的构建报告和浏览器报告为准；本文不替代真实构建证据。
 
+普通 `build:2d` / `dev:2d` 已统一为 Worker，原 legacy 预览入口及 `--legacy-execution` 已废弃。使用版本化 host/audio/presentation ABI 与 schema 3 候选封印，见 [Worker 执行与交付契约](browser-worker-runtime.zh-CN.md)。下文 schema 2 数字和验收记录属于历史；当前验收应使用 Worker 矩阵，不能复用旧报告。默认目录为 `dist-2d-debug` / `dist-2d-release`，不再追加 `-worker`。
+
 ## 配置与兼容边界
 
 | 配置 | 用途 | 内置示例 |
@@ -76,7 +78,7 @@ node scripts/test/build-browser-engine.mjs \
 
 报告保留 requestedArgs，并由独立构建树中的 SCons 记录实际解析后的功能和优化选项。最终模块来自生成的模块头。上游源码、模块源码、补丁、native bundle、工具链、模板和证据都绑定到构建报告。源码归档缺少 Git commit 时仍可用于本地实验，但不能因此获得正式源码认证。
 
-本地和 CI 共用七项经过检查的源码补丁：GLES3 Alpha Hash、小 CanvasGroup backbuffer、私有 tooltip、可选 PWA、音频退出、无线程 group wait，以及第七项 WebKit presentation boundary。第七项在 `platform/web/js/engine/config.js` 的模块 pre/post loop 钩子中保存和恢复独立的 READ/DRAW framebuffer；帧间绑定默认 framebuffer，供 WebKit/iOS WebKit compositor 提交。它同时处理上下文失效、canvas 所有权变更和退出清理，不读取或吞掉 GL error。此修改位于 JS wrapper 链路，构建前后仍逐样本核对 WASM 哈希，不能只凭“仅改 JS”推定字节相同。
+本地和 CI 共用经过检查的源码补丁。既有七项补丁包括：GLES3 Alpha Hash、小 CanvasGroup backbuffer、私有 tooltip、可选 PWA、音频退出、无线程 group wait，以及第七项 WebKit presentation boundary。第七项在 `platform/web/js/engine/config.js` 的模块 pre/post loop 钩子中保存和恢复独立的 READ/DRAW framebuffer；帧间绑定默认 framebuffer，供 WebKit/iOS WebKit compositor 提交。它同时处理上下文失效、canvas 所有权变更和退出清理，不读取或吞掉 GL error。此修改位于 JS wrapper 链路，构建前后仍逐样本核对 WASM 哈希，不能只凭“仅改 JS”推定字节相同。新的 Worker ABI 在同一 checked pipeline 另加入原生启动两阶段、绘制提交、Worker OS/音频宿主和 sample 分配前检查；回执按文件和补丁链绑定源码快照，不能复用历史七项补丁模板来声明支持 Worker。
 
 公开原生 API 不新增“必须调度进 process/physics”的限制。独立真实探针已通过 `JavaScriptBridge.create_callback` 与 `window.setTimeout` 在帧外调用 viewport 图像读回、`ImageTexture.create_from_image`、Sprite 纹理和位置更新，并验证实际目标像素。该证据覆盖这些公开 callback 路径；宿主自行混入 raw WebGL 绘制仍须尊重引擎 context 的所有权。探针结论不代替源码补丁集成后的完整候选验收。
 
@@ -116,7 +118,7 @@ node apps/playground/scripts/build.mjs \
 
 所有 source/export/asset/capture/output 目录必须按配置隔离。资源报告记录 importer/exporter 版本、二进制哈希、素材、导入参数及 PCK 输出。四个 2D 示例使用显式 asset ID 清单，包括运行时动态拼接的 tile ID、Shader、灯光资源与 `withDemo` 的音效。由 Godot importer/exporter 解析 `.import/.remap`、缓存与 UID 依赖，并检查导出的引用闭包。
 
-日常 `pnpm --filter @godot-js/playground build:2d` 自动读取同一配置命名空间下的构建报告，不再仅凭 ZIP 构建。显式 `GODOT_WEB_TEMPLATE` 会先查找旁边的 `engine-report.json`；也可传 `--engine-report`。构建前验证 profile、target、LTO、模块模式、模板哈希以及源码/recipe 证明，导出后复查报告与 ZIP 没有变化。缺少或无效的源码证明直接失败；不可信本地模板必须显式加 `--development`，其 `sourceCertified=false`，不能取得正式站点封印。baseline/no-LTO 保留常规 `dist-2d-debug` 等目录，其他实验默认写入各自配置命名空间下的 `site/`，防止覆盖常规调试产物。
+日常 `pnpm --filter @godot-js/playground build:2d` 自动读取同一配置命名空间下的构建报告，不再仅凭 ZIP 构建。显式 `GODOT_WEB_TEMPLATE` 会先查找旁边的 `engine-report.json`；也可传 `--engine-report`。构建前验证 profile、target、LTO、模块模式、模板哈希以及源码/recipe 证明，导出后复查报告与 ZIP 没有变化。缺少或无效的源码证明直接失败；不可信本地模板必须显式加 `--development`，其 `sourceCertified=false`，不能取得正式站点封印。baseline/no-LTO 的 Worker 构建使用 `dist-2d-debug` 等普通目录，其他实验默认写入各自配置命名空间下的 `site/`，防止覆盖常规调试产物。即便显式 `--development`，产品构建仍要求真实 Worker ABI 和 Native 补丁证明。
 
 显式报告和模板旁自动发现的报告采用同一解析顺序：先读取报告，再推导调用者未指定的 profile、target、LTO、模块模式和 jobs。调用者显式指定的 CLI/环境值必须匹配；ThinLTO 的链接 jobs 也须匹配。默认命名空间本身代表配置选择，放错命名空间的报告不能借推导逻辑静默切换配置。
 

@@ -143,7 +143,7 @@ jobs:
         run: >-
           bash scripts/test/run-browser-worker-linux.sh
           "${{ inputs.browser || 'chromium' }}" "$RUNNER_TEMP/worker-runtime" --
-          node scripts/test/browser-worker-integration.mjs
+          node scripts/test/browser-pthread-integration.mjs
           --engine-report "$RUNNER_TEMP/worker-engine-report.json"
           --out "$RUNNER_TEMP/worker-runtime"
           --browser "${{ inputs.browser || 'chromium' }}"

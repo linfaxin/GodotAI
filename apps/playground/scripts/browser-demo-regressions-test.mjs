@@ -2,10 +2,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {launchBrowser,withAcceptanceContext} from './browser-harness.mjs';
+import {launchBrowser,withAcceptanceContext,defaultTestDirectory} from './browser-harness.mjs';
 import {createStaticServer} from './serve.mjs';
 import {defaultProject} from '../src/project-templates.ts';
-const directory=path.resolve(process.env.PLAYGROUND_TEST_DIRECTORY??fileURLToPath(new URL('../dist',import.meta.url)));
+const directory=defaultTestDirectory();
 const release=JSON.parse(await fs.readFile(path.join(directory,'engine-release.json'),'utf8'));
 const servers=[createStaticServer(directory),createStaticServer(directory)];
 for(const server of servers)await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
@@ -24,7 +24,10 @@ async function imported(page,source,runtime='react'){
 }
 async function running(page){
  await page.waitForFunction(()=>{const state=globalThis.__playgroundWorkbench.inspect();if(state.diagnostics.some(d=>d.category==='error'))throw Error(JSON.stringify(state.diagnostics));if(state.engine?.state==='exited'&&document.querySelector('#status').textContent==='运行错误')throw Error(document.querySelector('#logs').textContent);return state.engine?.state==='running';},null,{timeout:120000});
+ const handle=await page.locator('#preview iframe').elementHandle(),frame=await handle.contentFrame();await handle.dispose();assert(frame);
+ const session=await frame.evaluate(()=>globalThis.__playgroundRuntimeSession);assert.equal(session?.executionBackend,'worker');assert.equal(session.workerState,'running');assert(session.workerId);
 }
+
 async function check(name,callback){
  const context=await browser.newContext({viewport:{width:1536,height:1000}}),page=await context.newPage();page.setDefaultTimeout(90000);
  try{await callback(page);results.push({name,status:'passed'});console.error('[demo regression] '+name+' passed');}

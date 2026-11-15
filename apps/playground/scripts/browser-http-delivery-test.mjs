@@ -5,8 +5,8 @@ import {spawnSync} from 'node:child_process';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {createStaticServer} from './serve.mjs';
-import {launchBrowser,withAcceptanceContext} from './browser-harness.mjs';
-const directory=path.resolve(process.env.PLAYGROUND_TEST_DIRECTORY??fileURLToPath(new URL('../dist',import.meta.url)));
+import {launchBrowser,withAcceptanceContext,defaultTestDirectory} from './browser-harness.mjs';
+const directory=defaultTestDirectory();
 const release=JSON.parse(await readFile(path.join(directory,'engine-release.json'),'utf8'));
 assert.equal(release.engine.wasm.encoding,undefined,'Native delivery tests verify HTTP decoding of the raw sealed WASM');
 const browser=await launchBrowser({headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
@@ -27,7 +27,7 @@ try{
    assert.equal(result.encoding,encoding);assert.equal(result.mime,'application/wasm');assert.equal(result.bytes,release.engine.wasm.bytes);assert.equal(result.sha256,release.engine.wasm.sha256);assert.equal(result.valid,true);checks.push({...result,encoding,transport:'https'});
   }finally{await page.close();await new Promise(resolve=>server.close(resolve));}
  }
- const report=await withAcceptanceContext({status:'passed',checks},{directory,browser});
+ const report=await withAcceptanceContext({status:'passed',executionScope:'http-delivery',checks},{directory,browser});
  if(process.env.PLAYGROUND_DELIVERY_REPORT){const file=path.resolve(process.env.PLAYGROUND_DELIVERY_REPORT);await mkdir(path.dirname(file),{recursive:true});await writeFile(file,JSON.stringify(report,null,2)+'\n');}
  console.log(JSON.stringify(report,null,2));
 }finally{await browser.close();await rm(tlsDirectory,{recursive:true,force:true});}

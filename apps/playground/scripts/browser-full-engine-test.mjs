@@ -1,43 +1,42 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import {createHash} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
-import {launchBrowser,withAcceptanceContext} from './browser-harness.mjs';
+import {createWorkletResponseCollector} from './worklet-response-evidence.mjs';
+import {launchBrowser,withAcceptanceContext,defaultTestDirectory,observedWorkerSessions,installPassiveRecorder,isBrowserConsoleWarning} from './browser-harness.mjs';
 import {createStaticServer} from './serve.mjs';
-import {createLocalTestTls,inspectTestSite,localDeploymentEvidence} from './browser-local-tls.mjs';
 import {getEngineProfile} from '../../../scripts/release/engine-profiles.mjs';
 import {RUNTIME_LIFECYCLE_MINIMUM} from './runtime-evidence.mjs';
 
 // Acceptance of the built production site: no runtime, compiler, or network mocks.
-const directory=path.resolve(process.env.PLAYGROUND_TEST_DIRECTORY??fileURLToPath(new URL('../dist',import.meta.url)));
-const productRelease=JSON.parse(await fs.readFile(path.join(directory,'engine-release.json'),'utf8'));
-const siteBytes=await fs.readFile(path.join(directory,'manifest.json'));
-const publicAssets=JSON.parse(siteBytes).publicAssets===true;
-const urlPrefix=publicAssets?`/releases/${createHash('sha256').update(siteBytes).digest('hex')}/`:'/';
-const runtimeProfile=productRelease.runtimeProfile;
-const isolated=(productRelease.execution??productRelease.engine?.execution)?.requiresCrossOriginIsolation===true;
-const useTls=isolated&&process.env.PLAYGROUND_TEST_TLS!=='0';
-if(useTls&&(process.env.BROWSER??'chromium')!=='chromium')throw Error('Pinned local TLS currently requires Chromium');
-const tls=useTls?await createLocalTestTls():undefined;
+const directory=defaultTestDirectory();
+const runtimeProfile=JSON.parse(await fs.readFile(path.join(directory,'engine-release.json'),'utf8')).runtimeProfile;
+const siteManifest=JSON.parse(await fs.readFile(path.join(directory,'manifest.json'),'utf8')),workerRuntime=siteManifest.schemaVersion===3;
 const output=process.env.PLAYGROUND_FULL_ENGINE_REPORT;
 const timeout=Number(process.env.PLAYGROUND_FULL_ENGINE_TIMEOUT??180000);
 const lifecycleLoops=Number(process.env.PLAYGROUND_FULL_ENGINE_LOOPS??RUNTIME_LIFECYCLE_MINIMUM[process.env.BROWSER??'chromium']);
 assert(Number.isInteger(lifecycleLoops)&&lifecycleLoops>=1&&lifecycleLoops<=100);
-const checks=[],audio=[],errors=[],warnings=[],network=[],frames=[],sessionCleanup=[];
-let browser,context,page,deployment,permissionPolicyObservation;
-const editor=createStaticServer(directory,{publicImmutable:publicAssets,urlPrefix,tls}),preview=createStaticServer(directory,{publicImmutable:publicAssets,urlPrefix,tls});
+const checks=[],audio=[],errors=[],warnings=[],network=[],frames=[],networkBodies=[],networkPending=[],runnerLogs=[],seenRunnerLogs=new Set();
+const workletResponses=createWorkletResponseCollector();
+let browser,context,page;
+const editor=createStaticServer(directory),preview=createStaticServer(directory);
 const listen=server=>new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
 const close=server=>new Promise(resolve=>server.close(resolve));
 const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 async function until(predicate,message){const end=Date.now()+timeout;while(Date.now()<end){if(await predicate())return;await pause(25);}throw Error(message);}
 const inspect=async()=>page?await page.evaluate(()=>globalThis.__playgroundWorkbench?.inspect()):undefined;
-async function running(runtime){
+async function captureRunnerLogs(documentId,phase){
+ const lines=await page.locator('#logs .log-line').evaluateAll(nodes=>nodes.map(node=>({text:node.textContent,level:node.classList.contains('error')?'error':node.classList.contains('warn')?'warn':'log'})));
+ runnerLogs.push({documentId,phase,lines});
+ for(const line of lines){
+  const key=line.level+':'+line.text;if(seenRunnerLogs.has(key))continue;seenRunnerLogs.add(key);
+  if(line.level==='warn'||/(?:^|\n)\s*(?:WARNING:|\[WARN\])/.test(line.text))warnings.push({kind:'runner-log',documentId,...line});
+  else if(line.level==='error'||/(?:^|\n)\s*(?:ERROR:|SCRIPT ERROR:)/.test(line.text))errors.push({kind:'runner-log',documentId,...line});
+ }
+}
+async function running(runtime,{audioDriver='AudioWorklet'}={}){
  console.error(`[full-engine acceptance] waiting for ${runtime} run ${frames.length+1}`);
- await until(async()=>{
-  if(errors.length)throw Error('Production page failed: '+JSON.stringify(errors));
-  return page.evaluate(runtime=>{const state=globalThis.__playgroundWorkbench?.inspect();if(state?.ready&&state.project.runtime===runtime){if(state.diagnostics?.some(d=>d.category==='error'))throw Error(JSON.stringify(state.diagnostics));if(['crashed','unresponsive'].includes(state.engine?.state))throw Error(JSON.stringify({engine:state.engine,logs:document.querySelector('#logs')?.textContent}));}return state?.ready&&state.project.runtime===runtime&&state.engine?.state==='running';},runtime);
- },`Production ${runtime} did not reach running`);
+ await page.waitForFunction(runtime=>{const state=globalThis.__playgroundWorkbench?.inspect();if(state?.ready&&state.project.runtime===runtime&&state.diagnostics?.some(d=>d.category==='error'))throw Error(JSON.stringify(state.diagnostics));return state?.ready&&state.project.runtime===runtime&&state.engine?.state==='running';},runtime,{timeout});
  const state=await inspect();assert.deepEqual(state.diagnostics.filter(d=>d.category==='error'),[]);
  assert.equal(await page.locator('#preview iframe').count(),1);
  const iframe=await page.locator('#preview iframe').elementHandle(),frame=await iframe.contentFrame();
@@ -46,41 +45,33 @@ async function running(runtime){
  assert.equal(new URL(frame.url()).pathname,new URL('preview.html',state.releaseContext.releaseRoot).pathname);
  assert.equal(await frame.locator('canvas').count(),1);
  assert.match(await page.locator('#preview iframe').getAttribute('sandbox'),/allow-pointer-lock/);
- const permissions=await page.locator('#preview iframe').getAttribute('allow');
- if(isolated){
-  assert.match(permissions,/autoplay/);assert.match(permissions,/cross-origin-isolated/);assert.match(permissions,/fullscreen/);assert.match(permissions,/xr-spatial-tracking/);assert.equal(await page.evaluate(()=>crossOriginIsolated),true);assert.equal(await frame.evaluate(()=>crossOriginIsolated),true);
-  const observation=await frame.evaluate(()=>{const policy=document.featurePolicy;return {queryApi:typeof policy?.allowsFeature==='function',fullscreenEnabled:document.fullscreenEnabled,...(typeof policy?.allowsFeature==='function'?{fullscreen:policy.allowsFeature('fullscreen'),xrSpatialTracking:policy.allowsFeature('xr-spatial-tracking')}:{})};});
-  if(observation.queryApi){assert.equal(observation.fullscreen,true);assert.equal(observation.xrSpatialTracking,true);}
-  else assert.equal(observation.fullscreenEnabled,true,'A browser without the policy query API must still permit native fullscreen');
-  permissionPolicyObservation??=observation;
- }
- else assert.equal(permissions,'autoplay');
- const observation=await frame.evaluate(()=>globalThis.__fullEngineObservation);
+ const permissions=await page.locator('#preview iframe').evaluate(element=>({
+  delegated:(element.getAttribute('allow')??'').split(';').map(value=>value.trim()),
+  recognized:element.featurePolicy?.features?.()??null,
+ }));
+ if(workerRuntime)for(const permission of ['fullscreen','microphone'])assert(permissions.delegated.includes(permission),'The Worker host must delegate '+permission);
+ if(!workerRuntime||permissions.recognized?.includes('autoplay'))assert(permissions.delegated.includes('autoplay'),'Delegate autoplay when the browser recognizes it');
+ const observation=await frame.evaluate(()=>{const current=globalThis.__playgroundRuntimeSession,session=typeof current==='function'?current():current;return session?.workerId?session:globalThis.__fullEngineObservation;});
  assert(observation?.documentId,'A fresh real preview document must be instrumented');
  assert(!frames.some(previous=>previous.documentId===observation.documentId),'Every run creates a fresh iframe');
- frames.push({runtime,documentId:observation.documentId,url:frame.url()});
- await until(()=>audio.filter(e=>e.documentId===observation.documentId&&e.type==='worklet-loaded').length>=2,'Both real audio worklets must load');
+ frames.push({runtime,documentId:observation.documentId,url:frame.url(),audioDriver,...(workerRuntime?{runId:observation.runId,workerId:observation.workerId,runConfigurationHash:observation.runConfigurationHash}:{})});
+ await captureRunnerLogs(observation.documentId,'running');
+ if(audioDriver==='Dummy')assert.equal(observation.audio?.driver,'Dummy','The prepared native driver must explicitly be Dummy');
+ else await until(()=>audio.filter(e=>e.documentId===observation.documentId&&e.type==='worklet-loaded').length>=(workerRuntime?1:2),'The declared real audio worklets must load');
  console.error(`[full-engine acceptance] running ${runtime} ${observation.documentId}`);
  return observation.documentId;
 }
-async function stop(documentId){
+async function stop(documentId,{dummy=false}={}){
  await page.locator('#stop').click();
  await page.waitForFunction(()=>globalThis.__playgroundWorkbench.inspect().engine?.state==='exited',null,{timeout});
  await page.waitForFunction(()=>!document.querySelector('#preview iframe'),null,{timeout});
- await until(()=>audio.some(e=>e.documentId===documentId&&e.type==='context-closed'&&e.state==='closed'),'Native engine shutdown must close its AudioContext');
+ if(dummy){
+  await until(()=>observedWorkerSessions(browser).some(session=>session.documentId===documentId&&session.exit?.hostCleanup?.status==='complete'),'Dummy session must report actual host retirement');
+  const retired=observedWorkerSessions(browser).find(session=>session.documentId===documentId);assert.equal(retired.audio.driver,'Dummy');assert.equal(retired.audio.contextsCreated,0);assert.equal(retired.audio.contextsClosed,0);
+ }else await until(()=>audio.some(e=>e.documentId===documentId&&e.type==='context-closed'&&e.state==='closed'),'Native engine shutdown must close its AudioContext');
  assert(!audio.some(e=>e.documentId===documentId&&e.type==='worklet-failed'));
- const terminal=await page.evaluate(()=>globalThis.__fullEngineTerminal);
- assert.equal(terminal.length,sessionCleanup.length+1,'Each stopped preview must deliver exactly one terminal receipt');
- const message=terminal.at(-1);assert.equal(message.type,'exited');assert.equal(message.code,0);
- const receipt=message.cleanup;assert(receipt);assert.equal(receipt.mode,'clean');assertCleanup(receipt);
- assert(!sessionCleanup.some(item=>item.runId===message.runId),'Terminal identities must belong to fresh sessions');
- sessionCleanup.push({documentId,runId:message.runId,cleanup:receipt});
+ await captureRunnerLogs(documentId,'stopped');
  console.error(`[full-engine acceptance] stopped ${documentId}`);
-}
-function assertCleanup(receipt){
- assert.deepEqual(receipt.errors,[]);
- for(const [created,closed]of [['workers','terminatedWorkers'],['audioContexts','closedAudioContexts'],['messagePorts','closedMessagePorts'],['glContexts','lostGlContexts'],['mediaTracks','stoppedMediaTracks'],['networkResources','closedNetworkResources']])assert.equal(receipt[created]??0,receipt[closed]??0,`${created} must be fully released`);
- if(isolated){assert(receipt.workers>0);assert(receipt.messagePorts>0);assert(receipt.glContexts>0);}
 }
 async function choose(id){await page.locator('#project-switcher').click();await page.locator(`[data-demo="${id}"]`).click();}
 function packedFiles(input){
@@ -121,6 +112,7 @@ export default class Main extends Node2D {
 }};
 function audioProject(playbackType){
  const project=structuredClone(nativeProject);
+ project.files['/project.godot']+='\n[audio]\ngeneral/default_playback_type=0\ngeneral/default_playback_type.web=0\n';
  project.files['/src/Main.ts']=`import {Node,AudioStreamPlayer,AudioStreamGenerator,AudioStreamGeneratorPlayback,Vector2,print} from "godot";
 export default class Main extends Node {
  player!:AudioStreamPlayer;
@@ -143,32 +135,26 @@ export default class Main extends Node {
  project.files['/main.tscn']=project.files['/main.tscn'].replace('type="Node2D"','type="Node"');
  return project;
 }
+function sampleAudioProject(){
+ const project=structuredClone(nativeProject),pcm=Buffer.alloc(9600);
+ for(let index=0;index<4800;index++)pcm.writeInt16LE(Math.round(Math.sin(index*2*Math.PI*220/48000)*6500),index*2);
+ project.files['/tone.tres']='[gd_resource type="AudioStreamWAV" format=3]\n[resource]\nformat=1\nmix_rate=48000\nstereo=false\nloop_mode=1\nloop_begin=0\nloop_end=4800\ndata=PackedByteArray('+Array.from(pcm).join(',')+')\n';
+ project.files['/src/Main.ts']='import {Node,AudioStreamPlayer,ResourceLoader} from "godot";export default class Main extends Node {_ready(){const player=new AudioStreamPlayer();player.stream=ResourceLoader.load("res://tone.tres") as any;player.playback_type=2;this.add_child(player);player.play();console.log("FULL_ENGINE_WAV_SAMPLE_READY");}}';
+ return project;
+}
 try{
  const release=JSON.parse(await fs.readFile(path.join(directory,'engine-release.json'),'utf8'));
  getEngineProfile(release.runtimeProfile);assert.equal(release.engine.worklets.length,2);
  await Promise.all([listen(editor),listen(preview)]);
- const editorOrigin=`${tls?'https':'http'}://127.0.0.1:${editor.address().port}`,previewOrigin=`${tls?'https':'http'}://127.0.0.1:${preview.address().port}`;
- const delivery=await inspectTestSite(editorOrigin+urlPrefix,tls);assert.equal(delivery.status,200);
- deployment=localDeploymentEvidence({tls,editorOrigin,previewOrigin,headers:delivery.headers});
- if(isolated){assert.equal(delivery.headers['cross-origin-opener-policy'],'same-origin');assert.equal(delivery.headers['cross-origin-embedder-policy'],'require-corp');assert.equal(delivery.headers['cross-origin-resource-policy'],'cross-origin');assert.match(delivery.headers['permissions-policy'],/cross-origin-isolated/);}
- browser=await launchBrowser({headless:true,executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE||undefined,args:['--no-sandbox','--enable-webgl','--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader','--disable-dev-shm-usage','--autoplay-policy=no-user-gesture-required',...(tls?['--ignore-certificate-errors-spki-list='+tls.spki]:[])]});
+ const editorOrigin=`http://127.0.0.1:${editor.address().port}`,previewOrigin=`http://127.0.0.1:${preview.address().port}`;
+ browser=await launchBrowser({headless:true,executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE||undefined,args:['--no-sandbox','--enable-webgl','--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader','--disable-dev-shm-usage','--autoplay-policy=no-user-gesture-required']});
  context=await browser.newContext({viewport:{width:1536,height:1000}});
- await context.exposeBinding('__fullAcceptanceRecord',(_source,event)=>{audio.push(event);});
+ await installPassiveRecorder(context,'__fullAcceptanceRecord',(_source,event)=>{audio.push(event);});
  await context.addInitScript(()=>{
-  globalThis.__fullEngineTerminal=[];
-  globalThis.__fullEngineConnections=[];globalThis.__fullEngineHealth={};
-  const Channel=MessageChannel;
-  globalThis.MessageChannel=new Proxy(Channel,{construct(target,args,newTarget){const channel=Reflect.construct(target,args,newTarget);for(const port of [channel.port1,channel.port2])port.addEventListener('message',event=>{
-   const message=event.data;if(message?.protocolVersion!==1||typeof message.runId!=='string')return;
-   const health=globalThis.__fullEngineHealth[message.runId]??={host:0,engine:0};
-   if(message.type==='heartbeat')health.host++;if(message.type==='engine-progress')health.engine++;
-   if(message.type==='connected')globalThis.__fullEngineConnections.push({port,identity:message});
-   if(['exited','terminated','fatal'].includes(message.type))globalThis.__fullEngineTerminal.push(message);
-  });return channel;}});
   if(!location.pathname.endsWith('/preview.html'))return;
   const documentId=crypto.randomUUID(),contexts=[],meters=[],blobs=new Map();
   globalThis.__fullEngineObservation={documentId};
-  const emit=event=>globalThis.__fullAcceptanceRecord({documentId,...event});
+  const emit=event=>{const current=globalThis.__playgroundRuntimeSession,session=typeof current==='function'?current():current;return globalThis.__fullAcceptanceRecord({documentId:session?.documentId??documentId,...event});};
   // Observe the original Blob object; fetching blob: is intentionally forbidden
   // by the production connect-src CSP. Never alter the verified module bytes.
   const createObjectURL=URL.createObjectURL.bind(URL),revokeObjectURL=URL.revokeObjectURL.bind(URL);
@@ -214,15 +200,20 @@ try{
  });
  page=await context.newPage();page.setDefaultTimeout(timeout);
  page.on('pageerror',error=>errors.push({kind:'pageerror',message:String(error)}));
- page.on('console',message=>{if(message.type()==='error'){
-  const text=message.text();
+ page.on('console',message=>{
+  const text=message.text(),warning=isBrowserConsoleWarning(message.type(),text);
+  if(message.type()==='error'||warning){
   // Godot reports normal module-resolution candidate misses through printErr.
   // The subsequent successful resolution is proved by the real React runs.
   const candidates=/^\[WARN\] \[jsb\]\[Warning\] failed to check out module \(absolute\) res:\/\/\.godot\/GodotJS\/(?:\.playground|src)\/node_modules\/(?:react|@godot-js\/react\/engine) \[at get_source_info /;
-  (candidates.test(text)?warnings:errors).push({kind:'console',message:text});
+  (warning||candidates.test(text)?warnings:errors).push({kind:'console',message:text});
  }});
  page.on('request',request=>{if(/\.audio\.(?:position\.)?worklet\.js(?:$|\?)/.test(request.url()))network.push(request.url());});
- await page.goto(`${editorOrigin}${urlPrefix}?previewOrigin=${encodeURIComponent(previewOrigin+urlPrefix)}`,{waitUntil:'domcontentloaded'});
+ page.on('response',response=>{
+  if(!/\.audio\.(?:position\.)?worklet\.js(?:$|\?)/.test(response.url()))return;
+  networkPending.push(workletResponses.capture(response).then(evidence=>networkBodies.push(evidence)).catch(error=>errors.push({kind:'worklet-response',message:String(error)})));
+ });
+ await page.goto(`${editorOrigin}/?previewOrigin=${encodeURIComponent(previewOrigin)}`,{waitUntil:'domcontentloaded'});
  const initial=await running('godot');
  assert.equal((await inspect()).engine.releaseId,release.id);
  assert.equal((await inspect()).project.demoId,'native');
@@ -315,11 +306,22 @@ export default class Main extends G.Node2D {_ready(){
  await page.locator('#import').setInputFiles({name:'byte-camel.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(bytes))});
  const byteCamel=await running('godot');await page.waitForFunction(()=>document.querySelector('#logs').textContent.includes('FULL_ENGINE_BYTE_CAMEL_OK'),null,{timeout});await stop(byteCamel);
  checks.push('byte-encoded project.godot selects camel declarations and executes the same native camel bindings');
+ if(workerRuntime){
+  const dummy=structuredClone(nativeProject);dummy.files['/project.godot']+='\n[audio]\ndriver/driver="Dummy"\n';
+  await page.locator('#import').setInputFiles({name:'explicit-dummy.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(dummy))});
+  const documentId=await running('godot',{audioDriver:'Dummy'});await stop(documentId,{dummy:true});
+  assert.equal(audio.filter(event=>event.documentId===documentId).length,0,'Explicit Dummy must create no AudioContext or worklet');
+  checks.push('explicit native Dummy driver runs without an AudioContext, worklet or failure fallback');
+  await page.locator('#import').setInputFiles({name:'real-wav-sample.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(sampleAudioProject()))});
+  const sample=await running('godot');await page.frameLocator('#preview iframe').locator('canvas').click({position:{x:8,y:8}});
+  await until(()=>audio.some(event=>event.documentId===sample&&event.type==='worklet-output'&&event.name==='godot-worker-meter'&&event.peak>0.01),'A real AudioStreamWAV sample must produce measured master-graph output');
+  await stop(sample);checks.push('a real looping AudioStreamWAV uses explicit sample playback and produces measured master output');
+ }
  for(const playbackType of [0,1]){
   await page.locator('#import').setInputFiles({name:`audio-${playbackType}.json`,mimeType:'application/json',buffer:Buffer.from(JSON.stringify(audioProject(playbackType)))});
   const playing=await running('godot');
   await page.frameLocator('#preview iframe').locator('canvas').click({position:{x:8,y:8}});
-  await until(()=>audio.some(event=>event.documentId===playing&&event.type==='worklet-output'&&event.name==='godot-processor'&&event.peak>0.01),`AudioStreamGenerator playback type ${playbackType} must produce a nonzero real worklet output`);
+  await until(()=>audio.some(event=>event.documentId===playing&&event.type==='worklet-output'&&event.name===(workerRuntime?'godot-worker-audio':'godot-processor')&&event.peak>0.01),`AudioStreamGenerator playback type ${playbackType} must produce a nonzero real worklet output`);
   await stop(playing);
  }
  checks.push('native AudioStreamGenerator and AudioStreamPlayer produce measured worklet output under default and stream playback settings');
@@ -330,49 +332,35 @@ export default class Main extends G.Node2D {_ready(){
   await stop(loop);
  }
  checks.push(`${lifecycleLoops} additional fresh audio iframe lifecycles complete without stale worklet callbacks or context leaks`);
- if(isolated){
-  const stalled=structuredClone(nativeProject);
-  stalled.files['/src/Main.ts']=`import {Node2D,print} from "godot";export default class Main extends Node2D{_ready(){
-   const host=(globalThis as any).__godotjsRuntimeHost;if(!host)throw Error('The real Worker RuntimeHost is missing');
-   host.bindProjectCommand((raw:string)=>{if(JSON.parse(raw).type==='acceptance-hang'){print('FULL_ENGINE_HANG_ENTER');while(true){}}});
-   print('FULL_ENGINE_HANG_READY');
-  }}`;
-  await page.locator('#import').setInputFiles({name:'forced-worker.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(stalled))});
-  const stalledDocument=await running('godot');
-  await page.waitForFunction(()=>document.querySelector('#logs').textContent.includes('FULL_ENGINE_HANG_READY'),null,{timeout});
-  const before=await page.evaluate(()=>{const current=globalThis.__fullEngineConnections.at(-1),health={...globalThis.__fullEngineHealth[current.identity.runId]};current.port.postMessage({...current.identity,type:'project-command',data:{type:'acceptance-hang'}});return{runId:current.identity.runId,health};});
-  await page.waitForFunction(()=>!document.querySelector('#preview iframe'),null,{timeout});
-  const after=await page.evaluate(runId=>({health:globalThis.__fullEngineHealth[runId],terminal:globalThis.__fullEngineTerminal.at(-1),count:globalThis.__fullEngineTerminal.length}),before.runId);
-  assert.equal(after.count,sessionCleanup.length+1);assert.equal(after.terminal.runId,before.runId);assert.equal(after.terminal.type,'terminated');assert.equal(after.terminal.cleanup.mode,'forced');assertCleanup(after.terminal.cleanup);
-  assert(after.health.host>=before.health.host+5,'The preview host must stay responsive while the application Worker is stuck');
-  assert(after.health.engine<=before.health.engine+1,'A stuck application Worker must stop reporting frame progress');
-  sessionCleanup.push({documentId:stalledDocument,runId:before.runId,cleanup:after.terminal.cleanup,forced:true,health:{before:before.health,after:after.health}});
-  await page.locator('#import').setInputFiles({name:'after-force.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(audioProject(1)))});
-  const recovered=await running('godot');await page.frameLocator('#preview iframe').locator('canvas').click({position:{x:8,y:8}});
-  await until(()=>audio.some(event=>event.documentId===recovered&&event.type==='worklet-output'&&event.peak>0.01),'A fresh session after forced termination must restore real audio output');await stop(recovered);
-  checks.push('A stalled application Worker leaves the host responsive, times out with complete forced cleanup, and a fresh Worker session restores real audio');
- }
- const hashes=new Set(release.engine.worklets.map(asset=>asset.decodedSha256??asset.sha256));
+ const hashes=new Set(workerRuntime?[siteManifest.runtime.assets['runtime.audio.worklet.js'].sha256]:release.engine.worklets.map(asset=>asset.decodedSha256??asset.sha256));
  for(const frame of frames){
   const loaded=audio.filter(event=>event.documentId===frame.documentId&&event.type==='worklet-loaded');
+  if(frame.audioDriver==='Dummy'){assert.equal(loaded.length,0);continue;}
   assert.deepEqual(new Set(loaded.map(event=>event.sha256)),hashes);
   assert(loaded.every(event=>event.url.startsWith('blob:')),'AudioWorklet executes verified Blob URLs');
   const created=audio.filter(event=>event.documentId===frame.documentId&&event.type==='context-created');
   const closed=audio.filter(event=>event.documentId===frame.documentId&&event.type==='context-closed');
   assert(created.length>0);assert.equal(closed.length,created.length);
  }
- assert.equal(network.length,frames.length*release.engine.worklets.length,'Only the integrity loader downloads each worklet once per fresh iframe');
+ const downloaded=[...release.engine.worklets.map(asset=>({path:asset.path,sha256:asset.sha256})),...(workerRuntime?[{path:siteManifest.runtime.audioWorklet,sha256:siteManifest.runtime.assets[siteManifest.runtime.audioWorklet].sha256}]:[])];
+ await Promise.all(networkPending);
+ assert.equal(network.length,frames.length*downloaded.length,'Each declared engine/runtime worklet is integrity-fetched once per fresh iframe');
+ assert.equal(networkBodies.length,network.length,'Every worklet response must have captured bytes or linked cache revalidation evidence');
+ for(const asset of downloaded){
+  const url=new URL(asset.path,previewOrigin+'/').href,requests=network.filter(value=>value===url),responses=networkBodies.filter(value=>value.url===url);
+  assert.equal(requests.length,frames.length,'Exactly one declared worklet request per fresh iframe: '+asset.path);
+  assert.equal(responses.length,frames.length,'Exactly one evidenced worklet response per fresh iframe: '+asset.path);
+  assert(responses.every(response=>response.sha256===asset.sha256),'Downloaded worklet bytes must match the declared hash: '+asset.path);
+ }
  assert.deepEqual(errors,[]);
  assert.deepEqual(warnings,[],'Production React imports must resolve without failed candidate paths');
  checks.push('both real audio worklets match release hashes, execute from verified Blob bytes, and every fresh session closes audio');
- const report=await withAcceptanceContext({status:'passed',releaseId:release.id,lifecycleLoops,deployment,checks,frames,audio,sessionCleanup,workletNetworkRequests:network.length,errors,warnings,permissionPolicyObservation,
-  ...(permissionPolicyObservation?.queryApi===false?{limitations:['This browser has no Permissions Policy query API. Fullscreen and actual cross-origin isolation are verified; the XR allow token is present, but XR policy behavior is not attested by this test.']}:{}),
-  ...(process.env.BROWSER==='firefox'&&process.env.LIBGL_ALWAYS_SOFTWARE==='1'?{testEnvironment:{headless:process.env.BROWSER_HEADLESS!=='0',softwareGL:true,firefoxUserPrefs:{'webgl.force-enabled':true,'webgl.disabled':false,'gfx.webrender.software':true}}}:{}),
- }, {directory,browser});
+ const report=await withAcceptanceContext({status:'passed',releaseId:release.id,lifecycleLoops,checks,frames,audio,runnerLogs,workletNetworkRequests:network.length,workletResponses:networkBodies,errors,warnings}, {directory,browser});
  if(output){await fs.mkdir(path.dirname(path.resolve(output)),{recursive:true});await fs.writeFile(output,JSON.stringify(report,null,2)+'\n');}
  console.log(JSON.stringify(report,null,2));
 }catch(error){
- const report={status:'failed',error:String(error),stack:error.stack,deployment,checks,frames,audio,sessionCleanup,network,errors,warnings,state:await inspect().catch(()=>undefined),logs:await page?.locator('#logs').textContent().catch(()=>undefined)};
+ await Promise.all(networkPending);
+ const report={status:'failed',error:String(error),stack:error.stack,checks,frames,audio,network,workletResponses:networkBodies,errors,warnings,state:await inspect().catch(()=>undefined),logs:await page?.locator('#logs').textContent().catch(()=>undefined)};
  if(output){await fs.mkdir(path.dirname(path.resolve(output)),{recursive:true});await fs.writeFile(output,JSON.stringify(report,null,2)+'\n');}
  console.error(JSON.stringify(report,null,2));throw error;
-}finally{await context?.close();await browser?.close();await Promise.all([close(editor),close(preview)]);await tls?.dispose();}
+}finally{await context?.close();await browser?.close();await Promise.all([close(editor),close(preview)]);}

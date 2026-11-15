@@ -6,7 +6,11 @@
   "description": "Browser compiler, package resolution and preview integration for GodotJS React",
   "exports": {
     ".": "./dist/index.js",
-    "./*": "./dist/*.js"
+    "./*": "./dist/*.js",
+    "./worker-runner": {
+      "types": "./dist/worker-runner.d.ts",
+      "import": "./dist/worker-runner.js"
+    }
   },
   "scripts": {
     "build": "node scripts/snapshot-runtime.mjs && tsc -p tsconfig.json",

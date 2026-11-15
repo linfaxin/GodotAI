@@ -50,6 +50,25 @@ test('preview adapter verifies target and schema2 receipt before a runner receiv
  await assert.rejects(preview.run(pack,1,{...provenance,artifactReceipt:{...proof,buildKey:'5'.repeat(64)}}),/E_ARTIFACT_BUILD_KEY/);
  await preview.run(pack,2,provenance);assert.equal(artifact.artifactId,proof.artifactId);assert.equal(artifact.manifest.sourceMarker,'unchanged');assert.equal(artifact.manifest.extensionId,undefined);
  await preview.run(pack,3,{...provenance,extensionId:manifest.extensionId});assert.equal(artifact.manifest.extensionId,manifest.extensionId);assert.throws(()=>{preview.manifest.extensionId='4'.repeat(64);},TypeError);
+
+});
+
+test('preview adapter preserves compiler manifest and refuses another release before creating an iframe',async t=>{
+ const manifest=sealRelease({...release(),runtimeAbi:{protocolVersion:2,host:1,audio:1,presentation:1}});
+ const runtime={executionBackend:'worker',presentationBackends:['direct','bitmap'],entry:'runtime.worker.js',audioWorklet:'runtime.audio.worklet.js',assets:{'runtime.worker.js':asset,'runtime.audio.worklet.js':asset}};
+ const files=new Map([['/releases/candidate-a/engine-release.json',JSON.stringify(manifest)],['/releases/candidate-a/manifest.json',JSON.stringify({schemaVersion:3,runtimeProfile:'engine-2d-v1',engineReleaseId:manifest.id,runtime,payloads:{}})],['/releases/candidate-a/preview-config.json',JSON.stringify({previewOrigin:'https://preview.test'})]]);
+ // config fetch is relative to the document; the fetch fixture resolves it at root.
+ mockFetch(t,files);
+ location.href=root+'index.html';
+ const module=await moduleFor(t,'../src/engine-preview.ts');
+ const preview=await module.createEnginePreview({ownerDocument:{location:{origin:'https://editor.test'}}},()=>{});
+ assert.equal(preview.context.releaseRoot,root);
+ const provenance={engineProfile:preview.context.engineProfile,engineReleaseId:preview.context.engineReleaseId,releaseContext:preview.context,sourceMarker:'unchanged'};
+ await assert.rejects(preview.run(new Uint8Array([1]),1,{...provenance,engineReleaseId:'engine-r2'}),/E_ARTIFACT_RELEASE_MISMATCH/);
+ let artifact;preview.runner.run=async value=>{artifact=value;return {state:'running'};};
+ await preview.run(new Uint8Array([1]),2,provenance);
+ assert.equal(artifact.manifest.sourceMarker,'unchanged');assert.equal(artifact.manifest.engineReleaseId,manifest.id);assert.deepEqual(artifact.manifest.releaseContext,preview.context);assert.equal(artifact.manifest.generation,artifact.generation);
+ assert.equal(preview.runner.options.previewUrl,'https://preview.test/releases/candidate-a/preview.html');
 });
 test('SDK replacement under old IDs and declaration identities is rejected before it reaches the compiler',async t=>{
  const fixture=await nativeReleaseFixture(),{manifest,files:assets}=fixture,requests=[];const files=new Map([...assets].map(([name,bytes])=>['/releases/candidate-a/'+name,bytes]));const original=JSON.stringify(manifest);files.set('/releases/candidate-a/engine-release.json',original);files.set('/releases/candidate-a/manifest.json',siteFor(manifest,original));mockFetch(t,files);
