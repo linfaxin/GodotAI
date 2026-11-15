@@ -11,6 +11,54 @@ namespace jsb
 {
     namespace
     {
+        // Generic write receipt: preserve Variant conversion and the ordinary
+        // binding guards, and read stored state after native normalization.
+        void _try_set_property(const v8::FunctionCallbackInfo<v8::Value>& info)
+        {
+            v8::Isolate* isolate = info.GetIsolate();
+            const auto context = isolate->GetCurrentContext();
+            Environment* env = Environment::wrap(context);
+            if (!env || !env->is_caller_thread() || env->is_disposing() || info.Length() != 3 || !info[1]->IsString())
+            {
+                jsb_throw(isolate, "E_PROPERTY_WRITE: invalid context or arguments");
+                return;
+            }
+            Variant target, desired;
+            if (!TypeConvert::js_to_gd_var(isolate, context, info[0], Variant::OBJECT, target)
+                || !TypeConvert::js_to_gd_var(isolate, context, info[2], Variant::NIL, desired))
+            {
+                jsb_throw(isolate, "E_PROPERTY_WRITE: invalid object or Variant");
+                return;
+            }
+            Object* object = target.get_validated_object();
+            if (!object)
+            {
+                jsb_throw(isolate, "E_PROPERTY_WRITE: released object");
+                return;
+            }
+            const StringName name = impl::Helper::to_string(isolate, info[1]);
+            const Variant property = name;
+            const Variant* args[] = { &property, &desired };
+            if (!ReactBridge::allows_bound_method(object, StringName("set"), args, 2))
+            {
+                jsb_throw(isolate, "E_STRUCTURAL_PERMISSION: property write is not permitted");
+                return;
+            }
+            const ObjectID identity = object->get_instance_id();
+            bool valid = false;
+            object->set(name, desired, &valid);
+            // A custom setter/signal can release its receiver synchronously.
+            Object* live = ::ObjectDB::get_instance(identity);
+            bool readable = false;
+            const Variant stored = live == object ? live->get(name, &readable) : Variant();
+            v8::Local<v8::Object> result = v8::Object::New(isolate);
+            result->Set(context, impl::Helper::new_string_ascii(isolate, "accepted"), v8::Boolean::New(isolate, valid && live == object && readable)).Check();
+            v8::Local<v8::Value> value;
+            if (readable && TypeConvert::gd_var_to_js(isolate, context, stored, value))
+                result->Set(context, impl::Helper::new_string_ascii(isolate, "value"), value).Check();
+            info.GetReturnValue().Set(result);
+        }
+
         void _get_engine_api(const v8::FunctionCallbackInfo<v8::Value>& info)
         {
             const auto context = info.GetIsolate()->GetCurrentContext();
@@ -608,6 +656,7 @@ namespace jsb
                 jsb_obj->Set(context, impl::Helper::new_string_ascii(isolate, "internal"), internal_obj).Check();
                 p_env->get_react_bridge().install(context, internal_obj);
                 internal_obj->Set(context, impl::Helper::new_string_ascii(isolate, "get_engine_api"), JSB_NEW_FUNCTION(context, _get_engine_api, {})).Check();
+                internal_obj->Set(context, impl::Helper::new_string_ascii(isolate, "try_set_property"), JSB_NEW_FUNCTION(context, _try_set_property, {})).Check();
 
                 internal_obj->Set(context, impl::Helper::new_string_ascii(isolate, "find_module"), JSB_NEW_FUNCTION(context, _find_module, {})).Check();
                 internal_obj->Set(context, impl::Helper::new_string_ascii(isolate, "add_module"), JSB_NEW_FUNCTION(context, _add_module, {})).Check();

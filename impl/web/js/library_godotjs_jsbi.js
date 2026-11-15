@@ -3,7 +3,13 @@ const GodotJSBrowserInterface = {
     // $GodotJSBrowserInterface__deps: ['$GodotRuntime'],
     // $GodotJSBrowserInterface: {},
 
-    "jsbi_init": function (gc_callback, unhandled_rejection, call_function, call_accessor, generate_internal_data, on_worker_message, on_worker_message_from_pthread, worker_get_or_add_native_transfer, debug_build, bridge_logging) {
+    // The page must relay messages even when the engine lives on a pthread
+    // and no GodotJS environment is initialized on the page itself.
+    "$GodotJSWorkerRouter": {},
+    "$GodotJSWorkerRouter__deps": typeof PTHREADS !== "undefined" && PTHREADS ? ["$PThread"] : [],
+    "$GodotJSWorkerRouter__postset": "_jsbb_.install_pthread_worker_listener_hook();",
+    "jsbi_init__deps": ["$GodotJSWorkerRouter"],
+    "jsbi_init": function (gc_callback, unhandled_rejection, call_function, call_accessor, generate_internal_data, on_worker_message, on_worker_message_from_pthread, worker_get_or_add_native_transfer, debug_build, bridge_logging, runtime_role, thread_id, parent_thread_id) {
         return _jsbb_.init({
             gc_callback,
             unhandled_rejection,
@@ -14,10 +20,14 @@ const GodotJSBrowserInterface = {
             on_worker_message_from_pthread,
             worker_get_or_add_native_transfer,
             debug_build,
-            bridge_logging
+            bridge_logging,
+            runtime_role,
+            thread_id: thread_id >>> 0,
+            parent_thread_id: parent_thread_id >>> 0
         });
     },
 
+    "jsbi_ConfigureThread": function (role, thread_id, parent_thread_id) { _jsbb_.ConfigureThread(role, thread_id >>> 0, parent_thread_id >>> 0); },
     "jsbi_NewEngine": function (opaque) { return _jsbb_.NewEngine(opaque); },
     "jsbi_FreeEngine": function (engine_id) { _jsbb_.FreeEngine(engine_id); },
     "jsbi_FlushPendingWorkerMessages": function () { _jsbb_.FlushPendingWorkerMessages(); },
@@ -156,8 +166,7 @@ const GodotJSBrowserInterface = {
     "jsbi_IsMap": function (engine_id, stack_pos) { return _jsbb_.GetEngine(engine_id).stack.GetValue(stack_pos) instanceof Map; },
     "jsbi_IsArrayBuffer": function (engine_id, stack_pos) { return _jsbb_.GetEngine(engine_id).stack.GetValue(stack_pos) instanceof ArrayBuffer; },
 
-    "jsbi_PostMessage": function (pthread_id, engine_id, data_sp, transfer_id, transfer_sp) { return _jsbb_.PostMessage(pthread_id, engine_id, data_sp, transfer_id, transfer_sp); },
-    "jsbi_RegisterWorkerOwner": function (pthread_id, engine_id, worker_owner_sp) { return _jsbb_.RegisterWorkerOwner(pthread_id, engine_id, worker_owner_sp); },
+    "jsbi_PostMessage": function (pthread_id, engine_id, data_sp, transfer_id, transfer_sp, to_parent) { return _jsbb_.PostMessage(pthread_id >>> 0, engine_id, data_sp, transfer_id >>> 0, transfer_sp, !!to_parent); },
 
     "jsbi_MapSize": function (engine_id, stack_pos) { return _jsbb_.GetEngine(engine_id).MapSize(stack_pos); },
 

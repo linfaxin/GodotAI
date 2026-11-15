@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {parseProject,filePath,addProjectFiles,renameProjectFile,canRenameProjectFile,exportProject,resolveProjectMainScene,projectProfileMatches} from '../src/project-model.ts';
+import {parseProject,filePath,addProjectFiles,renameProjectFile,canRenameProjectFile,exportProject,resolveProjectMainScene,projectProfileMatches,projectCompileRequest} from '../src/project-model.ts';
+import {compileEngineProject} from '../src/engine-project.ts';
+import {createBrowserResourceConverters} from '@godot-js/project-tools/resource-converters';
 import {renamedProjectFiles} from '../src/project-rename.ts';
 import {defaultProject,demoProject,migrateDemoProject} from '../src/project-templates.ts';
 import {resolveResourceUidFromCache,resourceUidTextToId} from '@godot-js/react-build/resource-uids';
@@ -43,13 +45,36 @@ test('native scripts and scenes are accepted without filtering native resource d
  assert.equal(parseProject({...native,mainScene:'res://world/Other.scn',files:{...native.files,'/world/Other.scn':[1,2,3]}}).mainScene,'res://world/Other.scn');
  assert.throws(()=>parseProject({...native,files:{'/project.godot':raw}}),/主场景/);
  assert.throws(()=>parseProject({...input(),schemaVersion:2,runtime:undefined}),/运行模式/);
- assert.throws(()=>parseProject({...input(),schemaVersion:4}),/版本/);
+ assert.throws(()=>parseProject({...input(),schemaVersion:5}),/版本/);
 });
 test('project.godot UID main scenes resolve to existing files without config rewrites',()=>{
  const files={'/project.godot':'[application]\nrun/main_scene="uid://native42"\n','/world/Main.tscn':'[gd_scene format=3 uid="uid://native42"]\n[node name="Main" type="Node"]\n'};
  assert.equal(resolveProjectMainScene({files}),'res://world/Main.tscn');
  assert.equal(parseProject({...input(),runtime:'godot',entry:'',files}).files['/project.godot'],files['/project.godot']);
  assert.throws(()=>resolveProjectMainScene({files:{'/project.godot':files['/project.godot']}}),/UID/);
+});
+
+test('UI UID resolution uses native metadata semantics for comments, byte text and conflicts',()=>{
+ const header='\uFEFF\n; legal scene prefix\n# another comment\n[gd_scene format=3 uid="uid://bb"]\n[node name="Main" type="Node"]\n';
+ const doc={schemaVersion:4,runtime:'engine',engineProfile:'full-engine-v1',launch:{kind:'scene',source:'project'},files:{'/project.godot':'[application]\nrun/main_scene="uid://bb"\n','/main.tscn':header}};
+ for(const contents of [header,[...new TextEncoder().encode(header)]]){
+  const project=parseProject({...doc,files:{...doc.files,'/main.tscn':contents}});assert.equal(project.mainScene,'res://main.tscn');assert.deepEqual(exportProject(project).files['/main.tscn'],contents);
+ }
+ assert.throws(()=>parseProject({...doc,files:{...doc.files,'/other.tscn':header}}),/UID.*both/);
+});
+
+test('UI preserves legacy-cache observations across edit/export/reload and an explicit recipe restores compilation',async()=>{
+ const wav=[...Buffer.from('UklGRiYAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQIAAACA/w==','base64')];
+ const doc={schemaVersion:4,runtime:'engine',engineProfile:'full-engine-v1',launch:{kind:'script',module:'res://start.ts'},files:{'/start.ts':'export function start(){}','/tone.wav':wav,'/tone.wav.import':'[remap]\npath="res://.godot/imported/tone.tres"\n','/.godot/imported/tone.tres':'[gd_resource type="AudioStreamWAV" format=3]\n[resource]\ndata=PackedByteArray(0,127)\n'}};
+ const project=parseProject(doc),observed=structuredClone(project.importCacheObservations),options={...projectCompileRequest(project),files:project.files};
+ const first=await compileEngineProject(options);assert(first.diagnostics.some(item=>item.code==='W_ENGINE_IMPORT_UNVERIFIED'));
+ project.files['/tone.wav'][45]=64;const reloaded=parseProject(exportProject(project));assert.deepEqual(reloaded.importCacheObservations,observed);assert.deepEqual(exportProject(reloaded,'original'),exportProject(project));
+ await assert.rejects(compileEngineProject({...projectCompileRequest(reloaded),files:reloaded.files}),error=>error.diagnostics?.some(item=>item.code==='E_IMPORT_STALE'));
+ reloaded.engineDocument.baseDocument.resourceImports=[{resource:'res://tone.wav',converter:'godotjs/wav-pcm'}];
+ const restored=await compileEngineProject({...projectCompileRequest(reloaded),files:reloaded.files,resourceConverters:createBrowserResourceConverters(),resourceTarget:{resourceAbi:'godot-4-text-resource-v1',features:{}}});
+ assert.equal(restored.receipt.schemaVersion,2);assert.equal(restored.receipt.imports[0].converter.id,'godotjs/wav-pcm');assert(!restored.diagnostics.some(item=>item.code==='W_ENGINE_IMPORT_UNVERIFIED'));
+ assert.deepEqual(exportProject(project,'original'),doc);assert.deepEqual(doc.files['/tone.wav'],wav);
+ const old=parseProject({schemaVersion:3,runtime:'godot',engineProfile:'full-engine-v1',entry:'/start.ts',files:doc.files});assert.deepEqual(projectCompileRequest(parseProject(exportProject(old))).importCacheObservations,old.importCacheObservations);
 });
 test('derived main scene follows edited project.godot and retains authoritative UID text on export',()=>{
  const config=uid=>'[application]\nrun/main_scene="uid://'+uid+'" ; native UID\n';

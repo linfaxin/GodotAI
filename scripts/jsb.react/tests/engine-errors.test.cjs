@@ -5,17 +5,17 @@ const {EngineNode,useFrame}=require('../dist/engine');
 const fixture=require('./engine-native-fixture.cjs');
 const h=React.createElement;
 
-test('uncaught render and commit failures retain their error and component context',()=>{
+test('uncaught render and commit failures retain their error and component context',async()=>{
  for(const phase of ['render','commit']){
   const f=fixture(),reports=[],failure=new Error('expected '+phase),root=f.setup({onError:(error,info)=>reports.push({error,info})});
   function Broken(){if(phase==='render')throw failure;React.useLayoutEffect(()=>{throw failure;},[]);return h(EngineNode,{ctor:f.Label});}
   root.render(h(Broken));
   assert(reports.some(item=>item.error===failure&&item.info.kind==='uncaught'&&item.info.componentStack.includes('Broken')));
-  root.shutdown();f.flushDeletes();assert.equal(f.container.children.length,0);
+  root.shutdown();await f.flushDeletes();assert.equal(f.container.children.length,0);
  }
 });
 
-test('ErrorBoundary recovery is caught and frame callback failures are runtime errors',()=>{
+test('ErrorBoundary recovery is caught and frame callback failures are runtime errors',async()=>{
  const f=fixture(),reports=[],root=f.setup({onError:(error,info)=>reports.push({error,info})});
  class Boundary extends React.Component{
   state={failed:false};static getDerivedStateFromError(){return {failed:true};}
@@ -28,5 +28,5 @@ test('ErrorBoundary recovery is caught and frame callback failures are runtime e
  function Framed(){useFrame('process',()=>{throw Error('frame failure');});return h(EngineNode,{ctor:f.Label});}
  root.render(h(Framed));root.process(.016);
  assert(reports.some(item=>item.info.kind==='runtime'&&String(item.error).includes('frame failure')));
- root.shutdown();f.flushDeletes();assert.equal(f.container.children.length,0);
+ root.shutdown();await f.flushDeletes();assert.equal(f.container.children.length,0);
 });

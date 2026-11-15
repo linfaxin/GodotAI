@@ -2,7 +2,7 @@ import * as React from "react";
 import {
   Node, VBoxContainer, HBoxContainer, CanvasLayer, Label, Button,
   asset, useAsset, useNodeRef, useInput,
-} from "@godot-js/react";
+} from "@godot-js/react/legacy";
 import Panel from "@project/react-templates/panel";
 
 const Session = React.createContext("missing-session");

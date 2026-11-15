@@ -25,6 +25,8 @@
     "test:browser:matrix": "node scripts/worker-acceptance-matrix.mjs",
     "test:browser:release-context": "node scripts/browser-release-context-test.mjs",
     "test:browser:regressions": "node scripts/browser-demo-regressions-test.mjs",
+    "test:browser:schema4": "node scripts/browser-schema4-flow-test.mjs",
+    "test:browser:resource-converters": "node scripts/browser-resource-converters-test.mjs",
     "build:worker": "node scripts/build.mjs",
     "build:2d:worker": "node scripts/build.mjs --profile engine-2d-v1",
     "build:2d:release:worker": "node scripts/build.mjs --profile engine-2d-v1 --target template_release",
@@ -36,7 +38,9 @@
     "@godot-js/react": "workspace:*",
     "react": "19.3.1",
     "@godot-js/react-browser": "workspace:*",
-    "@godot-js/react-build": "workspace:*"
+    "@godot-js/react-build": "workspace:*",
+    "@godot-js/engine": "workspace:*",
+    "@godot-js/project-tools": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^24.12.2",

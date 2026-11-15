@@ -1,4 +1,5 @@
 import {createServer} from 'node:http';
+import {createServer as createSecureServer} from 'node:https';
 import {promises as fs} from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -11,12 +12,23 @@ function encodings(header=''){
  return ['br','gzip'].map(name=>({name,q:values.get(name)??values.get('*')??0})).filter(v=>Number.isFinite(v.q)&&v.q>0).sort((a,b)=>b.q-a.q).map(v=>v.name);
 }
 /** Public immutable caching is explicit and limited to versioned release URLs. */
-export function createStaticServer(directory=root,{publicImmutable=false,allowedEncodings=['br','gzip']}={}){
+export function createStaticServer(directory=root,{publicImmutable=false,allowedEncodings=['br','gzip'],isolation='auto',urlPrefix='/',tls}={}){
  directory=path.resolve(directory);
- return createServer(async(req,res)=>{
+ if(typeof urlPrefix!=='string'||!urlPrefix.startsWith('/')||!urlPrefix.endsWith('/')||urlPrefix.includes('..')||/[?#\\]/.test(urlPrefix))throw Error('E_STATIC_URL_PREFIX');
+ const isolated=isolation==='auto'?fs.readFile(path.join(directory,'engine-release.json'),'utf8').then(bytes=>{const release=JSON.parse(bytes);return (release.execution??release.engine?.execution)?.requiresCrossOriginIsolation===true;}).catch(error=>{if(error.code==='ENOENT')return false;throw error;}):Promise.resolve(isolation===true);
+ if(tls&&(!tls.key||!tls.cert))throw Error('E_STATIC_TLS');
+ const handler=async(req,res)=>{
   try{
+   if(await isolated){
+    res.setHeader('Cross-Origin-Opener-Policy','same-origin');
+    res.setHeader('Cross-Origin-Embedder-Policy','require-corp');
+    res.setHeader('Cross-Origin-Resource-Policy','cross-origin');
+    res.setHeader('Permissions-Policy','cross-origin-isolated=*');
+   }
    if(!['GET','HEAD'].includes(req.method)){res.writeHead(405,{'Allow':'GET, HEAD'}).end();return;}
-   const url=new URL(req.url,'http://localhost'),name=decodeURIComponent(url.pathname),file=path.resolve(directory,`.${name==='/'?'/index.html':name}`);
+   const url=new URL(req.url,'http://localhost'),name=decodeURIComponent(url.pathname);
+   if(!name.startsWith(urlPrefix)){res.writeHead(404).end();return;}
+   const relative='/'+name.slice(urlPrefix.length),file=path.resolve(directory,`.${relative==='/'?'/index.html':relative}`);
    if(!file.startsWith(`${directory}${path.sep}`)){res.writeHead(403).end();return;}
    const actual=await fs.realpath(file),realDirectory=await fs.realpath(directory);if(!actual.startsWith(`${realDirectory}${path.sep}`)){res.writeHead(403).end();return;}
    let data=await fs.readFile(file),encoding;const modified=(await fs.stat(file)).mtimeMs;
@@ -29,6 +41,7 @@ export function createStaticServer(directory=root,{publicImmutable=false,allowed
    if(req.headers['if-none-match']===etag){res.writeHead(304,headers).end();return;}
    res.writeHead(200,{...headers,'Content-Length':data.length});res.end(req.method==='HEAD'?undefined:data);
   }catch{res.writeHead(404,{'Content-Type':'text/plain'}).end('Not found');}
- });
+ };
+ return tls?createSecureServer({key:tls.key,cert:tls.cert},handler):createServer(handler);
 }
 if(process.argv[1]===fileURLToPath(import.meta.url))createStaticServer(undefined,{publicImmutable:process.env.PLAYGROUND_PUBLIC_IMMUTABLE==='1'}).listen(port,'0.0.0.0',()=>console.log(`GodotJS Playground: http://localhost:${port}`));

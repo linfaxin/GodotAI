@@ -120,7 +120,7 @@ if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.ur
  try{
   const config=options(process.argv.slice(2),['--paths','--development','--verify']);
   if(config.paths){
-   const paths=browserEnginePaths({repository:required(config.repository,'--repository'),profile:config.profile,target:config.target,lto:config.lto,moduleMode:config['module-mode'],jobs:Number(config.jobs??4)});
+   const paths=browserEnginePaths({repository:required(config.repository,'--repository'),profile:config.profile,target:config.target,lto:config.lto,moduleMode:config['module-mode'],jobs:Number(config.jobs??4),executionModel:config['execution-model']??'window'});
    for(const filename of [process.env.GODOT_WEB_BUILD_DIR??paths.buildDirectory,paths.artifactDirectory,process.env.ENGINE_BUILD_REPORT??paths.reportPath,process.env.WEB_TEMPLATE_OUT??paths.templatePath]){if(/[\r\n]/.test(filename))throw Error('E_ENGINE_ARTIFACT_PATH');process.stdout.write(path.resolve(filename)+'\n');}
   }else if(config.verify){const result=await inspectBrowserEngineArtifact(required(config.out,'--out'));console.log(JSON.stringify({status:result.status,directory:result.directory,files:Object.keys(result.manifest.files).length}));}
   else if(config.publish)console.log(JSON.stringify(await publishBrowserEngineArtifact({report:config.report,publish:config.publish,templateOut:config['template-out'],development:config.development})));

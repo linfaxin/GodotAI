@@ -4,7 +4,8 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { gzipSync } from 'node:zlib';
-import { loadVerifiedEngine, validateRelease } from '../dist/verified-loader.js';
+import { loadVerifiedEngine, validateRelease,injectVerifiedWasm } from '../dist/verified-loader.js';
+import {installProbeWorker} from '../../../packages/engine/test/fixtures/probe-worker.mjs';
 
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const raw = text => new TextEncoder().encode(text);
@@ -182,4 +183,39 @@ test('adapter matches the actual unmodified Godot 4.6.1 Config factory', { skip:
   loaded.dispose();
   assert.equal(config.getModuleConfig, original);
   assert.equal(Object.hasOwn(config, 'getModuleConfig'), false, 'prototype method is restored without an own shadow');
+});
+
+function isolated(t){
+ installProbeWorker(t,{urls:false});
+}
+function proxyRelease(f){
+ f.release.execution={schemaVersion:1,executionModel:'proxy-pthread',wasmThreads:true,proxyToPthread:true,requiresCrossOriginIsolation:true,hostProtocolVersion:1,workerBootstrap:'embedded',workerAssets:[{path:'godot.js',sha256:f.release.engineJs.sha256,bytes:f.bytes.get(f.release.engineJs.url).length,role:'engine-main'}]};
+}
+test('pthread runtime reuses the verified complete main JS and seals separate worker helpers',async t=>{
+ isolated(t);const f=fixture(t);proxyRelease(f);
+ const helper=raw('/* actual pthread helper */'),asset={name:'godot.worker.js',url:'https://preview.test/godot.worker.js',sha256:sha(helper)};
+ f.bytes.set(asset.url,helper);f.release.workerAssets=[asset];
+ f.release.execution.workerAssets.push({path:'godot.worker.js',sha256:asset.sha256,bytes:helper.length,role:'pthread-runtime'});
+ const loaded=await loadVerifiedEngine(f.release,{document:f.document}),engine=new loaded.Engine({});loaded.installRuntimeAssets(engine);
+ const module=engine.config.getModuleConfig('virtual');
+ assert.equal(module.mainScriptUrlOrBlob,loaded.engineScriptUrl);
+ assert.equal(module.locateFile('godot.js'),loaded.engineScriptUrl);
+ assert.deepEqual(new Uint8Array(await f.blobs.get(loaded.engineScriptUrl).arrayBuffer()),f.bytes.get(f.release.engineJs.url));
+ assert.deepEqual(new Uint8Array(await f.blobs.get(module.locateFile('godot.worker.js')).arrayBuffer()),helper);
+ assert.throws(()=>module.locateFile('undeclared.worker.js'),/E_ENGINE_WORKER_MISSING/);
+ loaded.dispose();assert.equal(new Set(f.revoked).size,5);
+});
+test('threaded engine rejects missing isolation and unhashed bootstrap before executing code',async t=>{
+ const f=fixture(t);proxyRelease(f);
+ await assert.rejects(loadVerifiedEngine(f.release,{document:f.document}),/E_ENGINE_REQUIRES_ISOLATION/);
+ assert.equal(f.scripts.length,0);
+ f.release.execution.workerAssets[0].sha256='0'.repeat(64);
+ assert.throws(()=>validateRelease(f.release),/E_RELEASE_WORKER_CLOSURE/);
+});
+test('WASM byte injection preserves unrelated Godot runtime fetch requests',async()=>{
+ const requests=[],bytes=raw('wasm'),scope={fetch:async(input,init)=>{requests.push({input,init});return new Response('auxiliary');}};
+ const original=scope.fetch;
+ const Engine={load(base){return Promise.all([scope.fetch(base+'.wasm').then(r=>r.text()),scope.fetch('https://preview.test/runtime-helper',{cache:'no-cache'}).then(r=>r.text())]).then(values=>assert.deepEqual(values,['wasm','auxiliary']));}};
+ await injectVerifiedWasm(Engine,'https://preview.test/godot.wasm',bytes,scope);
+ assert.equal(scope.fetch,original);assert.deepEqual(requests,[{input:'https://preview.test/runtime-helper',init:{cache:'no-cache'}}]);
 });

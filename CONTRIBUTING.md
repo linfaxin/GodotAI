@@ -20,7 +20,7 @@ Problems that break ordinary development or core execution, corrupt data, or und
 - Clone the source code of [godot](https://github.com/godotengine/godot):
     - `git clone git@github.com:godotengine/godot.git` or
     - `git clone https://github.com/godotengine/godot.git`
-- This branch uses version `4.5` so checkout the version with: `git checkout 4.5`
+- The browser engine recipes target Godot `4.6.1-stable`; use the source revision recorded in the candidate's build report. See the [Worker build guide](docs/browser-worker-engine.zh-CN.md) for its fixed Web toolchain and independent build directory.
 - Clone this module and put it into `godot/modules/GodotJS`:
     - `git clone git@github.com:godotjs/GodotJS.git godot/modules/GodotJS` or
     - `git clone https://github.com/godotjs/GodotJS.git godot/modules/GodotJS`
@@ -55,6 +55,10 @@ Run these commands from the GodotJS module directory:
 | `pnpm build` | Build embedded scripts, then ecosystem packages |
 | `pnpm test` | The existing engine runtime matrix; requires its Godot build environment |
 | `pnpm test:react` | React renderer contracts and build-tool tests |
+| `pnpm test:engine` | Neutral engine and project-tools packages |
+| `pnpm test:browser:unit` | Bridge, browser SDK, execution identities, release and evidence validators |
+| `pnpm browser:engine:worker` | Build the opt-in complete-engine `proxy-pthread` candidate |
+| `pnpm test:browser:worker --engine-report /path/report.json --out /path/results` | Real isolated HTTPS Worker runtime probe; requires a prepared Web toolchain and browser |
 
 The [architecture guide](docs/architecture.md) explains the build and dependency boundaries. Follow [the package conventions](packages/README.md) when adding an ecosystem package. `tests/project` remains outside the workspace; install its dependencies with `pnpm -C tests/project install --ignore-workspace` when following the engine test workflow.
 

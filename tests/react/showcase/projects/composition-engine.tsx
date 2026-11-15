@@ -1,5 +1,5 @@
 import * as React from 'react';
-import {Node3D,Node2D,CanvasLayer,Control,ColorRect,Button,TextEdit,ItemList,HSplitContainer,VSplitContainer,HFlowContainer,VFlowContainer,TabContainer,SubViewport,TextureRect,WorldEnvironment,Camera3D,MeshInstance3D,NativeScene,useNodeRef,useProcess} from '@godot-js/react';
+import {Node3D,Node2D,CanvasLayer,Control,ColorRect,Button,TextEdit,ItemList,HSplitContainer,VSplitContainer,HFlowContainer,VFlowContainer,TabContainer,SubViewport,TextureRect,WorldEnvironment,Camera3D,MeshInstance3D,NativeScene,useNodeRef,useProcess} from '@godot-js/react/legacy';
 import {useDemo,useResource} from '@playground/api';
 const flags=['textUnicode','textSelection','textCaret','textUndo','textRedo','textInput','textUserUndo','textUserRedo','textReadOnly','textBudgetInput','listConfig','listCommands','listSelection','listDisabled','listActivated','listIcons','splitConfig','splitHorizontal','splitVertical','splitEvents','flowHorizontal','flowVertical','flowResize','tabsMetadata','tabsDisabled','tabsInput','tabsRemoved','maskA','maskB','maskParent','skyProcedural','skyPanorama','skyRotation','fogDepth','fogHeight','rangeNear','rangeVisible','rangeFar','rangeHysteresis','prefab'] as const;
 const checks:Record<string,boolean>=Object.fromEntries(flags.map(k=>[k,false]));

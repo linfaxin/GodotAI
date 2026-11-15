@@ -4,14 +4,19 @@ import {mkdtemp,mkdir,writeFile,readFile,rm,cp} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join,dirname} from 'node:path';
 import {spawnSync} from 'node:child_process';
+import {createContext,runInContext} from 'node:vm';
 import {buildBrowserEngine} from '../../../scripts/test/build-browser-engine.mjs';
 import {applyWebEnginePatches} from '../../../scripts/release/patch-web-engine.mjs';
 import {digest,canonical} from '../../../scripts/release/web-release-utils.mjs';
 import {THREADLESS_GROUP_WAIT_ORIGINAL} from '../../../scripts/release/patch-web-threadless-groups.mjs';
+import {PROXY_ENTRY_ORIGINAL,patchProxyEntry} from '../../../scripts/release/patch-web-proxy-entry.mjs';
+import {patchShaderUtf8} from '../../../scripts/release/patch-web-shader-utf8.mjs';
 
 async function fixture(root){
  const sources={
   SConstruct:'# source-only fixture',
+  'platform/web/detect.py':await readFile(new URL('./fixtures/godot-4.6.1-web-detect.py',import.meta.url),'utf8'),
+  'platform/web/js/patches/patch_em_gl.js':await readFile(new URL('./fixtures/godot-4.6.1-patch-em-gl.js',import.meta.url),'utf8'),
   'core/object/worker_thread_pool.cpp':THREADLESS_GROUP_WAIT_ORIGINAL,
   'platform/web/js/engine/config.js':await readFile(new URL('../../../scripts/jsb.react-browser/test/fixtures/godot-4.6.1-config.js',import.meta.url),'utf8'),
   'servers/audio/audio_server.cpp':await readFile(new URL('../../../scripts/jsb.react-browser/test/fixtures/godot-4.6.1-audio-server.cpp',import.meta.url),'utf8'),
@@ -45,7 +50,7 @@ test('local patch CLI and the actual CI snapshot builder produce identical engin
  const out=join(root,'report.json');
  await buildBrowserEngine({'godot-source':source,'build-dir':built,out,'snapshot-only':true,scons:process.execPath,emcc:process.execPath});
  const report=JSON.parse(await readFile(out,'utf8'));
- assert.equal(report.status,'snapshotted');assert.equal(report.recipe.patches.length,17);
+ assert.equal(report.status,'snapshotted');assert.equal(report.recipe.patches.length,19);
  assert.deepEqual(report.runtimeAbi,{protocolVersion:2,host:1,audio:1,presentation:1});
  assert.equal(Object.keys(report.workerPatch.files).length,10);
  assert.deepEqual(report.recipe.patches,localPatches);
@@ -68,7 +73,7 @@ test('a rejected late patch leaves all upstream files unchanged',async t=>{
  for(const [path,source]of Object.entries(sources))assert.equal(await readFile(join(root,path),'utf8'),source,path);
 });
 
-test('an unsupported worker-group source rejects the whole seven-patch plan without partial writes', async t => {
+test('an unsupported worker-group source rejects the whole patch plan without partial writes', async t => {
  const root=await mkdtemp(join(tmpdir(),'engine-worker-patch-atomic-'));t.after(()=>rm(root,{recursive:true,force:true}));
  const sources=await fixture(root);
  sources['core/object/worker_thread_pool.cpp']=sources['core/object/worker_thread_pool.cpp'].replace('groups.erase(p_group);','unknown_upstream_cleanup();');
@@ -77,12 +82,39 @@ test('an unsupported worker-group source rejects the whole seven-patch plan with
  for(const [path,source] of Object.entries(sources))assert.equal(await readFile(join(root,path),'utf8'),source,path);
 });
 
-test('an unsupported presentation config rejects all seven patches before any source write',async t=>{
+test('an unsupported presentation config rejects the whole patch plan before any source write',async t=>{
  const root=await mkdtemp(join(tmpdir(),'engine-presentation-patch-atomic-'));t.after(()=>rm(root,{recursive:true,force:true}));
  const sources=await fixture(root);sources['platform/web/js/engine/config.js']+='\n// unknown upstream change\n';
  await writeFile(join(root,'platform/web/js/engine/config.js'),sources['platform/web/js/engine/config.js']);
  await assert.rejects(applyWebEnginePatches(root),/E_PRESENTATION_PATCH_UNSUPPORTED/);
  for(const [path,source]of Object.entries(sources))assert.equal(await readFile(join(root,path),'utf8'),source,path);
+});
+
+test('proxy entry patch removes only the obsolete runtime export and is idempotent',async()=>{
+ const source=await readFile(new URL('./fixtures/godot-4.6.1-web-detect.py',import.meta.url),'utf8');
+ const first=patchProxyEntry(source);assert.equal(first.code.includes(PROXY_ENTRY_ORIGINAL),false);assert.match(first.code,/callMain/);
+ assert.deepEqual(patchProxyEntry(first.code),first);
+ assert.throws(()=>patchProxyEntry(source+PROXY_ENTRY_ORIGINAL),/E_PROXY_ENTRY_PATCH_UNSUPPORTED/);
+ assert.throws(()=>patchProxyEntry('unsupported detect.py'),/E_PROXY_ENTRY_PATCH_UNSUPPORTED/);
+ assert.throws(()=>patchProxyEntry(first.code.replace('Exported callMain','changed callMain')),/E_PROXY_ENTRY_PATCH_UNSUPPORTED/);
+});
+
+test('shader source decoding works without Emscripten UTF8Decoder on normal and shared heaps',async()=>{
+ const original=await readFile(new URL('./fixtures/godot-4.6.1-patch-em-gl.js',import.meta.url),'utf8');
+ const patched=patchShaderUtf8(original);assert.deepEqual(patchShaderUtf8(patched.code),patched);
+ assert.throws(()=>patchShaderUtf8(original+'\n'),/E_SHADER_UTF8_PATCH_UNSUPPORTED/);
+ assert.throws(()=>patchShaderUtf8(patched.code.replace('godotShaderDecoder.decode','unknownDecoder.decode')),/E_SHADER_UTF8_PATCH_UNSUPPORTED/);
+ for(const buffer of [new ArrayBuffer(512),new SharedArrayBuffer(512)]){
+  const bytes=new Uint8Array(buffer),words=new Uint32Array(buffer),first='// 漢字🙂\n',second='void main() {}',encoder=new TextEncoder();
+  bytes.set(encoder.encode(first),64);bytes.set(encoder.encode(second),128);words[4]=64;words[5]=128;words[8]=encoder.encode(first).length;words[9]=encoder.encode(second).length;
+  let decoders=0;const stringCalls=[];
+  class Decoder extends TextDecoder{constructor(encoding){super(encoding);decoders++;}}
+  const GL={},context=createContext({ArrayBuffer,TextDecoder:Decoder,HEAPU8:bytes,HEAPU32:words,GL,addOnPostRun:callback=>callback(),UTF8ToString:(ptr,len)=>{stringCalls.push({ptr,len});let end=ptr;while(bytes[end])end++;return new TextDecoder().decode(bytes.slice(ptr,end));}});
+  runInContext(patched.code,context);assert.equal(runInContext('typeof UTF8Decoder',context),'undefined');
+  assert.equal(GL.getSource(0,2,16,32),first+second);assert.equal(GL.getSource(0,2,16,32),first+second);assert.equal(decoders,1);
+  assert.equal(GL.getSource(0,2,16,0),first+second);assert.equal(stringCalls.length,2);
+ }
+
 });
 
 test('an unsupported final XR source rejects the entire native patch plan before writes',async t=>{
@@ -101,4 +133,17 @@ test('ThinLTO worker cap and compiler environment are part of the attested recip
  assert(report.recipe.args.includes('linkflags=-Wl,--thinlto-jobs=4'));assert.deepEqual(report.recipe.environment,{EMCC_CORES:'4',BINARYEN_CORES:'4'});assert.deepEqual(report.toolchains.environment,report.recipe.environment);assert.equal(report.recipeSha256,digest(canonical(report.recipe)));
  assert.notEqual(report.recipeSha256,digest(canonical({...report.recipe,args:report.recipe.args.map(arg=>arg==='linkflags=-Wl,--thinlto-jobs=4'?'linkflags=-Wl,--thinlto-jobs=8':arg)})));assert.notEqual(report.recipeSha256,digest(canonical({...report.recipe,environment:{...report.recipe.environment,EMCC_CORES:'8'}})));
  assert.match(await readFile(join(built,'SConstruct'),'utf8'),/resolvedLinkFlags/);assert(report.godotSource.inputs.SConstruct);
+});
+
+
+test('proxy-pthread snapshots retain the native pthread patch set without the Dedicated Worker ABI',async t=>{
+ const root=await mkdtemp(join(tmpdir(),'engine-pthread-patch-contract-'));t.after(()=>rm(root,{recursive:true,force:true}));
+ const source=join(root,'upstream'),built=join(root,'pthread');await fixture(source);
+ const out=join(root,'report.json');
+ await buildBrowserEngine({'godot-source':source,'build-dir':built,out,'execution-model':'proxy-pthread','snapshot-only':true,scons:process.execPath,emcc:process.execPath});
+ const report=JSON.parse(await readFile(out,'utf8'));
+ assert.equal(report.execution.executionModel,'proxy-pthread');assert.equal(report.recipe.patches.length,10);
+ assert.equal(report.runtimeAbi,undefined);assert.equal(report.workerPatch,undefined);
+ assert(report.recipe.args.includes('threads=yes'));assert(report.recipe.args.includes('proxy_to_pthread=yes'));
+ assert(report.recipe.patches.some(item=>item.patchId==='godotjs-audio-server-finish-v1'));
 });

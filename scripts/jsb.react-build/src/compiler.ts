@@ -36,6 +36,37 @@ export function resolveRuntimeRoot(config: ProjectConfig): string {
   catch { return packageRoot(createRequire(import.meta.url).resolve("@godot-js/react"), "@godot-js/react"); }
 }
 
+/** The NativePort CLI cannot silently turn the engine package root into legacy. */
+function assertExplicitLegacyImports(program: ts.Program, projectRoot: string): void {
+  const checker=program.getTypeChecker();
+  const engineEntry=(value:ts.Node|undefined):boolean=>!!value&&ts.isStringLiteralLike(value)&&['@godot-js/react','@godot-js/react/engine'].includes(value.text);
+  for(const file of program.getSourceFiles()){
+    if(file.isDeclarationFile||!file.fileName.startsWith(projectRoot+path.sep))continue;
+    const visit=(node:ts.Node):void=>{
+      let forbidden=false;
+      if(ts.isImportDeclaration(node)&&engineEntry(node.moduleSpecifier)){
+        const clause=node.importClause;
+        const typeOnly=clause?.isTypeOnly||(!clause?.name&&clause?.namedBindings&&ts.isNamedImports(clause.namedBindings)&&clause.namedBindings.elements.length>0&&clause.namedBindings.elements.every(item=>item.isTypeOnly));
+        forbidden=!typeOnly;
+      }else if(ts.isExportDeclaration(node)&&engineEntry(node.moduleSpecifier)){
+        const typeOnly=node.isTypeOnly||(node.exportClause&&ts.isNamedExports(node.exportClause)&&node.exportClause.elements.length>0&&node.exportClause.elements.every(item=>item.isTypeOnly));
+        forbidden=!typeOnly;
+      }else if(ts.isImportEqualsDeclaration(node)&&ts.isExternalModuleReference(node.moduleReference)&&engineEntry(node.moduleReference.expression))forbidden=!node.isTypeOnly;
+      else if(ts.isCallExpression(node)&&engineEntry(node.arguments[0])){
+        if(node.expression.kind===ts.SyntaxKind.ImportKeyword)forbidden=true;
+        else if(ts.isIdentifier(node.expression)&&node.expression.text==='require'){
+          const declarations=checker.getSymbolAtLocation(node.expression)?.declarations??[];
+          // An ordinary local function named require is not a module loader.
+          forbidden=!declarations.some(item=>(ts.isFunctionDeclaration(item)&&!(ts.getCombinedModifierFlags(item)&ts.ModifierFlags.Ambient))||(ts.isVariableDeclaration(item)&&!!item.initializer)||ts.isParameter(item));
+        }
+      }
+      if(forbidden){const point=file.getLineAndCharacterOfPosition(node.getStart(file));fail('E_LEGACY_ENTRY',`This NativePort CLI requires @godot-js/react/legacy runtime imports (${slash(path.relative(projectRoot,file.fileName))}:${point.line+1}:${point.character+1}). Use the engine project pipeline for @godot-js/react or /engine.`);}
+      ts.forEachChild(node,visit);
+    };
+    visit(file);
+  }
+}
+
 async function prepare(config: ProjectConfig, staging: string): Promise<PreparedProject> {
   const snapshot = await snapshotProject(config.projectRoot, path.join(staging, "snapshot", "project"), config.generatedDir);
   if(snapshot.hashes[slash(path.relative(config.projectRoot,config.configFile))]!==config.configHash)fail("E_SOURCE_CHANGED","Configuration changed before the source snapshot was frozen");
@@ -97,6 +128,7 @@ async function prepare(config: ProjectConfig, staging: string): Promise<Prepared
   }
   if (config.verification?.entry) roots.push(within(snapshot.root, config.verification.entry));
   const program = ts.createProgram(roots, compilerOptions);
+  assertExplicitLegacyImports(program,snapshot.root);
   const diagnostics = ts.getPreEmitDiagnostics(program); if (diagnostics.length) fail("E_TYPESCRIPT", formatDiagnostics(diagnostics));
   checkHostProfile(program, runtimeRoot, snapshot.root, config.profileId);
   for (const id of Object.keys(config.entries)) {
@@ -126,15 +158,18 @@ export async function generateProjectTypes(options: BuildOptions = {}): Promise<
 }
 
 function externalNative(): esbuild.Plugin {
-  return { name: "godot-native-builtins", setup(build) { build.onResolve({ filter: /^(?:godot(?:[./]|$)|godot-jsb$|jsb\.)/ }, args => ({ path: args.path, external: true })); } };
+  return { name: "godot-native-builtins", setup(build) {
+    build.onResolve({filter:/^@godot-js\/react(?:\/engine)?$/},args=>{fail('E_LEGACY_ENTRY',`NativePort dependencies must import @godot-js/react/legacy explicitly: ${args.importer}`);});
+    build.onResolve({ filter: /^(?:godot(?:[./]|$)|godot-jsb$|jsb\.)/ }, args => ({ path: args.path, external: true }));
+  } };
 }
 async function bundleRuntime(prepared: PreparedProject, generation: string): Promise<{ uri: string; outputs: Record<string, string>; shims: Record<string, string> }> {
   const { config, runtimeRoot, snapshot, templates } = prepared;
   const resolver = createRequire(path.join(runtimeRoot, "package.json"));
-  const runtimeMain = resolver.resolve("@godot-js/react"), godot = resolver.resolve("@godot-js/react/godot"), scheduler = resolver.resolve("@godot-js/react/scheduler"), nativeInterfaces = resolver.resolve("@godot-js/react/native-interfaces"),contracts=resolver.resolve("@godot-js/react/contracts"),schema=resolver.resolve("@godot-js/react/schema"),ui=resolver.resolve("@godot-js/react/ui");
+  const runtimeMain = resolver.resolve("@godot-js/react/legacy"), godot = resolver.resolve("@godot-js/react/godot"), scheduler = resolver.resolve("@godot-js/react/scheduler"), nativeInterfaces = resolver.resolve("@godot-js/react/native-interfaces"),contracts=resolver.resolve("@godot-js/react/contracts"),schema=resolver.resolve("@godot-js/react/schema"),ui=resolver.resolve("@godot-js/react/ui");
   const nodePaths = [path.join(runtimeRoot, "node_modules"), path.join(config.projectRoot, "node_modules")];
   const outfile = within(config.projectRoot, `.godot/GodotJS/react-build/${generation}/runtime/runtime.js`);
-  const bundle = await esbuild.build({ stdin: { contents: `exports.React=require("react");exports.jsxRuntime=require("react/jsx-runtime");exports.jsxDevRuntime=require("react/jsx-dev-runtime");exports.sdk=require(${JSON.stringify(runtimeMain)});exports.godot=require(${JSON.stringify(godot)});exports.nativeInterfaces=require(${JSON.stringify(nativeInterfaces)});exports.scheduler=require(${JSON.stringify(scheduler)});exports.contracts=require(${JSON.stringify(contracts)});exports.schema=require(${JSON.stringify(schema)});exports.ui=require(${JSON.stringify(ui)});`, resolveDir: runtimeRoot, sourcefile: "godot-react-runtime-entry.js", loader: "js" },
+  const bundle = await esbuild.build({ stdin: { contents: `exports.React=require("react");exports.jsxRuntime=require("react/jsx-runtime");exports.jsxDevRuntime=require("react/jsx-dev-runtime");exports.sdk=require(${JSON.stringify(runtimeMain)});exports.legacy=exports.sdk;exports.godot=require(${JSON.stringify(godot)});exports.nativeInterfaces=require(${JSON.stringify(nativeInterfaces)});exports.scheduler=require(${JSON.stringify(scheduler)});exports.contracts=require(${JSON.stringify(contracts)});exports.schema=require(${JSON.stringify(schema)});exports.ui=require(${JSON.stringify(ui)});`, resolveDir: runtimeRoot, sourcefile: "godot-react-runtime-entry.js", loader: "js" },
     bundle: true, write: false, platform: "neutral", format: "cjs", mainFields: ["main", "module"], target: "es2022", outfile, sourcemap: "external", sourcesContent: true, nodePaths,inject:[path.join(runtimeRoot,"dist","internal","performance.mjs")],
     define: { "process.env.NODE_ENV": JSON.stringify(config.mode) }, plugins: [externalNative(), { name: "godot-scheduler", setup(b) { b.onResolve({ filter: /^scheduler$/ }, () => ({ path: scheduler })); } }],
   });
@@ -175,7 +210,7 @@ export async function buildProject(options: BuildOptions = {}): Promise<BuildRes
     let shimIndex = 0;
     for (const uri of Object.values(vendor.shims)) modules[`shim-${shimIndex++}`] = { uri, sha256: sha256(vendor.outputs[uri]), dependencies: ["runtime"], kind: "vendor" };
     const sdkPlugin: esbuild.Plugin = { name: "godot-canonical-modules", setup(b) {
-      b.onResolve({ filter: /^(?:react(?:\/.*)?|scheduler(?:\/.*)?|@godot-js\/react(?:\/.*)?)$/ }, args => { const uri = vendor.shims[args.path]; if (!uri) fail("E_SDK_SUBPATH", `Unsupported SDK/runtime import ${args.path}`); return { path: uri, external: true }; });
+      b.onResolve({ filter: /^(?:react(?:\/.*)?|scheduler(?:\/.*)?|@godot-js\/react(?:\/.*)?)$/ }, args => { if(["@godot-js/react","@godot-js/react/engine"].includes(args.path))fail("E_LEGACY_ENTRY",`NativePort dependencies must import @godot-js/react/legacy explicitly: ${args.importer}`); const uri = vendor.shims[args.path]; if (!uri) fail("E_SDK_SUBPATH", `Unsupported SDK/runtime import ${args.path}`); return { path: uri, external: true }; });
       b.onResolve({filter:/^(?:react-dom|react-native|react-reconciler)(?:\/|$)/},args=>fail("E_RENDERER_IMPORT",`A second renderer is outside the Godot React profile: ${args.path}`));
       b.onResolve({ filter: /^@project\/react-templates\// }, args => { const id = args.path.slice("@project/react-templates/".length), template = p.templates.find(t => t.id === id); if (!template) fail("E_TEMPLATE_ID", `Unknown template ${id}`); return { path: template.module }; });
       b.onResolve({ filter: /\.tscn$/ }, args => fail("E_TEMPLATE_IMPORT_FORM", `Use @project/react-templates/<id>, not ${args.path}`));

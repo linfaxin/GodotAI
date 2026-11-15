@@ -9,11 +9,14 @@ import {patchAudioLifecycle} from './patch-web-audio-lifecycle.mjs';
 import {patchOptionalPwa} from './patch-web-optional-pwa.mjs';
 import {patchThreadlessGroups} from './patch-web-threadless-groups.mjs';
 import {patchPresentationBoundary} from './patch-web-presentation-boundary.mjs';
+import {patchProxyEntry} from './patch-web-proxy-entry.mjs';
+import {patchShaderUtf8} from './patch-web-shader-utf8.mjs';
+import {patchAudioServerFinish} from './patch-web-audio-server-finish.mjs';
 import {patchWorkerRuntimeFile,WORKER_RUNTIME_PATHS} from './patch-web-worker-runtime.mjs';
 
 const repo=fileURLToPath(new URL('../../',import.meta.url));
 const execute=promisify(execFile),hash=value=>createHash('sha256').update(value).digest('hex');
-export async function applyWebEnginePatches(root,{python='python3'}={}) {
+export async function applyWebEnginePatches(root,{python='python3',executionModel='window'}={}) {
  const planned=[];
  const add=async(path,code,patchId,implementation,baseline)=>{
   const before=baseline??await readFile(resolve(root,path),'utf8');
@@ -35,8 +38,11 @@ export async function applyWebEnginePatches(root,{python='python3'}={}) {
   }
  }
  for(const [path,apply,implementation]of [
+  ['platform/web/detect.py',patchProxyEntry,'scripts/release/patch-web-proxy-entry.mjs'],
+  ['platform/web/js/patches/patch_em_gl.js',patchShaderUtf8,'scripts/release/patch-web-shader-utf8.mjs'],
   ['platform/web/js/libs/library_godot_os.js',patchOptionalPwa,'scripts/release/patch-web-optional-pwa.mjs'],
   ['platform/web/js/libs/library_godot_audio.js',patchAudioLifecycle,'scripts/release/patch-web-audio-lifecycle.mjs'],
+  ...(executionModel==='proxy-pthread'?[['servers/audio/audio_server.cpp',patchAudioServerFinish,'scripts/release/patch-web-audio-server-finish.mjs']]:[]),
   ['core/object/worker_thread_pool.cpp',patchThreadlessGroups,'scripts/release/patch-web-threadless-groups.mjs'],
   ['platform/web/js/engine/config.js',patchPresentationBoundary,'scripts/release/patch-web-presentation-boundary.mjs'],
  ]) {
@@ -45,7 +51,7 @@ export async function applyWebEnginePatches(root,{python='python3'}={}) {
  }
  // The Worker audio imports compose after the independently checked lifecycle
  // patch. Keep both receipts, binding the second receipt to the first output.
- for(const path of WORKER_RUNTIME_PATHS){
+ for(const path of executionModel==='window'?WORKER_RUNTIME_PATHS:[]){
   const before=planned.findLast(item=>item.record.path===path)?.code??await readFile(resolve(root,path),'utf8');
   const result=patchWorkerRuntimeFile(path,before);
   await add(path,result.code,result.patchId,'scripts/release/patch-web-worker-runtime.mjs',before);

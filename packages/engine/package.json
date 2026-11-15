@@ -1,0 +1,64 @@
+{
+  "name": "@godot-js/engine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Browser Godot engine API, runtime contracts and session integration",
+  "exports": {
+    "./execution": {
+      "types": "./dist/execution.d.ts",
+      "import": "./dist/execution.js"
+    },
+    "./identities": {
+      "types": "./dist/identities.d.ts",
+      "import": "./dist/identities.js"
+    },
+    "./api": {
+      "types": "./dist/api.d.ts",
+      "import": "./dist/api.js"
+    },
+    "./runtime-types": {
+      "types": "./dist/engine-api-runtime-types.d.ts",
+      "import": "./dist/engine-api-runtime-types.js"
+    },
+    "./runtime": {
+      "types": "./dist/runtime-host.d.ts",
+      "import": "./dist/runtime-host.js"
+    },
+    "./browser/protocol": {
+      "types": "./dist/browser/protocol.d.ts",
+      "import": "./dist/browser/protocol.js"
+    },
+    "./browser/engine-session": {
+      "types": "./dist/browser/engine-session.d.ts",
+      "import": "./dist/browser/engine-session.js"
+    },
+    "./browser/verified-loader": {
+      "types": "./dist/browser/verified-loader.d.ts",
+      "import": "./dist/browser/verified-loader.js"
+    },
+    "./browser/runner": {
+      "types": "./dist/browser/runner.d.ts",
+      "import": "./dist/browser/runner.js"
+    },
+    "./browser/capabilities": {
+      "types": "./dist/browser/shared-memory-growth.d.ts",
+      "import": "./dist/browser/shared-memory-growth.js"
+    },
+    "./browser": {
+      "types": "./dist/browser/index.d.ts",
+      "import": "./dist/browser/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "node scripts/snapshot-runtime.mjs && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "pnpm build && node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "typescript": "6.0.3"
+  }
+}

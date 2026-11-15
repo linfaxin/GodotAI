@@ -7,5 +7,9 @@ export const ENGINE_2D_MODULE_BASELINE:readonly string[];
 export const ENGINE_PROFILES:Readonly<Record<EngineProfileId,EngineProfile>>;
 export function isEngineProfile(id:unknown):id is EngineProfileId;
 export function getEngineProfile(id?:string):EngineProfile;
-export function engineBuildArgs(configuration?:{profile?:string;target?:string;jobs?:number|string;lto?:string;moduleMode?:string}):string[];
+export type EngineExecutionModel='window'|'proxy-pthread';
+export interface EngineExecution {schemaVersion:1;executionModel:EngineExecutionModel;wasmThreads:boolean;proxyToPthread:boolean;requiresCrossOriginIsolation:boolean;hostProtocolVersion:1;}
+export function engineExecution(executionModel?:string):EngineExecution;
+export function validateEngineExecution(executionModel:string,observations?:{resolvedBuildOptions?:Record<string,unknown>;requireResolved?:boolean}):EngineExecution;
+export function engineBuildArgs(configuration?:{profile?:string;target?:string;jobs?:number|string;lto?:string;moduleMode?:string;executionModel?:string}):string[];
 export function validateEngineProfile(profileId:string,observations:{modules:string[];features?:Record<string,boolean>;classes?:Array<string|{nativeName?:string;name?:string}>;forBuild?:boolean}):EngineProfile;

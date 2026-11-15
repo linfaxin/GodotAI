@@ -24,7 +24,7 @@ test('shell contract build succeeds without engine resources and publishes only 
  const names=await readdir(root);
  assert(!names.includes('engine'));assert(!names.includes('engine-release.json'));assert(!names.includes('demo-release.json'));assert(!names.includes('demo-resources.pck'));
  assert(names.includes('runtime.worker.js'));assert(names.includes('runtime.audio.worklet.js'));assert(!names.some(name=>name.startsWith('preview.legacy.')));
- const mainMap=JSON.parse(await readFile(path.join(root,'main.js.map'),'utf8'));assert(!mainMap.sources.some(name=>/(?:^|\/)runner\.ts$/.test(name)));assert(mainMap.sources.some(name=>name.endsWith('/worker-runner.ts')));
+ const mainMap=JSON.parse(await readFile(path.join(root,'main.js.map'),'utf8'));assert(mainMap.sources.some(name=>name.endsWith('/engine/src/browser/runner.ts')));assert(mainMap.sources.some(name=>name.endsWith('/worker-runner.ts')));
  const examples=await readdir(path.join(root,'examples'));
  assert.deepEqual(examples.sort(),['dungeon.project.json','lights.project.json','match3.project.json','shader.project.json']);
  for(const name of examples){const project=JSON.parse(await readFile(path.join(root,'examples',name),'utf8'));assert.equal(project.schemaVersion,3);assert.equal(project.engineProfile,'engine-2d-v1');assert.equal(project.demoApiVersion,1);}

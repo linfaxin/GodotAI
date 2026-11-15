@@ -3,8 +3,8 @@ import {
   Node, CharacterBody2D, StaticBody2D, CollisionShape2D, Sprite2D, CanvasLayer,
   PanelContainer, VBoxContainer, Label, TextureRect, ProgressBar,
   asset, useAsset, useNodeRef, usePhysicsProcess, vec2,
-} from '@godot-js/react';
-import type { NodeReadHandle, FrameCommands } from '@godot-js/react';
+} from '@godot-js/react/legacy';
+import type { NodeReadHandle, FrameCommands } from '@godot-js/react/legacy';
 
 function ensure(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error('GAME2D_ASSERT: ' + message);

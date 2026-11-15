@@ -3,26 +3,10 @@ import assert from 'node:assert/strict';
 import {createProjectStorage,projectDatabaseName,copyLegacyProjectStorage} from '../src/project-storage.ts';
 import {parseProject,exportProject} from '../src/project-model.ts';
 import {defaultProject} from '../src/project-templates.ts';
+import {database} from './project-storage-fixture.mjs';
 
 // An asynchronous transaction fixture: writes become visible only at commit,
 // and an injected abort discards every put, including the recovery backup.
-function database(initial){
- const records=new Map(initial?[['current',structuredClone(initial)]]:[]);
- const db={records,abortNext:false,commits:[],transaction(_name,mode){
-  const staged=new Map([...records].map(([k,v])=>[k,structuredClone(v)])),writes=[];
-  let aborted=false,scheduled=false;
-  const tx={error:null,objectStore(){return store;},abort(){aborted=true;setImmediate(()=>tx.onabort?.());}};
-  const complete=()=>{if(scheduled)return;scheduled=true;setImmediate(()=>{
-   if(aborted)return;
-   if(mode==='readwrite'&&db.abortNext){db.abortNext=false;tx.error=Error('injected abort');tx.abort();return;}
-   if(mode==='readwrite'){records.clear();for(const [k,v]of staged)records.set(k,v);db.commits.push(writes);}
-   tx.oncomplete?.();
-  });};
-  const store={openCursor(){const request={},entries=[...staged];let index=0;const advance=()=>queueMicrotask(()=>{const entry=entries[index++];request.result=entry?{key:entry[0],value:structuredClone(entry[1]),continue:advance}:null;request.onsuccess?.();if(!entry)complete();});advance();return request;},get(key){const request={};queueMicrotask(()=>{request.result=structuredClone(staged.get(key));request.onsuccess?.();complete();});return request;},put(value,key){staged.set(key,structuredClone(value));writes.push(key);complete();}};
-  return tx;
- }};
- return db;
-}
 const legacy=()=>({schemaVersion:1,demoId:'old',entry:'/src/App.tsx',selected:'/asset.bin',files:{'/src/App.tsx':'export default function App(){return null}','/asset.bin':[0,255],'/project.godot':'config_version=5\n'},controls:{speed:1},mode:'production'});
 const snapshot=()=>({selected:'old',projects:[['old',legacy()]],versions:{old:7}});
 test('migration commit backs up the complete original snapshot atomically and keeps original export',async()=>{

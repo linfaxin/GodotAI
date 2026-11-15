@@ -3,6 +3,20 @@
 Node.js is a build/CI tool here. The resulting Playground is static and performs
 compilation, type checking and PCK generation in the browser.
 
+## Complete-engine Worker candidate
+
+The opt-in browser Worker route is documented in the [Worker engine guide](../../docs/browser-worker-engine.zh-CN.md). Select `--execution-model proxy-pthread` explicitly for both source build and product assembly. Capability profiles (`full-engine-v1` / `engine-2d-v1`) and execution models are independent; the existing `window` default remains compatible.
+
+The source-bound execution contract records actual resolved threads/proxy flags, isolation/protocol requirements and the entire auxiliary Worker closure, including a main JS file that embeds pthread bootstrap. Release assembly preserves and seals that closure; the loader verifies it before execution and passes its verified main Blob to Emscripten. Old threadless reports cannot certify the threaded route by changing a profile or status label.
+
+New native Worker releases also require `engineHost: {"source":"preview.js","path":"preview.js"}` in the assets input. This is the actual consumed browser host bundle, not a source hash or protocol-version substitute. It is sealed into `engine.host`, payload closure and engineId. The product builder compiles this neutral bundle before identity assembly and emits preview HTML with its module SRI, then reuses the same bytes. Host changes require a complete candidate rebuild; old host-free descriptors remain readable.
+
+Use `scripts/release/collect-worker-g0.mjs --engine-report <build.json> --runtime-report <worker-integration.json> --out <g0-directory>` and `scripts/release/g0-readiness.mjs <g0-directory>/g0-receipt.json` to bind actual observations to scoped readiness. Optional `--identity-report` and `--project-report` supply separately scoped Node evidence; they never become browser evidence. Missing observations remain unverified. A passed scoped case from a failed parent suite retains that explicit limitation.
+
+Worker G0 is a small runtime/integration gate. G1 requires exact new-product browser, lifecycle, failure/resource/migration acceptance; G2 separately accepts deployed origins, TLS/CDN/permissions and whole-version rollback. None changes default activation or publishes a package. The commands below describe the retained nonisolated conformance/library release route unless their reports explicitly bind a Worker execution contract. Linux Playwright WebKit is not macOS/iOS Safari.
+
+The v8 host includes the fixed retained-instance shared-memory-growth preflight before engine fetching. Positive Chromium/Firefox results and the WebKit WK-01 rejection/cleanup result have different meanings: the latter records `engineExecuted:false` and keeps WebKit unsupported. The formal full native template is unchanged, with no lowering workaround or UA blacklist. Refresh B6 producer/source binding when probe/loader/exports change; prior host candidates' G1/G2 receipts cannot certify the new engineId. Default activation remains held while WK-01 or other required acceptance is unresolved.
+
 The root scripts provide the same entry points used by CI:
 
 ```sh

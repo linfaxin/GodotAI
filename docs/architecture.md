@@ -13,10 +13,12 @@ GodotJS combines a native Godot module with embedded JavaScript support code and
 | `scripts/jsb.runtime/` | Private runtime support embedded in the engine |
 | `scripts/jsb.editor/` | Private editor support and type generation |
 | `impl/web/bridge/` | Private TypeScript bridge compiled into Emscripten glue |
-| `scripts/jsb.react/`, `scripts/jsb.react-build/` | Existing React renderer and scene toolchain; retained in their current locations |
+| `packages/engine/` | Neutral API/declarations, execution identities, browser loading and whole-session ownership |
+| `packages/project-tools/` | Neutral project preparation, launch/build plans, UID/source maps, resource receipts and PCK |
+| `scripts/jsb.react/`, `scripts/jsb.react-build/` | React renderer and React startup/build adapters; compatibility core reexports |
 | `packages/` | Reusable libraries with their own build and package entry points |
 | `apps/playground/` | Static Monaco workbench, native/React project compiler worker, separate-origin preview and native React demos |
-| `scripts/jsb.react-browser/` | Browser compiler core, fixed built-ins, verified asset loading and isolated runner |
+| `scripts/jsb.react-browser/` | Browser compiler and release adapters; compatibility reexports for neutral engine/session code |
 | `scripts/jsb.web-engine/` | Versioned engine, SDK, compiler and declaration release assets |
 | `configs/tsconfig/` | Shared checks for new TypeScript packages |
 | `tests/project/` | Independent GodotJS consumer used by engine integration tests |
@@ -40,6 +42,9 @@ pnpm install --frozen-lockfile
 | `pnpm build` | Build embedded scripts followed by ecosystem packages |
 | `pnpm test` | Run the existing engine runtime matrix |
 | `pnpm test:react` | Run React renderer contracts and build-tool tests |
+| `pnpm test:engine` | Run neutral engine and project-tool tests |
+| `pnpm browser:engine:worker` | Build an explicitly selected `proxy-pthread` candidate in its own namespace |
+| `pnpm test:browser:worker` | Run the real TLS/two-origin full-engine Worker probe |
 
 SCons invokes `build:engine-js` before generating embedded sources when `skip_js_runtime` is disabled. It checks for pnpm and the embedded packages' local TypeScript installations and reports the explicit preparation command when dependencies are missing. It does not invoke `pnpm install` or the aggregate build.
 
@@ -63,6 +68,8 @@ There is no engine-only dependency installation profile at present. A full expli
 Keep the embedded-script packages private. Their package names identify workspace build units, not separately installable engine runtimes.
 
 New reusable libraries belong in `packages/`, and applications consume those libraries. The existing `@godot-js/react`, `@godot-js/react-build`, and browser-specific `@godot-js/react-browser` packages stay under `scripts/` and are explicitly included in the ecosystem build. Libraries do not depend on application code. Declare package dependencies with `workspace:*` and use package entry points rather than imports into another package's source directory.
+
+`@godot-js/engine/api`, execution contracts and identity helpers do not load React, DOM or a compiler. `@godot-js/engine/browser` intentionally owns browser runtime behavior. `@godot-js/project-tools` owns the shared preparation implementation; old React build `core` paths delegate to it. React bootstrap is an adapter over that preparation. Native scripts do not fetch the React vendor merely to run the engine.
 
 GodotJS provides modules such as `godot`, `godot-jsb`, `godot.lib.api`, and `godot.annotations` inside the engine. Future ecosystem code must use the intended host API and preserve required host modules as external references when bundling. It must not install the private embedded packages as substitute runtimes.
 
@@ -90,9 +97,13 @@ The root package version continues to drive the existing engine version header a
 
 The P0 blocker assessment uses Schema 2 evidence receipts: the candidate engine hashes, validation batch and frozen producer/source hashes must match fresh nonempty required cases. `blockers-cleared` with `engineeringStart: go` authorizes dependent engineering. It explicitly leaves `defaultReleaseReady: false`; production API/declaration certification, deployment and migration/recovery acceptance are separate release work. Building a full-engine descriptor and passing local browser checks does not by itself establish external deployment or public package publication.
 
+The new Worker route has a separate `worker-g0-receipt` contract and actual-runtime normalizer in `scripts/release/collect-worker-g0.mjs`. It records each scoped blocker, source/build/producer/batch hashes and closed Worker assets. A passed child case can be consumed from a failed parent suite only with its exact parent hash and explicit passed status; it never promotes the suite. Node tests and build evidence remain separately labeled. G0 unlocks scoped integration, G1 accepts the new product, and G2 accepts deployment and whole-version rollback. Default activation remains held. See the [Worker guide](browser-worker-engine.zh-CN.md).
+
 ## Browser application
 
-The [Playground](../apps/playground/README.md) compiles user programs, checks target-specific types, builds PCK artifacts and runs a single-threaded Godot Web engine without a runtime Node.js service or WebContainers. The default `full-engine-v1` build enables the normal Godot 4.6.1 Web module set, GodotJS and fallback text. It does not include the P0 instrumentation module. Full-engine capability is bounded by the compiled Web target, including WebGL 2 and single-thread restrictions, rather than a React host whitelist.
+The [Playground](../apps/playground/README.md) compiles user programs, checks target-specific types and builds PCK artifacts without a runtime Node.js service or WebContainers. `full-engine-v1` enables the normal Godot 4.6.1 Web module set, including advanced text, and GodotJS. It does not include the P0 instrumentation module. Capabilities are bounded by the actual compiled Web target and browser platform.
+
+The default product uses the Dedicated Worker runtime introduced on main, with the full threadless Web binary and host/audio/presentation bridges. The historical native execution value `window` identifies that binary recipe; a schema-3 site and `runtimeAbi` select its Dedicated Worker host. The separately selected pthread candidate uses `proxy-pthread`, built with actual `threads=yes proxy_to_pthread=yes dlink_enabled=no`. The engine main loop, business JS and optional React execute in the engine Worker realm. The separate-origin iframe remains the browser host for DOM, input, audio and platform proxies. A user script Worker has an explicit different role. WebGL context ownership is measured; upstream host GL proxying must not be described as Worker-owned OffscreenCanvas rendering.
 
 The product CI builds this default application and runs its full-engine, editor,
 bridge failure/value, migration and legacy-demo acceptance against one directory.
@@ -105,13 +116,14 @@ The execution pipeline is:
 ```text
 Schema 2 project + engine-matched declaration snapshot
   -> compiler.worker.ts (diagnostics, module resolution, JS/source maps)
-  -> @godot-js/react-build/core (shared native project preparation)
-  -> @godot-js/react-browser/pck (project PCK)
-  -> engine-release.json + PreviewRunner (verified engine/worklets)
-  -> separate-origin preview.html (fresh Godot instance)
+  -> @godot-js/project-tools (shared native project preparation)
+  -> project-tools/pck (project PCK)
+  -> engine-release.json + PreviewRunner (verified engine and complete helper closure)
+  -> separate-origin preview.html + BrowserEngineSession
+  -> fresh Godot instance (selected window or proxy-pthread execution)
 ```
 
-`@godot-js/react-build/core` owns native project preparation for Node and browser consumers. The Playground adapter packs its result using the existing PCK writer. It preserves native scene/resource bytes and original project settings; TypeScript/JavaScript scripts are emitted as GodotJS modules with source maps. Native UID caches are retained/merged using the Godot binary format. Formats requiring Godot editor import still require their metadata and imported files; browser compilation does not provide an editor importer. Native modules remain engine externals. Fixed React/SDK runtime modules are hash-verified release assets; project-relative modules, `res://` imports and JSON are resolved locally. Generic npm installation remains outside this application path.
+`@godot-js/project-tools` owns native project preparation for Node and browser consumers. The Playground adapter packs its result using the shared PCK writer. It preserves native scene/resource bytes and original project settings; TypeScript/JavaScript scripts are emitted as GodotJS modules with source maps. Native UID caches are retained/merged using the Godot binary format. Formats requiring Godot editor import still require their metadata and imported files; browser compilation does not provide an editor importer. Native modules remain engine externals. Optional React/SDK runtime modules are hash-verified release assets; project-relative modules, `res://` imports and JSON are resolved locally. Generic npm installation remains outside this application path.
 
 Schema 2 supports two project modes:
 
@@ -122,12 +134,18 @@ Schema 2 supports two project modes:
 
 The generic engine renderer supplies `EngineNode`, native refs, property/signal bridging and React ownership/lifecycle. Adding React sugar normally changes JavaScript packages and their release assets. GodotJS ABI changes and native engine fixes still require matching native builds. The older NativePort API remains an independently tested library interface; it is not a Playground runtime mode.
 
+The new project-tools Schema 4 reader/writer describes a mutually exclusive scene/script launch over a read-only source snapshot. BuildPlan and OutputOverlay separate original files from generated bootstrap and outputs. Existing default storage remains Schema 3 until migration/recovery acceptance; compatibility readers preserve old React entry semantics even if an old document also contains a main scene. Resource receipts track converter/target/input/dependency/output identities, and unsupported converters stay explicit.
+
 The editor model keeps entry, selection, files, controls and runtime mode. It accepts native JS/TS entries or a main scene, and preserves arbitrary native files within the existing 64-file, 8 MB decoded and 1 MB binary-file limits. `mainSceneSource: project` marks a value derived from the latest `project.godot`; it is for UI/validation and never overrides that file's authoritative main-scene UID. Explicit overrides are separately marked. Scene headers, sidecars and existing UID caches resolve scene paths without rewriting original configuration.
 
 Schema 1 and documents naming the removed renderer are imported as React projects with their complete original document retained in migration history. Built-in demo documents are upgraded to the native React examples; their old source and attachments remain available through the original export. Arbitrary old source is preserved for manual migration instead of executing the removed renderer. IndexedDB writes retain per-project conflict detection, atomic recovery backups and versioned restore.
 
 For deployment, serve the same complete release at distinct editor and preview origins and set the editor's `preview-config.json` to `{"previewOrigin":"https://preview.example.com"}`. The URL query `previewOrigin` can override it for checks. Localhost automatically pairs `localhost` and `127.0.0.1`; outside local development, missing or same-origin configuration is rejected. The preview site serves the fixed `preview.html`, matching engine/worklets and relative release assets, with WASM MIME/CORS and frame/CSP policy suitable for the chosen pair. It must not share editor credentials or private application data.
 
-The native/React iframe retains its own origin with `allow-scripts allow-same-origin allow-pointer-lock`; a parent/source/origin/protocol/run-identity handshake transfers a private MessagePort. `PreviewRunner` tracks run/revision identities, startup deadlines, quit/cancellation and forced frame disposal; stale sessions cannot become active. Frame disposal is not proof of process isolation or immediate native/GPU collection. The single-thread deployment does not require COOP/COEP.
+The native/React iframe retains its own origin with `allow-scripts allow-same-origin allow-pointer-lock`; a parent/source/origin/protocol/run-identity handshake transfers a private MessagePort. `PreviewRunner` tracks run/revision identities and delegates runtime ownership to `BrowserEngineSession`. A session tracks the engine and script Worker pool, runtime progress, timers, ports, audio, Blob URLs and Canvas. Stop distinguishes cooperative exit from timeout/forced cleanup; removing an iframe alone is not proof of native/GPU collection.
+
+The old `window` deployment does not require COOP/COEP. `proxy-pthread` requires actual trusted HTTPS, SAB and cross-origin isolation in the editor, preview and engine Worker. Its top/preview headers, Permissions-Policy delegation, iframe allow policy, CSP and cross-origin asset responses form a deployment contract, tested with `serveIsolatedBrowserPair`. Runtime reports retain actual origins/headers/isolation and browser environment. Production deployment and physical Safari/XR/IME acceptance remain separate from local fixtures.
+
+The verified loader also runs a fixed 126-byte Wasm shared-memory-growth capability probe before any pthread engine fetch. Retained main/Worker instances must agree after growth and perform reads, copies and fills in the grown region. This is a real capability check, with bounded cleanup on all outcomes, rather than a UA blacklist. Linux WebKit 26 currently fails this standard behavior (WK-01); passing the startup-rejection test does not certify engine execution. The formal native template is unchanged: diagnostic lowering and reduced-memory/capability workarounds are not shipped. Default Worker activation stays held until the browser blocker and required G1/G2 acceptance are resolved; see the [Worker guide](browser-worker-engine.zh-CN.md).
 
 `pnpm build:playground` assembles the default application (`apps/playground/src`, `web`, and `scripts`) and `engine-release.json`, plus a verified native demo resource pack and the small demo service module. There is no alternative legacy build or runner. `build:frontend` can refresh an existing full-engine shell only if its declaration inputs still match the release hashes. The original browser SDK workbench remains a conformance fixture, built separately by `pnpm --filter @godot-js/playground build:conformance` into `dist-conformance/`; it is not the default application. Browser assets and engine release files remain outside the embedded-script build boundary. See the [Playground guide](../apps/playground/README.md) for current operation; the [browser SDK guide](browser-playground.zh-CN.md) describes the retained conformance/library workflows. None of these build paths claims an externally published deployment.

@@ -2,7 +2,7 @@ const test=require('node:test');
 const assert=require('node:assert/strict');
 const {createHash}=require('node:crypto');
 const React=require('react');
-const {createRoot,Node3D,ColorRect}=require('../dist');
+const {createRoot,Node3D,ColorRect}=require('../dist/legacy');
 const {MockNativePort}=require('../dist/testing');
 const {SHOWCASE_SCHEMA_DESCRIPTOR,SHOWCASE_PROFILE_HASH,getProfileSchema,validateValue}=require('../dist/schema');
 const {canonicalJson}=require('../dist/contracts');
@@ -29,7 +29,7 @@ test('showcase resources and hosts retire before a second root is created',()=>{
   }
 });
 test('rigid-body forces require a physics frame and both velocity and wake ownership',()=>{
-  const SDK=require('../dist');
+  const SDK=require('../dist/legacy');
   for(const full of [false,true]){
     const port=new MockNativePort(),container=port.createContainer();let applied=0,checked=0,expired;
     const original=port.command.bind(port);

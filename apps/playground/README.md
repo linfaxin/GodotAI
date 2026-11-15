@@ -4,6 +4,8 @@ A static Monaco workbench with a TypeScript compiler Worker and an ordinary Dedi
 
 Ordinary build/dev commands and demos use Worker execution; the legacy entry has been removed. This framework is in its initial construction phase and will continue to undergo broad refactoring. Follow the [framework development and review principles](../../CONTRIBUTING.md#framework-development-stage-and-reviews): prioritize working core flows, clear module responsibilities and efficient iteration. The [Worker runtime and delivery contract](../../docs/browser-worker-runtime.zh-CN.md) describes runtime behavior and later release validation.
 
+The independently selected `proxy-pthread` candidate is documented in the [complete Worker engine guide](../../docs/browser-worker-engine.zh-CN.md); it retains its own build namespace and acceptance gates.
+
 ## Engine profiles
 
 The default `full-engine-v1` builds all eight demos. `engine-2d-v1` uses the same native GodotJS/React runtime with 3D scenes, physics, navigation and XR disabled, and publishes Shader, Lights, Match3 and Dungeon. SDK inputs are built once; engine, resource, export and output directories are isolated per profile and target. New project documents use Schema 3 and carry their engine profile.
@@ -91,6 +93,8 @@ The WebKit patch parks the default framebuffer between engine loops and restores
 ## Preview deployment
 
 Serve the editor and preview from distinct HTTP(S) origins. Set `previewOrigin` in `web/preview-config.json`, or pass `?previewOrigin=https://preview.example.com`. Localhost development can use the localhost/127.0.0.1 alias pair. The single-thread build does not require COOP/COEP.
+
+The Worker candidate instead requires trusted HTTPS and actual cross-origin isolation at both page origins and the engine Worker, with COOP/COEP, Permissions-Policy/iframe delegation, and compatible asset CORS/CORP/CSP. Build it explicitly with `--engine-report /path/to/worker-report.json --execution-model proxy-pthread`; the full debug output is `dist-worker-full-debug/`. This separate namespace cannot overwrite the old default. A static HTTP dev server alone does not satisfy the candidate's threaded deployment contract.
 
 Each preview verifies its engine and worklet bytes, receives the compiled project over a private MessagePort and starts a fresh Godot instance. Startup, cancellation, stop, failure and telemetry are scoped to the current run. Source maps carry native React failures back to the editor.
 

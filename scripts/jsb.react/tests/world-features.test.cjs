@@ -1,5 +1,5 @@
 const test=require('node:test');const assert=require('node:assert/strict');const React=require('react');
-const SDK=require('../dist');const {MockNativePort}=require('../dist/testing');const {validateValue,getHostSchema,validateHostProps}=require('../dist/schema');
+const SDK=require('../dist/legacy');const {MockNativePort}=require('../dist/testing');const {validateValue,getHostSchema,validateHostProps}=require('../dist/schema');
 test('world hosts remain opt-in and integer cell codecs reject truncation and overflow',()=>{
  for(const type of ['AnimatedSprite2D','AnimatedSprite3D','AnimationPlayer','TileMapLayer','GridMap','NavigationRegion2D','NavigationRegion3D','NavigationAgent2D','NavigationAgent3D']){assert.ok(SDK[type]);assert.throws(()=>getHostSchema(type),/E_/);validateHostProps(type,{}, {profileId:'showcase-v1'});}
  assert.throws(()=>validateHostProps('AnimationPlayer',{rootNode:'../../outside'},{profileId:'showcase-v1'}),/E_PROPERTY_VALUE/);

@@ -150,7 +150,7 @@ function engineRelease() {
 }
 function makeRunner() {
   if (runner) return runner;
-  runner = new PreviewRunner({ container: $('preview'), previewUrl: new URL(appConfig.previewUrl, location.href).href, release: engineRelease() });
+  runner = new PreviewRunner({ container: $('preview'), previewUrl: new URL(appConfig.previewUrl, location.href).href, release: engineRelease(), allowLegacyArtifacts: true });
   runner.subscribe(event => {
     const identity = event.type === 'exit' ? event.report : event;
     const record = state.runs.find(run => run.runId === identity.runId) ?? [...state.runs].reverse().find(run => !run.runId && run.generation === identity.generation && run.buildKey === identity.buildKey);

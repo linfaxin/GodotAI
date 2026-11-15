@@ -7,6 +7,7 @@ import {get} from 'node:http';
 import {gunzipSync,brotliDecompressSync} from 'node:zlib';
 import {createStaticServer} from './serve.mjs';
 import {prepareSiteDelivery} from './prepare-site-delivery.mjs';
+import {createLocalTestTls,inspectTestSite} from './browser-local-tls.mjs';
 const request=(url,headers={})=>new Promise((resolve,reject)=>{get(url,{headers},res=>{const chunks=[];res.on('data',c=>chunks.push(c));res.on('end',()=>resolve({status:res.statusCode,headers:res.headers,bytes:Buffer.concat(chunks)}));}).on('error',reject);});
 test('HTTP variants preserve decoded WASM, explicit gzip and private cache rules',async t=>{
  const root=await mkdtemp(path.join(tmpdir(),'playground-http-'));t.after(()=>rm(root,{recursive:true,force:true}));
@@ -35,4 +36,40 @@ test('encoded variants cannot follow a symlink outside the static root',async t=
  const server=createStaticServer(root);await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>server.close(r)));const origin='http://127.0.0.1:'+server.address().port;
  for(const encoding of ['br','gzip','br,gzip']){const result=await request(origin+'/game.wasm',{'accept-encoding':encoding});assert.equal(result.status,200);assert.equal(result.headers['content-encoding'],undefined);assert.deepEqual(result.bytes,raw);}
  assert.equal((await request(origin+'/outside.wasm')).status,403);
+});
+
+test('static product hosts infer isolation from the execution contract while legacy sites stay non-isolated',async t=>{
+ const root=await mkdtemp(path.join(tmpdir(),'playground-worker-host-'));t.after(()=>rm(root,{recursive:true,force:true}));
+ await writeFile(path.join(root,'index.html'),'worker product');
+ await writeFile(path.join(root,'engine-release.json'),JSON.stringify({execution:{requiresCrossOriginIsolation:true}}));
+ const isolated=createStaticServer(root);await new Promise(resolve=>isolated.listen(0,'127.0.0.1',resolve));t.after(()=>new Promise(resolve=>isolated.close(resolve)));
+ const response=await request('http://127.0.0.1:'+isolated.address().port+'/');
+ assert.equal(response.headers['cross-origin-opener-policy'],'same-origin');assert.equal(response.headers['cross-origin-embedder-policy'],'require-corp');assert.equal(response.headers['cross-origin-resource-policy'],'cross-origin');assert.match(response.headers['permissions-policy'],/cross-origin-isolated/);
+ await writeFile(path.join(root,'engine-release.json'),JSON.stringify({execution:{requiresCrossOriginIsolation:false}}));
+ const legacy=createStaticServer(root);await new Promise(resolve=>legacy.listen(0,'127.0.0.1',resolve));t.after(()=>new Promise(resolve=>legacy.close(resolve)));
+ const old=await request('http://127.0.0.1:'+legacy.address().port+'/');assert.equal(old.headers['cross-origin-opener-policy'],undefined);assert.equal(old.headers['cross-origin-embedder-policy'],undefined);
+});
+
+test('versioned URL mounts preserve immutable cache policy and directory containment',async t=>{
+ const root=await mkdtemp(path.join(tmpdir(),'playground-versioned-host-'));t.after(()=>rm(root,{recursive:true,force:true}));
+ await writeFile(path.join(root,'index.html'),'versioned entry');await writeFile(path.join(root,'game.js'),'verified engine');
+ const server=createStaticServer(root,{urlPrefix:'/releases/candidate123/',publicImmutable:true});
+ await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));t.after(()=>new Promise(resolve=>server.close(resolve)));
+ const base='http://127.0.0.1:'+server.address().port;
+ assert.equal((await request(base+'/releases/candidate123/')).bytes.toString(),'versioned entry');
+ const asset=await request(base+'/releases/candidate123/game.js');assert.equal(asset.bytes.toString(),'verified engine');assert.match(asset.headers['cache-control'],/immutable/);
+ assert.equal((await request(base+'/game.js')).status,404);
+ assert.equal((await request(base+'/releases/candidate123/../game.js')).status,404);
+ assert.throws(()=>createStaticServer(root,{urlPrefix:'../outside/'}),/E_STATIC_URL_PREFIX/);
+});
+
+test('HTTPS product fixture trusts only its supplied certificate and preserves isolation headers',async t=>{
+ const root=await mkdtemp(path.join(tmpdir(),'playground-tls-host-')),tls=await createLocalTestTls();
+ t.after(()=>rm(root,{recursive:true,force:true}));t.after(()=>tls.dispose());
+ await writeFile(path.join(root,'index.html'),'secure product');
+ const server=createStaticServer(root,{isolation:true,tls});await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));t.after(()=>new Promise(resolve=>server.close(resolve)));
+ const url='https://127.0.0.1:'+server.address().port+'/';
+ const result=await inspectTestSite(url,tls);assert.equal(result.status,200);assert.equal(result.headers['cross-origin-opener-policy'],'same-origin');assert.equal(result.headers['cross-origin-embedder-policy'],'require-corp');assert.equal(result.headers['cross-origin-resource-policy'],'cross-origin');assert.match(result.headers['permissions-policy'],/cross-origin-isolated/);
+ await assert.rejects(inspectTestSite(url),/self.signed certificate/i);
+ assert.match(tls.spki,/^[A-Za-z0-9+/]{43}=$/);assert.match(tls.certificateSha256,/^[a-f0-9]{64}$/);
 });

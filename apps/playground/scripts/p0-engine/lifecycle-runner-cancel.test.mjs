@@ -11,7 +11,7 @@ test('synchronous stop from loading-frame event never attaches a retired frame',
  }};
  const container={ownerDocument:document,append(frame){attached.push(frame);}};
  const release={releaseId:'p0-cancel',profile:'native',engineJs:{url:'http://preview.test/godot.js',sha256:'a'.repeat(64)},engineWasm:{url:'http://preview.test/godot.wasm',sha256:'b'.repeat(64)}};
- const runner=new PreviewRunner({container,previewUrl:'http://preview.test/preview.html',release});
+ const runner=new PreviewRunner({container,previewUrl:'http://preview.test/preview.html',release,allowLegacyArtifacts:true});
  let stopping;
  runner.subscribe(event=>{if(event.type==='state'&&event.state==='loading-frame')stopping=runner.stop();});
  try{

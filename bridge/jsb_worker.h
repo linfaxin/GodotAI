@@ -73,6 +73,7 @@ namespace jsb
             VariantConversionFailed = -5,
             VariantCloneFailed = -6,
             TransferAppendFailed = -7,
+            OwnerMismatch = -8,
         };
 
         static void register_(const v8::Local<v8::Context>& p_context, const v8::Local<v8::Object>& p_self);
@@ -84,12 +85,19 @@ namespace jsb
         static void on_thread_exit();
 
 #if JSB_WITH_WEB
-        static void on_web_message(jsb::impl::StackPosition p_data_sp, uint32_t p_transfer_id);
+        // Owner-thread cleanup. Reap waits for completion and sent-message receipts;
+        // disposal requests all owned workers and joins before the parent dies.
+        static void reap_finished(Environment* p_owner);
+        static void finish_owned(Environment* p_owner);
+        static bool web_is_script_thread();
+        static uintptr_t web_parent_thread_id();
+        static void web_configure_script_thread(uintptr_t p_parent_thread_id);
+        static void on_web_message(uintptr_t p_sender_pthread_id, jsb::impl::StackPosition p_data_sp, uint32_t p_transfer_id);
         static void on_web_message_from_pthread(uintptr_t p_sender_pthread_id, jsb::impl::StackPosition p_data_sp, uint32_t p_transfer_id);
 
         static bool web_queue_transfers(uintptr_t p_pthread_id, uint32_t p_transfer_id, std::vector<TransferData>&& p_transfers);
         static bool web_discard_transfers(uintptr_t p_pthread_id, uint32_t p_transfer_id);
-        static bool web_get_or_add_transfer(uintptr_t p_pthread_id, uint32_t p_transfer_id, const Variant& p_variant, uint32_t& r_transfer_index, WebNativeTransferError& r_error);
+        static bool web_get_or_add_transfer(uintptr_t p_pthread_id, uintptr_t p_environment_token, uint32_t p_transfer_id, const Variant& p_variant, uint32_t& r_transfer_index, WebNativeTransferError& r_error);
         static bool web_try_get_worker_by_pthread_id(uintptr_t p_pthread_id, WorkerImplPtr& o_worker_impl);
 
         static v8::Local<v8::Value> web_restore_transfer_markers(

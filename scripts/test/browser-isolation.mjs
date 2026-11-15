@@ -87,7 +87,7 @@ try {
   const main = `import { PreviewRunner } from ${JSON.stringify(resolve(repo, 'scripts/jsb.react-browser/src/runner.ts'))};
     const release = ${JSON.stringify(release)};
     window.events=[]; window.logs=[]; window.ticks=0; setInterval(()=>window.ticks++,20);
-    window.makeRunner=(descriptor=release)=> { window.runner=new PreviewRunner({container:document.body,previewUrl:${JSON.stringify(previewService.origin + '/preview.html')},release:descriptor,deadlines:{heartbeat:${heartbeat},stopping:1000}}); window.runner.subscribe(event=>{window.events.push(event);if(event.type==='log')window.logs.push(event.text)}); return window.runner; };
+    window.makeRunner=(descriptor=release)=> { window.runner=new PreviewRunner({container:document.body,previewUrl:${JSON.stringify(previewService.origin + '/preview.html')},release:descriptor,allowLegacyArtifacts:true,deadlines:{heartbeat:${heartbeat},stopping:1000}}); window.runner.subscribe(event=>{window.events.push(event);if(event.type==='log')window.logs.push(event.text)}); return window.runner; };
     window.makeRunner();
     window.compile=source=>new Promise((resolve,reject)=>{ const worker=new Worker('./compiler.js?local=1'); worker.onmessage=({data})=>{worker.terminate();if(data.ok){const result=data.result;resolve({revision:'probe',buildKey:result.manifest.sourceSnapshotHash,generation:result.generation,manifest:result.manifest,pack:new Uint8Array(result.pack)})}else reject(Error(data.error))};worker.onerror=e=>{worker.terminate();reject(Error(e.message))};worker.postMessage({id:1,source})});
     window.start=async source=>{const artifact=await window.compile(source);window.events=[];window.logs=[];window.lastArtifact=artifact;return window.runner.run(artifact)};

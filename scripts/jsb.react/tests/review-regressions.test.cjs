@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const React = require('react');
-const SDK = require('../dist');
+const SDK = require('../dist/legacy');
 const { MockNativePort } = require('../dist/testing');
 const { execFileSync } = require('node:child_process');
 const h = React.createElement;
@@ -9,13 +9,13 @@ const h = React.createElement;
 function setup(options = {}) {
   const port = new MockNativePort();
   const container = port.createContainer();
-  return { port, container, root: SDK.createRoot(port, container, { generation: 'review-regressions', ...options }) };
+  return { port, container, root: SDK.createRoot(port, container, { generation: 'review-regressions', budgetMs: 1000, ...options }) };
 }
 
 test('development Suspense works without a global performance object and does not install one', () => {
   const script = `
     delete globalThis.performance;
-    const React=require('react'),SDK=require('./dist'),{MockNativePort}=require('./dist/testing');
+    const React=require('react'),SDK=require('./dist/legacy'),{MockNativePort}=require('./dist/testing');
     const assert=require('node:assert/strict'),h=React.createElement;
     (async()=>{
       const port=new MockNativePort(),container=port.createContainer(),root=SDK.createRoot(port,container,{generation:'no-browser-performance',mode:'development'});

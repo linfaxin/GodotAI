@@ -58,6 +58,11 @@ export function forwardDemoInput(event:any){
 }
 function transport(){
  if(!G.OS.has_feature('web'))return undefined;
+ const host=(globalThis as any).__godotjsRuntimeHost;
+ if(host&&typeof host.bindProjectCommand==='function')return {
+  send(value:unknown){(host.emitProjectEvent??host.projectEvent).call(host,value);},
+  listen(callback:(value:any)=>void){host.bindProjectCommand((raw:string)=>{if(typeof raw==='string'&&raw.length<=262144)callback(JSON.parse(raw));});return()=>host.bindProjectCommand(null);},
+ };
  const window=G.JavaScriptBridge.get_interface('window');
  return {send(value:unknown){window.call('__godotjsProjectEvent',JSON.stringify(value));},nativeInput(event:string,code:string){window.call('__godotjsBenchmarkInput',event,code);},listen(callback:(value:any)=>void){const native=G.JavaScriptBridge.create_callback(G.Callable.create((args:any)=>{const raw=args.get(0);if(typeof raw==='string'&&raw.length<=262144)callback(JSON.parse(raw));}));window.call('__godotjsSetProjectCommand',native);return ()=>{if(native)window.call('__godotjsSetProjectCommand',null);};}};
 }
@@ -67,7 +72,7 @@ export function withDemo(Component:React.ComponentType):React.ComponentType<{con
   const channel=React.useMemo(transport,[]),players=React.useRef<Record<string,any>>({}),data=resources();
   activeInput=state.input;
   const inputCtor=React.useMemo(()=>{G.ResourceLoader.load('res://.playground/demo-input.ts');return require('res://.godot/GodotJS/.playground/demo-input.js').default;},[]);
-  React.useEffect(()=>{const unsubscribe=channel?.listen(command=>{if(command.type==='controls')setControls(command.controls);else if(command.type==='action'&&typeof command.action==='string')state.input.requests.add(command.action);else if(command.type==='import-data')state.input.imported=command.data;else if(command.type==='clear-input')clearDemoInput();else if(command.type==='benchmark-input'&&command.enabled===true){benchmarkNativeInput=(event,code)=>channel?.nativeInput(event,code);channel?.send({type:'benchmark-input-ready'});}});return()=>{unsubscribe?.();benchmarkNativeInput=undefined;if(activeInput===state.input)activeInput=undefined;};},[]);
+  React.useEffect(()=>{const unsubscribe=channel?.listen(command=>{if(command.type==='controls')setControls(command.controls);else if(command.type==='action'&&typeof command.action==='string')state.input.requests.add(command.action);else if(command.type==='import-data')state.input.imported=command.data;else if(command.type==='clear-input')clearDemoInput();else if(command.type==='benchmark-input'&&command.enabled===true){benchmarkNativeInput=(event,code)=>channel?.nativeInput?.(event,code);channel?.send({type:'benchmark-input-ready'});}});return()=>{unsubscribe?.();benchmarkNativeInput=undefined;if(activeInput===state.input)activeInput=undefined;};},[]);
   useFrame('process',delta=>{state.frames++;state.elapsed+=delta;for(const name of state.sounds.splice(0))players.current[name]?.play();if(state.elapsed>=.1){channel?.send({type:'stats',state:'running',frames:state.frames,fps:Math.round(1/Math.max(delta,.001)),stats:state.stats});state.elapsed=0;}});
   const services:DemoServices={controls,input:state.input,models:data.models,stats:stats=>{state.stats=stats;},sound:name=>{if(state.sounds.length<16)state.sounds.push(name);},exportJSON:(name,value)=>channel?.send({type:'export-data',name,data:value})};
   return <Services.Provider value={services}><EngineNode ctor={inputCtor}/><Component/>{(['jump','coin','land'] as const).map(name=><DemoSound key={name} name={name} reference={players.current}/>)}</Services.Provider>;

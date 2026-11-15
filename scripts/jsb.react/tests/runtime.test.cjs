@@ -1,7 +1,7 @@
 const test=require('node:test');
 const assert=require('node:assert/strict');
 const React=require('react');
-const SDK=require('../dist');
+const SDK=require('../dist/legacy');
 const {MockNativePort}=require('../dist/testing');
 const h=React.createElement;
 function setup(){const port=new MockNativePort();const container=port.createContainer();const root=SDK.createRoot(port,container,{generation:'test',mode:'production'});return {root,port,container};}

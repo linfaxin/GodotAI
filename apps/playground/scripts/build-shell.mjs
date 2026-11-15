@@ -75,7 +75,9 @@ export async function buildShell(dist,options={}){
  if(shellOnly&&existing)throw Error('A shell-only fixture must use an output directory without an engine release');
  if(!shellOnly&&!existing)throw Error('A frontend refresh requires an existing engine release; use --shell-only for contract fixtures');
  if(!shellOnly){
-  try{assertWorkerRuntimeAbi(existing.runtimeAbi);}catch{throw Error('E_EXECUTION_BACKEND_RETIRED: rebuild the complete playground as a Worker release before refreshing');}
+  if((existing.execution??existing.engine?.execution)?.executionModel!=='proxy-pthread'){
+   try{assertWorkerRuntimeAbi(existing.runtimeAbi);}catch{throw Error('E_EXECUTION_BACKEND_RETIRED: rebuild the complete playground as a Worker release before refreshing');}
+  }
   await assertWorkerSdkBuildFrozen(repository,existing.build?.sdkBuild);
   const resourceBuild=JSON.parse(await fs.readFile(path.join(dist,'resource-build.json'),'utf8'));
   if(resourceBuild.runtimeProfile!==runtimeProfile||resourceBuild.engineReleaseId!==existing.id)throw Error('Resource build does not belong to this engine release');
@@ -91,7 +93,7 @@ export async function buildShell(dist,options={}){
   // mutable build-workspace directory surviving deployment.
   await buildDemoRuntime(dist,{project:path.join(dist,'resource-inputs'),runtimeProfile});
  }
- await buildFrontend(dist,undefined,{runtimeProfile});
+ await buildFrontend(dist,undefined,{runtimeProfile,executionModel:(existing?.execution??existing?.engine?.execution)?.executionModel,...(existing?.engine?.host?{previewHost:existing.engine.host}:{})});
  await fs.writeFile(path.join(dist,'shell-profile.json'),JSON.stringify({schemaVersion:2,runtimeProfile,shellOnly}));
  if(!shellOnly)await assertWorkerSdkBuildFrozen(repository,existing.build.sdkBuild);
  await refreshSiteManifests(dist);

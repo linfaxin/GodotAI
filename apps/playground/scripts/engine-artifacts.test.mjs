@@ -23,6 +23,8 @@ test('default artifact/build paths isolate both module modes and LTO recipes',()
  assert.equal(browserEnginePaths({repository:repo,jobs:2}).configurationId,browserEnginePaths({repository:repo,jobs:8}).configurationId);
  assert.notEqual(browserEnginePaths({repository:repo,lto:'thin',jobs:2}).configurationId,browserEnginePaths({repository:repo,lto:'thin',jobs:8}).configurationId);
  assert.throws(()=>browserEnginePaths({repository:repo,moduleMode:'unknown'}),/E_BROWSER_MODULE_MODE/);
+ const window=browserEnginePaths({repository:repo}),worker=browserEnginePaths({repository:repo,executionModel:'proxy-pthread'});
+ for(const key of ['configurationId','reportPath','templatePath','buildDirectory'])assert.notEqual(window[key],worker[key],key);
  const environment={...process.env};for(const name of ['GODOT_WEB_BUILD_DIR','ENGINE_BUILD_REPORT','WEB_TEMPLATE_OUT'])delete environment[name];
  const result=spawnSync(process.execPath,['scripts/test/package-browser-engine-artifact.mjs','--paths','--repository','/fixture/repository','--profile','engine-2d-v1','--target','template_release','--lto','thin','--module-mode','explicit'],{cwd:repo,encoding:'utf8',env:environment});
  assert.equal(result.status,0,result.stderr);
@@ -171,7 +173,7 @@ test('explicit and adjacent reports infer the same unset configuration and retai
   const name=[target,moduleMode,lto].join('-'),source=await engineBuildFixture(path.join(root,name),{target,moduleMode,lto,jobs:3});
   const out=path.join(root,name+'-portable');await packageBrowserEngineArtifact({report:source.reportPath,out});
   const common={repository:root},adjacent=await resolvePlaygroundEngine({...common,templatePath:path.join(out,'engine-template.zip')}),explicit=await resolvePlaygroundEngine({...common,reportPath:path.join(out,'engine-report.json')});
-  assert.deepEqual(adjacent.configuration,{profile:'engine-2d-v1',target,lto,moduleMode,jobs:3});
+  assert.deepEqual(adjacent.configuration,{profile:'engine-2d-v1',target,lto,moduleMode,jobs:3,executionModel:'window'});
   assert.deepEqual(adjacent.configuration,explicit.configuration);assert.deepEqual(adjacent.defaults,explicit.defaults);
   assert.equal(adjacent.templateHash,explicit.templateHash);assert.equal(adjacent.reportSha256,explicit.reportSha256);
   for(const change of [{profile:'full-engine-v1'},{target:target==='template_debug'?'template_release':'template_debug'},{lto:lto==='none'?'thin':'none'},{moduleMode:moduleMode==='baseline'?'explicit':'baseline'},...(lto==='thin'?[{jobs:4}]:[])])await assert.rejects(resolvePlaygroundEngine({...common,templatePath:path.join(out,'engine-template.zip'),...change}),/E_PLAYGROUND_ENGINE_REPORT/);

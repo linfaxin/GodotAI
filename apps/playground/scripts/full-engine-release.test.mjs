@@ -7,6 +7,7 @@ import {engineApiCaptureFiles} from './capture-engine-api.mjs';
 import {auditEngineBinding} from './engine-api-binding-audit.mjs';
 import {FULL_WEB_MODULE_BASELINE} from './full-engine-profile.mjs';
 import {getEngineProfile} from '../../../scripts/release/engine-profiles.mjs';
+import {assertFullEngineIdentities} from '../../../scripts/release/release-identities.mjs';
 import {createRequire} from 'node:module';
 const {ENGINE_SDK_MODULES}=createRequire(new URL('../../../scripts/jsb.react/package.json',import.meta.url))('@godot-js/react/engine-modules');
 const sdkDeclarations=()=>Object.fromEntries(Object.values(ENGINE_SDK_MODULES).map(entry=>[entry.declaration,'export {};\n']));
@@ -54,6 +55,27 @@ test('full engine release seals executable, native API, generated types and runt
  assert.equal(manifest.sdk.runtimeModules['godot-jsb'],undefined);
  assert.equal(assembleFullEngineRelease(input).manifest.id,id,'Same inputs reproduce identity');
  assert.notEqual(assembleFullEngineRelease({...input,vendor:'changed vendor'}).manifest.id,id);
+ assert.doesNotThrow(()=>assertFullEngineIdentities(manifest));
+});
+
+test('SDK type-only changes update extension identity while preserving engine-only identity',()=>{
+ const input=fixture(),before=assembleFullEngineRelease(input).manifest;
+ const update=snapshot=>JSON.stringify({...JSON.parse(snapshot),'/engine-sdk/engine.d.ts':'export declare function createRoot():unknown;\nexport interface AddedSdkType {value:number}\n'});
+ const changed={...input,typeSnapshot:update(input.typeSnapshot),namingProfiles:{camel:{...input.namingProfiles.camel,typeSnapshot:update(input.namingProfiles.camel.typeSnapshot)}}};
+ const after=assembleFullEngineRelease(changed).manifest;
+ assert.equal(after.engineId,before.engineId);assert.notEqual(after.extensionId,before.extensionId);assert.notEqual(after.sdk.typesHash,before.sdk.typesHash);
+ assert.doesNotThrow(()=>assertFullEngineIdentities(after));
+});
+test('actual browser host bytes change engine identity without changing the optional React extension',()=>{
+ const input=fixture(),host=Buffer.from('/* actual bundled host fixture */');
+ input.engine.host=describeAsset('preview.js',host);input.engineBytes['preview.js']=host;
+ const before=assembleFullEngineRelease(input).manifest;
+ assert.deepEqual(before.payloads['preview.js'],input.engine.host);assert.doesNotThrow(()=>assertFullEngineIdentities(before));
+ const nextHost=Buffer.from('/* changed host bundle */'),after=assembleFullEngineRelease({...input,engine:{...input.engine,host:describeAsset('preview.js',nextHost)}}).manifest;
+ assert.notEqual(after.engineId,before.engineId);assert.equal(after.extensionId,before.extensionId);
+ const corrupt=structuredClone(before);corrupt.engine.host.sha256=sha256('unbound host');assert.throws(()=>assertFullEngineIdentities(corrupt),/Declared engine or extension/);
+ const worker=fixture();worker.engine.execution={schemaVersion:1,executionModel:'proxy-pthread',wasmThreads:true,proxyToPthread:true,requiresCrossOriginIsolation:true,hostProtocolVersion:1,workerBootstrap:'embedded',workerAssets:[{...worker.engine.javascript,role:'pthread-runtime'}]};
+ assert.throws(()=>assembleFullEngineRelease(worker),/requires the actual browser host/);
 });
 
 test('production capture refuses IR from another engine, changed worklets, and inspector templates',()=>{

@@ -1,13 +1,15 @@
-import {fetchVerifiedAsset} from '@godot-js/react-browser/verified-loader';
+import {fetchVerifiedAsset} from '@godot-js/engine/browser/verified-loader';
+import type {ExecutionContract} from '@godot-js/engine/browser/verified-loader';
+import {assertNativeReleaseIdentity,assertNativeTypeSnapshot,assertSiteDescriptorIdentity} from '@godot-js/engine/identities';
 import {getEngineProfile} from '../../../scripts/release/engine-profiles.mjs';
 import {assertReleaseContext,assertSameRelease,type ReleaseContext} from './release-context';
 export type {ReleaseContext} from './release-context';
 export interface ReleaseAsset {path:string;sha256:string;bytes:number;encoding?:'gzip';decodedSha256?:string;decodedBytes?:number;maxDecodedBytes?:number}
 export interface EngineRelease {
- schemaVersion:2;runtimeProfile:string;id:string;candidateId?:string;
- runtimeAbi?:{protocolVersion:2;host:1;audio:1;presentation:1};
- engine:{javascript:ReleaseAsset;wasm:ReleaseAsset;worklets?:ReleaseAsset[]};
- api:{ir:ReleaseAsset;typeSnapshot:ReleaseAsset;declarations?:unknown;hash?:string;namingProfiles?:Partial<Record<'snake'|'camel',{typeSnapshot:ReleaseAsset}>>};
+ schemaVersion:2;runtimeAbi?:{protocolVersion:2;host:1;audio:1;presentation:1};runtimeProfile:string;id:string;candidateId?:string;engineId?:string;extensionId?:string;artifactReceiptVersion?:2;
+ engine:{javascript:ReleaseAsset;wasm:ReleaseAsset;host?:ReleaseAsset;worklets?:ReleaseAsset[];execution?:ExecutionContract;workerAssets?:Array<ReleaseAsset&{role?:string}>};
+ execution?:ExecutionContract;
+ api:{ir:ReleaseAsset;typeSnapshot:ReleaseAsset;declarations?:unknown;hash?:string;bindingVersion?:string;namingProfiles?:Partial<Record<'snake'|'camel',{typeSnapshot:ReleaseAsset}>>};
  sdk:{vendor:ReleaseAsset;vendors?:Partial<Record<'development'|'production',ReleaseAsset>>;runtimeModules:Record<string,ReleaseAsset>};
 }
 interface ReleaseState {manifest:EngineRelease;context:ReleaseContext;demo?:any;site?:any}
@@ -18,15 +20,17 @@ async function descriptor(url:string){
  const response=await fetch(url,{cache:'no-cache',credentials:'same-origin',redirect:'error'});
  if(!response.ok)throw Error('无法加载引擎发布清单，请先构建 Playground');
  const bytes=new Uint8Array(await response.arrayBuffer());
- return {value:JSON.parse(new TextDecoder().decode(bytes)),hash:await digest(bytes)};
+ return {value:JSON.parse(new TextDecoder().decode(bytes)),hash:await digest(bytes),bytes:bytes.length};
 }
 async function readState(expected?:ReleaseContext):Promise<ReleaseState>{
  if(expected)assertReleaseContext(expected);
  const url=new URL('engine-release.json',expected?.releaseRoot??new URL('./',location.href));
- const {value:manifest,hash}=await descriptor(url.href);
+ const {value:manifest,hash,bytes:descriptorBytes}=await descriptor(url.href);
  if(typeof manifest.runtimeProfile!=='string')throw Error('E_NATIVE_ENGINE_RELEASE');
  getEngineProfile(manifest.runtimeProfile);
  if(manifest.schemaVersion!==2||typeof manifest.id!=='string'||!manifest.id||!manifest.sdk?.runtimeModules||!manifest.sdk.vendor||!manifest.api?.typeSnapshot||!manifest.engine?.wasm)throw Error('E_NATIVE_ENGINE_RELEASE');
+ await assertNativeReleaseIdentity(manifest);
+ if(manifest.engine.host){const host=manifest.engine.host,sealed=manifest.payloads?.[host.path];if(!sealed||sealed.sha256!==host.sha256||sealed.bytes!==host.bytes)throw Error('E_NATIVE_HOST_CLOSURE');}
  const context:ReleaseContext={engineProfile:manifest.runtimeProfile,engineReleaseId:manifest.id,descriptorHash:hash,releaseRoot:new URL('./',url).href};
  const demoResponse=await fetch(new URL('demo-release.json',context.releaseRoot),{cache:'no-cache',credentials:'same-origin',redirect:'error'});
  let demo:any;
@@ -37,14 +41,16 @@ async function readState(expected?:ReleaseContext):Promise<ReleaseState>{
  if(siteResponse.ok){
   const bytes=new Uint8Array(await siteResponse.arrayBuffer());site=JSON.parse(new TextDecoder().decode(bytes));
   if(site.runtimeProfile!==context.engineProfile||site.engineReleaseId!==context.engineReleaseId)throw Error('E_SITE_RELEASE_MISMATCH');
+  assertSiteDescriptorIdentity(site,{sha256:hash,bytes:descriptorBytes},{required:manifest.engineId!==undefined});
   if(site.payloads?.['demo-release.json']&&site.payloads['demo-release.json'].sha256!==context.demoDescriptorHash)throw Error('E_SITE_DEMO_MISMATCH');
   context.candidateId=await digest(bytes);
   if(site.publicAssets===true)context.publicAssets=true;
  }else if(siteResponse.status!==404)throw Error('E_SITE_MANIFEST_HTTP: '+siteResponse.status);
  assertReleaseContext(context);
  if(expected)assertSameRelease(expected,context);
- return {manifest,context,demo,site};
+ return {manifest:deepFreeze(manifest),context,demo:demo&&deepFreeze(demo),site};
 }
+function deepFreeze<T>(value:T):T{if(value&&typeof value==='object'){for(const child of Object.values(value))deepFreeze(child);Object.freeze(value);}return value;}
 /** Workers initialize from the editor's context, not their own latest pointer. */
 export async function initializeReleaseContext(expected?:ReleaseContext):Promise<ReleaseContext>{
  state??=readState(expected);const loaded=await state;
@@ -64,10 +70,17 @@ export async function fetchReleaseAsset(asset:ReleaseAsset):Promise<Uint8Array> 
  if(!asset||!/^[-a-zA-Z0-9_./]+$/.test(asset.path)||asset.path.startsWith('/')||asset.path.split('/').includes('..')||!/^([a-f0-9]{64})$/i.test(asset.sha256)||!Number.isSafeInteger(asset.bytes)||asset.bytes<0||asset.bytes>64*1024*1024)throw Error('E_SDK_ASSET_DESCRIPTOR');
  const context=await loadReleaseContext(),key=context.engineReleaseId+':'+context.descriptorHash+':'+asset.path+':'+asset.sha256+':'+(asset.decodedSha256??'');
  let pending=cache.get(key);
- if(!pending){pending=fetchVerifiedAsset({...asset,url:new URL(asset.path,context.releaseRoot).href},{maxBytes:64*1024*1024,maxDecodedBytes:64*1024*1024,cachePolicy:context.publicAssets?'public-immutable':'revalidate'}).then(bytes=>{if(!asset.encoding&&bytes.length!==asset.bytes)throw Error('运行模块长度不匹配：'+asset.path);return bytes;});cache.set(key,pending);pending.catch(()=>cache.delete(key));}
+ if(!pending){pending=fetchVerifiedAsset({...asset,url:new URL(asset.path,context.releaseRoot).href},{maxBytes:64*1024*1024,maxDecodedBytes:64*1024*1024,cachePolicy:context.publicAssets?'public-immutable':'revalidate'}).then(async bytes=>{
+  if(!asset.encoding&&bytes.length!==asset.bytes)throw Error('运行模块长度不匹配：'+asset.path);
+  const manifest=await loadEngineRelease();
+  const profiles=manifest.api.namingProfiles??{snake:manifest.api};
+  for(const [naming,profile]of Object.entries(profiles))if(profile?.typeSnapshot?.path===asset.path)await assertNativeTypeSnapshot(manifest,JSON.parse(new TextDecoder().decode(bytes)),naming);
+  return bytes;
+ });cache.set(key,pending);pending.catch(()=>cache.delete(key));}
  return (await pending).slice();
 }
 export async function loadReactModules(mode:'development'|'production') {
+ if(mode!=='development'&&mode!=='production')throw Error('E_SDK_MODE');
  const manifest=await loadEngineRelease();
  const [vendor,rows]=await Promise.all([fetchReleaseAsset(manifest.sdk.vendors?.[mode]??manifest.sdk.vendor),Promise.all(Object.entries(manifest.sdk.runtimeModules).map(async([name,asset])=>[name,await fetchReleaseAsset(asset)] as const))]);
  return {vendor,runtimeModules:Object.fromEntries(rows),releaseId:manifest.id};

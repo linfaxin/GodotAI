@@ -6,10 +6,10 @@ import {isSourceCertified} from './engine-build-proof.mjs';
 
 /** The namespace covers all resolved build switches. Scheduling alone does not
  * change it; ThinLTO's link parallelism is a real recorded linker argument. */
-export function browserEnginePaths({repository,profile='full-engine-v1',target='template_debug',lto='none',moduleMode='baseline',jobs=4}){
- const args=engineBuildArgs({profile,target,lto,moduleMode,jobs});
+export function browserEnginePaths({repository,profile='full-engine-v1',target='template_debug',lto='none',moduleMode='baseline',jobs=4,executionModel='window'}){
+ const args=engineBuildArgs({profile,target,lto,moduleMode,jobs,executionModel});
  const configurationId=digest(canonical({version:1,args:args.filter(value=>!/^\-j\d+$/.test(value))}));
- const parts=[profile,target,moduleMode,lto,configurationId.slice(0,16)];
+ const parts=[profile,...(executionModel==='window'?[]:[executionModel]),target,moduleMode,lto,configurationId.slice(0,16)];
  const artifactDirectory=path.resolve(repository,'work/playground',...parts);
  return {configurationId,artifactDirectory,reportPath:path.join(artifactDirectory,'engine-report.json'),templatePath:path.join(artifactDirectory,'engine-template.zip'),buildDirectory:path.resolve(repository,'../work/godotjs-web',...parts)};
 }
@@ -20,7 +20,8 @@ export function browserEngineVariant(report){
  const enabled=report?.resolvedBuildOptions?.modules_enabled_by_default;
  const modules=typeof enabled==='boolean'?enabled:args.includes('modules_enabled_by_default=no')?false:args.includes('modules_enabled_by_default=yes')?true:undefined;
  const jobs=args.find(value=>/^-j\d+$/.test(value));
- return {lto,moduleMode:modules===undefined?undefined:modules?'baseline':'explicit',jobs:jobs?Number(jobs.slice(2)):undefined};
+ const executionModel=report?.execution?.executionModel??(args.includes('proxy_to_pthread=yes')?'proxy-pthread':undefined);
+ return {lto,moduleMode:modules===undefined?undefined:modules?'baseline':'explicit',jobs:jobs?Number(jobs.slice(2)):undefined,...(executionModel?{executionModel}:{})};
 }
 
 /** Ordinary builds require a matching certified report. Local unproven input
@@ -34,7 +35,7 @@ export async function resolvePlaygroundEngine(configuration){
  }
  let reportBytes=reportPath?await readFile(reportPath):undefined,report=reportBytes?JSON.parse(reportBytes):undefined;
  const variant=browserEngineVariant(report);
- const selected={profile:configuration.profile??report?.runtimeProfile??'full-engine-v1',target:configuration.target??report?.engineTarget??'template_debug',lto:configuration.lto??variant.lto??'none',moduleMode:configuration.moduleMode??variant.moduleMode??'baseline',jobs:configuration.jobs??variant.jobs??4};
+ const selected={profile:configuration.profile??report?.runtimeProfile??'full-engine-v1',target:configuration.target??report?.engineTarget??'template_debug',lto:configuration.lto??variant.lto??'none',moduleMode:configuration.moduleMode??variant.moduleMode??'baseline',jobs:configuration.jobs??variant.jobs??4,executionModel:configuration.executionModel??variant.executionModel??'window'};
  getEngineProfile(selected.profile);
  const defaults=browserEnginePaths({...selected,repository});
  if(!reportPath&&!configuration.templatePath&&await exists(defaults.reportPath)){
@@ -46,6 +47,7 @@ export async function resolvePlaygroundEngine(configuration){
  if(report&&(report.kind!=='godot-js-browser-engine-build'||!['built',...(development?['existing-development']:[])].includes(report.status)||report.runtimeProfile!==selected.profile||report.engineTarget!==selected.target))throw Error('E_PLAYGROUND_ENGINE_REPORT: profile, target or build status mismatch');
  if(!development&&(!report?.sourceCertified||!isSourceCertified(report)))throw Error('E_PLAYGROUND_SOURCE: A source-certified engine report is required; use --development only for an uncertified local template');
  const actual=browserEngineVariant(report);
+ if(report&&(actual.executionModel??'window')!==selected.executionModel)throw Error('E_PLAYGROUND_ENGINE_REPORT: execution model differs from the requested configuration');
  for(const key of ['lto','moduleMode'])if(actual[key]!==undefined&&actual[key]!==selected[key])throw Error('E_PLAYGROUND_ENGINE_REPORT: '+key+' differs from the requested configuration');
  if(selected.lto==='thin'&&actual.jobs!==undefined&&actual.jobs!==Number(selected.jobs))throw Error('E_PLAYGROUND_ENGINE_REPORT: ThinLTO link jobs differ from the requested configuration');
  if(report?.modules)validateEngineProfile(selected.profile,{modules:report.modules,features:report.resolvedFeatures?{...report.resolvedBuildOptions,...report.resolvedFeatures}:undefined});
