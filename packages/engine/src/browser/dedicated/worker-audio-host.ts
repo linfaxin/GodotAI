@@ -37,6 +37,7 @@ export class WorkerAudioHost {
   private abortStop?: (error: Error) => void;
   private abandonedEpoch = false;
   private stopping = false;
+  private draining = false;
   private closed = false;
   private nodesDisposed = false;
   private sequence = 0;
@@ -91,7 +92,7 @@ export class WorkerAudioHost {
     try {
       if (data.seq !== this.sequence + 1) throw new Error('Out-of-order audio control command');
       this.sequence = data.seq;
-      this.dispatch(data);
+      if (!this.draining || ['stop', 'unregister', 'input-stop'].includes(data.operation)) this.dispatch(data);
       this.post({ type: 'ack', seq: data.seq });
     } catch (error) { this.error(error); }
   }
@@ -180,7 +181,7 @@ export class WorkerAudioHost {
   private postState(): void { const state = this.context?.state ?? 'closed', latency = this.outputLatency(); if (this.descriptor) { this.descriptor.state = state; this.descriptor.outputLatency = latency; } this.post({ type: 'state', state, outputLatency: latency }); }
   /** Call synchronously from a real main-thread pointer/key handler, before yielding its activation. */
   resumeFromGesture(): Promise<void> {
-    if (!this.context || this.stopping) return Promise.resolve();
+    if (!this.context || this.stopping || this.draining) return Promise.resolve();
     return this.context.resume().then(() => this.postState());
   }
   private dispatch(data: any): void {
@@ -208,7 +209,7 @@ export class WorkerAudioHost {
   }
   private startInput(inputEpoch: number): void {
     this.stopInput(this.inputEpoch);
-    if(this.stopping)return;
+    if(this.stopping||this.draining)return;
     this.inputEpoch = inputEpoch;
     if(this.inputOperations.size>=this.maxPendingInputRequests){this.inputStatus('denied',inputEpoch,Error('E_WORKER_AUDIO_INPUT_PENDING'));return;}
     const operation=Promise.resolve().then(()=>this.acquireInput(inputEpoch));this.inputOperations.add(operation);
@@ -220,11 +221,11 @@ export class WorkerAudioHost {
     if(failure)throw failure;
   }
   private async acquireInput(inputEpoch:number):Promise<void> {
-    if(this.stopping||this.inputEpoch!==inputEpoch)return;
+    if(this.stopping||this.draining||this.inputEpoch!==inputEpoch)return;
     let acquired:MediaStream|undefined;
     try {
       const stream = acquired = await (this.options.requestInput ? this.options.requestInput() : navigator.mediaDevices.getUserMedia({ audio: true }));
-      if (this.stopping || this.inputEpoch !== inputEpoch) { this.stopTracks(stream); return; }
+      if (this.stopping || this.draining || this.inputEpoch !== inputEpoch) { this.stopTracks(stream); return; }
       this.inputStream = stream;
       this.inputSource = this.context!.createMediaStreamSource(stream);
       this.inputSource.connect(this.streamNode!);
@@ -431,6 +432,10 @@ export class WorkerAudioHost {
     for (const bus of this.buses) bus.gate.gain.value = !bus.muted && (!solo || audible.has(bus)) ? 1 : 0;
   }
   mute(): void { if (this.gate && this.context) this.gate.gain.setValueAtTime(0, this.context.currentTime); }
+  beginDrain(): void {
+    if (this.draining || this.stopping) return;
+    this.draining = true; this.mute(); this.stopInput(this.inputEpoch);
+  }
   private deadline<T>(promise: Promise<T>, name: string): Promise<T> {
     let timer: ReturnType<typeof setTimeout>;
     return Promise.race([promise, new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error(`${name} timed out`)), this.options.timeoutMs ?? 3000); })]).finally(() => clearTimeout(timer));

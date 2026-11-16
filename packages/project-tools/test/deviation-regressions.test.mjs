@@ -61,7 +61,7 @@ test('old cache inventory is unverified; known edits reject until an executable 
  const rebuilt=await packBuildPlan(await planFor(edited),{importCacheObservations:baseline,resourceImports:[{resource:'res://tone.wav',converter:'godotjs/wav-pcm'}],resourceConverters:createBrowserResourceConverters(),resourceTarget:{resourceAbi:'godot-4-text-resource-v1',features:{}}});
  assert.equal(rebuilt.imports[0].status,'fresh');assert(!rebuilt.prepared.diagnostics.some(item=>item.code==='W_ENGINE_IMPORT_UNVERIFIED'));
  const output=rebuilt.receipt.imports[0].outputs.find(file=>file.path.endsWith('.tres')).path;
- assert.match(dec.decode(rebuilt.prepared.files.get(output)),/PackedByteArray\(0,192\)/);assert.deepEqual(files['/tone.wav'],wav());
+ assert.match(dec.decode(rebuilt.prepared.files.get(output)),/PackedByteArray\("AMA="\)/);assert.deepEqual(files['/tone.wav'],wav());
  const sync=prepareEngineProject({files,runtime:'engine',launch});assert(sync.diagnostics.some(item=>item.code==='W_ENGINE_IMPORT_UNVERIFIED'));
  const custom={...source(),'/source.custom':[1],'/source.custom.import':'[remap]\npath="res://.godot/imported/custom.res"\n','/.godot/imported/custom.res':[2]};
  assert(prepareEngineProject({files:custom,runtime:'engine',launch}).diagnostics.some(item=>item.file==='res://source.custom'&&item.code==='W_ENGINE_IMPORT_UNVERIFIED'));

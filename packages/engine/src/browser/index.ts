@@ -1,4 +1,5 @@
 export * from './engine-session.js';
+export * from './lifecycle-gate.js';
 export * from './verified-loader.js';
 export * from './runner.js';
 export * from './protocol.js';

@@ -18,3 +18,7 @@ export function drainScheduler(budget=5,limit=1000):number{return Host.drain(bud
 export function schedulerTaskCount():number{return Host.pending();}
 export function scheduleHostTimeout(fn:()=>void,delay:number):number{return Host.scheduleTimeout(fn,delay);}
 export function cancelHostTimeout(id:number):void{Host.cancelTimeout(id);}
+/** Renderer-private observation of the realm scheduler, independent of drivers. */
+export const subscribeSchedulerWakeup=Host.subscribeWakeup;
+export const schedulerWorkRevision=Host.workRevision;
+export const schedulerHasReadyWork=Host.readyWork;

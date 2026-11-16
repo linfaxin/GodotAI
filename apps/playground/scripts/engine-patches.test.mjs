@@ -22,6 +22,8 @@ async function fixture(root){
   'servers/audio/audio_server.cpp':await readFile(new URL('../../../scripts/jsb.react-browser/test/fixtures/godot-4.6.1-audio-server.cpp',import.meta.url),'utf8'),
   'main/main.cpp':await readFile(new URL('../../../scripts/jsb.react-browser/test/fixtures/godot-4.6.1-main.cpp',import.meta.url),'utf8'),
   'platform/web/web_main.cpp':await readFile(new URL('../../../scripts/jsb.react-browser/test/fixtures/godot-4.6.1-web-main.cpp',import.meta.url),'utf8'),
+  'scene/main/scene_tree.h':await readFile(new URL('../../../scripts/test/fixtures/godot-4.6.1-scene-tree.h',import.meta.url),'utf8'),
+  'scene/main/scene_tree.cpp':await readFile(new URL('../../../scripts/test/fixtures/godot-4.6.1-scene-tree.cpp',import.meta.url),'utf8'),
   'platform/web/display_server_web.cpp':await readFile(new URL('../../../scripts/jsb.react-browser/test/fixtures/godot-4.6.1-display-server-web.cpp',import.meta.url),'utf8'),
   'platform/web/audio_driver_web.cpp':await readFile(new URL('../../../scripts/jsb.react-browser/test/fixtures/godot-4.6.1-audio-driver-web.cpp',import.meta.url),'utf8'),
   'platform/web/js/engine/engine.js':await readFile(new URL('../../../scripts/jsb.react-browser/test/fixtures/godot-4.6.1-engine.js',import.meta.url),'utf8'),
@@ -50,10 +52,14 @@ test('local patch CLI and the actual CI snapshot builder produce identical engin
  const out=join(root,'report.json');
  await buildBrowserEngine({'godot-source':source,'build-dir':built,out,'snapshot-only':true,scons:process.execPath,emcc:process.execPath});
  const report=JSON.parse(await readFile(out,'utf8'));
- assert.equal(report.status,'snapshotted');assert.equal(report.recipe.patches.length,19);
- assert.deepEqual(report.runtimeAbi,{protocolVersion:2,host:1,audio:1,presentation:1});
+ assert.equal(report.status,'snapshotted');assert.equal(report.recipe.patches.length,21);
+ assert.deepEqual(report.runtimeAbi,{protocolVersion:2,host:1,audio:1,presentation:1,lifecycle:1});
+ assert.equal(report.execution.lifecycleAbi,1);assert.equal(report.lifecyclePatch.abi,1);
  assert.equal(Object.keys(report.workerPatch.files).length,10);
  assert.deepEqual(report.recipe.patches,localPatches);
+ assert(localPatches.some(patch=>patch.implementation.path==='impl/web/patches/patch-web-renderer.py'));
+ assert(localPatches.some(patch=>patch.implementation.path==='impl/web/patches/patch-native-tooltips.py'));
+ assert(!localPatches.some(patch=>patch.implementation.path.startsWith('apps/')));
  for(const patch of localPatches){
   assert.equal(patch.changed,true);assert.match(patch.implementation.sha256,/^[a-f0-9]{64}$/);
   const finalPatch=localPatches.findLast(item=>item.path===patch.path);
@@ -142,7 +148,8 @@ test('proxy-pthread snapshots retain the native pthread patch set without the De
  const out=join(root,'report.json');
  await buildBrowserEngine({'godot-source':source,'build-dir':built,out,'execution-model':'proxy-pthread','snapshot-only':true,scons:process.execPath,emcc:process.execPath});
  const report=JSON.parse(await readFile(out,'utf8'));
- assert.equal(report.execution.executionModel,'proxy-pthread');assert.equal(report.recipe.patches.length,10);
+ assert.equal(report.execution.executionModel,'proxy-pthread');assert.equal(report.recipe.patches.length,13);
+ assert.equal(report.execution.lifecycleAbi,1);assert.equal(report.lifecyclePatch.abi,1);
  assert.equal(report.runtimeAbi,undefined);assert.equal(report.workerPatch,undefined);
  assert(report.recipe.args.includes('threads=yes'));assert(report.recipe.args.includes('proxy_to_pthread=yes'));
  assert(report.recipe.patches.some(item=>item.patchId==='godotjs-audio-server-finish-v1'));

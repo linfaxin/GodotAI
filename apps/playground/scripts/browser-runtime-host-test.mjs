@@ -20,6 +20,8 @@ assert(backend==='proxy-pthread'||site.runtime?.executionBackend==='worker','Run
 const candidateId=createHash('sha256').update(siteBytes).digest('hex');
 const prefix=site.publicAssets?'/releases/'+candidateId+'/':'/';
 const timeout=Number(process.env.PLAYGROUND_RUNTIME_HOST_TIMEOUT??180000);
+const typedDemoGuard=process.env.PLAYGROUND_TYPED_DEMO_GUARD==='1';
+const demoPackBytes=typedDemoGuard?(await fs.stat(path.join(directory,'demo-resources.pck'))).size:0;
 assert(Number.isSafeInteger(timeout)&&timeout>0);
 const useTls=execution?.requiresCrossOriginIsolation===true&&process.env.PLAYGROUND_TEST_TLS!=='0';
 if(useTls&&(process.env.BROWSER??'chromium')!=='chromium')throw Error('Pinned local TLS acceptance currently requires Chromium');
@@ -33,6 +35,29 @@ const pageErrors=[],checks=[],cases=[];
 const sourceObservations=[];
 let sourceObservationOverflow=0;
 let report={status:'failed',scope:'actual-product-runtime-host',backend,checks,cases};
+
+// Optional allocation regression: the original compiler bundle is imported
+// unchanged, but expanding its demo pack to a numeric array is made observable.
+function guardDemoArrayExpansion({bytes}){
+ if(location.pathname.endsWith('/preview.html'))return;
+ const Original=Worker,guard=globalThis.__typedDemoGuard={workers:0,bytes};
+ globalThis.Worker=new Proxy(Original,{construct(target,args,newTarget){
+  const url=new URL(String(args[0]),location.href);
+  if(!url.pathname.endsWith('/compiler.worker.js'))return Reflect.construct(target,args,newTarget);
+  guard.workers++;
+  const prefix=`const nativeArrayFrom=Array.from;Array.from=function(value,...rest){
+   if(value instanceof Uint8Array&&value.byteLength===${bytes})throw Error('E_DEMO_NUMERIC_ARRAY_EXPANSION');
+   return Reflect.apply(nativeArrayFrom,this,[value,...rest]);
+  };importScripts(${JSON.stringify(url.href)});`;
+  const bootstrap=URL.createObjectURL(new Blob([prefix],{type:'text/javascript'}));
+  try{
+   const worker=Reflect.construct(target,[bootstrap,...args.slice(1)],newTarget);
+   const release=()=>URL.revokeObjectURL(bootstrap);
+   worker.addEventListener('message',release,{once:true});worker.addEventListener('error',release,{once:true});
+   return worker;
+  }catch(error){URL.revokeObjectURL(bootstrap);throw error;}
+ }});
+}
 
 function observeRuntimeHostMessages(){
  if(location.pathname.endsWith('/preview.html'))return;
@@ -123,6 +148,23 @@ const failureProgram=`export async function start(ctx:any){
  throw Error('RUNTIME_HOST_ASYNC_START_FAILURE');
 }
 `;
+const pendingStartupProgram=`export async function start(ctx:any){
+ const host=ctx.host,lifetime=ctx.lifetime;
+ if(!host||!lifetime||typeof lifetime.onCancel!=="function")throw Error("RUNTIME_HOST_ENTRY_LIFETIME_MISSING");
+ const cancelled=new Promise<void>(resolve=>lifetime.onCancel(()=>{console.log("RUNTIME_HOST_PENDING_CANCELLED");resolve();}));
+ if(host.emitProjectEvent({type:"runtime-host-ready",marker:"RUNTIME_HOST_PENDING_STARTUP",sessionId:host.sessionId,role:host.role,apiVersion:host.apiVersion})!==true)throw Error("RUNTIME_HOST_PENDING_EVENT_REJECTED");
+ await cancelled;
+ if(!lifetime.cancelled)throw Error("RUNTIME_HOST_PENDING_LIFETIME_STILL_OPEN");
+ return async()=>{
+  console.log("RUNTIME_HOST_LATE_CLEANUP_BEGIN");
+  await Promise.resolve().then(()=>Promise.resolve());
+  // Entry cleanup must settle before the native mount and epoch are sealed.
+  if(!ctx.godot.is_instance_valid(ctx.mount))throw Error("RUNTIME_HOST_LATE_CLEANUP_NATIVE_SEALED");
+  if(host.emitProjectEvent({type:"runtime-host-after-close",marker:"RUNTIME_HOST_PENDING_STARTUP"})!==false)throw Error("RUNTIME_HOST_PENDING_CLOSED_ENTRY_ACTIVE");
+  console.log("RUNTIME_HOST_LATE_CLEANUP_COMPLETE");
+ };
+}
+`;
 function project(source){return {schemaVersion:4,runtime:'engine',engineProfile:release.runtimeProfile,
  launch:{kind:'script',module:'res://src/start.ts',export:'start'},files:{'/src/start.ts':source,
  '/project.godot':'config_version=5\n[application]\nconfig/name="RuntimeHost acceptance"\n[rendering]\nrenderer/rendering_method="gl_compatibility"\n'},
@@ -151,6 +193,76 @@ async function importDocument(document,entry,source){
  await until(async()=>{const state=await inspect();if(state?.diagnostics?.some(item=>item.category==='error'))throw Error(JSON.stringify(state.diagnostics));return state?.project?.files?.[entry]===source;},'The authored RuntimeHost project was not imported');
 }
 async function importProject(source){return importDocument(project(source),'/src/start.ts',source);}
+async function newReactTemplate(){
+ if(await page.locator('#preview iframe').count()){await page.locator('#stop').click();await stopped();}
+ const before=await inspect(),messageStart=(await observation()).messages.length;
+ if(!await page.locator('#new-react-project').isVisible())await page.locator('#project-menu summary').click();
+ await page.locator('#new-react-project').click();
+ const created=await until(async()=>{
+  const state=await inspect();if(state?.diagnostics?.some(item=>item.category==='error'))throw Error(JSON.stringify(state.diagnostics));
+  return state?.projectId!==before.projectId&&state?.project?.engineDocument&&state.engine?.state==='running'&&
+   await page.locator('#saved').textContent()==='已自动保存'?state:undefined;
+ },'The new React project button did not create, save and run its actual Schema4 template');
+ assert.equal(created.project.engineProfile,release.runtimeProfile);assert.equal(created.project.selected,'/src/App.tsx');
+ assert.deepEqual(created.project.engineDocument.launch,{kind:'script',module:'res://src/start.ts',export:'start'});
+ const authored=structuredClone(created.project.files),original=structuredClone(created.project.engineDocument.originalDocument);
+ assert.equal(original.schemaVersion,4);assert.equal(original.runtime,'engine');
+ const firstRun=await until(async()=>(await observation()).messages.slice(messageStart).find(packet=>packet.type==='phase'&&packet.phase==='running')?.runId,
+  'The unchanged UI-created React template did not reach native running');
+ cases.push({name:'new-react-project-ui-original',projectId:created.projectId,runId:firstRun,terminal:await stopClean(firstRun)});
+ checks.push('The new React project button creates, saves, compiles and runs the unchanged Schema4 template; Stop confirms native exit 0, sealed complete entry/host cleanup and no force');
+
+ // Retain the new template's start(ctx), root options, component and Label.
+ // Import an authored observer through the real UI, then use the editor's Find
+ // UI and per-key input for one short marker. Bulk insertText/paste/IME is not
+ // part of this RuntimeHost acceptance. A ref observes the actual native node.
+ const draftMarker='RUNTIME_HOST_REACT_SCHEMA4_DRAFT',marker='RUNTIME_HOST_REACT_SCHEMA4';
+ const draftSource=authored['/src/App.tsx'].replace('import {EngineNode}', 'import {EngineNode,useRuntimeHost}')
+  .replace('export default function App() {',`export default function App() {
+  const marker = "RUNTIME_HOST_REACT_SCHEMA4_DRAFT";
+  const host = useRuntimeHost();
+  const label = React.useRef<Label | null>(null);
+  React.useEffect(() => {
+    if (!host || host.apiVersion !== 1 || host.role !== "engine") throw Error("RUNTIME_HOST_REACT_SCHEMA4_CONTEXT_MISSING");
+    if (!label.current || label.current.text !== "Hello React + Godot") throw Error("RUNTIME_HOST_REACT_SCHEMA4_NATIVE_LABEL_MISSING");
+    if (host.emitProjectEvent({type: "runtime-host-ready", marker, sessionId: host.sessionId, role: host.role, apiVersion: host.apiVersion, nativeText: label.current.text}) !== true) throw Error("RUNTIME_HOST_REACT_SCHEMA4_EVENT_REJECTED");
+    return () => {
+      if (host.emitProjectEvent({type: "runtime-host-after-close", marker}) !== false) throw Error("RUNTIME_HOST_REACT_SCHEMA4_CLOSED_ENTRY_ACTIVE");
+      console.log("RUNTIME_HOST_REACT_SCHEMA4_CLEANUP_CLOSED");
+    };
+  }, [host]);`)
+  .replace('<EngineNode ctor={Label}', '<EngineNode ctor={Label} ref={label}');
+ assert.notEqual(draftSource,authored['/src/App.tsx']);assert.match(draftSource,/useRuntimeHost\(\)/);assert.match(draftSource,/ref=\{label\}/);
+ assert.equal(draftSource.split(draftMarker).length,2,'Only one short marker needs editor input');
+ const observerDocument={...structuredClone(original),files:{...authored,'/src/App.tsx':draftSource},editor:{...original.editor,selected:'/src/App.tsx'}};
+ await importDocument(observerDocument,'/src/App.tsx',draftSource);
+ const draftReady=await readyEvent(draftMarker),draftPacket=(await observation()).messages.find(item=>item.type==='project'&&item.data?.marker===draftMarker&&item.data?.sessionId===draftReady.sessionId);assert(draftPacket);
+ const imported=await inspect();assert.notEqual(imported.projectId,created.projectId);assert.equal(imported.project.files['/src/start.ts'],authored['/src/start.ts']);
+ cases.push({name:'new-react-template-imported-observer',derivedFromProjectId:created.projectId,projectId:imported.projectId,runId:draftPacket.runId,terminal:await stopClean(draftPacket.runId)});
+ const source=draftSource.replace(draftMarker,marker),interactionTimeout=Math.min(timeout,30000);
+ const codeInput=page.locator('#source textarea.inputarea').first();await codeInput.focus({timeout:interactionTimeout});
+ await page.keyboard.press('ControlOrMeta+Home');await page.keyboard.press('ControlOrMeta+f');
+ const findInput=page.locator('.find-widget textarea:visible, .find-widget input:visible').first();
+ await findInput.waitFor({state:'visible',timeout:interactionTimeout});await findInput.fill(draftMarker,{timeout:interactionTimeout});
+ const editingTrace=await findInput.evaluate(el=>({tagName:el.tagName,ariaLabel:el.getAttribute('aria-label'),value:el.value,focused:document.activeElement===el}));
+ await findInput.press('Escape');await codeInput.focus({timeout:interactionTimeout});await page.keyboard.type(marker,{delay:5});
+ await until(async()=>{
+  const state=await inspect();return state.projectId===imported.projectId&&state.project.files['/src/App.tsx']===source&&
+   await page.locator('#saved').textContent()==='已自动保存';
+ },'The real editor did not save the per-key RuntimeHost marker replacement');
+ const edited=await inspect();assert.equal(edited.project.files['/src/start.ts'],authored['/src/start.ts']);
+ assert.deepEqual(edited.project.engineDocument.originalDocument,observerDocument);
+ await page.locator('#run').click();const ready=await readyEvent(marker);assert.equal(ready.nativeText,'Hello React + Godot');
+ const packet=(await observation()).messages.find(item=>item.type==='project'&&item.data?.marker==='RUNTIME_HOST_REACT_SCHEMA4'&&item.data?.sessionId===ready.sessionId);assert(packet);
+ assert.notEqual(packet.runId,firstRun);assert.notEqual(packet.runId,draftPacket.runId);const terminal=await stopClean(packet.runId);
+ const cleanup=await until(async()=>{
+  const messages=(await observation()).messages;return messages.find(item=>item.runId===packet.runId&&item.type==='log'&&item.text?.includes('RUNTIME_HOST_REACT_SCHEMA4_CLEANUP_CLOSED'));
+ },'The actual React effect cleanup did not run after entry admission closed');
+ assert.equal(sessionExitReason(terminal.sessionFacts),'clean-exit');
+ cases.push({name:'new-react-template-import-marker-runtime-host',derivedFromProjectId:created.projectId,projectId:imported.projectId,sessionId:ready.sessionId,runId:packet.runId,
+  nativeText:ready.nativeText,authoring:'actual-ui-import-and-editor-find-per-key-marker-exact-source-verified',editingTrace,startSourceUnchanged:true,cleanupObserved:cleanup.text,terminal});
+ checks.push('An observer derived from the UI-created React template is imported through the real UI, then a short marker is edited with Find and per-key input; its unchanged start(ctx) renders a real native Label, exposes the public scoped RuntimeHost and runs effect cleanup after entry admission closes, with native exit 0 and complete cleanup');
+}
 async function runReactDemo(){
  const demo=JSON.parse(await fs.readFile(path.join(directory,'examples/shader.project.json'),'utf8')),entry=demo.entry;
  assert.equal(demo.runtime,'react');assert.equal(demo.demoId,'shader');
@@ -176,12 +288,11 @@ export default withDemo(RuntimeHostObservedShaderLab);`);
  await until(async()=>{const state=await inspect();return state.events.find(item=>item.type==='benchmark-input-ready');},'The demo services did not receive the command through their scoped Root Context host');
  await page.locator('#stop').click();await stopped();const terminal=await terminalFor(packet.runId),facts=terminal.sessionFacts;
  assert(facts);assert.equal(facts.nativeExit?.code,0);assert.equal(facts.failure,undefined);assert.equal(facts.forcedTerminationIssued,false);assert.equal(facts.hostCleanup,'complete');
- assert(['complete','unconfirmed'].includes(facts.entryCleanup),'Private native release checkpoints must not be misreported as synchronous completion');
- assert.equal(facts.runtimeSummary,'sealed','Logical native disposal must seal the source even while asynchronous entry cleanup remains unconfirmed');
- assert.equal(sessionExitReason(facts),facts.entryCleanup==='complete'?'clean-exit':'cleanup-unconfirmed');
+ assert.equal(facts.entryCleanup,'complete','Managed native cleanup ticks must confirm every renderer release');
+ assert.equal(facts.runtimeSummary,'sealed');assert.equal(sessionExitReason(facts),'clean-exit');
  await nativeSourceSeals(packet.runId);
  cases.push({name:'react-shader-demo-root-context',sessionId:ready.sessionId,runId:packet.runId,panels:stats.stats.panels,terminal});
- checks.push('The shipped React shader demo runs real native panels/resources, receives its scoped Root Context host and demo commands, and stops without a false fatal or fabricated cleanup confirmation');
+ checks.push('The shipped React shader demo runs real native panels/resources, receives its scoped Root Context host and demo commands, and stops with sealed complete entry cleanup and native exit 0');
 }
 async function readyEvent(marker,excludedSession){return until(async()=>{
  const state=await inspect();if(state?.diagnostics?.some(item=>item.category==='error'))throw Error(JSON.stringify(state.diagnostics));
@@ -210,12 +321,26 @@ async function stopClean(runId){
  return terminal;
 }
 
+async function stopPendingStartup(){
+ await importProject(pendingStartupProgram);const ready=await readyEvent('RUNTIME_HOST_PENDING_STARTUP');
+ const packet=(await observation()).messages.find(item=>item.type==='project'&&item.data?.marker==='RUNTIME_HOST_PENDING_STARTUP'&&item.data?.sessionId===ready.sessionId);
+ assert(packet,'Pending startup must emit through the original project port before Stop');
+ const terminal=await stopClean(packet.runId),messages=(await observation()).messages.filter(item=>item.runId===packet.runId);
+ const index=marker=>messages.findIndex(item=>item.type==='log'&&item.text?.includes(marker));
+ const cancelled=index('RUNTIME_HOST_PENDING_CANCELLED'),begin=index('RUNTIME_HOST_LATE_CLEANUP_BEGIN'),complete=index('RUNTIME_HOST_LATE_CLEANUP_COMPLETE');
+ const ended=messages.findIndex(item=>['exit-report','fatal','exited','terminated'].includes(item.type));
+ assert(cancelled>=0&&begin>cancelled&&complete>begin&&ended>complete,'Stop must cancel unresolved startup, await its late async cleanup, then emit the native terminal');
+ cases.push({name:'pending-startup-late-async-cleanup',sessionId:ready.sessionId,runId:packet.runId,cleanupOrder:{cancelled,begin,complete,ended},terminal});
+ checks.push('Stop cancels the public entry lifetime while start is unresolved, accepts its late async cleanup, retains the live native mount through the awaited cleanup, rejects closed-entry sends and reports complete cleanup without force');
+}
+
 try{
  await Promise.all([listen(editor),listen(preview)]);
  const scheme=tls?'https':'http',editorOrigin=`${scheme}://127.0.0.1:${editor.address().port}`,previewOrigin=`${scheme}://127.0.0.1:${preview.address().port}`;
  const delivery=await inspectTestSite(editorOrigin+prefix,tls);assert.equal(delivery.status,200);deployment=localDeploymentEvidence({tls,editorOrigin,previewOrigin,headers:delivery.headers});
  browser=await launchBrowser({headless:true,args:['--no-sandbox','--enable-webgl','--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader','--disable-dev-shm-usage','--autoplay-policy=no-user-gesture-required',...(tls?['--ignore-certificate-errors-spki-list='+tls.spki]:[])]});
  context=await browser.newContext({viewport:{width:1536,height:1000}});
+ if(typedDemoGuard)await context.addInitScript(guardDemoArrayExpansion,{bytes:demoPackBytes});
  await context.exposeBinding('__recordRuntimeHostSource',(_source,observation)=>{if(sourceObservations.length<16384)sourceObservations.push(observation);else sourceObservationOverflow++;});
  await context.addInitScript(observeRuntimeSources);await context.addInitScript(observeRuntimeHostMessages);
  page=await context.newPage();page.setDefaultTimeout(timeout);page.on('pageerror',error=>pageErrors.push(String(error)));
@@ -240,10 +365,15 @@ try{
  assert(![first.sessionId,restarted.sessionId].includes(recovered.sessionId));assert.notEqual(recoveredRun,failure.runId);
  cases.push({name:'recovery-after-failure',sessionId:recovered.sessionId,runId:recoveredRun,terminal:await stopClean(recoveredRun)});
  checks.push('A new project runs and communicates after failed startup without stale-session contamination');
- await runReactDemo();
+ await stopPendingStartup();await newReactTemplate();await runReactDemo();
+ if(typedDemoGuard){
+  const guard=await page.evaluate(()=>globalThis.__typedDemoGuard);assert(guard.workers>0);assert.equal(guard.bytes,demoPackBytes);
+  checks.push('The shipped shader demo compiles and runs while a compiler Worker guard rejects Array.from on its '+demoPackBytes+'-byte typed demo resource pack');
+ }
  assert.deepEqual(pageErrors,[]);
  assert.equal(sourceObservationOverflow,0,'Native source observation must remain complete');
- report=await withAcceptanceContext({status:'passed',scope:'actual-product-runtime-host',engineExecuted:true,backend,checks,cases,pageErrors,deployment,execution},{directory,browser});
+ report=await withAcceptanceContext({status:'passed',scope:'actual-product-runtime-host',engineExecuted:true,backend,checks,cases,pageErrors,deployment,execution,
+  ...(typedDemoGuard?{compilerAllocationGuard:{method:'Worker bootstrap Array.from guard; original compiler bundle imported unchanged',demoPackBytes}}:{})},{directory,browser});
 }catch(error){
  report={...report,status:'failed',error:String(error),stack:error?.stack,pageErrors,deployment,checks,cases,
   ...(page?{observed:await inspect().catch(()=>undefined),messages:await observation().catch(()=>undefined),logs:await page.locator('#logs').textContent().catch(()=>undefined)}:{})};

@@ -102,7 +102,28 @@ test('actual runtime binding receives generated entry cleanup facts and rejects 
  }}};
  vm.runInNewContext(source,context);const app=new context.exports.default();app._ready();
  assert.equal(binding.receiveProjectCommand({kind:'command'}),true);await flush();assert.equal(commands,1);assert.equal(events[0].kind,'started');
- app._exit_tree();app._exit_tree();assert.equal(cleanups,1);assert.equal(host.emitProjectEvent({kind:'stale'}),false);
+ app._exit_tree();app._exit_tree();assert.equal(host.emitProjectEvent({kind:'stale'}),false);await flush();assert.equal(cleanups,1);
  assert.throws(()=>host.bindProjectCommand(()=>{}),/E_RUNTIME_CLOSING/);
  binding.endNativeEpoch('native-epoch');assert.equal(summaries.length,1);assert.equal(summaries[0].entries[0].cleanup,'complete');
+});
+
+test('session close reaches ordinary entry lifetime without removing its mount',async()=>{
+ const events=[],binding=createRuntimeBinding({sessionId:'close-script',role:'engine'});
+ binding.beginNativeEpoch('native');
+ const context={exports:{},__godotjsRuntimeHost:binding,console,require:name=>name.endsWith('/native-modules/godot.js')?{Node:class{}}:{start:ctx=>{
+  ctx.lifetime.onCancel(()=>events.push('cancel'));
+  ctx.lifetime.defer(async()=>{await Promise.resolve();events.push('registered');});
+  return ()=>events.push('returned');
+ }}};
+ vm.runInNewContext(source,context);new context.exports.default()._ready();
+ binding.beginClose();assert.equal(binding.closeProgress().closing,true);
+ await flush();assert.deepEqual(events,['cancel','returned','registered']);assert.equal(binding.closeProgress().status,'complete');
+});
+
+test('pending script startup remains pending and its late cleanup participates before native seal',async()=>{
+ let resolve,cleanup=0;const binding=createRuntimeBinding({sessionId:'pending-start',role:'engine'});binding.beginNativeEpoch('native');
+ const context={exports:{},__godotjsRuntimeHost:binding,console,require:name=>name.endsWith('/native-modules/godot.js')?{Node:class{}}:{start:()=>new Promise(accept=>resolve=accept)}};
+ vm.runInNewContext(source,context);new context.exports.default()._ready();binding.beginClose();await binding.drainClose();
+ assert.equal(binding.closeProgress().pendingStartup,1);assert.equal(binding.closeProgress().status,'pending');
+ resolve(()=>cleanup++);await flush();assert.equal(cleanup,1);assert.equal(binding.closeProgress().status,'complete');
 });

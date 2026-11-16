@@ -150,6 +150,8 @@ export class WorkerPreviewRunner {
         s.port.postMessage({ ...identity, protocolVersion: WORKER_PROTOCOL, type: 'run', release: this.release,
           configuration: frozen.configuration, artifact: snapshot, stopTimeoutMs: Math.max(1, Math.floor(this.deadlines.stopping * 0.6)),
           cleanupTimeoutMs: Math.max(1, Math.min(frozen.configuration.budgets.cleanupTimeoutMs, Math.floor(this.deadlines.stopping * 0.3))) }, [snapshot.pack.buffer]);
+      } else if (m.type === 'worker-closing') {
+        this.beginStop(s, 'stopped', 'Native exit is preparing project cleanup');
       } else if (m.type === 'phase' && RUN_PHASES.includes(s.state as typeof RUN_PHASES[number])) {
         if (RUN_PHASES.indexOf(m.phase) !== RUN_PHASES.indexOf(s.state as typeof RUN_PHASES[number]) + 1) return;
         if (!this.transition(s, m.phase)) return;

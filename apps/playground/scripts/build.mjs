@@ -18,7 +18,6 @@ import {invalidateSiteDelivery} from './site-delivery-state.mjs';
 import {executionFromReport,legacyExecution} from '../../../scripts/release/execution-contract.mjs';
 import {productOutputPath,productExportPreset,exportedExecution} from './product-execution.mjs';
 import {describeWorkerCandidate,assertWorkerBuildProof} from './worker-candidate.mjs';
-import {WORKER_RUNTIME_ABI} from '../../../scripts/release/engine-profiles.mjs';
 import {proveWorkerSdkBuild,assertWorkerSdkBuildFrozen} from './worker-sdk-proof.mjs';
 
 const argument=name=>{const index=process.argv.indexOf(name);if(index<0)return undefined;const value=process.argv[index+1];if(!value||value.startsWith('--'))throw Error('Missing '+name+' value');return value;};
@@ -75,7 +74,8 @@ let fullRelease;
  const describe=async name=>describeAsset(name,await fs.readFile(path.join(dist,name)));
  const engine={javascript:await describe('engine/game.js'),wasm:await describe('engine/game.wasm'),worklets:await Promise.all(['engine/game.audio.worklet.js','engine/game.audio.position.worklet.js'].map(describe)),host:previewHost,execution:productExecution,workerAssets:productExecution.workerAssets};
  const [vendor,developmentVendor]=await Promise.all([buildEngineVendor(),buildEngineVendor({mode:'development'})]);
- const release=assembleFullEngineRelease({...api,namingProfiles,engine,runtimeProfile,...(executionModel==='window'?{runtimeAbi:WORKER_RUNTIME_ABI,engineBuildReport:engineReport}:{}),sdkVersion:JSON.parse(await fs.readFile(path.join(sdk,'package.json'),'utf8')).version,vendor,developmentVendor,build:{actualAPIHash:api.actualAPIHash,engineTemplateSha256:templateHash,sourceCertified:inputs.sourceCertified,sdkBuild,provenance:inputs.sourceCertified?'exact-template-and-native-api-capture':'uncertified-local-development',...(engineReport?{engineReportSha256,engineSource:engineReport.source,godotSource:engineReport.godotSource,recipeSha256:engineReport.recipeSha256}:{} )}});
+ if(executionModel==='window'&&!engineReport?.runtimeAbi)throw Error('E_WORKER_BUILD_ABI: the actual template report must declare its runtime ABI');
+ const release=assembleFullEngineRelease({...api,namingProfiles,engine,runtimeProfile,...(executionModel==='window'?{runtimeAbi:engineReport.runtimeAbi,engineBuildReport:engineReport}:{}),sdkVersion:JSON.parse(await fs.readFile(path.join(sdk,'package.json'),'utf8')).version,vendor,developmentVendor,build:{actualAPIHash:api.actualAPIHash,engineTemplateSha256:templateHash,sourceCertified:inputs.sourceCertified,sdkBuild,provenance:inputs.sourceCertified?'exact-template-and-native-api-capture':'uncertified-local-development',...(engineReport?{engineReportSha256,engineSource:engineReport.source,godotSource:engineReport.godotSource,recipeSha256:engineReport.recipeSha256}:{} )}});
  await writeFullEngineOutputs(dist,release.outputs);fullRelease=release.manifest;
  await fs.rm(path.join(dist,'api/capture'),{recursive:true,force:true});
 }

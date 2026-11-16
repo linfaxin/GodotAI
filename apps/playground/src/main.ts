@@ -5,7 +5,7 @@ import {createFileMenu} from './workbench/file-menu';
 import {filePath,parseProject,addProjectFiles,renameProjectFile,canRenameProjectFile,MAX_PROJECT_DOCUMENT_BYTES,exportProject,projectCompileRequest,newEngineProject,type EditorProject} from './project-model';
 import {createProjectStorage,openProjectDatabase} from './project-storage';
 import type {TypeDiagnostic} from './compiler-types';
-import {defaultProject,demoProject,migrateDemoProject as migrateDemo} from './project-templates';
+import {defaultProject,demoProject,newEngineReactProject,migrateDemoProject as migrateDemo} from './project-templates';
 import {createEnginePreview} from './engine-preview';
 import {loadReleaseContext,loadSiteConfiguration,type ReleaseContext} from './engine-assets';
 import {assertCompiledRelease} from './release-context';
@@ -172,6 +172,7 @@ $<HTMLInputElement>('asset-import').onchange=async event=>{
 function download(name:string,value:unknown){let text=JSON.stringify(value);if(text.length<=16*1024*1024)text=JSON.stringify(value,null,2);const url=URL.createObjectURL(new Blob([text],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 $('export').onclick=()=>download('godot-playground-project.json',exportProject(current));
 $('new-engine-project').onclick=()=>{const project=newEngineProject(siteEngineProfile),id='project-'+crypto.randomUUID();projects.set(id,project);storage.stage(id,project);select(registerProjectDemo(id,project));menu.open=false;};
+$('new-react-project').onclick=()=>{const project=newEngineReactProject(siteEngineProfile),id='project-'+crypto.randomUUID();projects.set(id,project);storage.stage(id,project);select(registerProjectDemo(id,project));menu.open=false;};
 $('export-original').onclick=()=>download('godot-playground-original.json',exportProject(current,'original'));
 $('restore-recovery').onclick=async()=>{try{const recovery=recoverySnapshot??await storage.recovery();if(!await save())throw Error('当前编辑尚未安全保存，请先导出修改');const result=await storage.restore(recovery as any);if(!result.snapshot)throw Error(result.interrupted?'恢复期间有新编辑或未保存项目，已取消切换；请先保存或导出修改':'本地项目存在保存冲突，未恢复任何内容');const snapshot=result.snapshot;persistenceBlocked=false;recoverySnapshot=await storage.recovery();projects.clear();for(const [id,document]of snapshot.projects){try{const parsed=parseProject(document),demo=demos.find(item=>item.id===id),project=demo&&parsed.engineProfile===siteEngineProfile?migrateDemo(parsed,demo):parsed;projects.set(id,project);registerProjectDemo(id,project);if(project!==parsed)storage.stage(id,project);}catch{}}const demo=demos.find(d=>d.id===snapshot.selected)??demos[0];select(demo);toast('已从恢复备份还原项目');}catch(error){toast(String(error));}};
 $('export-recovery').onclick=()=>download('godot-playground-recovery.json',recoverySnapshot);

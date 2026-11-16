@@ -1,8 +1,8 @@
 import {prepareEngineProject as prepareCore,EngineProjectBuildError,type EngineProjectOptions as CoreOptions} from '@godot-js/project-tools/engine-project';
-import {createSourceSnapshot,createBuildPlan,adaptLegacyLaunch,prepareBuildPlan,packPreparedProject,type ProjectLaunch,type OutputEntry} from '@godot-js/project-tools/build-plan';
+import {createSourceSnapshot,createBuildPlan,adaptLegacyLaunch,packPreparedProject,type ProjectLaunch,type OutputEntry} from '@godot-js/project-tools/build-plan';
+import {compileBuildPlan,type CompilerEnvironment} from '@godot-js/project-tools/compiler';
 import {prepareEngineProject as prepareReactProject,prepareLegacyBuildPlan,type EngineProjectOptions as LegacyOptions,type EngineProjectManifest,type EngineProjectDiagnostic} from '@godot-js/react-build/core';
 import type {ImportReceipt,ImportInspection,LegacyImportObservation} from '@godot-js/project-tools/import-receipts';
-import {assertArtifactReceipt} from '@godot-js/engine/identities';
 import type {ImportTarget} from '@godot-js/project-tools/import-receipts';
 import type {ResourceImportRequest,ResourceConverterRegistry} from '@godot-js/project-tools/resource-converters';
 import {ProjectToolError} from '@godot-js/project-tools/errors';
@@ -14,6 +14,7 @@ export interface EngineProjectOptions extends Omit<LegacyOptions,'runtime'> {
  /** A supplied launch explicitly selects the new scene/script contract. */
  launch?:ProjectLaunch;
  identityInputs?:Readonly<Record<string,unknown>>;
+ compilerEnvironment?:CompilerEnvironment;
  importReceipts?:readonly ImportReceipt[];
  importCacheObservations?:readonly LegacyImportObservation[];
  importChecks?:readonly {receipt?:ImportReceipt;inspection:Omit<ImportInspection,'files'|'outputFiles'>}[];
@@ -51,6 +52,8 @@ export async function compileEngineProject(options:EngineProjectOptions):Promise
 }
 async function compileSnapshot(options:EngineProjectOptions):Promise<EngineProjectResult>{
  const limits={maxBytes:options.maxBytes??256*1024*1024,maxFiles:options.maxFiles??10000};
+ for(const [name,value]of Object.entries(limits))if(!Number.isSafeInteger(value)||value<1)throw new ProjectToolError('E_PROJECT_BUDGET','Invalid '+name);
+ const packLimits={maxBytes:Math.min(limits.maxBytes,64*1024*1024),maxFiles:limits.maxFiles};
  let plan;
  if(options.launch!==undefined){
   plan=await createBuildPlan(await createSourceSnapshot(options.files,limits),options.launch,{inputs:options.identityInputs});
@@ -62,14 +65,10 @@ async function compileSnapshot(options:EngineProjectOptions):Promise<EngineProje
  }
  const compilerOptions:Omit<CoreOptions,'files'|'launch'|'entry'|'mainScene'>={
   ...(options.vendor?{vendor:options.vendor}:{}),...(options.runtimeModules?{runtimeModules:options.runtimeModules}:{}),
-  ...(options.generatedJs?{generatedJs:options.generatedJs}:{}),maxBytes:limits.maxBytes,maxFiles:limits.maxFiles,
+  ...(options.generatedJs?{generatedJs:options.generatedJs}:{}),...(!options.compilerEnvironment?{maxBytes:limits.maxBytes,maxFiles:limits.maxFiles}:{}),
  };
  const buildOptions={compilerOptions,...(options.importChecks?{importChecks:options.importChecks}:{}),...(options.importReceipts?{storedImportReceipts:options.importReceipts}:{}),...(options.importCacheObservations?{importCacheObservations:options.importCacheObservations}:{}),
   ...(options.resourceImports?{resourceImports:options.resourceImports,resourceConverters:options.resourceConverters,resourceTarget:options.resourceTarget}:{})};
- const prepared=plan.compatibility?await prepareLegacyBuildPlan(plan,{...buildOptions,...(options.props?{props:options.props}:{})}):await prepareBuildPlan(plan,buildOptions);
- const artifact=await packPreparedProject(prepared,limits);
- const receipt=await assertArtifactReceipt(artifact.receipt,{pack:artifact.pack,buildKey:artifact.plan.buildKey});
- if(!receipt?.artifactId)throw Error('E_ARTIFACT_IDENTITY: Compiler must produce schema 2 receipts');
- return {pack:artifact.pack,index:artifact.index,manifest:artifact.prepared.manifest,diagnostics:artifact.prepared.diagnostics,
-  buildKey:artifact.plan.buildKey,artifactId:receipt.artifactId,receipt:artifact.receipt,overlay:artifact.overlay.entries};
+ return compileBuildPlan(plan,{environment:options.compilerEnvironment,preparation:buildOptions,pack:packLimits,
+  ...(plan.compatibility?{preparePlan:(input,preparation)=>prepareLegacyBuildPlan(input,{...preparation,...(options.props?{props:options.props}:{})})}:{})});
 }

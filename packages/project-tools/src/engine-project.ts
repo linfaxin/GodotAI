@@ -1,3 +1,4 @@
+import {scriptBootstrap} from './runtime-entry.js';
 import ts from 'typescript';
 import type {ProjectLaunch} from './build-plan.js';
 import {parseProjectLaunch} from './launch.js';
@@ -7,12 +8,14 @@ import {inventoryImportCaches,type ImportCacheEntry} from './import-receipts.js'
 import {nativeModuleSource} from './native-module-exports.js';
 import {moduleRequireOffsets} from './script-bindings.js';
 import {ENGINE_MODULE_ROOT,projectScript,projectDeclaration,moduleCandidates,projectModulePath,emittedModulePath} from './project-modules.js';
+import {adoptBytes,byteMap,captureBytes,retainBytes} from './owned-bytes.js';
+import {engineEmitOptions} from './compiler-policy.js';
 
 export interface EngineProjectDiagnostic {
  file?:string;line:number;column:number;message:string;code?:string|number;category:'error'|'warning';
 }
 export interface EngineProjectOptions {
- files:Readonly<Record<string,string|readonly number[]>>;
+ files:Readonly<Record<string,string|readonly number[]|Uint8Array>>;
  /** Compatibility label only; engine behavior is determined by launch/startup. */
  runtime?:string;entry?:string;entryExport?:string;mainScene?:string;
  launch?:ProjectLaunch;
@@ -178,66 +181,6 @@ export default class PlaygroundEngineBootstrap extends G.Node {
 
 /** New script entries are ordinary start(ctx) functions. Legacy Node classes
  * keep their original registration/bootstrap path through the old adapter. */
-function scriptBootstrap(module:string,exportName:string):string {
- return `const intrinsicStackGetter = Object.getOwnPropertyDescriptor(new Error(), 'stack')?.get;
-const G = require('godot');
-export default class ProjectScriptBootstrap extends G.Node {
- private cleanup: any; private cleanupCalled = false; private closed = false;
- private entry: any; private host: any;
- private diagnostic(error: any) {
-  const own = (name: string, limit: number) => { try { const d = error != null && (typeof error === 'object' || typeof error === 'function') ? Object.getOwnPropertyDescriptor(error, name) : undefined; const text = d && 'value' in d ? d.value : name === 'stack' && intrinsicStackGetter && d?.get === intrinsicStackGetter && ['message','name'].every(key => { const field = Object.getOwnPropertyDescriptor(error,key); return !field || 'value' in field; }) ? intrinsicStackGetter.call(error) : undefined; return typeof text === 'string' ? text.slice(0, limit) : undefined; } catch (_) { return undefined; } };
-  return {kind:'runtime',message:(typeof error === 'string' ? error.slice(0,4096) : own('message',4096)) ?? 'Script entry failed',stack:own('stack',32768)};
- }
- private report(error: any, cleanup = false): boolean {
-  if (!cleanup && this.closed) return true;
-  const diagnostic = this.diagnostic(error);
-  try {
-   if (cleanup && this.entry) { this.entry.reportCleanupFailure(diagnostic); return true; }
-   if (typeof this.host?.reportDiagnostic === 'function' && this.host.reportDiagnostic(diagnostic) === true) return true;
-  } catch (_) {}
-  console.error(error); return false;
- }
- private runCleanup(cleanup: any) {
-  if (this.cleanupCalled) return;
-  this.cleanupCalled = true;
-  if (this.entry && !this.entry.canCleanup()) { this.entry.cleanupUnconfirmed(); return; }
-  try {
-   const result = cleanup();
-   if (result && typeof result.then === 'function') {
-    this.entry?.cleanupUnconfirmed();
-    void Promise.resolve(result).catch((error: any) => this.report(error, true));
-   } else this.entry?.cleanupComplete();
-  } catch (error) { this.report(error, true); }
- }
- _ready() {
-  const binding = (globalThis as any).__godotjsRuntimeHost;
-  this.entry = typeof binding?.openEntry === 'function' ? binding.openEntry() : undefined;
-  this.host = this.entry?.host ?? binding;
-  const accept = (cleanup: any) => {
-   if (cleanup !== undefined && typeof cleanup !== 'function') throw Error('Script startup must return void or a cleanup function');
-   this.entry?.ready(typeof cleanup === 'function');
-   if (this.closed) {
-    if (cleanup) { if (this.entry && !this.entry.canCleanup()) this.entry.cleanupUnconfirmed(); else void Promise.resolve().then(() => this.runCleanup(cleanup)); }
-   } else this.cleanup = cleanup;
-  };
-  try {
-   const start = require(${JSON.stringify(module)})[${JSON.stringify(exportName)}];
-   if (typeof start !== 'function') throw Error('Script entry must export a start function');
-   const result = start({mount:this,godot:G,host:this.host});
-   if (result && typeof result.then === 'function') void Promise.resolve(result).then(accept).catch((error: any) => this.report(error));
-   else accept(result);
-  } catch (error) { if (!this.report(error)) throw error; }
- }
- _exit_tree() {
-  if (this.closed) return;
-  this.closed = true; this.entry?.close();
-  const cleanup = this.cleanup; this.cleanup = undefined;
-  if (cleanup) this.runCleanup(cleanup);
- }
-}
-`;
-}
-
 /** Pure project preparation: no filesystem, network, package installer or editor importer. */
 export function prepareEngineProject(options:EngineProjectOptions):PreparedEngineProject {
  if(options.launch!==undefined){try{options={...options,launch:parseProjectLaunch(options.launch)};}catch(error){fail('E_PROJECT_LAUNCH',String(error));}}
@@ -253,9 +196,9 @@ export function prepareEngineProject(options:EngineProjectOptions):PreparedEngin
   const path=resourcePath(input),collision=casePaths.get(path.toLowerCase());
   if(collision)fail('E_ENGINE_PATH_COLLISION',`Project paths collide: ${collision} and ${input}`,input);
   casePaths.set(path.toLowerCase(),path);
-  if(typeof value==='string'){textFiles.set(path,value);files.set(path,encoder.encode(value));}
-  else if(Array.isArray(value)&&value.every(byte=>Number.isInteger(byte)&&byte>=0&&byte<=255)){
-   const bytes=Uint8Array.from(value);files.set(path,bytes);
+  if(typeof value==='string'){textFiles.set(path,value);files.set(path,adoptBytes(encoder.encode(value)));}
+  else if(value instanceof Uint8Array||Array.isArray(value)&&value.every(byte=>Number.isInteger(byte)&&byte>=0&&byte<=255)){
+   const bytes=value instanceof Uint8Array?retainBytes(value):captureBytes(value);files.set(path,bytes);
    if(path==='res://project.godot'){
     try{textFiles.set(path,decodeProjectText(bytes)!);}
     catch{fail('E_ENGINE_PROJECT_TEXT','project.godot must contain valid UTF-8 text',path);}
@@ -264,7 +207,7 @@ export function prepareEngineProject(options:EngineProjectOptions):PreparedEngin
   else fail('E_ENGINE_BYTES',`Expected text or byte values 0–255: ${input}`,input);
  }
  const put=(path:string,value:string|Uint8Array,replace=false)=>{
-  const bytes=typeof value==='string'?encoder.encode(value):new Uint8Array(value);
+  const bytes=typeof value==='string'?adoptBytes(encoder.encode(value)):retainBytes(value);
   const collision=casePaths.get(path.toLowerCase());
   if(collision&&collision!==path)fail('E_ENGINE_PATH_COLLISION',`Generated path collides with ${collision}: ${path}`,path);
   const existing=files.get(path);
@@ -361,7 +304,7 @@ export function prepareEngineProject(options:EngineProjectOptions):PreparedEngin
     const resolved=moduleCandidates(base).find(candidate=>moduleOutputs.has(candidate));
     return resolved?moduleOutputs.get(resolved):undefined;
    };
-   const result=ts.transpileModule(source,{fileName:transpileName,reportDiagnostics:true,transformers:{before:[runtimeImportTransformer(resolveImport,(specifier)=>{if(specifier==='godot')referencesNative();else rewritten();}),nativeImportTransformer(rewritten)]},compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.React,esModuleInterop:true,sourceMap:true,inlineSources:true,rewriteRelativeImportExtensions:true}});
+   const result=ts.transpileModule(source,{fileName:transpileName,reportDiagnostics:true,transformers:{before:[runtimeImportTransformer(resolveImport,(specifier)=>{if(specifier==='godot')referencesNative();else rewritten();}),nativeImportTransformer(rewritten)]},compilerOptions:engineEmitOptions()});
    for(const item of result.diagnostics??[]){
     const point=item.file&&item.start!==undefined?item.file.getLineAndCharacterOfPosition(item.start):undefined;
     diagnostics.push({file:path,line:point?point.line+1:0,column:point?point.character+1:0,code:item.code,category:item.category===ts.DiagnosticCategory.Error?'error':'warning',message:ts.flattenDiagnosticMessageText(item.messageText,'\n')});
@@ -417,6 +360,6 @@ export function prepareEngineProject(options:EngineProjectOptions):PreparedEngin
  diagnostics.push(...uidCache.diagnostics);
  if(uidCache.cache)put(RESOURCE_UID_CACHE,uidCache.cache,true);
  const errors=diagnostics.filter(item=>item.category==='error');if(errors.length)throw new EngineProjectBuildError(diagnostics);
- return {files,diagnostics,manifest:{schemaVersion:1,runtime:options.runtime??'engine',entry,mainScene,projectSettings,
+ return {files:byteMap(files),diagnostics,manifest:{schemaVersion:1,runtime:options.runtime??'engine',entry,mainScene,projectSettings,
   files:[...files.keys()].sort(),generatedFiles:[...generated].sort(),modules,runtimeModules:runtimePaths}};
 }

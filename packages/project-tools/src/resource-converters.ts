@@ -2,16 +2,19 @@ import {canonicalJson,hashBytes,hashJson} from './hash.js';
 import {resourcePath} from './paths.js';
 import {ProjectToolError} from './errors.js';
 import {readProjectStringSetting} from './project-settings.js';
-import {createImportReceipt,assessImportReceipt,type ImportAssessment,type ImportReceipt,type ImportTarget} from './import-receipts.js';
+import {createImportReceipt,assessImportReceipt,parseImportReceipt,type ImportAssessment,type ImportReceipt,type ImportTarget} from './import-receipts.js';
+import {byteMap,borrowByteMap,captureBytes} from './owned-bytes.js';
+import {base64Resource} from './base64-resource.js';
 
 export interface ResourceImportRequest {resource:string;converter:string;parameters?:Readonly<Record<string,unknown>>;dependencies?:readonly string[];uid?:string}
-export interface ResourceConversionContext {resource:string;uid?:string;parameters:Readonly<Record<string,unknown>>;target:ImportTarget;files:ReadonlyMap<string,Uint8Array>;destination:string}
+export interface ResourceConversionContext {resource:string;uid?:string;parameters:Readonly<Record<string,unknown>>;target:ImportTarget;files:ReadonlyMap<string,Uint8Array>;destination:string;maxOutputBytes?:number;maxDecodedPixels?:number}
 export interface ResourceConverter {
  id:string;version:string;extensions:readonly string[];
  parameters(input:Readonly<Record<string,unknown>>):Readonly<Record<string,unknown>>;
  convert(context:ResourceConversionContext):Promise<ReadonlyMap<string,Uint8Array>>|ReadonlyMap<string,Uint8Array>;
 }
-export interface ResourceConversionResult {files:ReadonlyMap<string,Uint8Array>;receipts:readonly ImportReceipt[];assessments:readonly ImportAssessment[];reasons:ReadonlyMap<string,string>}
+export interface ResourceConversionLimits {maxOutputBytes?:number;maxDecodedPixels?:number}
+export interface ResourceConversionResult {files:ReadonlyMap<string,Uint8Array>;receipts:readonly ImportReceipt[];assessments:readonly ImportAssessment[];reasons:ReadonlyMap<string,string>;retainedOutputs:readonly {resource:string;path:string}[]}
 function fail(message:string):never {throw new ProjectToolError('E_RESOURCE_CONVERTER',message);}
 const jsonObject=(value:unknown):Record<string,unknown>=>{
  if(!value||typeof value!=='object'||Array.isArray(value))return fail('Converter parameters must be a JSON object');
@@ -41,14 +44,19 @@ export class ResourceConverterRegistry {
  // Cross-session caches are reconstructed once before they may be reused.
  private readonly executed=new Set<string>();
  register(converter:ResourceConverter):this {
-  if(!converter.id||!converter.version||this.converters.has(converter.id)||!converter.extensions.length)fail('Invalid or duplicate converter registration');
-  this.converters.set(converter.id,converter);return this;
+  if(!converter.id||!converter.version||this.converters.has(converter.id)||!converter.extensions.length||typeof converter.parameters!=='function'||typeof converter.convert!=='function')fail('Invalid or duplicate converter registration');
+  const {id,version,parameters,convert}=converter;
+  // A caller may retain the registration object; in-flight identities stay fixed.
+  this.converters.set(id,Object.freeze({id,version,extensions:Object.freeze([...converter.extensions]),parameters:(input:Readonly<Record<string,unknown>>)=>parameters.call(converter,input),convert:(context:ResourceConversionContext)=>convert.call(converter,context)}));return this;
  }
  get ids():ReadonlySet<string>{return new Set(this.converters.keys());}
- async run(requests:readonly ResourceImportRequest[],source:ReadonlyMap<string,Uint8Array>,target:ImportTarget,stored:readonly ImportReceipt[]=[]):Promise<ResourceConversionResult>{
-  canonicalJson(target);
+ async run(requests:readonly ResourceImportRequest[],source:ReadonlyMap<string,Uint8Array>,target:ImportTarget,stored:readonly ImportReceipt[]=[],limits:ResourceConversionLimits={}):Promise<ResourceConversionResult>{
+  target=JSON.parse(canonicalJson(target));stored=JSON.parse(canonicalJson(stored));
+  const maxOutputBytes=limits.maxOutputBytes??64*1024*1024,maxDecodedPixels=limits.maxDecodedPixels??16*1024*1024;
+  if(!Number.isSafeInteger(maxOutputBytes)||maxOutputBytes<1||!Number.isSafeInteger(maxDecodedPixels)||maxDecodedPixels<1)fail('Invalid conversion budget');
+  source=byteMap(source);const sourceView=borrowByteMap(source);let outputBytes=0;
   const outputs=new Map<string,Uint8Array>(),receipts:ImportReceipt[]=[],assessments:ImportAssessment[]=[],reasons=new Map<string,string>();
-  const parsed=parseResourceImports(requests);
+  const parsed=parseResourceImports(requests),retainedOutputs:{resource:string;path:string}[]=[];
   for(const request of parsed){
    const converter=this.converters.get(request.converter);if(!converter)fail(`Converter is not registered: ${request.converter}`);
    const extension=/\.([^.\/]+)$/.exec(request.resource)?.[1].toLowerCase();
@@ -58,32 +66,39 @@ export class ResourceConverterRegistry {
    const oldUid=metadata&&readProjectStringSetting(new TextDecoder().decode(metadata),'remap','uid');
    if(request.uid&&oldUid&&request.uid!==oldUid)fail(`Resource UID conflicts with original metadata: ${request.resource}`);
    const uid=request.uid??oldUid,sourcePaths=[...new Set([request.resource,...(request.dependencies??[])])].sort();
-   const files=new Map<string,Uint8Array>();for(const path of sourcePaths){const bytes=source.get(path);if(!bytes)fail(`Missing conversion source ${path}`);files.set(path,new Uint8Array(bytes));}
+   const files=new Map<string,Uint8Array>();for(const path of sourcePaths){const bytes=sourceView.get(path);if(!bytes)fail(`Missing conversion source ${path}`);files.set(path,new Uint8Array(bytes));}
    const identity=await hashJson({kind:'godotjs-resource-conversion-v1',resource:request.resource,converter:{id:converter.id,version:converter.version},parameters,target,...(uid?{uid}:{}),sources:await Promise.all([...files].map(async([path,bytes])=>({path,sha256:await hashBytes(bytes)})))});
    const destination='res://.godot/imported/godotjs-'+identity+'.tres';
    const inspection={resource:request.resource,...(uid?{uid}:{}),converter:{id:converter.id,version:converter.version},parameters,target,sourcePaths,files:source};
    const previous=stored.find(receipt=>receipt.resource===request.resource);
    const assessment=await assessImportReceipt(previous,{...inspection,outputFiles:source});
    if(assessment.status==='fresh'&&this.executed.has(canonicalJson(previous))){
-    for(const output of previous!.outputs){if(outputs.has(output.path))fail(`Converters collide at ${output.path}`);outputs.set(output.path,new Uint8Array(source.get(output.path)!));reasons.set(output.path,`Verified cached output from ${converter.id}@${converter.version}`);}
+    for(const output of previous!.outputs){if(outputs.has(output.path))fail(`Converters collide at ${output.path}`);const bytes=sourceView.get(output.path)!;outputBytes+=bytes.byteLength;if(outputBytes>maxOutputBytes)fail('Converted resources exceed the generated byte budget');outputs.set(output.path,bytes);reasons.set(output.path,`Verified cached output from ${converter.id}@${converter.version}`);}
     receipts.push(previous!);assessments.push(assessment);continue;
    }
-   const converted=await converter.convert({resource:request.resource,...(uid?{uid}:{}),parameters,target,files,destination});
+   const converted=await converter.convert({resource:request.resource,...(uid?{uid}:{}),parameters,target:JSON.parse(canonicalJson(target)),files,destination,maxOutputBytes:maxOutputBytes-outputBytes,maxDecodedPixels});
    const convertedFiles=new Map<string,Uint8Array>();
    for(const [name,bytes]of converted){
     const path=resourcePath(name);
     if(!(bytes instanceof Uint8Array)||!bytes.length)fail(`Converter produced invalid bytes: ${path}`);
     if(path!==request.resource+'.import'&&!path.startsWith('res://.godot/imported/'))fail(`Converter output escapes artifact import cache: ${path}`);
     if(outputs.has(path)||convertedFiles.has(path))fail(`Converters collide at ${path}`);
-    convertedFiles.set(path,new Uint8Array(bytes));
+    outputBytes+=bytes.byteLength;if(outputBytes>maxOutputBytes)fail('Converted resources exceed the generated byte budget');
+    // A registered converter can retain its return value, so acquire ownership here.
+    convertedFiles.set(path,captureBytes(bytes));
    }
    if(!convertedFiles.has(destination)||!convertedFiles.has(request.resource+'.import'))fail('Converter must produce its resource and import remap');
    const receipt=await createImportReceipt({...inspection,outputFiles:convertedFiles,outputPaths:[...convertedFiles.keys()]});
+   if(previous)try{
+    const old=parseImportReceipt(previous);
+    if(old.converter.id===converter.id&&old.converter.version!==converter.version)for(const output of old.outputs)
+     if(output.path.startsWith('res://.godot/imported/')&&!convertedFiles.has(output.path)&&sourceView.has(output.path))retainedOutputs.push({resource:request.resource,path:output.path});
+   }catch{/* An unverified cache is preserved, never deleted based on a claim. */}
    this.executed.add(canonicalJson(receipt));
    for(const [path,bytes]of convertedFiles){outputs.set(path,bytes);reasons.set(path,`Converted by ${converter.id}@${converter.version}`);}
    receipts.push(receipt);assessments.push({resource:request.resource,status:'fresh',reasons:[`Executed registered ${converter.id}@${converter.version}`]});
   }
-  return {files:outputs,receipts,assessments,reasons};
+  return {files:byteMap(outputs),receipts,assessments,reasons,retainedOutputs};
  }
 }
 function noParameters(input:Readonly<Record<string,unknown>>):Readonly<Record<string,unknown>> {if(Object.keys(input).length)fail('This converter does not accept editor importer parameters');return {};}
@@ -110,22 +125,28 @@ export function decodePcmWav(bytes:Uint8Array):{format:0|1;stereo:boolean;mixRat
  if(fmt.bits===8)for(let i=0;i<data.length;i++)data[i]^=128;
  return {format:fmt.bits===8?0:1,stereo:fmt.channels===2,mixRate:fmt.rate,data};
 }
-export const pcmWavConverter:ResourceConverter={id:'godotjs/wav-pcm',version:'1.0.1',extensions:['wav'],parameters:noParameters,convert(context){
+export const pcmWavConverter:ResourceConverter={id:'godotjs/wav-pcm',version:'1.1.0-base64',extensions:['wav'],parameters:noParameters,convert(context){
  const pcm=decodePcmWav(context.files.get(context.resource)!);
- const resource=encode('[gd_resource type="AudioStreamWAV" format=3]\n\n[resource]\nformat='+pcm.format+'\nstereo='+pcm.stereo+'\nmix_rate='+pcm.mixRate+'\ndata=PackedByteArray('+[...pcm.data].join(',')+')\n');
- return new Map([[context.destination,resource],[context.resource+'.import',remap(context,'AudioStreamWAV')]]);
+ const mapping=remap(context,'AudioStreamWAV');
+ const resource=base64Resource('[gd_resource type="AudioStreamWAV" format=3]\n\n[resource]\nformat='+pcm.format+'\nstereo='+pcm.stereo+'\nmix_rate='+pcm.mixRate+'\ndata=PackedByteArray("',pcm.data,'")\n',(context.maxOutputBytes??64*1024*1024)-mapping.byteLength);
+ return new Map([[context.destination,resource],[context.resource+'.import',mapping]]);
 }};
 export interface DecodedRgbaImage {width:number;height:number;rgba:Uint8Array}
 export interface ImageDecoder {id:string;version:string;decode(bytes:Uint8Array,mime:'image/png'|'image/jpeg'):Promise<DecodedRgbaImage>}
 export function rgbaImageConverter(decoder:ImageDecoder):ResourceConverter {
- if(!decoder.id||!decoder.version)fail('An image decoder needs an explicit implementation identity');
- return {id:'godotjs/image-rgba',version:'1.0.1/'+decoder.id+'/'+decoder.version,extensions:['png','jpg','jpeg'],parameters(input){
+ const {id,version,decode}=decoder;
+ if(!id||!version||typeof decode!=='function')fail('An image decoder needs an explicit implementation identity and function');
+ // Keep the receiver for stateful decoder implementations, but never read a
+ // replacement method or identity from the caller's registration object.
+ const decodeImage=decode.bind(decoder);
+ return {id:'godotjs/image-rgba',version:'1.1.0-base64/'+id+'/'+version,extensions:['png','jpg','jpeg'],parameters(input){
   if(Object.keys(input).some(key=>key!=='mipmaps')||input.mipmaps!==undefined&&input.mipmaps!==false)fail('Image converter supports mipmaps=false only');return {mipmaps:false};
  },async convert(context){
-  const image=await decoder.decode(context.files.get(context.resource)!,/\.png$/i.test(context.resource)?'image/png':'image/jpeg');
-  if(!Number.isInteger(image.width)||!Number.isInteger(image.height)||image.width<1||image.height<1||image.width*image.height>16*1024*1024||!(image.rgba instanceof Uint8Array)||image.rgba.length!==image.width*image.height*4)fail('Image decoder returned invalid RGBA pixels');
-  const resource=encode('[gd_resource type="ImageTexture" load_steps=2 format=3]\n\n[sub_resource type="Image" id="image"]\ndata={"width":'+image.width+',"height":'+image.height+',"format":"RGBA8","mipmaps":false,"data":PackedByteArray('+[...image.rgba].join(',')+')}\n\n[resource]\nimage=SubResource("image")\n');
-  return new Map([[context.destination,resource],[context.resource+'.import',remap(context,'ImageTexture')]]);
+  const image=await decodeImage(context.files.get(context.resource)!,/\.png$/i.test(context.resource)?'image/png':'image/jpeg');
+  if(!Number.isInteger(image.width)||!Number.isInteger(image.height)||image.width<1||image.height<1||image.width*image.height>(context.maxDecodedPixels??16*1024*1024)||!(image.rgba instanceof Uint8Array)||image.rgba.length!==image.width*image.height*4)fail('Image decoder returned invalid RGBA pixels');
+  const mapping=remap(context,'ImageTexture');
+  const resource=base64Resource('[gd_resource type="ImageTexture" load_steps=2 format=3]\n\n[sub_resource type="Image" id="image"]\ndata={"width":'+image.width+',"height":'+image.height+',"format":"RGBA8","mipmaps":false,"data":PackedByteArray("',image.rgba,'")}\n\n[resource]\nimage=SubResource("image")\n',(context.maxOutputBytes??64*1024*1024)-mapping.byteLength);
+  return new Map([[context.destination,resource],[context.resource+'.import',mapping]]);
  }};
 }
 export function createBrowserResourceConverters(decoder?:ImageDecoder):ResourceConverterRegistry {

@@ -7,6 +7,8 @@ export interface ExecutionContract {
   proxyToPthread:boolean;
   requiresCrossOriginIsolation:boolean;
   hostProtocolVersion:number;
+  /** Supplied only by a source-bound build with the native pre-exit gate. */
+  lifecycleAbi?:1;
   routerProtocolVersion?:number;
   workerBootstrap?:'embedded'|'separate';
   workerAssets?:ExecutionWorkerAsset[];
@@ -18,6 +20,7 @@ export function validateExecution(value:unknown):asserts value is ExecutionContr
   if(!v||v.schemaVersion!==1||!['window','proxy-pthread','dedicated-worker'].includes(v.executionModel))reject('Unsupported execution model');
   for(const key of ['wasmThreads','proxyToPthread','requiresCrossOriginIsolation'] as const)if(typeof v[key]!=='boolean')reject('Invalid '+key);
   if(!Number.isSafeInteger(v.hostProtocolVersion)||v.hostProtocolVersion<1)reject('Invalid host protocol');
+  if(v.lifecycleAbi!==undefined&&v.lifecycleAbi!==1)reject('Unsupported lifecycle ABI');
   if(v.routerProtocolVersion!==undefined&&(!Number.isSafeInteger(v.routerProtocolVersion)||v.routerProtocolVersion<1))reject('Invalid router protocol');
   if(v.proxyToPthread!==(v.executionModel==='proxy-pthread')||(v.proxyToPthread&&!v.wasmThreads)||(v.wasmThreads&&!v.requiresCrossOriginIsolation))reject('Inconsistent thread model');
   if(v.workerBootstrap!==undefined&&!['embedded','separate'].includes(v.workerBootstrap))reject('Invalid worker layout');

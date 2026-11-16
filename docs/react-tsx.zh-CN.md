@@ -88,7 +88,7 @@ root 和 portal 的挂载容器属于借用对象，卸载时保留容器及其�
 
 ## 1. 从源码使用
 
-需要含 React native bridge 的 GodotJS 构建，以及本仓库的 pnpm workspace。仓库构建和测试使用 Node.js 24；发布包的 CLI 支持 Node.js 22 及以上。现有不启用 React 的 TS 项目仍走原来的编译和导出路径。
+需要含 React native bridge 的 GodotJS 构建，以及本仓库的 pnpm workspace。仓库构建和测试使用 Node.js 24；发布包的 CLI 要求 Node.js 22.14.0 及以上，与共享 project-tools 的最低版本一致。现有不启用 React 的 TS 项目仍走原来的编译和导出路径。
 
 在仓库中安装并构建：
 

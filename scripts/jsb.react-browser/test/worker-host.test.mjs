@@ -35,7 +35,7 @@ class FakeNode {
  disconnect(){this.connections=[];}
 }
 
-async function fixture({fetchAsset,loadRuntime,moduleReady,closeReady,inputReady,ackAudio=true,verifyRelease,budgets={}}={}){
+async function fixture({fetchAsset,loadRuntime,moduleReady,closeReady,inputReady,ackAudio=true,managed=false,verifyRelease,budgets={}}={}){
  let now=0,timerId=0,api,connect;const timers=new Map(),listeners=new Map(),channels=[],contexts=[],worklets=[],snapshots=[],createdUrls=[],revokedUrls=[];
  const counters={runtimeLoads:0,fetches:0,workerPosts:[],terminations:0,runtimeDisposals:0,presentationConsumes:0,presentationDisposals:0,presentationCheckpoints:[],inputCommands:0,inputDisposals:0,browserDisposals:0};
  const addTimer=(callback,delay,interval)=>{const id=++timerId;timers.set(id,{callback,due:now+Math.max(0,Number(delay)||0),interval});return id;};
@@ -91,7 +91,7 @@ async function fixture({fetchAsset,loadRuntime,moduleReady,closeReady,inputReady
  const host=api.startWorkerPreviewHost(identity,editor,{canvas:{getBoundingClientRect:()=>({width:320,height:200,left:0,top:0})},verifyRelease,onSnapshot:snapshot=>snapshots.push(snapshot)});
  const envelope=fields=>wrap(identity,fields);
  const run=()=>editor.onmessage?.({data:envelope({type:'run',configuration:prepared.configuration,stopTimeoutMs:30,cleanupTimeoutMs:20,
-  release:clone({runtimeAbi:{protocolVersion:2,host:1,audio:1,presentation:1},runtimeWorker:{},runtimeAudioWorklet:{}}),artifact:{pack:new Uint8Array([1]),manifest:{generation:1}}})});
+  release:clone({runtimeAbi:{protocolVersion:2,host:1,audio:1,presentation:1,...(managed?{lifecycle:1}:{})},runtimeWorker:{},runtimeAudioWorklet:{}}),artifact:{pack:new Uint8Array([1]),manifest:{generation:1}}})});
  async function advance(ms){const target=now+ms;await flush();for(;;){const next=[...timers].filter(([,timer])=>timer.due<=target).sort((a,b)=>a[1].due-b[1].due||a[0]-b[0])[0];if(!next)break;
    const [id,timer]=next;now=timer.due;if(timer.interval)timer.due+=timer.interval;else timers.delete(id);timer.callback();await flush();}now=target;await flush();}
  return {host,editor,identity,counters,channels,contexts,worklets,snapshots,createdUrls,revokedUrls,timers,run,advance,flush,runtime,envelope,clone,makeError:message=>vm.runInContext('new Error('+JSON.stringify(message)+')',context),
@@ -320,5 +320,29 @@ test('native zero without a runtime seal remains explicitly unconfirmed',async()
 test('terminal runtime summary retains a fatal even when native zero arrives without an earlier fatal packet',async()=>{
  const f=await fixture();try{await f.ready();f.sendControl({type:'native-exit',code:0,runtimeSummary:f.clone({schemaVersion:1,epoch:'native-final',sealed:true,overflow:false,entries:[],failure:{kind:'runtime',message:'fatal-before-native-zero',stack:'author.ts:4'}})});await f.flush();
   assert.equal(f.receipt.reason,'crashed');assert.equal(f.receipt.sessionFacts.failure.message,'fatal-before-native-zero');assert.equal(f.receipt.code,0);
+ }finally{await f.cleanup();}
+});
+
+test('managed cleanup ACKs retain independent credits when queued business data fills its budget',async()=>{
+ const f=await fixture({managed:true,budgets:{maxInputEvents:2}});try{
+  await f.ready();f.inputOptions.sendInput({type:'pointer'});await f.flush();assert.equal(f.connect.dataPort.peer.sent.length,2);
+  f.host.stop();f.inputOptions.sendState({type:'dom-state',requestId:9,ok:true});
+  f.presentationOptions.sendAck({type:'present-ack',runId:f.identity.runId,frameId:1,resizeEpoch:0});await f.flush();
+  const cleanup=f.connect.dataPort.peer.sent.filter(m=>(m.type==='host-state'&&m.state.requestId===9)||m.type==='present-ack');assert.equal(cleanup.length,2);
+  f.sendData({type:'data-receipt',dataSequence:cleanup[0].dataSequence});await f.flush();
+  f.sendData({type:'host-command',commandSequence:4,command:{type:'dom-command',kind:'release'}});await f.flush();
+  assert(f.connect.dataPort.peer.sent.some(m=>m.type==='host-command-receipt'&&m.commandSequence===4));assert.equal(f.host.snapshot.workerErrors.length,0);
+  f.sendControl({type:'native-exit',code:0});await f.flush();assert.equal(f.receipt.reason,'clean-exit');
+ }finally{await f.cleanup();}
+});
+
+for(const nativeExit of [false,true])test('managed close retains the first fatal and its original stop deadline'+(nativeExit?' through native zero':' through repeated closing'),async()=>{
+ const f=await fixture({managed:true});try{
+  await f.ready();f.sendControl({type:'worker-fatal',diagnostic:{source:'godotjs',message:'first managed failure'},detail:'first managed failure'});await f.flush();
+  assert.equal(f.counters.inputDisposals,0,'the cleanup lane stays live');await f.advance(20);
+  f.sendControl({type:'worker-closing'});f.sendControl({type:'worker-fatal',diagnostic:{source:'browser',message:'E_START_ABORT'},detail:'E_START_ABORT'});await f.flush();
+  if(nativeExit){f.sendControl({type:'native-exit',code:0});await f.flush();assert.equal(f.receipt.engineOutcome.kind,'native-exit');assert.equal(f.receipt.code,0);}
+  else{await f.advance(11);assert.equal(f.receipt.engineOutcome.kind,'terminate-issued');}
+  assert.equal(f.receipt.reason,'crashed');assert.equal(f.receipt.diagnostic.message,'first managed failure');assert.equal(f.receipt.sessionFacts.failure.message,'first managed failure');
  }finally{await f.cleanup();}
 });

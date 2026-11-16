@@ -1,6 +1,7 @@
 import {isProjectData, previewDiagnostic, type PreviewDiagnostic, type RunIdentity} from './protocol.js';
 import {createRuntimeBinding, type RuntimeBinding, type RuntimeSummary, type RuntimeDiagnostic as HostDiagnostic} from '../runtime-host.js';
 import {isRuntimeSummary, factsFromRuntimeSummaries, type SessionFacts} from '../session-facts.js';
+import {installNativeLifecycleGate, type NativeLifecycleModule} from './lifecycle-gate.js';
 
 export type EngineExecutionModel = 'window' | 'dedicated-worker' | 'proxy-pthread';
 export type RuntimeRole = 'host' | 'engine' | 'script-worker';
@@ -32,11 +33,12 @@ export interface BrowserEngineSessionOptions {
   onWorkerRole?: (role: {workerId: number; role: RuntimeRole}) => void;
   cleanupTimeoutMs?: number;
   onSummary?: (summary:RuntimeSummary) => void;
+  onClosing?: () => void;
 }
 
 interface RuntimePacket {
   __godotjsRuntime: 2; sessionId: string; workerId: number;
-  type: 'role' | 'progress' | 'diagnostic' | 'project' | 'log' | 'epoch' | 'summary' | 'command-receipt';
+  type: 'role' | 'progress' | 'diagnostic' | 'project' | 'log' | 'epoch' | 'summary' | 'command-receipt' | 'closing';
   role: RuntimeRole; sequence?: number; data?: unknown;
 }
 interface WorkerRecord {
@@ -46,9 +48,10 @@ interface WorkerRecord {
 }
 
 /** Serialized into a fresh realm. Every dependency is an explicit argument. */
-export function installWorkerRuntimeHost(sessionId: string, workerId: number, factory:typeof createRuntimeBinding): void {
+export function installWorkerRuntimeHost(sessionId: string, workerId: number, factory:typeof createRuntimeBinding, lifecycleFactory?:typeof installNativeLifecycleGate): void {
   const scope = globalThis as unknown as {
     __godotjsRuntimeHost?: RuntimeBinding;
+    __godotjsInstallLifecycle?: (module: NativeLifecycleModule) => void;
     postMessage(value: unknown): void;
     addEventListener(type: string, listener: (event: MessageEvent) => void, options?: boolean): void;
   };
@@ -76,6 +79,16 @@ export function installWorkerRuntimeHost(sessionId: string, workerId: number, fa
   host.beginNativeEpoch=epoch=>{begin(epoch);send('epoch',{epoch});};
   if(scope.__godotjsRuntimeHost)throw new Error('E_RUNTIME_HOST_IN_USE');
   scope.__godotjsRuntimeHost=host;
+  const installedModules = new WeakSet<object>();
+  scope.__godotjsInstallLifecycle = module => {
+    if (installedModules.has(module)) return;
+    if (!lifecycleFactory) throw Error('E_NATIVE_LIFECYCLE_HELPER');
+    lifecycleFactory(module, host, {onBegin(){if(role==='engine')send('closing');},onError(error){
+      const message=error instanceof Error?error.message:'Native cleanup tick failed';
+      host.reportDiagnostic({kind:'runtime',message});
+    }});
+    installedModules.add(module);
+  };
   const output=globalThis.console;
   const format=(value:unknown):string=>{
     if(typeof value==='string')return value.slice(0,4096);
@@ -93,7 +106,7 @@ export function installWorkerRuntimeHost(sessionId: string, workerId: number, fa
     const data=event.data;
     if(!data||data.__godotjsRuntime!==2||data.sessionId!==sessionId||!['project-command','project-receipt','drain'].includes(data.type))return;
     event.stopImmediatePropagation();
-    if(data.type==='drain'){host.drain();return;}
+    if(data.type==='drain'){host.beginClose('session-stop');return;}
     if(data.type==='project-receipt'){
       const bytes=projects.get(data.sequence);if(bytes!==undefined){projects.delete(data.sequence);projectBytes-=bytes;}return;
     }
@@ -116,7 +129,7 @@ export function installWorkerRuntimeHost(sessionId: string, workerId: number, fa
 }
 
 export function runtimeWorkerBootstrap(url:string,sessionId:string,workerId:number,module=false):string {
-  const install=`(${installWorkerRuntimeHost.toString()})(${JSON.stringify(sessionId)},${workerId},(${createRuntimeBinding.toString()}));\n`;
+  const install=`(${installWorkerRuntimeHost.toString()})(${JSON.stringify(sessionId)},${workerId},(${createRuntimeBinding.toString()}),(${installNativeLifecycleGate.toString()}));\n`;
   return install+(module?`await import(${JSON.stringify(url)});\n`:`importScripts(${JSON.stringify(url)});\n`);
 }
 
@@ -184,7 +197,7 @@ export class BrowserEngineSession {
     const local=createRuntimeBinding({sessionId:this.identity.runId,
       schedule:callback=>{void Promise.resolve().then(callback);},
       onRole:role=>{if(role!=='host'&&this.executionModel!=='window')throw new Error('E_SESSION_ENGINE_ON_HOST');},
-      onProgress:()=>{if(this.localBinding?.role!=='engine'||this.stopped)return;const time=Date.now();if(time-lastProgress<250)return;lastProgress=time;this.options.onProgress?.({workerId:0,sequence:++sequence,role:'engine'});},
+      onProgress:()=>{if(this.localBinding?.role!=='engine'||this.stopped||this.draining)return;const time=Date.now();if(time-lastProgress<250)return;lastProgress=time;this.options.onProgress?.({workerId:0,sequence:++sequence,role:'engine'});},
       onDiagnostic:value=>this.report(value),onProject:value=>this.project(value),
       onLog:(level,text)=>{if(this.stopped)return false;this.options.onLog?.(level,text);return true;},
       onSummary:summary=>{if(!this.localEpochs.has(summary.epoch))return;this.localSummaries.set(summary.epoch,summary);this.options.onSummary?.(summary);this.notifySummaries();},
@@ -206,7 +219,7 @@ export class BrowserEngineSession {
     const owner = this;
     const Wrapped = function (this: Worker, script: string | URL, options?: WorkerOptions): Worker {
       if (!new.target) throw new TypeError('Worker constructor requires new');
-      if (owner.stopped) throw new Error('E_SESSION_DISPOSED');
+      if (owner.stopped || owner.draining) throw new Error('E_SESSION_DISPOSED');
       const id = ++owner.workerSerial;
       const originalUrl = new URL(String(script), owner.scope.location?.href).href;
       const url = owner.scope.URL.createObjectURL(new Blob([runtimeWorkerBootstrap(originalUrl,owner.identity.runId,id,options?.type==='module')],{type:'text/javascript'}));
@@ -252,10 +265,12 @@ export class BrowserEngineSession {
       return;
     }
     if(record.role!=='engine')return;
+    if(packet.type==='closing'){this.beginDrain();this.options.onClosing?.();return;}
     if(packet.type==='command-receipt'){
       const bytes=record.commands.get(packet.sequence!);if(bytes!==undefined){record.commands.delete(packet.sequence!);record.commandBytes-=bytes;}return;
     }
     if(packet.type==='progress'){
+      if(this.draining)return;
       if(!Number.isSafeInteger(packet.sequence)||packet.sequence!<=record.sequence)return;
       record.sequence=packet.sequence!;this.options.onProgress?.({workerId:record.id,sequence:record.sequence,role:'engine'});
     }else if(packet.type==='project'){
@@ -267,7 +282,7 @@ export class BrowserEngineSession {
 
   /** Stop business traffic while preserving the control/final-summary channel. */
   beginDrain():void {
-    if(this.stopped||this.draining)return;this.draining=true;this.localBinding?.drain();
+    if(this.stopped||this.draining)return;this.draining=true;this.localBinding?.beginClose('session-stop');
     for(const record of this.workers.values())try{record.worker.postMessage({__godotjsRuntime:2,sessionId:this.identity.runId,type:'drain'});}catch{}
   }
 
@@ -327,14 +342,14 @@ export class BrowserEngineSession {
       const Original=(this.scope as unknown as Record<string,unknown>)[key];
       if (typeof Original!=='function') continue;
       const owner=this;
-      const Wrapped=function (this:AudioContext,...args:unknown[]) {if(!new.target)throw new TypeError('AudioContext constructor requires new');if(owner.stopped)throw new Error('E_SESSION_DISPOSED');const context=Reflect.construct(Original,args) as AudioContext;owner.contexts.add(context);return context;};
+      const Wrapped=function (this:AudioContext,...args:unknown[]) {if(!new.target)throw new TypeError('AudioContext constructor requires new');if(owner.stopped||owner.draining)throw new Error('E_SESSION_DISPOSED');const context=Reflect.construct(Original,args) as AudioContext;owner.contexts.add(context);return context;};
       Wrapped.prototype=Original.prototype;Object.setPrototypeOf(Wrapped,Original);this.replace(this.scope,key,Wrapped);
     }
     // Browser audio activation belongs on the Window that receives the trusted
     // gesture. A proxied application pthread cannot consume that activation.
     if(typeof this.scope.addEventListener==='function'){
       const resume=(event:Event)=>{
-        if(this.stopped||!event.isTrusted)return;
+        if(this.stopped||this.draining||!event.isTrusted)return;
         const failed=(error:unknown)=>{if(!this.stopped)this.options.onLog?.('warn','Audio resume failed: '+previewDiagnostic(error).message);};
         const native=this.module?.resumeAudio;
         if(typeof native==='function'){
@@ -377,7 +392,7 @@ export class BrowserEngineSession {
       const Original=(this.scope as unknown as Record<string,unknown>)[name];if(typeof Original!=='function')continue;
       const Wrapped=function(this:unknown,...args:unknown[]){
         if(!new.target)throw new TypeError(name+' constructor requires new');
-        if(owner.stopped)throw new Error('E_SESSION_DISPOSED');
+        if(owner.stopped||owner.draining)throw new Error('E_SESSION_DISPOSED');
         const value=Reflect.construct(Original,args) as MessageChannel&AudioWorkletNode;
         for(const port of name==='MessageChannel'?[value.port1,value.port2]:[value.port])if(port&&typeof port.close==='function')owner.ports.add(port);
         return value;
@@ -403,22 +418,23 @@ export class BrowserEngineSession {
     if(devices&&typeof devices.getUserMedia==='function'){
       const original=devices.getUserMedia;
       this.replace(devices,'getUserMedia',async function(this:MediaDevices,constraints:MediaStreamConstraints){
+        if(owner.stopped||owner.draining)throw new DOMException('Engine session is closing','AbortError');
         const stream=await original.call(this,constraints);
-        if(owner.stopped){for(const track of stream.getTracks())track.stop();throw new DOMException('Engine session ended before media became available','AbortError');}
+        if(owner.stopped||owner.draining){for(const track of stream.getTracks())track.stop();throw new DOMException('Engine session ended before media became available','AbortError');}
         owner.media.add(stream);return stream;
       });
     }
     const track=(value:unknown)=>{
       const resource=value as {close:()=>unknown;[key:string]:unknown};
       if(!resource||typeof resource.close!=='function')return;
-      if(owner.stopped){resource.close();return;}
+      if(owner.stopped||owner.draining){resource.close();return;}
       owner.network.add(resource);
     };
     for(const name of ['WebSocket','RTCPeerConnection'] as const){
       const Original=(this.scope as unknown as Record<string,unknown>)[name];if(typeof Original!=='function')continue;
       const Wrapped=function(this:unknown,...args:unknown[]){
         if(!new.target)throw new TypeError(name+' constructor requires new');
-        if(owner.stopped)throw new Error('E_SESSION_DISPOSED');
+        if(owner.stopped||owner.draining)throw new Error('E_SESSION_DISPOSED');
         const resource=Reflect.construct(Original,args) as RTCPeerConnection;track(resource);
         if(name==='RTCPeerConnection'){
           const create=resource.createDataChannel;

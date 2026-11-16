@@ -2,9 +2,10 @@
 import {createHash} from 'node:crypto';
 import {readFileSync} from 'node:fs';
 import {WORKER_XR_PATH,patchWorkerXR} from './patch-web-worker-xr.mjs';
+import {WEB_LIFECYCLE_MAIN_EDITS} from './patch-web-lifecycle.mjs';
 const XR_IMPLEMENTATION_SHA256='e34160cf7e4fb6073f530c424b2c41b1e6402be155403b223af9381fdbb57069';
 export const WORKER_RUNTIME_PATCH='godotjs-web-worker-runtime-v1';
-export const WORKER_RUNTIME_ABI=Object.freeze({protocolVersion:2,host:1,audio:1,presentation:1});
+export const WORKER_RUNTIME_ABI=Object.freeze({protocolVersion:2,host:1,audio:1,presentation:1,lifecycle:1});
 const layouts={
   "main/main.cpp": {
     "sha256": "248f7e34fbe5aa3a65275420264af33cca7d29e0ce353120a90b9aaf23e8927c",
@@ -256,6 +257,7 @@ const layouts={
     ]
   }
 };
+layouts['platform/web/web_main.cpp'].edits.push(...WEB_LIFECYCLE_MAIN_EDITS);
 export const WORKER_RUNTIME_PATHS=Object.freeze([...Object.keys(layouts),WORKER_XR_PATH]);
 const hash=source=>createHash('sha256').update(source).digest('hex');
 const count=(source,text)=>source.split(text).length-1;

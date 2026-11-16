@@ -136,7 +136,9 @@ test('the main native patch receipt pins the complete independent XR helper impl
  const root=await mkdtemp(join(tmpdir(),'worker-native-xr-pin-'));t.after(()=>rm(root,{recursive:true,force:true}));
  const main=await readFile(new URL('../../release/patch-web-worker-runtime.mjs',import.meta.url),'utf8');
  const helper=await readFile(new URL('../../release/patch-web-worker-xr.mjs',import.meta.url),'utf8');
+ const lifecycle=await readFile(new URL('../../release/patch-web-lifecycle.mjs',import.meta.url),'utf8');
  await writeFile(join(root,'patch-web-worker-runtime.mjs'),main);await writeFile(join(root,'patch-web-worker-xr.mjs'),helper+'\n// unbound helper modification\n');
+ await writeFile(join(root,'patch-web-lifecycle.mjs'),lifecycle);
  const isolated=await import(pathToFileURL(join(root,'patch-web-worker-runtime.mjs')).href);
  assert.throws(()=>isolated.patchWorkerRuntimeFile('modules/webxr/native/library_godot_webxr.js','unused'),/E_WORKER_XR_IMPLEMENTATION_DRIFT/);
 });

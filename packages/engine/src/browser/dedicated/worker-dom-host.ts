@@ -3,6 +3,7 @@ import { DOM_ELEMENT_PROPERTIES, DOM_INPUT_EVENTS, DOM_STYLE_PROPERTIES, type Do
 import { collectDrop } from './worker-drop.js';
 import { createWorkerHostServicesHost, type HostServiceCommand } from './worker-host-services.js';
 import { benchmarkNow, type BenchmarkInputTiming } from './worker-benchmark.js';
+import {DOM_ELEMENT_LIMIT,isDomCleanupOperation} from './worker-dom-policy.js';
 
 export interface InputHostOptions {
   canvas: HTMLCanvasElement; geometry: CanvasGeometry;
@@ -16,8 +17,8 @@ export function createInputHost(options: InputHostOptions) {
   const canvas = options.canvas, document = canvas.ownerDocument, window = document.defaultView!;
   if (!window) throw Error('E_WORKER_DOM_WINDOW');
   let geometry = { ...options.geometry }; drawingBufferSize(geometry);
-  let closed = false, sequence = 0;
-  const privilegedOperations=new Set<Promise<void>>();let disposePromise:Promise<void>|undefined,fullscreenExit:Promise<void>|undefined,pointerExit:Promise<void>|undefined,pointerRequest:Promise<void>|undefined;
+  let closed = false, draining = false, sequence = 0;
+  const privilegedOperations=new Set<Promise<void>>(),cleanupOperations=new Set<Promise<void>>();let disposePromise:Promise<void>|undefined,fullscreenExit:Promise<void>|undefined,pointerExit:Promise<void>|undefined,pointerRequest:Promise<void>|undefined;
   const elements = new Map<string, HTMLElement>();
   const listeners: Array<() => void> = [];
   const nodeListeners = new Map<HTMLElement, Array<() => void>>();
@@ -57,13 +58,13 @@ export function createInputHost(options: InputHostOptions) {
     return fields;
   }
   function forward(target: string, event: Event) {
-    if (closed) return;
+    if (closed || draining) return;
     const capturedAtMs=options.benchmarkTimings?(options.benchmarkClock??benchmarkNow)():undefined;
     const fields=serialize(event,target);
     forwardFields(target,event.type,fields,capturedAtMs===undefined?undefined:{capturedAtMs,forwardedAtMs:(options.benchmarkClock??benchmarkNow)(),trusted:event.isTrusted});
   }
   function forwardFields(target:string,event:string,fields:Record<string,unknown>,timing?:BenchmarkInputTiming) {
-    if (!closed) options.sendInput({ type:'dom-input', sequence:++sequence, target, event, fields, geometry:{...geometry},...(timing?{timing}:{}) });
+    if (!closed && !draining) options.sendInput({ type:'dom-input', sequence:++sequence, target, event, fields, geometry:{...geometry},...(timing?{timing}:{}) });
   }
   function captured():boolean {
     return document.activeElement === canvas || document.pointerLockElement === canvas || mouseButtons.size > 0 || pointerButtons.size > 0;
@@ -150,10 +151,13 @@ export function createInputHost(options: InputHostOptions) {
     } catch (error) { if(compensating)throw error;if(!closed)reply(command,undefined,error); }
   }
   function enqueuePrivileged(command:DomHostCommand):boolean{
-    if(privilegedOperations.size>=32){reply(command,undefined,Error('E_WORKER_DOM_REQUEST_BUDGET'));return false;}
+    const cleanup=draining&&isDomCleanupOperation(command.operation);
+    const pending=cleanup?cleanupOperations.size:privilegedOperations.size-cleanupOperations.size;
+    if(pending>=32){reply(command,undefined,Error('E_WORKER_DOM_REQUEST_BUDGET'));return false;}
     let complete!:()=>void,fail!:(error:unknown)=>void;
-    const operation=new Promise<void>((resolve,reject)=>{complete=resolve;fail=reject;});privilegedOperations.add(operation);
-    void operation.then(()=>privilegedOperations.delete(operation),error=>{privilegedOperations.delete(operation);if(!closed)options.onError?.(error);});
+    const operation=new Promise<void>((resolve,reject)=>{complete=resolve;fail=reject;});privilegedOperations.add(operation);if(cleanup)cleanupOperations.add(operation);
+    const retire=()=>{privilegedOperations.delete(operation);cleanupOperations.delete(operation);};
+    void operation.then(retire,error=>{retire();if(!closed)options.onError?.(error);});
     // Register ownership before calling APIs which can cause synchronous DOM
     // events. Call them in this task, without delaying user activation.
     void privileged(command).then(complete,fail);return true;
@@ -235,9 +239,11 @@ export function createInputHost(options: InputHostOptions) {
     clipboard:{write:typeof window.navigator.clipboard?.writeText==='function',read:typeof window.navigator.clipboard?.readText==='function'},
     screen:{width:window.screen.width,height:window.screen.height}});
   return {
+    beginDrain(): void { if (closed || draining) return; releaseHeld(); draining = true; clearInterval(gamepadTimer); },
     resize(next: CanvasGeometry): void { drawingBufferSize(next); if (next.epoch > geometry.epoch) { geometry = {...next};sendState({screen:{width:window.screen.width,height:window.screen.height}}); } },
     command(command: DomHostCommand): boolean {
       if (closed || command?.type !== 'dom-command' || typeof command.operation !== 'string') return false;
+      if (draining && !isDomCleanupOperation(command.operation)) { reply(command,undefined,Error('E_WORKER_DOM_CLOSING')); return false; }
       const element = command.target === 'canvas' ? canvas : elements.get(command.target ?? '');
       try {
         switch (command.operation) {
@@ -250,7 +256,7 @@ export function createInputHost(options: InputHostOptions) {
             dropBusy=value.error?-1:undefined;if(value.error)options.onError?.(Error(String(value.error).slice(0,1024)));return true;
           }
           case 'create': {
-            if (!command.target || !/^element-[1-9][0-9]{0,8}$/.test(command.target) || elements.has(command.target) || elements.size >= 16 || !['div','input','textarea','link','a'].includes(command.name ?? '')) throw Error('E_WORKER_DOM_ELEMENT');
+            if (!command.target || !/^element-[1-9][0-9]{0,8}$/.test(command.target) || elements.has(command.target) || elements.size >= DOM_ELEMENT_LIMIT || !['div','input','textarea','link','a'].includes(command.name ?? '')) throw Error('E_WORKER_DOM_ELEMENT');
             const node = document.createElement(command.name!); elements.set(command.target,node); const local: Array<() => void> = []; nodeListeners.set(node,local);
             for (const type of DOM_INPUT_EVENTS) if (['input','keydown','keyup','compositionstart','compositionupdate','compositionend','focus','blur'].includes(type)) on(node,type,event => {
               if (type === 'keydown') gesture(event);

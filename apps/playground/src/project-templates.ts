@@ -31,6 +31,35 @@ export default function App() {
  },controls:{},mode:'production'});
 }
 
+/** New React projects use an ordinary explicit script entry. Existing demo and
+ * imported component documents retain their established startup adapter. */
+export function newEngineReactProject(engineProfile='full-engine-v1'):EditorProject {
+ return parseProject({schemaVersion:4,runtime:'engine',engineProfile,launch:{kind:'script',module:'res://src/start.ts',export:'start'},files:{
+  '/src/start.ts':`import React from "react";
+import {createRoot} from "@godot-js/react/engine";
+import type {Node} from "godot";
+import App from "./App";
+
+export function start(ctx: {mount: Node; host?: any}) {
+  const root = createRoot(ctx.mount, {runtimeHost: ctx.host});
+  root.render(React.createElement(App));
+  return () => root.shutdown();
+}
+`,
+  '/src/App.tsx':`import React from "react";
+import {EngineNode} from "@godot-js/react/engine";
+import {Label} from "godot";
+
+export default function App() {
+  return <EngineNode ctor={Label} native={{text: "Hello React + Godot"}} />;
+}
+`,
+  '/project.godot':'config_version=5\n\n[application]\nconfig/name="React engine project"\n\n[display]\nwindow/size/viewport_width=960\nwindow/size/viewport_height=640\n\n[rendering]\nrenderer/rendering_method="gl_compatibility"\n',
+  '/package.json':JSON.stringify({private:true,dependencies:{react:'19.3.1','@godot-js/react':'0.1.0'}},null,2),
+  '/README.md':'# React engine project\n\nEdit src/App.tsx and run. src/start.ts mounts the component and registers shutdown with the project entry.\n',
+ },editor:{selected:'/src/App.tsx',mode:'production',demoId:'engine-react'}});
+}
+
 export function demoProject(demo:{id:string;file:string;source:string;name:string;hint:string;controls:readonly {key:string;value:number;min?:number;max?:number}[]},engineProfile='full-engine-v1'):EditorProject {
  const project=defaultProject('react',engineProfile);project.demoApiVersion=1;project.demoId=demo.id;delete project.files[project.entry];project.entry=project.selected='/src/'+demo.file;project.files[project.entry]=demo.source;
  project.controls=Object.fromEntries(demo.controls.map(control=>[control.key,control.value]));

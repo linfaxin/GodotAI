@@ -7,27 +7,52 @@ const EngineReact = require(${JSON.stringify(modulePath('@godot-js/react/engine'
 const names = require('godot-jsb').internal.names;
 const call = (object: any, name: string, ...args: any[]) => object[names.get_member(name)](...args);
 export default class PlaygroundEngineBootstrap extends G.Node {
- private root: any; private closingRoot: any; private entryScope: any; private host: any; private closed = false; private closing = false;
+ private root: any; private closingRoot: any; private entryScope: any; private host: any; private closed = false; private closing = false; private managed = false;
  _ready() {
   const binding = (globalThis as any).__godotjsRuntimeHost;
+  const admission = typeof binding?.closeProgress === 'function' ? binding.closeProgress() : undefined;
+  if (admission && (admission.closing || admission.accepting === false)) { this.closed = true; return; }
   this.entryScope = typeof binding?.openEntry === 'function' ? binding.openEntry() : undefined;
   this.host = this.entryScope?.host ?? binding;
   try {
    const entry = require(${JSON.stringify(entry)});
    const Component = entry[${JSON.stringify(exportName)}] ?? (${JSON.stringify(exportName)} === 'default' && typeof entry === 'function' ? entry : undefined);
    if (Component === undefined) throw Error(${JSON.stringify(`React entry does not export "${exportName}"`)});
-   this.root = EngineReact.createRoot(this, {autoProcess: false, runtimeHost:this.host, onError: (error: any, info: any) => this.report(error, info)});
+   this.root = EngineReact.createRoot(this, {autoProcess: false, runtimeHost:this.host,lifetime:this.entryScope?.lifetime, onError: (error: any, info: any) => this.report(error, info)});
+   const root = this.root;
+   this.managed = !!this.entryScope?.lifetime && typeof root.close === 'function';
+   if (this.managed) {
+    const runtimeManaged = root.runtimeManagedCleanup === true;
+    this.entryScope.lifetime.onCancel(() => {
+     this.closed = true; this.closing = true; this.closingRoot = root; this.root = undefined;
+     if (!runtimeManaged) root.requestShutdown();
+    });
+    if (runtimeManaged) {
+     this.entryScope.onCleanupTick(() => { if (!['open','pending'].includes(root.getCloseProgress().status)) this.finishClosing(); });
+     this.entryScope.onNativeSeal(() => this.finishClosing());
+    } else {
+     this.entryScope.onCleanupTick(() => root.session.drainClose());
+     this.entryScope.onNativeSeal(() => { root.sealClose(); this.finishClosing(); });
+     this.entryScope.lifetime.defer(async () => {
+      try {
+       const result = await root.close();
+       if (result.status !== 'complete') throw Error('React root cleanup ' + result.status);
+      } finally { this.finishClosing(); }
+     });
+    }
+   }
    this.entryScope?.ready(true);
    this.root.render(React.isValidElement(Component) ? Component : React.createElement(Component, ${JSON.stringify(props)}));
    this.root.flush();
   } catch (error) {
+   this.entryScope?.ready(!!this.root);
    if (this.host) this.report(error, {kind:'runtime'});
    this.close('startup-failure');
    if (!this.host) throw error;
   }
  }
- _process(delta: number) { this.root?.process(delta); }
- _physics_process(delta: number) { this.root?.physics(delta); }
+ _process(delta: number) { if (!this.entryScope?.lifetime?.cancelled && this.root) (this.root.processFrame ?? this.root.process).call(this.root,delta); }
+ _physics_process(delta: number) { if (!this.entryScope?.lifetime?.cancelled && this.root) (this.root.physicsFrame ?? this.root.physics).call(this.root,delta); }
  _exit_tree() { this.close('bootstrap-exit'); }
  private finishClosing() { this.closing = false; this.closingRoot = undefined; }
  private report(error: any, info: any, cleanup = false) {
@@ -35,7 +60,7 @@ export default class PlaygroundEngineBootstrap extends G.Node {
   if (this.closed) {
    if (this.entryScope && !this.entryScope.canCleanup()) { this.finishClosing(); return; }
    if (!cleanup) {
-    try { if (this.closingRoot?.getStats().state === 'disposed') { this.finishClosing(); return; } }
+    try { if (this.managed ? !['open','pending'].includes(this.closingRoot?.getCloseProgress().status) : this.closingRoot?.getStats().state === 'disposed') { this.finishClosing(); return; } }
     catch (_) { /* Failed inspection cannot certify that teardown completed. */ }
    }
   }
@@ -57,6 +82,7 @@ export default class PlaygroundEngineBootstrap extends G.Node {
   if (this.closed) return;
   this.closed = true; this.closing = true; this.entryScope?.close();
   const root = this.root; this.root = undefined; this.closingRoot = root;
+  if (this.managed) { if (!root?.runtimeManagedCleanup) root?.requestShutdown(); return; }
   if (!root) { this.entryScope?.cleanupComplete(); this.finishClosing(); return; }
   if (this.entryScope && !this.entryScope.canCleanup()) { this.entryScope.cleanupUnconfirmed(); this.finishClosing(); return; }
   try {

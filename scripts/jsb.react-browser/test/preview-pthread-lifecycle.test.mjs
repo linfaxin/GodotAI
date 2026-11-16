@@ -163,3 +163,30 @@ test('pthread exit zero waits for the source summary and cannot erase a fatal ar
  const terminal=f.messages.find(message=>message.type==='fatal');assert(terminal);assert.equal(terminal.sessionFacts.nativeExit.code,0);assert.equal(terminal.sessionFacts.failure.message,'latched before native exit');assert.equal(terminal.sessionFacts.runtimeSummary,'sealed');
  assert(!f.messages.some(message=>message.type==='exited'));
 });
+
+test('native pthread closing cancels a startup wait without publishing a late running phase',async()=>{
+ let f,config,worker;
+ class Thread extends EventTarget{postMessage(){}terminate(){}deliver(data){this.dispatchEvent(new MessageEvent('message',{data:f.packet(data)}));}}
+ f=fixture(async()=>({basePath:'/engine',installWorklets(){},dispose(){},Engine:class{
+  constructor(value){config=value;this.rtenv={_godotjs_release_exit(){}};}
+  async preloadFile(){}
+  async init(){worker=new f.sandbox.Worker('https://preview.test/thread.js');worker.deliver({__godotjsRuntime:2,sessionId:identity.runId,workerId:1,role:'engine',type:'role'});worker.deliver({__godotjsRuntime:2,sessionId:identity.runId,workerId:1,role:'engine',type:'epoch',data:{epoch:'native-A'}});}
+  async start(){worker.deliver({__godotjsRuntime:2,sessionId:identity.runId,workerId:1,role:'engine',type:'closing'});}
+  requestQuit(){throw Error('native quit must not be requested twice');}
+ }}),{execution:{executionModel:'proxy-pthread',lifecycleAbi:1},Worker:Thread});
+ f.run();await flush();assert(f.messages.some(m=>m.type==='closing'));assert(!f.messages.some(m=>m.phase==='running'||m.type==='fatal'));
+ worker.deliver({__godotjsRuntime:2,sessionId:identity.runId,workerId:1,role:'engine',type:'progress',sequence:1});await flush();assert(!f.messages.some(m=>m.phase==='running'));
+ worker.deliver({__godotjsRuntime:2,sessionId:identity.runId,workerId:1,role:'engine',type:'summary',data:{schemaVersion:1,epoch:'native-A',sealed:true,overflow:false,entries:[]}});config.onExit(0);await flush();
+ assert.equal(f.messages.filter(m=>m.type==='exited').length,1);assert.equal(f.messages.find(m=>m.type==='exited').sessionFacts.runtimeSummary,'sealed');
+});
+
+test('managed fatal defers native quit and keeps its first failure when safe-point quit fails',async()=>{
+ let f,quit=0;
+ f=fixture(async()=>({basePath:'/engine',installWorklets(){},dispose(){},Engine:class{
+  constructor(){this.rtenv={_godotjs_release_exit(){}};}async preloadFile(){}async init(){}async start(){}
+  requestQuit(){quit++;throw Error('later quit failure');}
+ }}),{execution:{executionModel:'proxy-pthread',lifecycleAbi:1}});
+ f.run();await flush();f.event('error',{error:Error('first managed browser failure'),message:'first managed browser failure',preventDefault(){}});
+ assert.equal(quit,0,'native quit must wait until the error callback returns');await flush();
+ const fatal=f.messages.find(m=>m.type==='fatal');assert(fatal);assert.equal(quit,1);assert.equal(fatal.diagnostic.message,'first managed browser failure');assert.equal(fatal.sessionFacts.failure.message,'first managed browser failure');assert.equal(fatal.sessionFacts.forcedTerminationIssued,true);
+});

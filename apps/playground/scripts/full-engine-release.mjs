@@ -100,7 +100,7 @@ export function assembleFullEngineRelease({engine,ir,capture,irBytes,declaration
  if(execution.executionModel!=='window'&&!engine.host)throw Error('E_FULL_ENGINE_HOST: Worker release requires the actual browser host bundle');
  if(engine.host&&(!/^[a-f0-9]{64}$/.test(engine.host.sha256??'')||!Number.isSafeInteger(engine.host.bytes)||engine.host.bytes<=0||!engine.host.path||engine.host.path.startsWith('/')||engine.host.path.split('/').some(part=>!part||part==='.'||part==='..')))throw Error('E_FULL_ENGINE_HOST: Invalid browser host asset');
 
- if(runtimeAbi){assertWorkerRuntimeAbi(runtimeAbi);assertWorkerBuildProof(engineBuildReport);assertWorkerSdkProof(build.sdkBuild);if(canonical(runtimeAbi)!==canonical(engineBuildReport.runtimeAbi))throw Error('E_WORKER_BUILD_ABI');build={...build,workerPatch:engineBuildReport.workerPatch,engineRecipe:engineBuildReport.recipe};}
+ if(runtimeAbi){assertWorkerRuntimeAbi(runtimeAbi);assertWorkerBuildProof(engineBuildReport);assertWorkerSdkProof(build.sdkBuild);if(canonical(runtimeAbi)!==canonical(engineBuildReport.runtimeAbi))throw Error('E_WORKER_BUILD_ABI');build={...build,workerPatch:engineBuildReport.workerPatch,engineRecipe:engineBuildReport.recipe,...(engineBuildReport.lifecyclePatch?{lifecyclePatch:engineBuildReport.lifecyclePatch}:{})};}
  const definition=getEngineProfile(runtimeProfile);
  const profiles={snake:{ir,capture,irBytes,declarations,namingVersion,codegenVersion,typeSnapshot,strictTypechecks,actualAPIHash:build.actualAPIHash},camel:namingProfiles?.camel};
  if(!profiles.camel)throw Error('E_FULL_ENGINE_NAMING: Both snake and camel captures are required');

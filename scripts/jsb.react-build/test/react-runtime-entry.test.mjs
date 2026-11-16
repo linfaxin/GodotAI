@@ -49,6 +49,55 @@ function actualFixture(createApp){
  return {native,app,binding,diagnostics,get root(){return root;}};
 }
 
+function managedFixture({automatic=false}={}){
+ const events=[];let progress='open',resolveClose,closePromise,ticks=0,binding;
+ const root={render(){},flush(){},processFrame(){events.push('frame');},physicsFrame(){events.push('physics');},
+  requestShutdown(){progress='pending';events.push('request-close');},
+  close(){events.push('close');return closePromise??=new Promise(resolve=>{resolveClose=resolve;});},
+  getCloseProgress(){return {status:progress,pendingReleases:progress==='pending'?1:0};},
+  sealClose(){progress='unconfirmed';resolveClose?.({status:'unconfirmed',pendingReleases:1});events.push('sealed');},
+  session:{drainClose(){events.push('tick');if(++ticks>=2&&resolveClose){progress='complete';resolveClose({status:'complete',pendingReleases:0});}}},
+ };
+ const context={exports:{},console,require(name){
+  if(name==='godot')return {Node:class{}};
+  if(name==='godot-jsb')return {internal:{names:{get_member:name=>name,get_class:name=>name}}};
+  if(name.endsWith('/react/index.js'))return {isValidElement(){return false;},createElement(){return {};}};
+  if(name.endsWith('/@godot-js/react/engine/index.js'))return {createRoot(_mount,options){
+   if(automatic)root.runtimeManagedCleanup=binding.attachEntryCleanup(options.runtimeHost,{beginClose:()=>root.requestShutdown(),tick:()=>root.session.drainClose(),seal:()=>root.sealClose(),close:async()=>{const result=await root.close();if(result.status!=='complete')throw Error('Root close '+result.status);}});
+   return root;
+  }};
+  return {default:function App(){}};
+ }};
+ vm.runInNewContext(runtimeSource,context);
+ binding=context.exports.createRuntimeBinding({sessionId:'managed-react',role:'engine'});binding.beginNativeEpoch('native');
+ context.__godotjsRuntimeHost=binding;context.exports={};vm.runInNewContext(source,context);
+ const app=new context.exports.default();app._ready();return {app,binding,root,events};
+}
+
+test('session close cancels React frames and polls native release progress before completing the entry',async()=>{
+ const f=managedFixture();f.binding.beginClose();f.app._process(.1);f.app._physics_process(.1);
+ assert.equal(f.events.includes('frame'),false);assert.equal(f.events.includes('physics'),false);
+ await f.binding.drainClose();await flush();
+ assert.equal(f.binding.closeProgress().status,'complete');assert.equal(f.binding.snapshotSummary().entries[0].cleanup,'complete');
+ assert.equal(f.events.filter(value=>value==='close').length,1);assert.equal(f.app.closing,false);
+});
+
+test('native sealing settles a pending React root without invoking later cleanup ticks',async()=>{
+ const f=managedFixture();f.binding.beginClose();await flush();
+ assert.equal(f.binding.closeProgress().status,'pending');f.binding.endNativeEpoch('native');
+ const ticks=f.events.filter(value=>value==='tick').length;await f.binding.drainClose();await flush();
+ assert.equal(f.events.filter(value=>value==='tick').length,ticks);assert(f.events.includes('sealed'));
+ assert.equal(f.binding.snapshotSummary().entries[0].cleanup,'unconfirmed');assert.equal(f.app.closing,false);
+});
+
+test('React component bootstrap observes an automatically attached root without registering cleanup twice',async()=>{
+ const f=managedFixture({automatic:true});assert.equal(f.root.runtimeManagedCleanup,true);
+ f.binding.beginClose();for(let pass=0;pass<3;pass++)await f.binding.drainClose();await flush();
+ assert.equal(f.binding.closeProgress().status,'complete');assert.equal(f.events.filter(value=>value==='close').length,1);
+ assert.equal(f.events.filter(value=>value==='request-close').length,1);assert.equal(f.app.closing,false);
+ f.binding.endNativeEpoch('native');assert.equal(f.events.filter(value=>value==='sealed').length,0,'A completed participant has retired its native callbacks');
+});
+
 test('React bootstrap injects and reports through its captured entry host',async()=>{
  const f=fixture();f.app._ready();assert.equal(f.options.runtimeHost,f.host);
  f.context.__godotjsRuntimeHost={reportDiagnostic(){throw Error('replacement must not be used');}};

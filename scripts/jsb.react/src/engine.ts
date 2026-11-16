@@ -1,8 +1,8 @@
 import * as React from 'react';
 import ReconcilerFactory from './reconciler';
-import {drainScheduler} from './scheduler';
+import {drainScheduler,schedulerHasReadyWork,schedulerWorkRevision,subscribeSchedulerWakeup} from './scheduler';
 import {mapEngineStack} from './engine-source-map';
-import {captureValue, nativeAlive, nativeCall, nativeIdentity, propertyDescriptions, signalDescriptions, sameValue, sequence, writeNativeProperty, type NativePropertyWriter, type CapturedValue, type PropertyDescription} from './engine-native';
+import {captureValue, nativeAlive, nativeCall, nativeIdentity, nativeReleaseState, propertyDescriptions, signalDescriptions, sameValue, sequence, writeNativeProperty, type NativePropertyWriter, type CapturedValue, type PropertyDescription} from './engine-native';
 
 declare const require: (name: string) => any;
 export type NativeConstructor<T extends object = any> = new (...args: any[]) => T;
@@ -63,6 +63,8 @@ export interface EngineRootOptions {
   publicName?: (nativeName: string)=>string;
   className?: (nativeName: string)=>string;
   runtimeHost?: EngineRuntimeHost;
+  /** Entry-scoped admission without importing the browser/runtime package. */
+  lifetime?: {readonly cancelled:boolean};
 }
 export interface EngineStats {
   state: 'running'|'faulted'|'disposing'|'disposed';
@@ -71,6 +73,17 @@ export interface EngineStats {
   commits: number; connections: number; disconnects: number; liveRecords: number;
   processHooks: number; physicsHooks: number; portals: number;
   cleanExit: boolean;
+}
+export interface EngineFrameToken {epoch:string|number;counter:number}
+export interface EngineCloseResult {status:'complete'|'failed'|'unconfirmed';pendingReleases:number}
+export interface EngineCloseProgress {status:'open'|'pending'|EngineCloseResult['status'];logicalDisposed:boolean;pendingReleases:number}
+interface AutomaticFrameBudget extends EngineFrameToken {workVersion:number;schedulerVersion:number;remaining:number;until:number}
+interface EntryCleanupParticipant {beginClose():void;tick():void;seal():void;close():Promise<void>}
+interface RealmRuntimeBinding {
+  role?:string;sessionId?:string;
+  closeProgress?():{closing:boolean;accepting?:boolean};
+  attachEntryCleanup?(host:EngineRuntimeHost,participant:EntryCleanupParticipant):boolean;
+  detachEntryCleanup?(host:EngineRuntimeHost,participant:EntryCleanupParticipant):boolean;
 }
 type NodeProps = EngineNodeProps | AdoptedNodeProps;
 type Status = 'materialized'|'published'|'retiring'|'release-requested'|'freed';
@@ -96,7 +109,7 @@ const error = (code:string,text:string)=>new Error(`${code}: ${text}`);
 // The pinned reconciler and scheduler are singletons in this JavaScript realm.
 const rendererMicrotasks:Array<()=>void> = [];
 const rendererTimers = new Map<number,{at:number;callback:()=>void}>();
-let rendererTimerSerial=0, rendererDepth=0, realmPhysicsDepth=0;
+let rendererTimerSerial=0, rendererDepth=0, realmPhysicsDepth=0, rendererIngressVersion=0,sessionSerial=0;
 function rendererCall<T>(callback:()=>T):T { rendererDepth++;try{return callback();}finally{rendererDepth--;} }
 function nativeChildren(object:any):any[] { return sequence(nativeCall(object,'get_children')); }
 function alive(godot:any,object:any,identity:string):boolean { try{return nativeAlive(godot,object)&&nativeIdentity(object)===identity;}catch{return false;} }
@@ -106,6 +119,11 @@ export class EngineSession {
   readonly godot:any;
   readonly options:EngineSessionOptions;
   private readonly roots=new Set<EngineRoot>();
+  private readonly releasingRoots=new Set<EngineRoot>();
+  private schedulerUnsubscribe:(()=>void)|undefined;
+  readonly frameEpoch=++sessionSerial;
+  private workVersion=0;
+  private readonly automaticFrames=new Map<'process'|'physics',AutomaticFrameBudget>();
   private readonly hiddenValues=new Map<any,HiddenValue>();
   private permission=0;
   private pumping=false;
@@ -140,17 +158,20 @@ export class EngineSession {
   /** Hosts may use this around engine physics callbacks, including other roots. */
   runPhysics<T>(callback:()=>T):T {realmPhysicsDepth++;try{return callback();}finally{realmPhysicsDepth--;}}
   /** Native callbacks can enqueue work, but releasing their native stack is deferred. */
-  runNativeCallback<T>(callback:()=>T):T {
+  runNativeCallback<T>(callback:()=>T,requestWork=true):T {
     this.nativeDepth++;
-    try{return callback();}finally{this.nativeDepth--;this.requestPump();}
+    try{return callback();}finally{this.nativeDepth--;if(requestWork)this.requestPump();}
   }
   register(root:EngineRoot):void {
     // Multiple EngineSession objects for one native world would split permission.
     const established=sessions.get(this.godot);
-    if(established&&established!==this&&established.roots.size)throw error('E_ENGINE_SESSION','A native world already has an active session');
+    if(established&&established!==this&&(established.roots.size||established.releasingRoots.size))throw error('E_ENGINE_SESSION','A native world already has an active or releasing session');
     sessions.set(this.godot,this);this.roots.add(root);
+    this.workVersion++;
+    this.schedulerUnsubscribe??=subscribeSchedulerWakeup(()=>this.requestPump(false));
   }
-  requestPump():void {
+  requestPump(notifyHost=true):void {
+    this.workVersion++;
     if(this.scheduled)return;
     this.scheduled=true;
     // Only this private browser microtask can authorize destruction. An explicit
@@ -158,12 +179,28 @@ export class EngineSession {
     // the enclosing JS/WASM/native stack has returned.
     void Promise.resolve().then(()=>{
       this.scheduled=false;
-      if(!this.roots.size||!this.canCommit())return;
+      if((!this.roots.size&&!this.releasingRoots.size)||!this.canCommit())return;
       this.releaseCheckpoint=true;
       try{this.pump();}catch(value){for(const root of this.roots)root.failSession(value);}
       finally{this.releaseCheckpoint=false;}
     });
-    this.options.requestPump?.();
+    if(notifyHost)this.options.requestPump?.();
+  }
+  /** Raw frame callbacks may mutate Godot without going through React. */
+  noteExternalWork():void {this.workVersion++;this.invalidateValidation();}
+  /** Only automatic maintenance is coalesced; explicit pumps always inspect. */
+  prepareAutomaticFrame(phase:'process'|'physics',token:EngineFrameToken,fresh=false):void {
+    let frame=this.automaticFrames.get(phase);
+    if(!frame||frame.epoch!==token.epoch||frame.counter!==token.counter){
+      frame={...token,workVersion:-1,schedulerVersion:-1,remaining:Math.max(1,...[...this.roots].map(root=>root.options.maxWork??1000)),until:Date.now()+Math.min(5,...[...this.roots].map(root=>root.options.budgetMs??5))};
+      this.automaticFrames.set(phase,frame);
+    }
+    const version=this.workVersion+rendererIngressVersion,schedulerVersion=schedulerWorkRevision();
+    const ready=rendererMicrotasks.length>0||[...rendererTimers.values()].some(timer=>timer.at<=Date.now())||schedulerHasReadyWork()||[...this.roots].some(root=>root.hasPending()||root.hasEvents());
+    if(!fresh&&frame.workVersion===version&&frame.schedulerVersion===schedulerVersion&&!ready)return;
+    if(frame.remaining<=0)return;
+    if(!this.pumpWork(frame))return;
+    frame.workVersion=this.workVersion+rendererIngressVersion;frame.schedulerVersion=schedulerWorkRevision();
   }
   invalidateValidation():void {this.validation.clear();}
   validate(record:Instance):boolean {
@@ -240,32 +277,35 @@ export class EngineSession {
     }
     owner.dependents.add(container);
   }
-  pump():void {
-    if(this.pumping||rendererDepth||this.callbackDepth||!this.canCommit())return;
-    this.runSafe(()=>{
+  pump():void {this.pumpWork();}
+  private pumpWork(frame?:AutomaticFrameBudget):boolean {
+    if(!this.roots.size&&!this.releasingRoots.size)return false;
+    if(this.pumping||rendererDepth||this.callbackDepth||!this.canCommit())return false;
+    return this.runSafe(()=>{
       this.pumping=true;
+      let remaining=frame?.remaining??Math.max(1,...[...this.roots].map(root=>root.options.maxWork??1000));
       try{
-        let remaining=Math.max(1,...[...this.roots].map(root=>root.options.maxWork??1000));
+        this.reapCloseRoots();
         for(let pass=0;pass<100;pass++){
           this.invalidateValidation();
           let work=false;
           for(const root of [...this.roots]){root.reapReleased();root.audit();work=root.performPending()||work;}
-          for(const [id,timer]of rendererTimers)if(timer.at<=Date.now()){
+          for(const [id,timer]of rendererTimers)if(timer.at<=Date.now()&&(!frame||remaining>0)){
             rendererTimers.delete(id);rendererCall(timer.callback);work=true;
             if(--remaining<0)throw error('E_ENGINE_BUDGET','Renderer timers did not settle');
           }
-          while(rendererMicrotasks.length){
+          while(rendererMicrotasks.length&&(!frame||remaining>0)){
             if(--remaining<0)throw error('E_ENGINE_BUDGET','React microtasks did not settle');
             rendererCall(rendererMicrotasks.shift()!);work=true;
           }
-          for(const root of [...this.roots])while(root.hasEvents()){
+          for(const root of [...this.roots])while(root.hasEvents()&&(!frame||remaining>0)){
             if(--remaining<0)throw error('E_ENGINE_BUDGET','Signal callbacks did not settle');
             this.callbackDepth++;try{root.deliverEvent();}finally{this.callbackDepth--;}
             work=true;
           }
-          const budget=Math.min(5,...[...this.roots].map(root=>root.options.budgetMs??5));
+          const budget=frame?Math.max(0,frame.until-Date.now()):Math.min(5,...[...this.roots].map(root=>root.options.budgetMs??5));
           this.invalidateValidation();
-          const tasks=rendererCall(()=>drainScheduler(budget,Math.max(1,remaining)));
+          const tasks=frame&&remaining<=0?0:rendererCall(()=>drainScheduler(budget,Math.max(1,remaining)));
           remaining-=tasks;work=!!tasks||work;
           const passive=rendererCall(()=>EngineRoot.flushPassiveEffects());
           work=passive||work;
@@ -277,14 +317,23 @@ export class EngineSession {
             root.finishShutdown();
             if(!this.releaseCheckpoint&&root.hasRetirements())this.requestPump();
           }
+          this.reapCloseRoots();
           if(!work&&!rendererMicrotasks.length&&![...this.roots].some(root=>root.hasPending()))break;
+          if(frame&&remaining<=0)break;
           if(remaining<0)throw error('E_ENGINE_BUDGET','React work did not settle');
         }
-      }finally{this.pumping=false;}
-    });
+        return true;
+      }finally{if(frame)frame.remaining=Math.max(0,remaining);this.pumping=false;}
+    })===true;
   }
+  /** Close progression never dispatches process/physics frame subscriptions. */
+  drainClose():void {this.pump();}
+  private reapCloseRoots():void {for(const root of [...this.releasingRoots]){root.reapReleased();root.refreshCloseResult();if(root.getCloseProgress().status!=='pending')this.releasingRoots.delete(root);}this.releaseSchedulerIfIdle();}
+  private releaseSchedulerIfIdle():void {if(!this.roots.size&&!this.releasingRoots.size){this.schedulerUnsubscribe?.();this.schedulerUnsubscribe=undefined;}}
   releaseAllowed():boolean {return this.releaseCheckpoint&&this.hasPermission()&&!rendererDepth&&!this.nativeDepth&&!this.callbackDepth;}
-  forget(root:EngineRoot):void {this.roots.delete(root);this.invalidateValidation();}
+  forget(root:EngineRoot):void {this.roots.delete(root);if(root.getCloseProgress().pendingReleases)this.releasingRoots.add(root);this.workVersion++;this.invalidateValidation();this.releaseSchedulerIfIdle();}
+  forgetSealed(root:EngineRoot):void {this.roots.delete(root);this.releasingRoots.delete(root);this.workVersion++;this.invalidateValidation();this.releaseSchedulerIfIdle();}
+  completeRelease(root:EngineRoot):void {this.releasingRoots.delete(root);this.releaseSchedulerIfIdle();}
 }
 
 export function EngineNode<C extends NativeConstructor>(props:EngineNodeProps<C>):React.ReactElement;
@@ -324,6 +373,7 @@ export class EngineRoot {
   readonly container:Container;
   readonly memberName:(name:string)=>string;
   readonly typeName:(name:string)=>string;
+  readonly runtimeManagedCleanup:boolean=false;
   private state:EngineStats['state']='running';
   private committing=false;
   private pendingRender:{element:React.ReactNode}|undefined;
@@ -339,7 +389,16 @@ export class EngineRoot {
   private readonly automatic:Array<()=>void>=[];
   private readonly counters={prepared:0,created:0,adopted:0,freed:0,invalidations:0,releaseRequested:0,orphaned:0,commits:0,connections:0,disconnects:0};
   private cleanExit=true;
+  private nativeSealed=false;
+  private closePromise:Promise<EngineCloseResult>|undefined;
+  private resolveClose:((result:EngineCloseResult)=>void)|undefined;
+  private closeResult:Readonly<EngineCloseResult>|undefined;
+  private detachEntryCleanup:(()=>void)|undefined;
+  private readonly automaticFrames=new Map<'process'|'physics',EngineFrameToken>();
   constructor(containerNativeNode:object,options:EngineRootOptions={}) {
+    const binding=(globalThis as unknown as {__godotjsRuntimeHost?:RealmRuntimeBinding}).__godotjsRuntimeHost;
+    const admission=binding?.role==='engine'?binding.closeProgress?.():undefined;
+    if(options.lifetime?.cancelled||admission?.closing||admission?.accepting===false)throw error('E_ENGINE_CLOSING','The project entry or native session is closing');
     this.options=options;this.godot=options.godot??options.session?.godot??require('godot');
     this.session=options.session??EngineSession.for(this.godot);
     if(this.session.godot!==this.godot)throw error('E_ENGINE_SESSION','Root and session must share one native world');
@@ -354,13 +413,25 @@ export class EngineRoot {
     const report=(kind:EngineErrorInfo['kind'])=>(value:unknown,info?:{componentStack?:string})=>this.recordError(value,{kind,componentStack:info?.componentStack});
     this.fiber=this.renderer.createContainer(this.container,1,null,!!options.strictMode,null,'godot-',report('uncaught'),report('caught'),report('recoverable'),null);
     this.session.register(this);mounts.set(containerNativeNode,this.container);
-    if(options.autoProcess!==false)try{this.installAutomaticProcessing();}catch(value){this.shutdown();throw value;}
+    try{
+      if(options.runtimeHost&&binding?.role==='engine'&&binding.attachEntryCleanup){
+        const participant:EntryCleanupParticipant={
+          beginClose:()=>this.requestShutdown(),tick:()=>this.session.drainClose(),seal:()=>{this.sealClose();},
+          close:async()=>{const result=await this.close();if(result.status!=='complete')throw error('E_ENGINE_CLEANUP',`Native root cleanup ${result.status}`);},
+        };
+        this.runtimeManagedCleanup=binding.attachEntryCleanup(options.runtimeHost,participant);
+        if(!this.runtimeManagedCleanup)throw error('E_ENGINE_ENTRY','Runtime host does not belong to an active project entry');
+        this.detachEntryCleanup=()=>{binding.detachEntryCleanup?.(options.runtimeHost!,participant);};
+      }
+      if(options.autoProcess!==false)this.installAutomaticProcessing();
+    }catch(value){this.shutdown();throw value;}
   }
   recordError(value:unknown,info:EngineErrorInfo={kind:'runtime'}):void {
     this.errors.push(value);
+    if(this.pendingShutdown&&!this.closeResult&&(info.kind==='runtime'||info.kind==='uncaught'))this.cleanExit=false;
     try{
       const stack=(value as {stack?:unknown})?.stack;
-      if(typeof stack==='string')info={...info,stack:mapEngineStack(stack,file=>{
+      if(!this.nativeSealed&&!this.closeResult&&typeof stack==='string')info={...info,stack:mapEngineStack(stack,file=>{
         const access=this.godot[this.typeName('FileAccess')];
         return access&&nativeCall(access,'file_exists',file)?String(nativeCall(access,'get_file_as_string',file)):undefined;
       })};
@@ -377,7 +448,7 @@ export class EngineRoot {
   failSession(value:unknown):void {if(this.pendingShutdown)this.recordError(value);this.fault(value);}
   getErrors():readonly unknown[] {return [...this.errors];}
   getStats():EngineStats {
-    this.reapReleased();
+    if(!this.nativeSealed)this.reapReleased();
     return {...this.counters,state:this.state,pendingReleases:[...this.records].filter(r=>r.status==='release-requested').length,
       liveRecords:[...this.records].filter(r=>r.status!=='release-requested'&&r.status!=='freed'&&!r.orphaned).length,
       processHooks:this.frames.process.size,physicsHooks:this.frames.physics.size,portals:this.portals.size,cleanExit:this.cleanExit};
@@ -391,10 +462,13 @@ export class EngineRoot {
         owner.root.orphanIsland(owner,'Native ownership changed during a callback/setter');
         throw error('E_ENGINE_STRUCTURE','Cannot write a transferred ownership island');
       }
+      // The commit/pump owns the full graph audit. Recheck this target on every
+      // write, including its ancestry, because a preceding setter may transfer it.
+      if(owner){owner.root.auditRecord(owner);if(owner.orphaned)throw error('E_ENGINE_STRUCTURE','Cannot write a transferred ownership island');}
       return writeNativeProperty(this.godot,object,name,value,this.session.options.writeProperty).value;
     });
   }
-  private requirePermission():void {if(!this.session.hasPermission())throw error('E_ENGINE_PHASE','React mutation requires a session safe point');}
+  private requirePermission():void {if(this.nativeSealed)throw error('E_ENGINE_DISPOSED','Native epoch was sealed');if(!this.session.hasPermission())throw error('E_ENGINE_PHASE','React mutation requires a session safe point');}
   private mutation<T>(callback:()=>T):T {
     try{this.requirePermission();this.session.invalidateValidation();return callback();}catch(value){this.fault(value);throw value;}
   }
@@ -405,7 +479,7 @@ export class EngineRoot {
       rendererVersion:'0.3.0',rendererPackageName:'@godot-js/react/engine',supportsMutation:true,supportsPersistence:false,supportsHydration:false,isPrimaryRenderer:true,
       getRootHostContext:()=>emptyContext,getChildHostContext:()=>emptyContext,
       getPublicInstance:(record:Instance)=>{record.root.session.invalidateValidation();if(!record.root.valid(record))throw error('E_ENGINE_REF','Native instance is unavailable');record.published=true;if(record.status==='materialized')record.status='published';return record.native;},
-      prepareForCommit:(container:Container)=>{container.root.requirePermission();container.root.committing=true;return null;},
+      prepareForCommit:(container:Container)=>{const root=container.root;root.requirePermission();root.session.invalidateValidation();root.audit();root.committing=true;return null;},
       resetAfterCommit:(container:Container)=>{const root=container.root;root.committing=false;root.counters.commits++;for(const record of root.records)if(record.status==='materialized'){record.published=true;record.status='published';}root.session.markVisibilityDirty();root.session.refreshVisibility();},
       preparePortalMount:noop,
       createInstance:(_type:string,props:NodeProps,container:Container)=>{
@@ -434,9 +508,9 @@ export class EngineRoot {
       hideInstance:(record:Instance)=>{record.hidden=true;record.root.session.markVisibilityDirty();},
       unhideInstance:(record:Instance)=>{record.hidden=false;record.root.session.markVisibilityDirty();},
       hideTextInstance:noop,unhideTextInstance:noop,
-      scheduleTimeout:(callback:()=>void,delay:number)=>{const id=++rendererTimerSerial;rendererTimers.set(id,{at:Date.now()+Math.max(0,delay),callback});return id;},
-      cancelTimeout:(id:number)=>rendererTimers.delete(id),noTimeout:-1,
-      supportsMicrotasks:true,scheduleMicrotask:(callback:()=>void)=>rendererMicrotasks.push(callback),
+      scheduleTimeout:(callback:()=>void,delay:number)=>{const id=++rendererTimerSerial;rendererTimers.set(id,{at:Date.now()+Math.max(0,delay),callback});rendererIngressVersion++;return id;},
+      cancelTimeout:(id:number)=>{if(rendererTimers.delete(id))rendererIngressVersion++;},noTimeout:-1,
+      supportsMicrotasks:true,scheduleMicrotask:(callback:()=>void)=>{rendererMicrotasks.push(callback);rendererIngressVersion++;},
       setCurrentUpdatePriority:(value:number)=>priority=value,getCurrentUpdatePriority:()=>priority,resolveUpdatePriority:()=>priority||32,
       resolveEventType:()=>null,resolveEventTimeStamp:()=>-1.1,trackSchedulerEvent:noop,requestPostPaintCallback:noop,shouldAttemptEagerTransition:()=>false,
       maySuspendCommit:()=>false,maySuspendCommitOnUpdate:()=>false,maySuspendCommitInSyncRender:()=>false,preloadInstance:()=>true,startSuspendingCommit:noop,suspendInstance:noop,suspendOnActiveViewTransition:noop,waitForCommitToBeReady:()=>null,
@@ -531,12 +605,14 @@ export class EngineRoot {
     if((next.childScope??'react-managed')!==record.scope)throw error('E_ENGINE_SCOPE','Change key when changing child scope');
     const args='args'in next?next.args??[]:[];
     if(args.length!==record.args.length||args.some((value,index)=>!sameValue(record.args[index],captureValue(this.godot,value,this.typeName))))throw error('E_ENGINE_ARGUMENTS','Change key when changing constructor args');
-    if(!this.valid(record)){this.orphanIsland(record,'Native identity or parent changed');return;}
+    this.auditRecord(record);
+    if(record.orphaned||!this.valid(record)){this.orphanIsland(record,'Native identity or parent changed');return;}
     this.apply(record,next);record.props=next;
   }
   private append(parent:Parent,child:Instance,before?:Instance):void {
     if(parent.kind==='instance'&&parent.scope==='native-owned-opaque')throw error('E_ENGINE_OPAQUE','React children require a borrowed portal');
     if(parent.kind==='instance'&&parent.native&&!this.valid(parent)){this.orphanIsland(parent,'Native parent changed');return;}
+    if(parent.kind==='instance'&&parent.native){this.auditRecord(parent);if(parent.orphaned)return;}
     const target=parent.kind==='container'?parent.native:this.make(parent);
     if(parent.kind==='container'&&!alive(this.godot,target,parent.identity))throw error('E_ENGINE_CONTAINER','Native mount has been released');
     if(child.native&&!this.valid(child)){this.orphanIsland(child,'Native child changed');return;}
@@ -569,6 +645,7 @@ export class EngineRoot {
     for(const child of record.children)this.markRetiring(child);
   }
   private remove(parent:Parent,child:Instance):void {
+    if(parent.kind==='instance')this.auditRecord(parent);
     this.auditRecord(child);
     parent.children=parent.children.filter(item=>item!==child);
     this.markRetiring(child);
@@ -602,7 +679,7 @@ export class EngineRoot {
     }
   }
   audit():void {
-    if(this.state==='disposed')return;
+    if(this.nativeSealed||this.state==='disposed')return;
     if(alive(this.godot,this.container.native,this.container.identity)){
       const enclosing=this.session.owningAncestor(this.container.native);
       if(enclosing&&enclosing.root!==this){
@@ -658,6 +735,7 @@ export class EngineRoot {
     return true;
   }
   releaseRetired():void {
+    if(this.nativeSealed)return;
     if(!this.session.releaseAllowed())return;
     const list=[...this.records].reverse();
     for(const record of list){
@@ -685,7 +763,9 @@ export class EngineRoot {
     this.reapReleased();
   }
   reapReleased():void {
-    for(const record of [...this.records])if(record.status==='release-requested'&&record.native&&record.identity&&!alive(this.godot,record.native,record.identity))this.forgetRecord(record,true);
+    if(this.nativeSealed)return;
+    for(const record of [...this.records])if(record.status==='release-requested'&&record.native&&record.identity&&nativeReleaseState(this.godot,record.native,record.identity)==='released')this.forgetRecord(record,true);
+    this.refreshCloseResult();
   }
   hasRetirements():boolean {return [...this.records].some(record=>record.status==='retiring');}
   private forgetRecord(record:Instance,freed:boolean):void {
@@ -698,7 +778,7 @@ export class EngineRoot {
   }
   /** Enqueue a render. flush()/pump() or the engine's next safe point performs it. */
   render(element:React.ReactNode):void {
-    if(this.state!=='running'||this.pendingShutdown)throw error('E_ENGINE_DISPOSED','Root is closed');
+    if(this.options.lifetime?.cancelled||this.state!=='running'||this.pendingShutdown)throw error('E_ENGINE_DISPOSED','Root is closed');
     this.pendingRender={element};this.session.requestPump();
   }
   flush():void {this.session.pump();}
@@ -721,20 +801,47 @@ export class EngineRoot {
     return true;
   }
   subscribeFrame(phase:'process'|'physics',callback:(delta:number)=>void):()=>void {
-    if(this.state!=='running')throw error('E_ENGINE_DISPOSED','Cannot subscribe to a closed root');
+    if(this.nativeSealed||this.state!=='running')throw error('E_ENGINE_DISPOSED','Cannot subscribe to a closed root');
     this.frames[phase].add(callback);return()=>{this.frames[phase].delete(callback);};
   }
-  private frame(phase:'process'|'physics',delta:number):void {
+  private frame(phase:'process'|'physics',delta:number,prepared=false):void {
+    if(this.options.lifetime?.cancelled||this.nativeSealed||this.state!=='running')return;
+    if(phase==='process'&&!prepared)this.session.pump();
     if(this.state!=='running')return;
-    if(phase==='process')this.session.pump();
-    if(this.state!=='running')return;
-    const run=()=>{for(const callback of [...this.frames[phase]])if(this.state==='running'&&!this.pendingShutdown&&this.frames[phase].has(callback))try{callback(delta);}catch(value){this.recordError(value);}};
+    let invoked=false;
+    const run=()=>{for(const callback of [...this.frames[phase]])if(this.state==='running'&&!this.pendingShutdown&&this.frames[phase].has(callback)){invoked=true;try{callback(delta);}catch(value){this.recordError(value);}}};
     if(phase==='physics')this.session.runPhysics(run);else run();
+    if(invoked)this.session.noteExternalWork();
   }
   process(delta:number):void {this.frame('process',delta);}
   physics(delta:number):void {this.frame('physics',delta);}
+  private automaticFrame(phase:'process'|'physics',delta:number,supplied?:EngineFrameToken):void {
+    if(this.options.lifetime?.cancelled||this.nativeSealed||this.state!=='running')return;
+    let token=supplied;
+    if(!token){
+      try{
+        const engine=this.godot.Engine??this.godot.engine;
+        const counter=Number(nativeCall(engine,phase==='process'?'get_process_frames':'get_physics_frames'));
+        if(Number.isSafeInteger(counter)&&counter>=0)token={epoch:this.options.runtimeHost?.sessionId??this.session.frameEpoch,counter};
+      }catch{/* Older/injected hosts retain explicit manual pumping semantics. */}
+    }
+    if(!token){this.frame(phase,delta);return;}
+    if(!Number.isSafeInteger(token.counter)||token.counter<0||!['number','string'].includes(typeof token.epoch))throw error('E_ENGINE_FRAME','Invalid native frame token');
+    const previous=this.automaticFrames.get(phase),dispatch=!previous||previous.epoch!==token.epoch||previous.counter!==token.counter;
+    if(phase==='process'){
+      this.session.prepareAutomaticFrame(phase,token,dispatch&&this.frames[phase].size>0);
+      // Shared idle audits are reusable, callback-side raw native writes are not.
+      if(dispatch&&this.frames[phase].size)this.session.runSafe(()=>{this.session.invalidateValidation();this.audit();});
+    }
+    if(!dispatch)return;
+    this.automaticFrames.set(phase,{...token});
+    this.frame(phase,delta,true);
+  }
+  /** Native automatic driver; manual process()/physics() remain uncoalesced. */
+  processFrame(delta:number,token?:EngineFrameToken):void {this.automaticFrame('process',delta,token);}
+  physicsFrame(delta:number,token?:EngineFrameToken):void {this.automaticFrame('physics',delta,token);}
   portal(element:React.ReactNode,target:object,key:React.Key='portal'):React.ReactPortal {
-    if(this.state!=='running'||!nativeAlive(this.godot,target)||!nativeCall(target,'is_class','Node'))throw error('E_ENGINE_PORTAL','Expected a live native mount');
+    if(this.nativeSealed||this.state!=='running'||!nativeAlive(this.godot,target)||!nativeCall(target,'is_class','Node'))throw error('E_ENGINE_PORTAL','Expected a live native mount');
     const reserved=mounts.get(target);if(reserved&&reserved.root!==this)throw error('E_ENGINE_OWNERSHIP','Portal mount belongs to another root');
     if(owners.has(target))throw error('E_ENGINE_OWNERSHIP','Use a borrowed child mount, not an owned node');
     let container=this.portals.get(target);
@@ -750,8 +857,41 @@ export class EngineRoot {
     return this.renderer.createPortal(element,container,null,key);
   }
   unmount():void {if(this.state==='running')this.render(null);}
-  requestShutdown():void {if(this.state!=='disposed'){this.pendingShutdown=true;this.pendingRender=undefined;this.session.requestPump();}}
-  shutdown():void {this.requestShutdown();this.session.pump();}
+  requestShutdown():void {if(!this.nativeSealed&&this.state!=='disposed'){this.pendingShutdown=true;this.pendingRender=undefined;this.session.requestPump();}}
+  shutdown():void {if(this.nativeSealed)return;this.requestShutdown();this.session.pump();}
+  /** Idempotent completion waits for native releases, independently of stats. */
+  close():Promise<EngineCloseResult> {
+    if(!this.closePromise)this.closePromise=new Promise(resolve=>{this.resolveClose=resolve;});
+    if(this.closeResult)this.resolveClose?.(this.closeResult);
+    else {this.requestShutdown();this.session.drainClose();this.refreshCloseResult();}
+    return this.closePromise;
+  }
+  getCloseProgress():EngineCloseProgress {
+    if(!this.nativeSealed)this.reapReleased();
+    return {status:this.closeResult?.status??(this.pendingShutdown||this.shutdownStarted?'pending':'open'),logicalDisposed:this.state==='disposed',pendingReleases:[...this.records].filter(record=>record.status==='release-requested').length};
+  }
+  /** Called before/at native epoch sealing; never enters a native object. */
+  sealClose():EngineCloseResult {
+    this.nativeSealed=true;
+    if(this.closeResult){this.session.forgetSealed(this);return this.closeResult;}
+    this.pendingShutdown=true;this.pendingRender=undefined;
+    this.frames.process.clear();this.frames.physics.clear();this.events.length=0;
+    const pendingReleases=[...this.records].filter(record=>record.status==='release-requested').length;
+    this.closeResult=Object.freeze({status:this.cleanExit?'unconfirmed':'failed',pendingReleases});
+    this.resolveClose?.(this.closeResult);this.session.forgetSealed(this);
+    return this.closeResult;
+  }
+  /** Session-owned release ledger survives logical root disposal. */
+  refreshCloseResult():void {
+    if(this.closeResult||this.nativeSealed||this.state!=='disposed')return;
+    const pendingReleases=[...this.records].filter(record=>record.status==='release-requested').length;
+    if(pendingReleases)return;
+    this.closeResult=Object.freeze({status:this.cleanExit?'complete':'failed',pendingReleases:0});
+    if(this.closeResult.status==='complete'){
+      const detach=this.detachEntryCleanup;this.detachEntryCleanup=undefined;detach?.();
+    }
+    this.resolveClose?.(this.closeResult);this.session.completeRelease(this);
+  }
   finishShutdown():void {
     if(!this.shutdownStarted||this.state==='disposed')return;
     for(const record of this.records)if(record.status==='materialized'&&!record.published)this.markRetiring(record);
@@ -760,17 +900,17 @@ export class EngineRoot {
     this.frames.process.clear();this.frames.physics.clear();this.events.length=0;
     if(mounts.get(this.container.native)===this.container)mounts.delete(this.container.native);
     for(const [target,container]of this.portals){if(mounts.get(target)===container)mounts.delete(target);container.owner?.dependents.delete(container);}
-    this.portals.clear();this.state='disposed';this.session.forget(this);
+    this.portals.clear();this.state='disposed';this.session.forget(this);this.refreshCloseResult();
   }
   private installAutomaticProcessing():void {
     if(!nativeCall(this.container.native,'is_inside_tree'))throw error('E_ENGINE_AUTOPROCESS','Mount must be in SceneTree, or use autoProcess:false');
     const tree=nativeCall(this.container.native,'get_tree');
-    for(const [signal,callback]of [['process_frame',()=>this.process(Number(nativeCall(this.container.native,'get_process_delta_time')))],['physics_frame',()=>this.physics(Number(nativeCall(this.container.native,'get_physics_process_delta_time')))]] as const){
+    for(const [signal,callback]of [['process_frame',()=>this.processFrame(Number(nativeCall(this.container.native,'get_process_delta_time')))],['physics_frame',()=>this.physicsFrame(Number(nativeCall(this.container.native,'get_physics_process_delta_time')))]] as const){
       const callable=this.godot.Callable.create(()=>this.session.runNativeCallback(()=>{
         if(this.state!=='running')return;
         if(!alive(this.godot,this.container.native,this.container.identity)){this.requestShutdown();return;}
         callback();
-      }));
+      },false));
       if(nativeCall(tree,'connect',signal,callable)!==0)throw error('E_ENGINE_AUTOPROCESS',`Cannot connect ${signal}`);
       this.automatic.push(()=>{if(nativeAlive(this.godot,tree)&&nativeCall(tree,'is_connected',signal,callable))nativeCall(tree,'disconnect',signal,callable);});
     }

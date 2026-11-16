@@ -40,6 +40,16 @@ test('session tracks every pthread, only native engine progress counts, and stal
  packet(engine,1,'progress',{sequence:2});assert.equal(progress.length,1);
 });
 
+test('draining ignores late pthread progress while retaining final summary and consumption receipts',async()=>{
+ const f=fixture(),progress=[];
+ const session=new BrowserEngineSession({identity,scope:f.scope,executionModel:'proxy-pthread',onProgress:value=>progress.push(value)});
+ const worker=new f.scope.Worker('https://preview.test/thread.js');
+ const send=(type,fields={})=>worker.deliver({__godotjsRuntime:2,sessionId:identity.runId,workerId:1,role:'engine',type,...fields});
+ send('role');send('epoch',{data:{epoch:'native-A'}});session.beginDrain();send('progress',{sequence:1});
+ send('project',{sequence:4,data:{type:'late-event'}});send('summary',{data:{schemaVersion:1,epoch:'native-A',sealed:true,overflow:false,entries:[]}});
+ assert.equal(progress.length,0);assert(worker.sent.some(m=>m.type==='project-receipt'&&m.sequence===4));assert.equal(session.sessionFacts().runtimeSummary,'sealed');await session.dispose();
+});
+
 test('whole-session disposal closes audio, pooled workers, timers, callbacks and canvas exactly once',async()=>{
  const f=fixture();const session=new BrowserEngineSession({identity,scope:f.scope,executionModel:'proxy-pthread'});
  new f.scope.Worker('https://preview.test/thread.js');new f.scope.Worker('https://preview.test/thread.js');

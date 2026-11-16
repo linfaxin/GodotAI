@@ -12,7 +12,7 @@ export interface VerifiedAsset {
   maxDecodedBytes?: number;
 }
 export interface VerifiedRelease {
-  runtimeAbi?: { protocolVersion: 2; host: 1; audio: 1; presentation: 1 };
+  runtimeAbi?: { protocolVersion: 2; host: 1; audio: 1; presentation: 1; lifecycle?: 1 };
   runtimeWorker?: VerifiedAsset;
   runtimeAudioWorklet?: VerifiedAsset;
   artifactReceiptVersion?:2;
@@ -149,7 +149,8 @@ export function validateRelease(release: VerifiedRelease, base = globalThis.loca
   if (release.worklets !== undefined && !Array.isArray(release.worklets)) throw new Error('E_RELEASE_WORKLETS');
   const execution=release.execution??legacyExecution();validateExecution(execution);
   if(release.workerAssets!==undefined&&!Array.isArray(release.workerAssets))throw Error('E_RELEASE_WORKERS');
-  if (release.runtimeAbi !== undefined && (!release.runtimeAbi || release.runtimeAbi.protocolVersion !== 2 || release.runtimeAbi.host !== 1 || release.runtimeAbi.audio !== 1 || release.runtimeAbi.presentation !== 1)) throw new Error('E_RELEASE_RUNTIME_ABI');
+  if (release.runtimeAbi !== undefined && (!release.runtimeAbi || release.runtimeAbi.protocolVersion !== 2 || release.runtimeAbi.host !== 1 || release.runtimeAbi.audio !== 1 || release.runtimeAbi.presentation !== 1 || (release.runtimeAbi.lifecycle !== undefined && release.runtimeAbi.lifecycle !== 1))) throw new Error('E_RELEASE_RUNTIME_ABI');
+  if (release.runtimeAbi && release.runtimeAbi.lifecycle !== execution.lifecycleAbi) throw Error('E_RELEASE_LIFECYCLE_ABI');
   const kinds = new Set<WorkletKind>();
   for (const asset of [release.engineJs, release.engineWasm, ...release.worklets ?? [], ...release.workerAssets??[], ...release.runtimeWorker ? [release.runtimeWorker] : [], ...release.runtimeAudioWorklet ? [release.runtimeAudioWorklet] : []]) {
     assetMetadata(asset);

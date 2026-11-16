@@ -34,7 +34,7 @@ const source=marker=>`import {Node,Label,Vector2,print} from 'godot';
 import * as G from 'godot';
 import DefaultG from 'godot';
 export async function start({mount}:{mount:Node}){
- if(typeof (globalThis as any).document!=='undefined')throw Error('Schema4 executed on the host document');
+ const realm=globalThis as any;if(typeof realm.WorkerGlobalScope!=='function'||!(realm instanceof realm.WorkerGlobalScope))throw Error('Project must execute in the native engine Worker');
  const dynamic:any=await import('godot');if(dynamic!==G||dynamic.default!==DefaultG||G.Node!==Node||dynamic.Node!==Node)throw Error('Native import namespace identity differs');
  if((dynamic as any).then!==undefined||(dynamic as any).__esModule!==true)throw Error('Native namespace metadata is unsafe');
  const label=new Label();label.text=${JSON.stringify(marker)};label.position=new Vector2(16,24);mount.add_child(label);

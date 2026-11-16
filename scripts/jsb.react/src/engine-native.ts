@@ -13,6 +13,25 @@ export function nativeIdentity(object: unknown): string {
   return String(nativeCall(object, 'get_instance_id'));
 }
 
+/** Observation failure is not evidence that the queued native object died. */
+export function nativeReleaseState(godot:any,object:unknown,identity:string):'pending'|'released'|'unconfirmed' {
+  try {
+    const lookup=godot.instance_from_id??godot.instanceFromId;
+    if(typeof lookup==='function'&&/^[0-9]+$/.test(identity)){
+      const id=BigInt(identity),value=lookup.call(godot,id<=BigInt(Number.MAX_SAFE_INTEGER)?Number(id):id);
+      if(value===null)return 'released';
+      if(!value||nativeIdentity(value)!==identity)return 'unconfirmed';
+      return 'pending';
+    }
+    const check=godot.is_instance_valid??godot.isInstanceValid;
+    if(typeof check!=='function')return 'unconfirmed';
+    const valid=check.call(godot,object);
+    if(typeof valid!=='boolean')return 'unconfirmed';
+    if(!valid)return 'released';
+    return nativeIdentity(object)===identity?'pending':'released';
+  }catch{return 'unconfirmed';}
+}
+
 export function sequence(value: any): any[] {
   if (Array.isArray(value)) return value;
   const size = Number(nativeCall(value, 'size'));

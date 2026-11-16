@@ -23,6 +23,8 @@ function startSession(identity:RunIdentity,port:MessagePort):void {
  let started=false,exited=false,cleaned=false,quitRequested=false,seenEngineProgress=false;
  let cleanupPromise:Promise<SessionCleanupReceipt>|undefined;
  let finalizing=false,forcedTerminationIssued=false;
+ let cooperativeLifecycle=false,stopDeadline:ReturnType<typeof setTimeout>|undefined;
+ const armStopDeadline=()=>{if(!stopDeadline)stopDeadline=setTimeout(()=>{if(!nativeExit)forceStop();},2000);};
  let failure:ReturnType<typeof previewDiagnostic>|undefined,nativeExit:{code:number}|undefined;
  let readyResolve:(()=>void)|undefined,readyReject:((reason:unknown)=>void)|undefined;
  const ready=new Promise<void>((resolve,reject)=>{readyResolve=resolve;readyReject=reject;});void ready.catch(()=>{});
@@ -44,7 +46,7 @@ function startSession(identity:RunIdentity,port:MessagePort):void {
  globals.__godotjsSetProjectCommand=(callback:unknown)=>runtime?.bindLegacyProjectCommand(typeof callback==='function'?callback as (json:string)=>void:null);
  const cleanup=(mode:'clean'|'forced'):Promise<SessionCleanupReceipt>=>{
   if(cleanupPromise)return cleanupPromise;
-  cleaned=true;clearInterval(heartbeat);port.onmessage=null;
+  cleaned=true;clearInterval(heartbeat);clearTimeout(stopDeadline);port.onmessage=null;
   removeEventListener('error',onBrowserError);removeEventListener('unhandledrejection',onRejectedPromise);removeEventListener('blur',onBlur);
   for(const level of ['log','warn','error'] as const)console[level]=originalConsole[level];
   if(globals.__godotjsReportReactError===onReactError)delete globals.__godotjsReportReactError;
@@ -89,6 +91,18 @@ function startSession(identity:RunIdentity,port:MessagePort):void {
   if(exited||cleaned||failure)return;
   failure=previewDiagnostic(error,location);failure.source=source;
   runtime?.beginDrain();
+  if(cooperativeLifecycle&&engine&&!nativeExit){
+   aborter.abort(new DOMException('Preview failed','AbortError'));armStopDeadline();
+   void Promise.resolve().then(()=>{
+    if(exited||cleaned||nativeExit)return;
+    try{requestQuit();}catch{
+     // Keep the originating failure if the safe-point native quit also fails.
+     if(runtime?.executionModel!=='window')forcedTerminationIssued=true;
+     scheduleTerminal();
+    }
+   });
+   return;
+  }
   // No native-exit arriving on another transport can erase this first failure.
   if(runtime?.executionModel!=='window')forcedTerminationIssued=!nativeExit;
   aborter.abort(new DOMException('Preview failed','AbortError'));
@@ -119,6 +133,7 @@ function startSession(identity:RunIdentity,port:MessagePort):void {
   if(data.type==='project-command'&&!exited&&!aborter.signal.aborted&&isProjectData(data.data)){try{command(data.data);}catch(error){fatal(error);}return;}
   if(data.type==='stop'){
    runtime?.beginDrain();
+   if(cooperativeLifecycle)armStopDeadline();
    aborter.abort(new DOMException('Stopped','AbortError'));
    try{requestQuit();}catch(error){fatal(error);}
    if(!engine)forceStop();
@@ -144,10 +159,12 @@ function startSession(identity:RunIdentity,port:MessagePort):void {
    }
    check();
    const execution=release.execution;
+   cooperativeLifecycle=execution?.lifecycleAbi===1;
    runtime=new BrowserEngineSession({identity,cleanupTimeoutMs:500,executionModel:execution?.executionModel??'window',requiresCrossOriginIsolation:execution?.requiresCrossOriginIsolation,
     onProgress:progress=>{if(exited||cleaned)return;seenEngineProgress=true;send({type:'engine-progress',...progress});readyResolve?.();},
     onDiagnostic:diagnostic,onProject:data=>projectEvent(data),onLog:(level,text)=>log(level,[text]),
     onWorkerRole:value=>log('log',[`GODOTJS_WORKER_ROLE ${value.role} ${value.workerId}`]),
+    onClosing:()=>{aborter.abort(new DOMException('Native engine is closing','AbortError'));armStopDeadline();send({type:'closing'});},
    });
    const result=await loadVerifiedEngine(release,{signal:aborter.signal});
    if(aborter.signal.aborted||exited){result.dispose();return;}
@@ -159,6 +176,7 @@ function startSession(identity:RunIdentity,port:MessagePort):void {
    (loaded.installRuntimeAssets??loaded.installWorklets).call(loaded,engine);
    phase('preloading');await engine.preloadFile(pack,'/application.pck');check();
    phase('initializing');await engine.init();runtime?.attachEngine(engine);check();
+   if(execution?.lifecycleAbi===1&&typeof (engine as any).rtenv?._godotjs_release_exit!=='function')throw Error('E_NATIVE_LIFECYCLE_ABI: native pre-exit export is missing');
    phase('starting');await engine.start({args:nativeAudioEnabled(release.profile)?['--main-pack','/application.pck','--rendering-method','gl_compatibility']:['--main-pack','/application.pck','--rendering-method','gl_compatibility','--audio-driver','Dummy']});check();
    if(exited||finalizing)return;phase('waiting-ready');
    if(execution&&execution.executionModel!=='window'){if(!seenEngineProgress)await ready;}

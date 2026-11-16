@@ -27,7 +27,7 @@ pnpm --filter @godot-js/engine build
 pnpm --filter @godot-js/engine test
 ```
 
-Dedicated Worker infrastructure lives under `src/browser/dedicated/`; its concrete module subpaths are also exported for the existing browser bridges and worklet build. The corresponding `@godot-js/react-browser/worker-*` modules are compatibility reexports, not separate implementations. Browser compiler and resolution code remains in `react-browser`.
+Dedicated Worker infrastructure lives under `src/browser/dedicated/`; its concrete module subpaths are also exported for the existing browser bridges and worklet build. The corresponding `@godot-js/react-browser/worker-*` modules are compatibility reexports, not separate implementations. The product compiler policy, type environment and artifact pipeline live in `project-tools`; the retained browser SDK resolver and conformance compiler remain in `react-browser`.
 
 Existing `@godot-js/react-browser/engine-api`, identity, loader and session wrappers remain compatibility paths to this implementation. New neutral consumers use the engine package directly. See the [Worker engine guide](../../docs/browser-worker-engine.zh-CN.md) for build provenance, deployment requirements and current activation gates.
 
@@ -37,7 +37,13 @@ Existing `@godot-js/react-browser/engine-api`, identity, loader and session wrap
 
 One realm has one installed owner. A binding's `openEntry()` returns an internal scope with a public host view; generated `start(ctx)` programs receive that view as `ctx.host`. React root options accept the same host, made available through `useRuntimeHost()`. Entry close revokes that view and its command binding, while a native epoch end seals the environment's observation without uninstalling the realm host. Old entry callbacks cannot activate a replacement entry. Native/standalone scripts may run without a browser host.
 
-The public contract has no signal or `ctx.signal`. Internal session cancellation and entry closure remain distinct. Startup may be asynchronous; cleanup is a synchronous function invoked at most once. Pending startup, asynchronous cleanup and late results after native epoch seal remain unconfirmed. The binding does not claim to cancel arbitrary project work or await all application Promises.
+Generated ordinary entries also receive `ctx.lifetime`: a cooperative, DOM-independent `EntryLifetime` with `cancelled`, `onCancel(callback)` and `defer(cleanup)`. Startup and registered cleanup may return Promises. Closing revokes business services, broadcasts cancellation and executes registered cleanup in reverse order, waiting for each asynchronous result before advancing that entry. The binding tracks unresolved startup and cleanup separately; native sealing makes unfinished work unconfirmed and prevents late callbacks from entering the released epoch. There is no `ctx.signal`, and cancellation does not stop arbitrary application Promises.
+
+React roots created with the captured `runtimeHost` automatically join its entry through the internal `attachEntryCleanup()` hook. `root.shutdown()` retains its request-only API; `root.close()` returns an idempotent Promise whose result distinguishes complete, failed and unconfirmed cleanup. Logical root disposal and `queue_free()` admission do not prove that native destruction completed. `getCloseProgress()` retains the release ledger until actual native identities are gone; sealing a still-pending root makes its result unconfirmed without reading native objects.
+
+For matching Web builds, lifecycle ABI 1 installs an owner-realm native pre-exit gate. Stop and project `quit()` close entries before native cleanup. A cleanup-only loop advances registered participants and consumes the native deletion queue after callbacks return, then a later tick observes release completion. It does not run process/physics subscriptions or flush the general deferred business queue. The existing host deadline still owns forced termination. The ABI must be backed by the applied Web/SceneTree patch chain and matching engine assets; adding descriptor metadata or refreshing the frontend cannot provide it.
+
+Dedicated Worker drain keeps bounded DOM release credits separate from ordinary host commands. Saturated business commands cannot prevent mirrored element removal, pointer/fullscreen release, speech cancellation or drop-credit release. Only matching run/sequence receipts return transport credits; duplicate or stale receipts do not. The main-thread privileged request queue also reserves a separate bounded drain lane, so unresolved ordinary requests cannot block pointer/fullscreen release.
 
 ## Exit facts and engine matching
 
@@ -52,3 +58,5 @@ Threaded loading tests actual retained-instance shared-memory growth before fetc
 The identity entry validates complete native descriptors, SDK v2 runtime/type/module identities, site descriptor seals and schema 2 artifact receipts against actual pack bytes. Historical native schema 2 descriptors retain their original complete IDs; missing old optional identity fields do not admit arbitrary labels or partial asset references. Legacy artifact receipts require explicit runner compatibility, and a release advertising `artifactReceiptVersion: 2` always rejects downgrade.
 
 Product SDK source/build proofs include this package and `project-tools`, their actual exported outputs, build scripts, shared TypeScript configuration and runtime declaration inputs. Moving a source file changes the sealed source-map/provenance paths even when runtime behavior is unchanged.
+
+See the [engine evolution implementation guide](../../docs/engine-evolution-implementation.zh-CN.md) for the current APIs, validation commands and prototype boundaries. Default execution remains Dedicated Worker; the pthread route remains an explicitly selected candidate.

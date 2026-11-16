@@ -13,6 +13,7 @@ import {patchProxyEntry} from './patch-web-proxy-entry.mjs';
 import {patchShaderUtf8} from './patch-web-shader-utf8.mjs';
 import {patchAudioServerFinish} from './patch-web-audio-server-finish.mjs';
 import {patchWorkerRuntimeFile,WORKER_RUNTIME_PATHS} from './patch-web-worker-runtime.mjs';
+import {patchWebLifecycleFile} from './patch-web-lifecycle.mjs';
 
 const repo=fileURLToPath(new URL('../../',import.meta.url));
 const execute=promisify(execFile),hash=value=>createHash('sha256').update(value).digest('hex');
@@ -26,8 +27,8 @@ export async function applyWebEnginePatches(root,{python='python3',executionMode
  // Compute every patch before writing: unsupported source layouts leave the
  // input tree intact. Python's JSON mode calls the same checked pure patchers.
  for(const [script,patchIds] of [
-  ['apps/playground/scripts/patch-web-renderer.py',{'drivers/gles3/shaders/scene.glsl':'godotjs-gles3-alpha-hash-v1','drivers/gles3/storage/texture_storage.cpp':'godotjs-gles3-small-canvas-backbuffer-v1'}],
-  ['apps/playground/scripts/patch-native-tooltips.py',{'scene/main/viewport.cpp':'godotjs-private-tooltip-v1'}],
+  ['impl/web/patches/patch-web-renderer.py',{'drivers/gles3/shaders/scene.glsl':'godotjs-gles3-alpha-hash-v1','drivers/gles3/storage/texture_storage.cpp':'godotjs-gles3-small-canvas-backbuffer-v1'}],
+  ['impl/web/patches/patch-native-tooltips.py',{'scene/main/viewport.cpp':'godotjs-private-tooltip-v1'}],
  ]) {
   const {stdout}=await execute(python,[resolve(repo,script),resolve(root),'--json'],{maxBuffer:16*1024*1024});
   const files=JSON.parse(stdout);
@@ -55,6 +56,10 @@ export async function applyWebEnginePatches(root,{python='python3',executionMode
   const before=planned.findLast(item=>item.record.path===path)?.code??await readFile(resolve(root,path),'utf8');
   const result=patchWorkerRuntimeFile(path,before);
   await add(path,result.code,result.patchId,'scripts/release/patch-web-worker-runtime.mjs',before);
+ }
+ for(const path of ['scene/main/scene_tree.h','scene/main/scene_tree.cpp',...(executionModel==='proxy-pthread'?['platform/web/web_main.cpp']:[])]){
+  const result=patchWebLifecycleFile(path,await readFile(resolve(root,path),'utf8'));
+  await add(path,result.code,result.patchId,'scripts/release/patch-web-lifecycle.mjs');
  }
  for(const {code,record}of planned)if(record.changed)await writeFile(resolve(root,record.path),code);
  return planned.map(({record})=>record);

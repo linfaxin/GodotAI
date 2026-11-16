@@ -42,6 +42,7 @@ export interface WorkerBrowserClient {
   RTCPeerConnection:new(configuration?:RTCConfiguration)=>WorkerRTCPeerConnection;
   RTCIceCandidate:new(init?:RTCIceCandidateInit)=>RTCIceCandidateInit&{toJSON():RTCIceCandidateInit};
   RTCSessionDescription:new(init:RTCSessionDescriptionInit)=>RTCSessionDescriptionInit&{toJSON():RTCSessionDescriptionInit};
+  beginDrain():void;
   dispose():void;
 }
 const defaults = {maxPeers:16,maxChannels:64,maxMessageBytes:1024*1024,maxPendingCommands:128,maxPendingEvents:256,maxBufferedBytes:4*1024*1024};
@@ -63,7 +64,7 @@ const channelSnapshot=(channel:RTCDataChannel)=>({readyState:channel.readyState,
 export function createWorkerBrowserHost(options:WorkerBrowserOptions&{RTCPeerConnection?:typeof RTCPeerConnection}) {
   const budget=limits(options),port=options.port,Constructor=options.RTCPeerConnection??globalThis.RTCPeerConnection;
   const peers=new Map<string,RTCPeerConnection>(),channels=new Map<string,RTCDataChannel>(),channelPeers=new Map<string,string>();
-  const eventSizes=new Map<number,number>();let eventSerial=0,remoteChannels=0,eventBytes=0,pending=0,pendingTeardown=0,closed=false;
+  const eventSizes=new Map<number,number>();let eventSerial=0,remoteChannels=0,eventBytes=0,pending=0,pendingTeardown=0,closed=false,draining=false;
   const report=(error:unknown)=>{try{options.onError?.(new Error(errorText(error)));}catch{/* diagnostics cannot prevent cleanup */}};
   const release=()=>{
     for(const channel of channels.values()){channel.onopen=channel.onclose=channel.onerror=channel.onmessage=channel.onbufferedamountlow=null;try{channel.close();}catch{}}
@@ -100,7 +101,7 @@ export function createWorkerBrowserHost(options:WorkerBrowserOptions&{RTCPeerCon
       const peer=new Constructor(dto(args[0]??{}));peers.set(id,peer);
       for(const type of ['connectionstatechange','iceconnectionstatechange','icegatheringstatechange','signalingstatechange'] as const)peer['on'+type as 'onconnectionstatechange']=()=>postEvent(id,type,{state:peerSnapshot(peer)});
       peer.onicecandidate=event=>postEvent(id,'icecandidate',{candidate:event.candidate?.toJSON()??null});
-      peer.ondatachannel=event=>{try{const channelId='h-'+(++remoteChannels);attachChannel(channelId,id,event.channel);postEvent(id,'datachannel',{channelId,state:channelSnapshot(event.channel)});}catch(error){fatal(error);}};
+      peer.ondatachannel=event=>{if(draining){event.channel.close();return;}try{const channelId='h-'+(++remoteChannels);attachChannel(channelId,id,event.channel);postEvent(id,'datachannel',{channelId,state:channelSnapshot(event.channel)});}catch(error){fatal(error);}};
       return peerSnapshot(peer);
     }
     const peer=peers.get(id);
@@ -143,12 +144,13 @@ export function createWorkerBrowserHost(options:WorkerBrowserOptions&{RTCPeerCon
     // Closing a native handle must progress even when SDP operations are still
     // pending. This lane is bounded by the run's handle limits, not ordinary work.
     const teardown=isTeardown(message.operation);
+    if(draining&&!teardown){respond(message.request,undefined,failure('E_RTC_CLOSING'));return;}
     if(teardown?pendingTeardown>=budget.maxPeers+budget.maxChannels:pending>=budget.maxPendingCommands){fatal(new Error('E_RTC_COMMAND_BACKPRESSURE'));return;}
     if(teardown)pendingTeardown++;else pending++;
     void execute(message).then(result=>respond(message.request,result),error=>respond(message.request,undefined,error)).finally(()=>{if(teardown)pendingTeardown--;else pending--;});
   };
   port.addEventListener('message',onmessage);port.start();
-  return{dispose(){if(!closed){closed=true;release();}port.removeEventListener('message',onmessage);port.close();}};
+  return{beginDrain(){draining=true;},dispose(){if(!closed){closed=true;release();}port.removeEventListener('message',onmessage);port.close();}};
 }
 
 class BrowserMirror extends EventTarget {
@@ -162,11 +164,12 @@ export function createWorkerBrowserClient(options:WorkerBrowserOptions):WorkerBr
   // A locally removed mirror can still own an unacknowledged native close.
   // Keep that handle charged so repeated create/close cannot grow this lane.
   const ownedPeers=new Set<string>(),ownedChannels=new Set<string>();
-  let serial=0,peerSerial=0,channelSerial=0,pendingCommands=0,closed=false,lastEvent=0;
+  let serial=0,peerSerial=0,channelSerial=0,pendingCommands=0,closed=false,draining=false,lastEvent=0;
   const report=(error:unknown)=>{try{options.onError?.(new Error(errorText(error)));}catch{}};
   const request=(operation:string,id:string,args:unknown[]=[],transfer:Transferable[]=[])=>{
     if(closed)return Promise.reject(failure('E_RTC_DISPOSED'));
     const teardown=isTeardown(operation);
+    if(draining&&!teardown)return Promise.reject(failure('E_RTC_CLOSING'));
     if(teardown?requests.size-pendingCommands>=budget.maxPeers+budget.maxChannels:pendingCommands>=budget.maxPendingCommands)return Promise.reject(new RangeError('E_RTC_COMMAND_BACKPRESSURE'));
     return new Promise<any>((resolve,reject)=>{const token=++serial;requests.set(token,{teardown,resolve,reject});if(!teardown)pendingCommands++;try{port.postMessage({rtc:1,type:'command',request:token,operation,id,args},transfer);}catch(error){requests.delete(token);if(!teardown)pendingCommands--;reject(error);}});
   };
@@ -201,13 +204,14 @@ export function createWorkerBrowserClient(options:WorkerBrowserOptions):WorkerBr
     update(state:unknown){if(!this.#closed&&!closed)Object.assign(this,state);}
     fail(error:unknown){if(!this.#closed&&!closed)failed(this,error);}
     operation(operation:string,args:unknown[]=[]) {if(closed)return Promise.reject(failure('E_RTC_DISPOSED'));if(this.#closed)return Promise.reject(failure('E_RTC_PEER_CLOSED'));return request(operation,this.handle,args).then(value=>{if(closed)throw failure('E_RTC_DISPOSED');if(this.#closed)throw failure('E_RTC_PEER_CLOSED');return value;},error=>{if(this.#closed)throw failure('E_RTC_PEER_CLOSED');throw error;});}
-    constructor(configuration:RTCConfiguration={}){super();if(closed)throw failure('E_RTC_DISPOSED');if(ownedPeers.size>=budget.maxPeers)throw new RangeError('E_RTC_PEER_LIMIT');this.handle='p-'+(++peerSerial);this.#configuration=dto(configuration);peers.set(this.handle,this);ownedPeers.add(this.handle);void request('peer.create',this.handle,[this.#configuration]).then(state=>this.update(state),error=>{if(this.#closed||closed)return;this.connectionState='failed';this.emit('connectionstatechange');this.fail(error);});}
+    constructor(configuration:RTCConfiguration={}){super();if(closed)throw failure('E_RTC_DISPOSED');if(draining)throw failure('E_RTC_CLOSING');if(ownedPeers.size>=budget.maxPeers)throw new RangeError('E_RTC_PEER_LIMIT');this.handle='p-'+(++peerSerial);this.#configuration=dto(configuration);peers.set(this.handle,this);ownedPeers.add(this.handle);void request('peer.create',this.handle,[this.#configuration]).then(state=>this.update(state),error=>{if(this.#closed||closed)return;this.connectionState='failed';this.emit('connectionstatechange');this.fail(error);});}
     createOffer(options:RTCOfferOptions={}){return this.operation('peer.offer',[dto(options)]);}
     createAnswer(options:RTCAnswerOptions={}){return this.operation('peer.answer',[dto(options)]);}
     async setLocalDescription(description:RTCLocalSessionDescriptionInit={}){this.update(await this.operation('peer.local',[dto(description)]));}
     async setRemoteDescription(description:RTCSessionDescriptionInit){this.update(await this.operation('peer.remote',[dto(description)]));}
     async addIceCandidate(candidate:RTCIceCandidateInit|null){await this.operation('peer.ice',[dto(candidate)]);}
     createDataChannel(label:string,configuration:RTCDataChannelInit={}){
+      if(draining)throw failure('E_RTC_CLOSING');
       if(this.#closed||closed)throw failure('E_RTC_PEER_CLOSED');if(ownedChannels.size>=budget.maxChannels)throw new RangeError('E_RTC_CHANNEL_LIMIT');if(typeof label!=='string'||label.length>65535)throw new TypeError('E_RTC_LABEL');
       const config=dto(configuration),id='c-'+(++channelSerial),channel=new Channel(id,this.handle,{label,protocol:config.protocol??'',ordered:config.ordered??true,negotiated:config.negotiated??false,id:config.id??null,maxPacketLifeTime:config.maxPacketLifeTime??null,maxRetransmits:config.maxRetransmits??null});
       void request('channel.create',this.handle,[id,label,config]).then(state=>channel.update(state),error=>channel.failCreate(error));return channel;
@@ -225,6 +229,7 @@ export function createWorkerBrowserClient(options:WorkerBrowserOptions):WorkerBr
     if(message.type==='result'){const pending=requests.get(message.request);if(!pending)return;requests.delete(message.request);if(!pending.teardown)pendingCommands--;if(message.error!==undefined)pending.reject(new Error(String(message.error).slice(0,4096)));else pending.resolve(message.result);return;}
     if(message.type!=='event'||!Number.isSafeInteger(message.sequence)||message.sequence<=lastEvent||!handle(message.target))return;lastEvent=message.sequence;
     try{
+      if(draining&&message.event!=='close')return;
       const peer=peers.get(message.target),channel=channels.get(message.target),data=message.data??{};
       if(peer){if(data.state&&message.event!=='datachannel')peer.update(data.state);if(message.event==='datachannel'){
         if(!handle(data.channelId)||ownedChannels.size>=budget.maxChannels)throw new RangeError('E_RTC_CHANNEL_LIMIT');const incoming=new Channel(data.channelId,peer.handle);incoming.update(data.state);peer.emit('datachannel',{channel:incoming});
@@ -236,7 +241,7 @@ export function createWorkerBrowserClient(options:WorkerBrowserOptions):WorkerBr
   port.addEventListener('message',onmessage);port.start();
   class Candidate {candidate='';sdpMid:string|null=null;sdpMLineIndex:number|null=null;usernameFragment:string|null=null;constructor(init:RTCIceCandidateInit={}){Object.assign(this,dto(init));}toJSON(){return{candidate:this.candidate,sdpMid:this.sdpMid,sdpMLineIndex:this.sdpMLineIndex,usernameFragment:this.usernameFragment};}}
   class Description {type:RTCSdpType;sdp:string;constructor(init:RTCSessionDescriptionInit){this.type=init.type;this.sdp=init.sdp??'';}toJSON(){return{type:this.type,sdp:this.sdp};}}
-  return{RTCPeerConnection:Peer,RTCIceCandidate:Candidate,RTCSessionDescription:Description,dispose(){if(!closed){try{port.postMessage({rtc:1,type:'dispose'});}catch{}shutdown(failure('E_RTC_DISPOSED'),false);}port.removeEventListener('message',onmessage);port.close();}};
+  return{RTCPeerConnection:Peer,RTCIceCandidate:Candidate,RTCSessionDescription:Description,beginDrain(){draining=true;},dispose(){if(!closed){try{port.postMessage({rtc:1,type:'dispose'});}catch{}shutdown(failure('E_RTC_DISPOSED'),false);}port.removeEventListener('message',onmessage);port.close();}};
 }
 
 /** Convenience installer; the caller owns this run's port and scope lifetime. */

@@ -88,3 +88,27 @@ test('receipt collector hashes real files and never invents passed cases for mis
  assert.deepEqual(result.readiness.clearedBlockers,[]);assert.equal(result.readiness.defaultReleaseReady,false);
  assert(Object.values(result.readiness.workPackages).every(item=>item.developmentStart==='GO'));
 });
+
+
+test('native lifecycle capability requires the complete compiled source proof',()=>{
+ const paths=['platform/web/web_main.cpp','scene/main/scene_tree.h','scene/main/scene_tree.cpp'];
+ const candidate=report();candidate.execution.lifecycleAbi=1;candidate.runtimeAbi={lifecycle:1};
+ candidate.source={inputs:{}};candidate.godotSource={inputs:{}};candidate.recipe.patches=[];
+ candidate.lifecyclePatch={abi:1,patchId:'godotjs-web-lifecycle-v1',files:{}};
+ for(const path of paths){
+  const implementation={path:'scripts/release/patch-web-lifecycle.mjs',sha256:sha('implementation')};
+  const final=sha(path);candidate.source.inputs[implementation.path]=implementation.sha256;candidate.godotSource.inputs[path]=final;
+  candidate.recipe.patches.push({path,patchId:'godotjs-web-lifecycle-v1',beforeSha256:sha('original '+path),afterSha256:final,implementation});
+  candidate.lifecyclePatch.files[path]={sha256:final,implementation};
+ }
+ assert.equal(executionFromReport(candidate).lifecycleAbi,1);
+ const mutate=fn=>{const copy=structuredClone(candidate);fn(copy);assert.throws(()=>executionFromReport(copy),/lifecycle/);};
+ mutate(value=>delete value.lifecyclePatch);
+ mutate(value=>delete value.lifecyclePatch.files[paths[1]]);
+ mutate(value=>value.godotSource.inputs[paths[2]]=sha('unpatched source'));
+ mutate(value=>value.source.inputs['scripts/release/patch-web-lifecycle.mjs']=sha('different implementation'));
+ mutate(value=>value.recipe.patches[0].afterSha256=sha('different output'));
+ mutate(value=>value.recipe.patches[0].patchId='unrelated-patch');
+ mutate(value=>value.runtimeAbi.lifecycle=undefined);
+ mutate(value=>value.execution.lifecycleAbi=undefined);
+});
