@@ -28,15 +28,33 @@ exports.default=class EngineApiCapture extends G[names.get_class('Node')]{
   if(bindingAudit.status!=='passed'||classFailures.length||nameMismatches.length)throw Error('Binding audit failed: '+JSON.stringify({bindingAudit,inventory}));
   const host=globalThis.__godotjsRuntimeHost;
   if(host&&typeof host.emitProjectEvent==='function'){
-   const payload=JSON.stringify({ir,audit:{bindingAudit,inventory}}),total=Math.ceil(payload.length/65536);
-   for(let index=0;index<total;index++)host.emitProjectEvent({type:'engine-api-capture-chunk',index,total,data:payload.slice(index*65536,(index+1)*65536)});
+   this.captureHost=host;this.capturePayload=JSON.stringify({ir,audit:{bindingAudit,inventory}});
+   this.captureIndex=0;this.captureTotal=Math.ceil(this.capturePayload.length/65536);
+   this.captureAcknowledged=typeof host.bindProjectCommand!=='function';
+   if(!this.captureAcknowledged)this.captureDispose=host.bindProjectCommand(data=>{if(data?.type==='engine-api-capture-received')this.captureAcknowledged=true;});
+   return;
   }else{
    const window=call(G[names.get_class('JavaScriptBridge')],'get_interface','window');
    call(window,'call','__captureEngineApi',JSON.stringify(ir),JSON.stringify({bindingAudit,inventory}));
   }
   this.exitCode=0;
  }catch(error){console.error('ENGINE_API_CAPTURE_ERROR '+String(error));}}
- _process(){if(++this.frames===3)call(call(this,'get_tree'),'quit',this.exitCode);}
+ _process(){
+  if(this.capturePayload!==undefined){try{
+   // Retry the same chunk after backpressure; acceptance is not guaranteed
+   // merely because the native API inventory was produced successfully.
+   for(let sent=0;sent<4&&this.captureIndex<this.captureTotal;sent++){
+    const index=this.captureIndex;
+    if(this.captureHost.emitProjectEvent({type:'engine-api-capture-chunk',index,total:this.captureTotal,data:this.capturePayload.slice(index*65536,(index+1)*65536)})!==true)return;
+    this.captureIndex++;
+   }
+   if(this.captureIndex<this.captureTotal||!this.captureAcknowledged)return;
+   this.captureDispose?.();this.captureDispose=undefined;
+   this.capturePayload=undefined;this.captureHost=undefined;this.exitCode=0;this.frames=0;
+  }catch(error){this.capturePayload=undefined;this.captureHost=undefined;this.frames=0;this.exitCode=1;console.error('ENGINE_API_CAPTURE_ERROR '+String(error));}}
+  if(++this.frames===3)call(call(this,'get_tree'),'quit',this.exitCode);
+ }
+ _exit_tree(){this.captureDispose?.();this.captureDispose=undefined;}
 };`;
  return new Map([
   ['res://src/EngineApiCapture.ts',encode('export default class EngineApiCapture {}\n')],
@@ -90,7 +108,7 @@ export async function captureEngineApi({engineJs,engineWasm,output,reportPath=ou
     if(item.type!=='engine-api-capture-chunk')return;
     if(!Number.isSafeInteger(item.index)||!Number.isSafeInteger(item.total)||item.total<1||item.total>1024||item.index<0||item.index>=item.total||typeof item.data!=='string'||item.data.length>65536||total!==undefined&&total!==item.total||chunks[item.index]!==undefined)throw Error('E_ENGINE_API_CHUNKS');
     total=item.total;chunks[item.index]=item.data;
-    if(chunks.filter(value=>value!==undefined).length===total){const result=JSON.parse(chunks.join(''));window.__engineApiCapture.ir=result.ir;window.__engineApiCapture.audit=result.audit;}
+    if(chunks.filter(value=>value!==undefined).length===total){const result=JSON.parse(chunks.join(''));window.__engineApiCapture.ir=result.ir;window.__engineApiCapture.audit=result.audit;session.command({type:'engine-api-capture-received'});}
    }});
    window.__captureSession=session;
    let exited,timer;const exit=new Promise(resolve=>{exited=resolve;});

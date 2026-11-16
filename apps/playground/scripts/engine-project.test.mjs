@@ -178,12 +178,12 @@ test('react bootstrap owns lifecycle once and keeps user autoload/native setting
  assert.match(project,/run\/main_scene="res:\/\/\.playground\/engine-bootstrap.tscn"/);
  for(const specifier of ['@godot-js/react','@godot-js/react/engine'])assert.match(read(result,'res://.godot/GodotJS/node_modules/'+specifier+'/index.js'),/\["engineReact"\]/);
  assert.equal(result.index['res://.godot/GodotJS/node_modules/godot/index.js'],undefined);
- const calls=[],root={render:value=>calls.push(['render',value]),flush:()=>calls.push(['flush']),pump:d=>calls.push(['pump',d]),process:d=>calls.push(['process',d]),physics:d=>calls.push(['physics',d]),shutdown:reason=>calls.push(['shutdown',reason])};
+ const calls=[],root={render:value=>calls.push(['render',value]),flush:()=>calls.push(['flush']),pump:d=>calls.push(['pump',d]),process:d=>calls.push(['process',d]),physics:d=>calls.push(['physics',d]),shutdown:reason=>calls.push(['shutdown',reason]),getStats:()=>({state:'disposed',cleanExit:true})};
  class Node {}
  function App(){}
  const entry={default:App};
  const module={exports:{}},require=withNativeNamespace(result,specifier=>{
-  if(specifier==='godot')return {Node};
+  if(specifier==='godot')return {Node,OS:{has_feature:()=>false}};
   if(specifier==='godot-jsb')return {internal:{names:{get_member:name=>name,get_class:name=>name}}};
   if(specifier==='res://.godot/GodotJS/node_modules/react/index.js')return {isValidElement:()=>false,createElement:(type,props)=>({type,props})};
   if(specifier==='res://.godot/GodotJS/node_modules/@godot-js/react/engine/index.js')return {createRoot:(node,options)=>{calls.push(['createRoot',node,options]);return root;}};
@@ -195,12 +195,14 @@ test('react bootstrap owns lifecycle once and keeps user autoload/native setting
  assert.equal(calls[0][0],'createRoot');assert.equal(calls[0][2].autoProcess,false);
  assert.deepEqual(calls.map(call=>call[0]),['createRoot','render','flush','process','physics','shutdown']);
  assert.equal(calls[1][1].type,App);
- const original=Error('original startup failure'),cleanup=Error('cleanup failure'),secondary=[];
+ const secondary=[],failedModule={exports:{}};
+ const failedContext=vm.createContext({require,module:failedModule,exports:failedModule.exports,console:{error:(...args)=>secondary.push(args)}});
+ const original=vm.runInContext('new Error("original startup failure")',failedContext),cleanup=vm.runInContext('new Error("cleanup failure")',failedContext);
  root.render=()=>{throw original;};root.shutdown=()=>{throw cleanup;};
- const failedModule={exports:{}};
- vm.runInNewContext(read(result,'res://.godot/GodotJS/.playground/engine-bootstrap.js'),{require,module:failedModule,exports:failedModule.exports,console:{error:(...args)=>secondary.push(args)}});
+ vm.runInContext(read(result,'res://.godot/GodotJS/.playground/engine-bootstrap.js'),failedContext);
  const failed=new failedModule.exports.default();assert.throws(()=>failed._ready(),error=>error===original);
- assert.equal(secondary.length,1);assert.equal(secondary[0][1],cleanup);failed._exit_tree();
+ failed._exit_tree();assert.equal(secondary.length,1);assert.equal(secondary[0].length,1);
+ assert.match(secondary[0][0],/cleanup failure/);assert(secondary[0][0].includes(cleanup.stack));
 });
 
 test('pre-emitted CommonJS keeps its own source map and missing maps are reported honestly',async()=>{

@@ -1,5 +1,5 @@
 import {PreviewRunner} from '@godot-js/engine/browser/runner';
-import {WorkerPreviewRunner} from '@godot-js/react-browser/worker-runner';
+import {WorkerPreviewRunner} from '@godot-js/engine/browser/dedicated/worker-runner';
 import type {RunnerEvent} from '@godot-js/engine/browser/protocol';
 import type {VerifiedRelease} from '@godot-js/engine/browser/verified-loader';
 import {loadEngineRelease,loadReleaseContext,loadRuntimeCandidate,type ReleaseContext} from './engine-assets';

@@ -179,18 +179,61 @@ export default class PlaygroundEngineBootstrap extends G.Node {
 /** New script entries are ordinary start(ctx) functions. Legacy Node classes
  * keep their original registration/bootstrap path through the old adapter. */
 function scriptBootstrap(module:string,exportName:string):string {
- return `const G = require('godot');
+ return `const intrinsicStackGetter = Object.getOwnPropertyDescriptor(new Error(), 'stack')?.get;
+const G = require('godot');
 export default class ProjectScriptBootstrap extends G.Node {
- private cleanup: any; private closed = false;
- _ready() {
-  const start = require(${JSON.stringify(module)})[${JSON.stringify(exportName)}];
-  if (typeof start !== 'function') throw Error('Script entry must export a start function');
-  const accept = (cleanup: any) => { if (cleanup !== undefined && typeof cleanup !== 'function') throw Error('Script startup must return void or a cleanup function'); if (this.closed) cleanup?.(); else this.cleanup = cleanup; };
-  const result = start({mount:this,godot:G,host:(globalThis as any).__godotjsRuntimeHost});
-  if (result && typeof result.then === 'function') result.then(accept).catch((error: any) => { const host=(globalThis as any).__godotjsRuntimeHost; if (typeof host?.reportDiagnostic === 'function') host.reportDiagnostic({kind:'runtime',message:String(error),stack:error?.stack}); else console.error(error); });
-  else accept(result);
+ private cleanup: any; private cleanupCalled = false; private closed = false;
+ private entry: any; private host: any;
+ private diagnostic(error: any) {
+  const own = (name: string, limit: number) => { try { const d = error != null && (typeof error === 'object' || typeof error === 'function') ? Object.getOwnPropertyDescriptor(error, name) : undefined; const text = d && 'value' in d ? d.value : name === 'stack' && intrinsicStackGetter && d?.get === intrinsicStackGetter && ['message','name'].every(key => { const field = Object.getOwnPropertyDescriptor(error,key); return !field || 'value' in field; }) ? intrinsicStackGetter.call(error) : undefined; return typeof text === 'string' ? text.slice(0, limit) : undefined; } catch (_) { return undefined; } };
+  return {kind:'runtime',message:(typeof error === 'string' ? error.slice(0,4096) : own('message',4096)) ?? 'Script entry failed',stack:own('stack',32768)};
  }
- _exit_tree() { this.closed = true; const cleanup=this.cleanup;this.cleanup=undefined;cleanup?.(); }
+ private report(error: any, cleanup = false): boolean {
+  if (!cleanup && this.closed) return true;
+  const diagnostic = this.diagnostic(error);
+  try {
+   if (cleanup && this.entry) { this.entry.reportCleanupFailure(diagnostic); return true; }
+   if (typeof this.host?.reportDiagnostic === 'function' && this.host.reportDiagnostic(diagnostic) === true) return true;
+  } catch (_) {}
+  console.error(error); return false;
+ }
+ private runCleanup(cleanup: any) {
+  if (this.cleanupCalled) return;
+  this.cleanupCalled = true;
+  if (this.entry && !this.entry.canCleanup()) { this.entry.cleanupUnconfirmed(); return; }
+  try {
+   const result = cleanup();
+   if (result && typeof result.then === 'function') {
+    this.entry?.cleanupUnconfirmed();
+    void Promise.resolve(result).catch((error: any) => this.report(error, true));
+   } else this.entry?.cleanupComplete();
+  } catch (error) { this.report(error, true); }
+ }
+ _ready() {
+  const binding = (globalThis as any).__godotjsRuntimeHost;
+  this.entry = typeof binding?.openEntry === 'function' ? binding.openEntry() : undefined;
+  this.host = this.entry?.host ?? binding;
+  const accept = (cleanup: any) => {
+   if (cleanup !== undefined && typeof cleanup !== 'function') throw Error('Script startup must return void or a cleanup function');
+   this.entry?.ready(typeof cleanup === 'function');
+   if (this.closed) {
+    if (cleanup) { if (this.entry && !this.entry.canCleanup()) this.entry.cleanupUnconfirmed(); else void Promise.resolve().then(() => this.runCleanup(cleanup)); }
+   } else this.cleanup = cleanup;
+  };
+  try {
+   const start = require(${JSON.stringify(module)})[${JSON.stringify(exportName)}];
+   if (typeof start !== 'function') throw Error('Script entry must export a start function');
+   const result = start({mount:this,godot:G,host:this.host});
+   if (result && typeof result.then === 'function') void Promise.resolve(result).then(accept).catch((error: any) => this.report(error));
+   else accept(result);
+  } catch (error) { if (!this.report(error)) throw error; }
+ }
+ _exit_tree() {
+  if (this.closed) return;
+  this.closed = true; this.entry?.close();
+  const cleanup = this.cleanup; this.cleanup = undefined;
+  if (cleanup) this.runCleanup(cleanup);
+ }
 }
 `;
 }

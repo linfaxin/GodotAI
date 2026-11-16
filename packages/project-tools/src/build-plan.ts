@@ -164,7 +164,7 @@ export async function prepareBuildPlan(plan:BuildPlan,options:PrepareBuildPlanOp
  const legacyImports=assessLegacyImportCaches(prepared.files,options.importCacheObservations).filter(item=>!reported.has(item.resource));
  requireFreshImports([...assessments,...stored,...legacyImports]);
  const effectivePlan=await createBuildPlan(plan.snapshot,plan.launch,{compatibility:plan.compatibility,inputs:{...plan.inputs,
-  compilation:{tool:'godotjs-project-tools/2',typescript:(await import('typescript')).default.version,options:await compilationInputs(compilerSnapshot),...(options.adapterIdentity?{adapterIdentity:options.adapterIdentity}:{}),imports:(options.importChecks??[]).map(check=>({inspection:check.inspection,...(check.receipt?{receipt:check.receipt}:{})})),storedImportReceipts:options.storedImportReceipts??[],importCacheObservations:options.importCacheObservations??[],
+  compilation:{tool:'godotjs-project-tools/3',typescript:(await import('typescript')).default.version,options:await compilationInputs(compilerSnapshot),...(options.adapterIdentity?{adapterIdentity:options.adapterIdentity}:{}),imports:(options.importChecks??[]).map(check=>({inspection:check.inspection,...(check.receipt?{receipt:check.receipt}:{})})),storedImportReceipts:options.storedImportReceipts??[],importCacheObservations:options.importCacheObservations??[],
    ...(conversion?{resourceImports:conversion.receipts.map(({resource,uid,converter,target,parameterHash,sources})=>({resource,...(uid?{uid}:{}),converter,target,parameterHash,sources}))}:{})}}});
  const imports=[...(options.imports??[]),...(conversion?.assessments??[]),...assessments,...stored,...legacyImports];
  const assessedResources=new Set(imports.map(item=>item.resource));

@@ -3,20 +3,44 @@ import path from 'node:path';
 import ts from 'typescript';
 import {canonical,digest} from './site-evidence.mjs';
 
-export const WORKER_SDK_PACKAGES=Object.freeze(['scripts/jsb.react','scripts/jsb.react-build','scripts/jsb.react-browser']);
-export async function describeWorkerSdkSources(repository,packages=WORKER_SDK_PACKAGES){
- const inputs={};
- async function walk(directory){for(const entry of (await readdir(directory,{withFileTypes:true})).sort((a,b)=>a.name.localeCompare(b.name))){const filename=path.join(directory,entry.name);if(entry.isDirectory())await walk(filename);else if(entry.isFile())inputs[path.relative(repository,filename).split(path.sep).join('/')]=digest(await readFile(filename));}}
+export const WORKER_SDK_PACKAGES=Object.freeze(['packages/engine','packages/project-tools','scripts/jsb.react','scripts/jsb.react-build','scripts/jsb.react-browser']);
+export async function describeWorkerSdkEntrypoints(repository,packages=WORKER_SDK_PACKAGES){
+ const result={};
  for(const directory of packages){
-  for(const filename of ['package.json','tsconfig.json'])inputs[directory+'/'+filename]=digest(await readFile(path.join(repository,directory,filename)));
-  await walk(path.join(repository,directory,'src'));
+  const manifest=JSON.parse(await readFile(path.join(repository,directory,'package.json'),'utf8')),targets=new Set();
+  const visit=value=>{if(typeof value==='string'){if(value.startsWith('./dist/')&&!value.includes('*'))targets.add(directory+'/'+value.slice(2));}else if(value&&typeof value==='object')for(const child of Object.values(value))visit(child);};
+  visit(manifest.exports);visit(manifest.main);visit(manifest.types);
+  result[directory]=[...targets].sort();
  }
+ return result;
+}
+export async function describeWorkerSdkSources(repository,packages=WORKER_SDK_PACKAGES){
+ const inputs={},seen=new Set();
+ const add=async filename=>{const relative=path.relative(repository,filename).split(path.sep).join('/');if(relative.startsWith('../')||path.isAbsolute(relative))throw Error('E_WORKER_SDK_SOURCE_PATH');inputs[relative]=digest(await readFile(filename));};
+ async function walk(directory,optional=false){let entries;try{entries=await readdir(directory,{withFileTypes:true});}catch(error){if(optional&&error.code==='ENOENT')return;throw error;}
+  for(const entry of entries.sort((a,b)=>a.name.localeCompare(b.name))){const filename=path.join(directory,entry.name);if(entry.isDirectory())await walk(filename);else if(entry.isFile())await add(filename);else throw Error('E_WORKER_SDK_SOURCE_SYMLINK: '+filename);}}
+ async function config(filename){filename=path.resolve(filename);if(seen.has(filename))return;seen.add(filename);await add(filename);const data=ts.readConfigFile(filename,ts.sys.readFile);if(data.error)throw Error('E_WORKER_SDK_CONFIG: '+filename);for(const parent of [data.config.extends??[]].flat())if(typeof parent==='string'&&parent.startsWith('.'))await config(path.resolve(path.dirname(filename),parent.endsWith('.json')?parent:parent+'.json'));}
+ for(const directory of packages){
+  const root=path.join(repository,directory),manifest=JSON.parse(await readFile(path.join(root,'package.json'),'utf8'));
+  await add(path.join(root,'package.json'));await config(path.join(root,'tsconfig.json'));await walk(path.join(root,'src'));await walk(path.join(root,'scripts'),true);
+  for(const filename of ['build.mjs','engine-modules.cjs'])try{await add(path.join(root,filename));}catch(error){if(error.code!=='ENOENT')throw error;}
+  // Root export adapters can be producer inputs even when they are not TS.
+  const visit=async value=>{if(typeof value==='string'){if(value.startsWith('./')&&!value.startsWith('./dist/')&&!value.includes('*'))await add(path.join(root,value));}else if(value&&typeof value==='object')for(const child of Object.values(value))await visit(child);};
+  await visit(manifest.exports);
+ }
+ if(packages.includes('packages/engine'))await add(path.join(repository,'scripts/out/jsb.runtime.bundle.d.ts'));
  return inputs;
 }
 /** Re-emit to memory and compare against the frozen SDK. No shared dist writes,
  * and source maps that read current TS cannot disguise stale generated JS. */
 export async function proveWorkerSdkBuild(repository,{packages=WORKER_SDK_PACKAGES,verifyReactGenerated=true}={}){
- const sources=await describeWorkerSdkSources(repository,packages),outputs={};
+ const sources=await describeWorkerSdkSources(repository,packages),entrypoints=await describeWorkerSdkEntrypoints(repository,packages),outputs={};
+ if(packages.includes('packages/engine')){
+  const declarations=(await readFile(path.join(repository,'scripts/out/jsb.runtime.bundle.d.ts'),'utf8')).replaceAll('\r\n','\n');
+  const source=ts.createSourceFile('engine-api-runtime-types.ts',await readFile(path.join(repository,'packages/engine/src/engine-api-runtime-types.ts'),'utf8'),ts.ScriptTarget.ES2022,true);
+  const declaration=source.statements.flatMap(statement=>ts.isVariableStatement(statement)?[...statement.declarationList.declarations]:[]).find(item=>ts.isIdentifier(item.name)&&item.name.text==='ENGINE_RUNTIME_DECLARATIONS');
+  if(!declaration?.initializer||!ts.isStringLiteral(declaration.initializer)||declaration.initializer.text!==declarations)throw Error('E_WORKER_SDK_STALE: runtime declaration snapshot; rebuild engine package');
+ }
  const compare=async(filename,expected)=>{
   const relative=path.relative(repository,filename).split(path.sep).join('/'),actual=await readFile(filename);
   if(!actual.equals(Buffer.from(expected)))throw Error('E_WORKER_SDK_STALE: '+relative+'; rebuild and freeze the shared SDK');
@@ -45,14 +69,18 @@ export async function proveWorkerSdkBuild(repository,{packages=WORKER_SDK_PACKAG
   }
  }
  if(canonical(await describeWorkerSdkSources(repository,packages))!==canonical(sources))throw Error('E_WORKER_SDK_SOURCE_DRIFT');
- return {schemaVersion:1,kind:'worker-sdk-source-build-proof',typescript:ts.version,packages:[...packages],sourceInputs:sources,sourceSnapshotHash:digest(canonical(sources)),outputs,outputSnapshotHash:digest(canonical(outputs))};
+ return {schemaVersion:1,kind:'worker-sdk-source-build-proof',typescript:ts.version,packages:[...packages],entrypoints,sourceInputs:sources,sourceSnapshotHash:digest(canonical(sources)),outputs,outputSnapshotHash:digest(canonical(outputs))};
 }
 export function assertWorkerSdkProof(proof){
  if(proof?.schemaVersion!==1||proof.kind!=='worker-sdk-source-build-proof'||canonical(proof.packages)!==canonical(WORKER_SDK_PACKAGES)||digest(canonical(proof.sourceInputs))!==proof.sourceSnapshotHash||digest(canonical(proof.outputs))!==proof.outputSnapshotHash||!Object.keys(proof.outputs??{}).length)throw Error('E_WORKER_SDK_PROOF');
- for(const directory of WORKER_SDK_PACKAGES)if(!proof.sourceInputs?.[directory+'/src/index.ts']||!proof.outputs?.[directory+'/dist/index.js'])throw Error('E_WORKER_SDK_PROOF_PACKAGE');
+ for(const directory of WORKER_SDK_PACKAGES){
+  const entries=proof.entrypoints?.[directory];
+  if(!proof.sourceInputs?.[directory+'/package.json']||!proof.sourceInputs?.[directory+'/tsconfig.json']||!Array.isArray(entries)||!entries.length||!entries.some(name=>name.endsWith('.js'))||entries.some(name=>typeof name!=='string'||!name.startsWith(directory+'/dist/')||name.includes('..')||name.includes('\\')||!proof.outputs?.[name]))throw Error('E_WORKER_SDK_PROOF_PACKAGE');
+ }
 }
 export async function assertWorkerSdkSources(repository,proof){
  assertWorkerSdkProof(proof);
+ if(canonical(await describeWorkerSdkEntrypoints(repository,proof.packages))!==canonical(proof.entrypoints))throw Error('E_WORKER_SDK_EXPORT_DRIFT');
  if(canonical(await describeWorkerSdkSources(repository,proof.packages))!==canonical(proof.sourceInputs))throw Error('E_WORKER_SDK_SOURCE_DRIFT');
 }
 export async function assertWorkerSdkBuildFrozen(repository,proof){

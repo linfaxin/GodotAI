@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import {build} from 'esbuild';
 import {fileURLToPath} from 'node:url';
+import {factsFromRuntimeSummary,sessionExitReason} from '@godot-js/engine/session-facts';
 
 // Execute the actual runtime/heartbeat with a deliberately slow native init.
 // Only browser I/O and the native loader are replaced; no timer races or GPU.
@@ -15,7 +16,7 @@ const replacements={
  'worker-xr.js':`export function createWorkerXRBridge(){return {active:false,dispose(){},snapshot(){return {};}};}`,
  'worker-browser.js':`export function installWorkerBrowserBridge(){return {dispose(){}};}`,
 };
-const code=(await build({stdin:{contents:'export {installWorkerRuntime} from "./src/worker-runtime.ts";export {prepareWorkerRunConfiguration} from "./src/worker-protocol.ts";',resolveDir:directory},bundle:true,write:false,format:'iife',globalName:'RuntimeUnderTest',platform:'browser',target:'es2022',plugins:[{name:'native-io',setup(builder){
+const code=(await build({stdin:{contents:'export {installWorkerRuntime} from "../../packages/engine/src/browser/dedicated/worker-runtime.ts";export {prepareWorkerRunConfiguration} from "../../packages/engine/src/browser/dedicated/worker-protocol.ts";export {isProjectData} from "../../packages/engine/src/browser/protocol.ts";',resolveDir:directory},bundle:true,write:false,format:'iife',globalName:'RuntimeUnderTest',platform:'browser',target:'es2022',plugins:[{name:'native-io',setup(builder){
  builder.onResolve({filter:/(verified-loader|worker-presentation|worker-dom|worker-audio|worker-xr|worker-browser)\.js$/},args=>({path:args.path.split('/').at(-1),namespace:'runtime-test'}));
  builder.onLoad({filter:/.*/,namespace:'runtime-test'},args=>({contents:replacements[args.path],loader:'js'}));
 }}]})).outputFiles[0].text;
@@ -92,7 +93,7 @@ test('slow native initialization cannot make heartbeat memory observation termin
   assert.equal(control.sent.some(message=>message.type==='worker-fatal'),false);
   const consumed=[];scope.__godotjsSetProjectCommand(raw=>{assert.equal(control.sent.filter(m=>m.type==='project-command-receipt').length,0);consumed.push(JSON.parse(raw));});
   const command=Object.assign(vm.runInContext('({})',context),boot,{type:'project-command',commandSequence:1,data:vm.runInContext('({type:"native-command",value:7})',context)});
-  control.onmessage({data:command});assert.deepEqual(consumed,[{type:'native-command',value:7}]);assert.equal(control.sent.filter(m=>m.type==='project-command-receipt').length,1);
+  control.onmessage({data:command});await flush();assert.deepEqual(consumed,[{type:'native-command',value:7}]);assert.equal(control.sent.filter(m=>m.type==='project-command-receipt').length,1);
   control.onmessage({data:command});assert.equal(consumed.length,1);assert.equal(control.sent.filter(m=>m.type==='project-command-receipt').length,1,'duplicate sequence never re-enters the consumer');
   const input=fields=>data.onmessage({data:Object.assign(vm.runInContext('({})',context),boot,fields)});
   input({type:'geometry',dataSequence:7,geometry:{width:2,height:1,dpr:1,epoch:1}});
@@ -101,4 +102,125 @@ test('slow native initialization cannot make heartbeat memory observation termin
  }finally{
   control.onmessage?.({data:Object.assign(vm.runInContext('({})',context),boot,{type:'stop'})});resolveInit();await flush();uninstall();
  }
+});
+
+async function hostRuntimeFixture({onStart}={}){
+ const listeners=new Map(),consoleErrors=[],events=[],tasks=[];
+ class Port{sent=[];onmessage=null;postMessage(value){this.sent.push(value);}start(){}}
+ class Scope{
+  addEventListener(name,callback){if(!listeners.has(name))listeners.set(name,new Set());listeners.get(name).add(callback);}
+  removeEventListener(name,callback){listeners.get(name)?.delete(callback);}
+  close(){this.closed=true;}
+ }
+ const scope=new Scope();scope.WorkerGlobalScope=Scope;let engine;
+ class Engine{
+  constructor(options){engine=this;this.options=options;this.config={getModuleConfig(){return {HEAPU8:new Uint8Array(64)};}};}
+  async preloadFile(){}
+  async init(){this.rtenv=this.config.getModuleConfig();scope.__godotjsRuntimeHost.beginNativeEpoch('test-native-epoch');}
+  async start(){await onStart?.(scope,this);}
+  requestQuit(){events.push('quit');scope.__godotjsRuntimeHost.endNativeEpoch('test-native-epoch');this.options.onExit(0);}
+ }
+ const context=vm.createContext({console:{log(){},warn(){},error:value=>consoleErrors.push(String(value))},crypto,MessagePort:Port,ArrayBuffer,Uint8Array,TextEncoder,AbortController,DOMException,queueMicrotask,
+  setInterval(callback){tasks.push(callback);return tasks.length;},clearInterval(){},__Engine:Engine});
+ vm.runInContext(code,context);const clone=value=>vm.runInContext('('+JSON.stringify(value)+')',context);
+ const prepared=await context.RuntimeUnderTest.prepareWorkerRunConfiguration(clone({}));
+ const control=new Port(),data=new Port();
+ const boot=Object.assign(clone({}),{protocolVersion:2,type:'worker-connect',runId:'host-runtime',revision:1,buildKey:'pack',generation:1,documentId:'doc',workerId:'worker',runConfigurationHash:prepared.hash,
+  configuration:prepared.configuration,release:{runtimeAbi:{protocolVersion:2,host:1,audio:1,presentation:1}},pack:new Uint8Array([1]),canvas:{},geometry:{width:1,height:1,dpr:1,epoch:0},controlPort:control,dataPort:data});
+ const uninstall=context.RuntimeUnderTest.installWorkerRuntime(scope);
+ const connect=[...listeners.get('message')][0];connect({data:boot});
+ const deadline=Date.now()+2000;while(!control.sent.some(m=>m.type==='worker-fatal'||(m.type==='phase'&&m.phase==='running'))){assert(Date.now()<deadline,JSON.stringify(control.sent));await flush();}
+ assert.equal(control.sent.some(m=>m.type==='worker-fatal'),false,JSON.stringify(control.sent));
+ assert(scope.__godotjsRuntimeHost,JSON.stringify({messages:control.sent,events,keys:Object.keys(scope)}));
+ return {scope,context,control,data,clone,events,consoleErrors,get engine(){return engine;},
+  heartbeat(){tasks[0]();return control.sent.filter(message=>message.type==='worker-heartbeat').at(-1);},
+  event(name,value){for(const listener of [...listeners.get(name)??[]])listener(value);},
+  command(sequence,value){control.onmessage({data:Object.assign(clone({}),boot,{type:'project-command',commandSequence:sequence,data:clone(value)})});},
+  async cleanup(){if(!scope.closed)control.onmessage?.({data:Object.assign(clone({}),boot,{type:'stop'})});await flush();uninstall();}};
+}
+
+test('default Worker installs a scoped RuntimeHost before the first project statement and drains queued commands once',async()=>{
+ let entry,received=[];
+ const f=await hostRuntimeFixture({onStart(scope){
+  assert.equal(scope.__godotjsRuntimeHost.apiVersion,1);entry=scope.__godotjsRuntimeHost.openEntry();entry.ready();
+ }});
+ try{
+  f.command(1,{value:1});await flush();assert.equal(f.control.sent.filter(m=>m.type==='project-command-receipt').length,0,'queued input is not consumed before a handler exists');
+  entry.host.bindProjectCommand(value=>received.push(value.value));assert.deepEqual(received,[],'registration never re-enters a native callback');
+  await flush();assert.deepEqual(received,[1]);assert.equal(f.control.sent.filter(m=>m.type==='project-command-receipt').length,1);
+  f.command(1,{value:99});await flush();assert.deepEqual(received,[1]);
+  assert.equal(entry.host.emitProjectEvent(f.clone({type:'host-roundtrip'})),true);assert(f.control.sent.some(m=>m.type==='project'&&m.data.type==='host-roundtrip'));
+  entry.close();entry.cleanupComplete();
+ }finally{await f.cleanup();}
+});
+
+test('a fatal is latched before a synchronous native zero and survives the terminal summary',async()=>{
+ const f=await hostRuntimeFixture();
+ try{
+  const host=f.scope.__godotjsRuntimeHost;
+  assert.equal(host.reportDiagnostic(f.clone({kind:'runtime',message:'fatal-on-native-stack'})),true);
+  assert.equal(host.failure.message,'fatal-on-native-stack');assert.equal(f.events.length,0,'requestQuit must wait for the safe checkpoint');
+  f.engine.requestQuit();await flush();
+  const terminal=f.control.sent.find(m=>m.type==='native-exit');assert.equal(terminal.code,0);assert.equal(terminal.runtimeSummary.failure.message,'fatal-on-native-stack');
+  assert.equal(f.control.sent.filter(m=>m.type==='worker-fatal').length,1);assert.equal(f.events.length,1,'deferred quit cannot re-enter an already-exited engine');
+ }finally{await f.cleanup();}
+});
+
+test('ordinary native error output is forwarded once and remains nonfatal after host installation',async()=>{
+ const f=await hostRuntimeFixture();try{
+  vm.runInContext('console.error("native error text")',f.context);
+  assert.equal(f.control.sent.filter(m=>m.type==='log'&&m.text==='native error text').length,1);
+  assert.equal(vm.runInContext('console.error.__godotjsConsoleForwarded',f.context),true);
+  assert.equal(f.control.sent.some(m=>m.type==='worker-fatal'),false);
+ }finally{await f.cleanup();}
+});
+
+test('Worker project admission uses the owned serialization without invoking project toJSON accessors',async()=>{
+ const f=await hostRuntimeFixture();try{
+  vm.runInContext('globalThis.serializerReads=0;Object.defineProperty(Object.prototype,"toJSON",{configurable:true,get(){serializerReads++;throw Error("project serializer ran");}})',f.context);
+  const value=f.clone({type:'safe-owned-event',items:['汉',1]});
+  assert.equal(f.scope.__godotjsRuntimeHost.emitProjectEvent(value),true);
+  assert.equal(vm.runInContext('serializerReads',f.context),0);
+  assert(f.control.sent.some(message=>message.type==='project'&&message.data.type==='safe-owned-event'));
+ }finally{vm.runInContext('delete Object.prototype.toJSON',f.context);await f.cleanup();}
+});
+
+test('large array events remain consumable and their receipts restore all project credits',async()=>{
+ const f=await hostRuntimeFixture();
+ try{
+  const binding=f.scope.__godotjsRuntimeHost,payload={type:'snapshot',ids:Array(25000).fill(0),padding:''};
+  payload.padding='x'.repeat(262144-new TextEncoder().encode(JSON.stringify(payload)).byteLength);
+  for(let index=0;index<4;index++)assert.equal(binding.emitProjectEvent(f.clone(payload)),true);
+  assert.equal(f.heartbeat().memory.projectChannel.bytes,1048576);
+  assert.equal(binding.emitProjectEvent(f.clone({type:'small-normal'})),false,'unconsumed events still enforce their byte budget');
+  const delivered=f.control.sent.filter(message=>message.type==='project');assert.equal(delivered.length,4);
+  for(const message of delivered){
+   assert.equal(f.context.RuntimeUnderTest.isProjectData(message.data),true,'the downstream validator must accept every admitted dense array');
+   assert.equal(message.data.ids.length,25000);
+   f.control.onmessage({data:f.clone({...message,type:'project-receipt',data:undefined})});
+  }
+  assert.equal(f.heartbeat().memory.projectChannel.pending,0);assert.equal(f.heartbeat().memory.projectChannel.bytes,0);
+  assert.equal(binding.emitProjectEvent(f.clone({type:'small-normal'})),true);
+  const normal=f.control.sent.filter(message=>message.type==='project').at(-1);
+  assert.equal(f.context.RuntimeUnderTest.isProjectData(normal.data),true);
+  f.control.onmessage({data:f.clone({...normal,type:'project-receipt',data:undefined})});
+  assert.equal(f.heartbeat().memory.projectChannel.pending,0);
+ }finally{await f.cleanup();}
+});
+
+
+test('a browser teardown error after the native seal is reported independently before native zero',async()=>{
+ const f=await hostRuntimeFixture();try{
+  const binding=f.scope.__godotjsRuntimeHost;binding.endNativeEpoch('test-native-epoch');
+  const sealed=JSON.stringify(binding.snapshotSummary());assert.equal(binding.snapshotSummary().sealed,true);
+  let prevented=0;f.event('error',{error:vm.runInContext('new Error("physical teardown failed")',f.context),message:'physical teardown failed',filename:'engine.js',lineno:17,colno:2,preventDefault(){prevented++;}});
+  const fatal=f.control.sent.find(message=>message.type==='worker-fatal');assert(fatal,'a sealed project source must not swallow the outer runtime error');
+  assert.equal(fatal.diagnostic.message,'physical teardown failed');assert.equal(fatal.diagnostic.filename,'engine.js');assert.equal(prevented,1);
+  assert.equal(binding.failure,undefined);assert.equal(JSON.stringify(binding.snapshotSummary()),sealed,'the previously sealed source summary stays immutable');
+  f.engine.requestQuit();await flush();
+  const terminal=f.control.sent.find(message=>message.type==='native-exit');assert.equal(terminal.code,0);assert.equal(terminal.runtimeSummary.failure,undefined);
+  const summary=JSON.parse(JSON.stringify(terminal.runtimeSummary));
+  const facts=factsFromRuntimeSummary(summary,{nativeExit:{code:terminal.code},hostCleanup:'complete',failure:{kind:'runtime',message:fatal.diagnostic.message}});
+  assert.equal(sessionExitReason(facts),'crashed');assert.equal(f.control.sent.filter(message=>message.type==='worker-fatal').length,1);
+ }finally{await f.cleanup();}
 });

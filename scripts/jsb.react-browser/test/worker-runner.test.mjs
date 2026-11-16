@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {WorkerPreviewRunner} from '../dist/worker-runner.js';
 import {WORKER_PROTOCOL} from '../dist/worker-protocol.js';
-import {boundedWorkerCleanup} from '../dist/worker-session.js';
+import {boundedWorkerCleanup,isWorkerEngineOutcome,isWorkerHostCleanupOutcome} from '../dist/worker-session.js';
+import {createSessionFacts} from '@godot-js/engine/session-facts';
 
 const asset=name=>({url:`http://preview.test/${name}`,sha256:'a'.repeat(64)});
 const release={releaseId:'worker-test',profile:'core-ui-v1',engineJs:asset('godot.js'),engineWasm:asset('godot.wasm'),
@@ -19,7 +20,15 @@ function fixture({pauseAt,frameLoad=true,connect=true,heartbeat=true,stopReply=c
   const frame={attributes:{},setAttribute(name,value){this.attributes[name]=value;},remove(){this.removed=true;},contentWindow:{
    postMessage(identity,origin,ports){
     assert.equal(origin,'http://preview.test');assert.equal(identity.editorOrigin,'http://editor.test');
-    const port=ports[0],host={identity,port,sequence:0,resumeEpoch:0,send(fields){port.postMessage({...identity,protocolVersion:WORKER_PROTOCOL,...fields});}};
+    const port=ports[0],host={identity,port,sequence:0,resumeEpoch:0,send(fields){
+     if(fields.type==='exit-report'&&!Object.hasOwn(fields,'sessionFacts')&&isWorkerEngineOutcome(fields.engineOutcome)&&isWorkerHostCleanupOutcome(fields.hostCleanup)){
+      const outcome=fields.engineOutcome;
+      fields={...fields,sessionFacts:createSessionFacts({runtimeSummary:'sealed',entryCleanup:'not-applicable',hostCleanup:fields.hostCleanup.status,forcedTerminationIssued:outcome.kind==='terminate-issued',
+       ...(outcome.kind==='native-exit'?{nativeExit:{code:outcome.code}}:{}),
+       ...(['startup-failed','runtime-failed','host-lost'].includes(outcome.kind)?{failure:{kind:'runtime',message:outcome.kind}}:{}),
+       ...(fields.diagnostic?{failure:{kind:'runtime',message:fields.diagnostic.message,...(fields.diagnostic.stack?{stack:fields.diagnostic.stack}:{})}}:{})})};
+     }
+     port.postMessage({...identity,protocolVersion:WORKER_PROTOCOL,...fields});}};
     hosts.push(host);port.unref?.();
     port.onmessage=event=>{
      const message=event.data;messages.push(message);
@@ -135,8 +144,8 @@ test('missing host Worker termination receipt is only forced frame disposal',asy
 test('only native zero plus complete host cleanup is clean',async t=>{
  for(const [outcome,cleanup,reason,code]of [
   [{kind:'native-exit',code:0},{status:'complete'},'clean-exit',0],
-  [{kind:'native-exit',code:0},{status:'failed'},'crashed',0],
-  [{kind:'native-exit',code:0},{status:'timed-out'},'crashed',0],
+  [{kind:'native-exit',code:0},{status:'failed'},'host-cleanup-failed',0],
+  [{kind:'native-exit',code:0},{status:'timed-out'},'host-cleanup-failed',0],
   [{kind:'native-exit',code:7},{status:'complete'},'crashed',7],
   [{kind:'terminate-issued'},{status:'complete'},'forced-worker-termination',undefined],
   [{kind:'startup-failed'},{status:'complete'},'crashed',undefined],
@@ -152,7 +161,7 @@ test('incomplete or malformed exit receipts cannot manufacture clean exit',async
  const f=fixture();
  try{
   await f.runner.run(artifact);
-  for(const receipt of [{engineOutcome:{kind:'native-exit',code:0}},
+  for(const receipt of [{...clean,sessionFacts:undefined},{...clean,sessionFacts:{schemaVersion:999}},{engineOutcome:{kind:'native-exit',code:0}},
    {hostCleanup:{status:'complete'}},{...clean,engineOutcome:{kind:'native-exit',code:Infinity}},
    {...clean,hostCleanup:{status:'unknown'}},{...clean,engineOutcome:{kind:'native-exit',code:0,unexpected:true}},
    {...clean,detail:{invalid:'must reject before slice'}}])f.host.send({type:'exit-report',...receipt});
@@ -168,7 +177,7 @@ test('native zero with stalled host cleanup settles without a clean exit and per
   const first=await f.runner.run(artifact);
   const result=await f.runner.run({...artifact,revision:'after-cleanup-timeout'});
   const report=f.events.find(event=>event.type==='exit').report;
-  assert.equal(report.runId,first.runId);assert.equal(report.reason,'crashed');assert.equal(report.code,0);
+  assert.equal(report.runId,first.runId);assert.equal(report.reason,'host-cleanup-failed');assert.equal(report.code,0);
   assert.equal(report.hostCleanup.status,'timed-out');assert.equal(f.frames[0].removed,true);
   assert.equal(result.revision,'after-cleanup-timeout');assert.equal(f.runner.state,'running');assert.equal(f.frames.length,2);
  }finally{await f.cleanup();}
@@ -255,7 +264,7 @@ test('old heartbeat epoch and duplicate sequence cannot replay liveness after re
   f.host.send({type:'visibility',visible:true,resumeEpoch:1});f.host.send({type:'worker-heartbeat',sequence:1,resumeEpoch:1});
   stale=setInterval(()=>{f.host.send({type:'worker-heartbeat',sequence:999,resumeEpoch:0});f.host.send({type:'worker-heartbeat',sequence:1,resumeEpoch:1});},5);
   await until(()=>f.runner.state==='exited');
-  assert.equal(f.events.find(event=>event.type==='exit').report.reason,'forced-worker-termination');
+  const report=f.events.find(event=>event.type==='exit').report;assert.equal(report.reason,'crashed');assert.equal(report.sessionFacts.forcedTerminationIssued,true);
   assert.match(f.messages.find(message=>message.type==='stop').detail,/heartbeat/i);
  }finally{clearInterval(stale);await f.cleanup();}
 });
@@ -299,4 +308,18 @@ test('startup project events are bounded and a fault cannot be reported as a cle
 test('runner resolves relative release against preview rather than editor before crossing MessagePort',async()=>{
  const relative=structuredClone(release);for(const key of ['engineJs','engineWasm','runtimeWorker','runtimeAudioWorklet'])relative[key].url='./'+key+'.js';const before=structuredClone(relative),f=fixture({release:relative});
  try{await f.runner.run(artifact);const sent=f.messages.find(m=>m.type==='run').release;for(const key of ['engineJs','engineWasm','runtimeWorker','runtimeAudioWorklet'])assert.equal(sent[key].url,'http://preview.test/'+key+'.js');assert.deepEqual(relative,before);}finally{await f.cleanup();}
+});
+
+test('a valid native zero with an unconfirmed runtime summary remains stopped without a false clean claim',async()=>{
+ const sessionFacts=createSessionFacts({nativeExit:{code:0},hostCleanup:'complete',runtimeSummary:'unconfirmed',entryCleanup:'unconfirmed'});
+ const f=fixture({stopReply:{...clean,sessionFacts}});
+ try{await f.runner.run(artifact);const report=await f.runner.stop();assert.equal(report.reason,'cleanup-unconfirmed');assert.equal(report.code,0);assert.equal(report.sessionFacts.runtimeSummary,'unconfirmed');}
+ finally{await f.cleanup();}
+});
+
+test('terminal facts retain a fatal independently of a projected native zero',async()=>{
+ const sessionFacts=createSessionFacts({nativeExit:{code:0},hostCleanup:'complete',runtimeSummary:'sealed',entryCleanup:'complete',failure:{kind:'runtime',message:'failure before native zero'}});
+ const f=fixture({stopReply:{...clean,sessionFacts}});
+ try{await f.runner.run(artifact);const report=await f.runner.stop();assert.equal(report.reason,'crashed');assert.equal(report.code,0);assert.equal(report.sessionFacts.failure.message,'failure before native zero');assert.equal(report.diagnostic.message,'failure before native zero');}
+ finally{await f.cleanup();}
 });

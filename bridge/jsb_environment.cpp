@@ -566,6 +566,12 @@ namespace jsb
         exec_async_calls();
         flags_ |= EF_PostDispose;
         EnvironmentStore::get_shared().remove(this);
+#if JSB_WITH_WEB
+        // Shared ScriptInstances may retain this Environment after disposal.
+        // Revoke entry cleanup now; physical Isolate release must still wait
+        // for those references and must not be forced by this observation hook.
+        jsbi_SealNativeEpoch(isolate_->rt());
+#endif
     }
 
     void Environment::update(uint64_t p_delta_msecs)

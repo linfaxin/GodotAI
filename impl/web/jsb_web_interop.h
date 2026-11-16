@@ -68,6 +68,8 @@ JSBROWSER_API void jsbi_ConfigureThread(int role, uintptr_t thread_id, uintptr_t
 // engine
 JSBROWSER_API jsb::impl::JSRuntime jsbi_NewEngine(void* opaque);
 JSBROWSER_API void jsbi_FreeEngine(jsb::impl::JSRuntime engine_id);
+// Retire execution observation without releasing retained native handles.
+JSBROWSER_API void jsbi_SealNativeEpoch(jsb::impl::JSRuntime engine_id);
 JSBROWSER_API void jsbi_FlushPendingWorkerMessages();
 JSBROWSER_API void jsbi_log(const char* ptr);
 JSBROWSER_API void jsbi_error(const char* ptr);

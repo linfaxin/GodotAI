@@ -26,7 +26,7 @@ export async function runWorkerAcceptanceMatrix({site,out,planOnly=false}={}){
  assertWorkerCandidate(manifest,release,await sitePayloads(site));
  const plan=workerAcceptancePlan(release.runtimeProfile);if(planOnly)return {status:'planned',profile:release.runtimeProfile,plan};
  await mkdir(out,{recursive:true});const prepared=await sealSiteAcceptance(site,out,{begin:true}),results=[];
- const {DEFAULT_WORKER_RUN_CONFIGURATION}=await import(pathToFileURL(path.join(root,'scripts/jsb.react-browser/dist/worker-protocol.js')).href);
+ const {DEFAULT_WORKER_RUN_CONFIGURATION}=await import(pathToFileURL(path.join(root,'packages/engine/dist/browser/dedicated/worker-protocol.js')).href);
  for(const presentationBackend of ['direct','bitmap'])await writeFile(path.join(out,'configuration.'+presentationBackend+'.json'),JSON.stringify({...DEFAULT_WORKER_RUN_CONFIGURATION,presentationBackend},null,2)+'\n');
  for(const item of plan){
   try{

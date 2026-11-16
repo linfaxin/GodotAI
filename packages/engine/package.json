@@ -48,6 +48,94 @@
     "./browser": {
       "types": "./dist/browser/index.d.ts",
       "import": "./dist/browser/index.js"
+    },
+    "./session-facts": {
+      "types": "./dist/session-facts.d.ts",
+      "import": "./dist/session-facts.js"
+    },
+    "./browser/dedicated/worker-audio-host": {
+      "types": "./dist/browser/dedicated/worker-audio-host.d.ts",
+      "import": "./dist/browser/dedicated/worker-audio-host.js"
+    },
+    "./browser/dedicated/worker-audio-protocol": {
+      "types": "./dist/browser/dedicated/worker-audio-protocol.d.ts",
+      "import": "./dist/browser/dedicated/worker-audio-protocol.js"
+    },
+    "./browser/dedicated/worker-audio-worklet": {
+      "types": "./dist/browser/dedicated/worker-audio-worklet.d.ts",
+      "import": "./dist/browser/dedicated/worker-audio-worklet.js"
+    },
+    "./browser/dedicated/worker-audio": {
+      "types": "./dist/browser/dedicated/worker-audio.d.ts",
+      "import": "./dist/browser/dedicated/worker-audio.js"
+    },
+    "./browser/dedicated/worker-benchmark": {
+      "types": "./dist/browser/dedicated/worker-benchmark.d.ts",
+      "import": "./dist/browser/dedicated/worker-benchmark.js"
+    },
+    "./browser/dedicated/worker-browser": {
+      "types": "./dist/browser/dedicated/worker-browser.d.ts",
+      "import": "./dist/browser/dedicated/worker-browser.js"
+    },
+    "./browser/dedicated/worker-dom-host": {
+      "types": "./dist/browser/dedicated/worker-dom-host.d.ts",
+      "import": "./dist/browser/dedicated/worker-dom-host.js"
+    },
+    "./browser/dedicated/worker-dom": {
+      "types": "./dist/browser/dedicated/worker-dom.d.ts",
+      "import": "./dist/browser/dedicated/worker-dom.js"
+    },
+    "./browser/dedicated/worker-drop": {
+      "types": "./dist/browser/dedicated/worker-drop.d.ts",
+      "import": "./dist/browser/dedicated/worker-drop.js"
+    },
+    "./browser/dedicated/worker-host-services": {
+      "types": "./dist/browser/dedicated/worker-host-services.d.ts",
+      "import": "./dist/browser/dedicated/worker-host-services.js"
+    },
+    "./browser/dedicated/worker-host": {
+      "types": "./dist/browser/dedicated/worker-host.d.ts",
+      "import": "./dist/browser/dedicated/worker-host.js"
+    },
+    "./browser/dedicated/worker-log": {
+      "types": "./dist/browser/dedicated/worker-log.d.ts",
+      "import": "./dist/browser/dedicated/worker-log.js"
+    },
+    "./browser/dedicated/worker-presentation": {
+      "types": "./dist/browser/dedicated/worker-presentation.d.ts",
+      "import": "./dist/browser/dedicated/worker-presentation.js"
+    },
+    "./browser/dedicated/worker-project-channel": {
+      "types": "./dist/browser/dedicated/worker-project-channel.d.ts",
+      "import": "./dist/browser/dedicated/worker-project-channel.js"
+    },
+    "./browser/dedicated/worker-protocol": {
+      "types": "./dist/browser/dedicated/worker-protocol.d.ts",
+      "import": "./dist/browser/dedicated/worker-protocol.js"
+    },
+    "./browser/dedicated/worker-runner": {
+      "types": "./dist/browser/dedicated/worker-runner.d.ts",
+      "import": "./dist/browser/dedicated/worker-runner.js"
+    },
+    "./browser/dedicated/worker-runtime": {
+      "types": "./dist/browser/dedicated/worker-runtime.d.ts",
+      "import": "./dist/browser/dedicated/worker-runtime.js"
+    },
+    "./browser/dedicated/worker-session": {
+      "types": "./dist/browser/dedicated/worker-session.d.ts",
+      "import": "./dist/browser/dedicated/worker-session.js"
+    },
+    "./browser/dedicated/worker-xr-host": {
+      "types": "./dist/browser/dedicated/worker-xr-host.d.ts",
+      "import": "./dist/browser/dedicated/worker-xr-host.js"
+    },
+    "./browser/dedicated/worker-xr-protocol": {
+      "types": "./dist/browser/dedicated/worker-xr-protocol.d.ts",
+      "import": "./dist/browser/dedicated/worker-xr-protocol.js"
+    },
+    "./browser/dedicated/worker-xr": {
+      "types": "./dist/browser/dedicated/worker-xr.d.ts",
+      "import": "./dist/browser/dedicated/worker-xr.js"
     }
   },
   "files": [

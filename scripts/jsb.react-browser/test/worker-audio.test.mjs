@@ -409,7 +409,9 @@ async function productionProcessor() {
  try {
   globalThis.AudioWorkletProcessor=class { constructor(){this.port=processor;} };
   globalThis.registerProcessor=(name,klass)=>classes.set(name,klass);
-  await import(`../dist/worker-audio-worklet.js?capture-regression=${++processorModuleSequence}`);
+  const source=new URL(import.meta.resolve('@godot-js/engine/browser/dedicated/worker-audio-worklet'));
+  source.searchParams.set('capture-regression',String(++processorModuleSequence));
+  await import(source.href);
   return {instance:new (classes.get('godot-worker-audio'))(),main};
  } finally {
   if(oldProcessor===undefined)delete globalThis.AudioWorkletProcessor;else globalThis.AudioWorkletProcessor=oldProcessor;

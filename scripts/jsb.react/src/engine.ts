@@ -34,6 +34,16 @@ export interface AdoptedNodeProps<N extends object = any> extends CommonNodeProp
   args?: never;
 }
 export interface EngineErrorInfo { kind:'uncaught'|'caught'|'recoverable'|'runtime'; componentStack?:string; stack?:string }
+/** Structural project services injected by the bootstrap. The renderer does not
+ * load the browser SDK or infer an entry from a process-wide global. */
+export interface EngineRuntimeHost {
+  readonly apiVersion: 1;
+  readonly sessionId: string;
+  readonly role: 'host'|'engine'|'script-worker';
+  reportDiagnostic(value:{kind:'caught'|'recoverable'|'uncaught'|'runtime';message:string;stack?:string;componentStack?:string}):boolean;
+  emitProjectEvent(value:Readonly<Record<string,unknown>>):boolean;
+  bindProjectCommand(handler:(data:Record<string,unknown>)=>void|Promise<void>):()=>void;
+}
 export interface EngineSessionOptions {
   /** Additional engine-owned stage check. A true result never overrides physics. */
   canCommit?: ()=>boolean;
@@ -52,6 +62,7 @@ export interface EngineRootOptions {
   onError?: (error: unknown, info:EngineErrorInfo)=>void;
   publicName?: (nativeName: string)=>string;
   className?: (nativeName: string)=>string;
+  runtimeHost?: EngineRuntimeHost;
 }
 export interface EngineStats {
   state: 'running'|'faulted'|'disposing'|'disposed';
@@ -296,6 +307,13 @@ export function useFrame(phase:'process'|'physics',callback:(delta:number)=>void
   // A suspended/abandoned render must not replace the active native callback.
   React.useLayoutEffect(()=>{latest.current=callback;});
   React.useLayoutEffect(()=>root.subscribeFrame(phase,delta=>latest.current(delta)),[root,phase]);
+}
+
+/** Returns the services of this root's entry, including an absent native host. */
+export function useRuntimeHost():EngineRuntimeHost|undefined {
+  const root=React.useContext(Context);
+  if(!root)throw error('E_ENGINE_CONTEXT','useRuntimeHost requires an engine root');
+  return root.options.runtimeHost;
 }
 
 export class EngineRoot {

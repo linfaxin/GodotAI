@@ -24,5 +24,5 @@ export function prepareLegacyBuildPlan(plan:BuildPlan,options:Omit<NonNullable<P
  if(!plan.compatibility)throw new EngineProjectBuildError([{code:'E_PROJECT_SCHEMA',message:'Expected an adapted legacy plan',line:0,column:0,category:'error'}]);
  const runtime=plan.compatibility.runtime;
  const startup=runtime==='react'&&plan.launch.kind==='script'?{source:reactBootstrap(emittedModulePath(plan.launch.module),plan.launch.export??'default',options.props??{})}:undefined;
- return prepareBuildPlan(plan,{...options,adapterIdentity:'@godot-js/react-build/legacy-startup-v1',compilerOptions:{...options.compilerOptions,...(startup?{startup}:{})},prepare:core=>prepareEngineProject({...core,runtime,...(options.props?{props:options.props}:{})})});
+ return prepareBuildPlan(plan,{...options,adapterIdentity:'@godot-js/react-build/legacy-startup-v3',compilerOptions:{...options.compilerOptions,...(startup?{startup}:{})},prepare:core=>prepareEngineProject({...core,runtime,...(options.props?{props:options.props}:{})})});
 }

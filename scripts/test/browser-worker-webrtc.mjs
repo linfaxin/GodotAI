@@ -8,7 +8,7 @@ import {createHash} from 'node:crypto';
 import {createRequire} from 'node:module';
 import {resolve,join} from 'node:path';
 const require=createRequire(new URL('../../apps/playground/package.json',import.meta.url)),{build}=require('esbuild'),{chromium}=require('playwright');
-const source=new URL('../jsb.react-browser/src/worker-browser.ts',import.meta.url).pathname;
+const source=new URL('../../packages/engine/src/browser/dedicated/worker-browser.ts',import.meta.url).pathname;
 const common={bundle:true,write:false,format:'iife',platform:'browser',target:'es2022'};
 const host=(await build({...common,stdin:{contents:`import {createWorkerBrowserHost} from ${JSON.stringify(source)};globalThis.makeHost=createWorkerBrowserHost;`,resolveDir:process.cwd(),sourcefile:'rtc-host.ts'}})).outputFiles[0].text;
 const worker=(await build({...common,stdin:{contents:`import {createWorkerBrowserClient} from ${JSON.stringify(source)};

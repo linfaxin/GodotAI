@@ -1,5 +1,6 @@
 /** This protocol routes untrusted preview telemetry; it does not attest user code. */
 import type {SessionCleanupReceipt} from './engine-session.js';
+import {isSessionFacts,type SessionFacts} from '../session-facts.js';
 export const PREVIEW_PROTOCOL = 1 as const;
 export type Revision = string | number;
 export interface RunIdentity {
@@ -22,7 +23,7 @@ export interface BrowserArtifact {
 }
 export type RunPhase = 'downloading' | 'preloading' | 'initializing' | 'starting' | 'waiting-ready' | 'running';
 export type RunnerState = 'idle' | 'loading-frame' | 'handshaking' | RunPhase | 'stopping' | 'exited';
-export type ExitReason = 'clean-exit' | 'forced-frame-disposal' | 'forced-worker-termination' | 'forced-session-termination' | 'crashed' | 'unresponsive';
+export type ExitReason = 'clean-exit' | 'forced-frame-disposal' | 'forced-worker-termination' | 'forced-session-termination' | 'crashed' | 'unresponsive' | 'host-cleanup-failed' | 'cleanup-unconfirmed';
 export interface PreviewDiagnostic {
   source: 'browser' | 'godotjs' | 'godot';
   message: string;
@@ -38,6 +39,7 @@ export interface ExitReport extends RunIdentity {
   detail?: string;
   diagnostic?: PreviewDiagnostic;
   cleanup?: SessionCleanupReceipt;
+  sessionFacts?: SessionFacts;
 }
 export interface PhaseDeadlines {
   'loading-frame': number;
@@ -68,6 +70,7 @@ export interface PreviewEnvelope extends RunIdentity {
   code?: number;
   diagnostic?: PreviewDiagnostic;
   cleanup?: SessionCleanupReceipt;
+  sessionFacts?: SessionFacts;
   sequence?: number;
   workerId?: number;
   role?: 'engine';
@@ -125,7 +128,7 @@ export function sameRun(a: RunIdentity, b: RunIdentity): boolean {
 export function isPreviewEnvelope(value: unknown): value is PreviewEnvelope {
   if (!isIdentity(value)) return false;
   const v = value as unknown as Record<string, unknown>;
-  if (v.protocolVersion !== PREVIEW_PROTOCOL) return false;
+  if (v.protocolVersion !== PREVIEW_PROTOCOL||(v.sessionFacts!==undefined&&!isSessionFacts(v.sessionFacts))) return false;
   switch (v.type) {
     case 'connected': case 'heartbeat': return true;
     case 'engine-progress': return v.role==='engine'&&Number.isSafeInteger(v.sequence)&&Number(v.sequence)>0&&Number.isSafeInteger(v.workerId)&&Number(v.workerId)>=0;
@@ -140,7 +143,7 @@ export function isPreviewEnvelope(value: unknown): value is PreviewEnvelope {
 }
 
 export function isSessionCleanupReceipt(value:unknown):value is SessionCleanupReceipt {
-  if(!isProjectData(value)||!['clean','forced'].includes(String(value.mode)))return false;
+  if(!isProjectData(value)||!['clean','forced'].includes(String(value.mode))||(value.status!==undefined&&!['complete','failed','timed-out'].includes(String(value.status))))return false;
   for(const key of ['workers','terminatedWorkers','audioContexts','closedAudioContexts','clearedTimers','removedListeners'])if(!Number.isSafeInteger(value[key])||Number(value[key])<0)return false;
   for(const key of ['mediaStreams','mediaTracks','stoppedMediaTracks','networkResources','closedNetworkResources','messagePorts','closedMessagePorts','glContexts','glLossRequested','lostGlContexts'])if(value[key]!==undefined&&(!Number.isSafeInteger(value[key])||Number(value[key])<0))return false;
   if(Number(value.stoppedMediaTracks??0)>Number(value.mediaTracks??0)||Number(value.closedNetworkResources??0)>Number(value.networkResources??0))return false;
@@ -149,13 +152,52 @@ export function isSessionCleanupReceipt(value:unknown):value is SessionCleanupRe
 }
 
 export function sessionCleanupComplete(value:SessionCleanupReceipt):boolean {
-  return value.errors.length===0&&value.terminatedWorkers===value.workers&&value.closedAudioContexts===value.audioContexts&&(value.stoppedMediaTracks??0)===(value.mediaTracks??0)&&(value.closedNetworkResources??0)===(value.networkResources??0)&&(value.closedMessagePorts??0)===(value.messagePorts??0)&&(value.lostGlContexts??0)===(value.glContexts??0);
+  return (value.status===undefined||value.status==='complete')&&value.errors.length===0&&value.terminatedWorkers===value.workers&&value.closedAudioContexts===value.audioContexts&&(value.stoppedMediaTracks??0)===(value.mediaTracks??0)&&(value.closedNetworkResources??0)===(value.networkResources??0)&&(value.closedMessagePorts??0)===(value.messagePorts??0)&&(value.lostGlContexts??0)===(value.glContexts??0);
 }
 
 /** Only plain bounded JSON crosses the optional project UI channel. */
 export function isProjectData(value:unknown):value is Record<string,unknown>{
  if(!value||typeof value!=='object'||Array.isArray(value))return false;
- try{let size=0;const inspect=(item:unknown,depth=0):boolean=>{if(depth>16)return false;if(item===null||typeof item==='boolean')return true;if(typeof item==='number')return Number.isFinite(item);if(typeof item==='string'){size+=item.length;return size<=262144;}if(!item||typeof item!=='object')return false;const proto=Object.getPrototypeOf(item);if(!Array.isArray(item)&&proto!==Object.prototype&&proto!==null)return false;return Object.entries(Object.getOwnPropertyDescriptors(item)).every(([key,d])=>{size+=key.length+8;return size<=262144&&'value'in d&&inspect(d.value,depth+1);});};return inspect(value);}catch{return false;}
+ try{
+  // Match createRuntimeBinding's JSON shape, traversal limits and serialized
+  // UTF-8 budget. Array indices are syntax, not extra object-key overhead.
+  let nodes=0,units=0,bytes=0;
+  const charge=(text:string):boolean=>{
+   for(const character of text){const point=character.codePointAt(0)!;bytes+=point<128?1:point<2048?2:point<65536?3:4;if(bytes>262144)return false;}
+   return true;
+  };
+  const inspect=(item:unknown,depth=0):boolean=>{
+   if(depth>16||++nodes>32768)return false;
+   if(item===null||typeof item==='boolean')return charge(String(item));
+   if(typeof item==='number')return Number.isFinite(item)&&charge(String(item));
+   if(typeof item==='string'){units+=item.length;return units<=262144&&charge(JSON.stringify(item));}
+   if(!item||typeof item!=='object')return false;
+   const array=Array.isArray(item),proto=Object.getPrototypeOf(item);
+   if(!array&&proto!==Object.prototype&&proto!==null)return false;
+   const descriptors=Object.getOwnPropertyDescriptors(item);
+   if(Object.getOwnPropertySymbols(item).length)return false;
+   if(array){
+    const length=descriptors.length;
+    if(!length||!('value'in length)||!Number.isSafeInteger(length.value)||length.value<0||length.value>32768)return false;
+    for(const key of Object.keys(descriptors))if(key!=='length'&&!(/^(0|[1-9][0-9]*)$/.test(key)&&Number(key)<length.value))return false;
+    if(!charge('['))return false;
+    for(let index=0;index<length.value;index++){
+     const descriptor=descriptors[String(index)];
+     if(!descriptor||!('value'in descriptor)||!descriptor.enumerable||(index>0&&!charge(','))||!inspect(descriptor.value,depth+1))return false;
+    }
+    return charge(']');
+   }
+   if(!charge('{'))return false;
+   let first=true;
+   for(const [key,descriptor]of Object.entries(descriptors)){
+    units+=key.length+8;
+    if(units>262144||!('value'in descriptor)||!descriptor.enumerable||(!first&&!charge(','))||!charge(JSON.stringify(key))||!charge(':')||!inspect(descriptor.value,depth+1))return false;
+    first=false;
+   }
+   return charge('}');
+  };
+  return inspect(value);
+ }catch{return false;}
 }
 
 export function normalizedOrigin(value: string): string {

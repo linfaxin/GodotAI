@@ -2,8 +2,10 @@ import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {createContext,runInContext} from 'node:vm';
 import test from 'node:test';
+import ts from 'typescript';
 
 const source=await readFile(new URL('../../js/jsbb.impl.js',import.meta.url),'utf8');
+const runtimeHostSource=ts.transpileModule(await readFile(new URL('../../../../packages/engine/src/runtime-host.ts',import.meta.url),'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
 
 // Browser-like asynchronous postMessage delivery across independent JS realms.
 // The host intentionally has no bridge engine or native callbacks.
@@ -158,4 +160,103 @@ test('native errors are forwarded once through a marked console wrapper and reta
   assert.deepEqual(logs,[['error','native error']]);
   scopeConsole.error=()=>{};context._jsbb_.error(456);
   assert.deepEqual(logs,[['error','native error'],['error','native error']]);
+});
+
+test('native epoch summary is sealed before unregister without uninstalling the realm host',()=>{
+  const events=[],epochs=[];
+  const host={
+    assignRole(role){events.push(['role',role]);},
+    beginNativeEpoch(epoch){epochs.push(epoch);events.push(['begin',epoch]);},
+    endNativeEpoch(epoch){events.push(['end',epoch]);},
+  };
+  const context=createContext({console,ENVIRONMENT_IS_PTHREAD:true,postMessage:packet=>events.push([packet.action,packet.runtime.epoch]),addEventListener(){},__godotjsRuntimeHost:host});
+  runInContext(source,context);
+  context._jsbb_.ConfigureThread(1,41,0);
+  const first=epochs[0];
+  context._jsbb_.ConfigureThread(1,41,0);
+  assert.equal(epochs.length,1,'idempotent ConfigureThread must not open another epoch');
+  context._jsbb_.engine={Release(){events.push(['release',first]);}};
+  context._jsbb_.FreeEngine(0);
+  assert.deepEqual(events.slice(-3),[['release',first],['end',first],['unregister',first]]);
+  assert.equal(context.__godotjsRuntimeHost,host,'freeing native state preserves the realm binding');
+  context._jsbb_.FreeEngine(0);
+  assert.equal(events.filter(event=>event[0]==='end').length,1,'repeated free must not reseal');
+  context._jsbb_.ConfigureThread(1,41,0);
+  assert.equal(epochs.length,2);assert.notEqual(epochs[1],first);
+});
+
+test('release failure is observed and the native epoch still seals and unregisters',()=>{
+  const events=[],failure=new Error('release failed');
+  const context=createContext({console,ENVIRONMENT_IS_PTHREAD:true,postMessage:packet=>events.push(packet.action),addEventListener(){},__godotjsRuntimeHost:{
+    assignRole(){},beginNativeEpoch(){},reportDiagnostic(value){events.push(value.kind);},endNativeEpoch(){events.push('sealed');},
+  }});
+  runInContext(source,context);context._jsbb_.ConfigureThread(2,42,41);
+  context._jsbb_.engine={Release(){throw failure;}};
+  assert.throws(()=>context._jsbb_.FreeEngine(0),error=>error===failure);
+  assert.equal(context._jsbb_.engine,undefined);
+  assert.deepEqual(events.slice(-3),['runtime','sealed','unregister']);
+});
+
+test('logical disposal rejects late cleanup without releasing retained native handles',async()=>{
+  const events=[],module={exports:{}};
+  const context=createContext({console,module,exports:module.exports,ENVIRONMENT_IS_PTHREAD:true,postMessage:packet=>events.push(packet.action),addEventListener(){}});
+  runInContext(runtimeHostSource,context);
+  context.__godotjsRuntimeHost=module.exports.createRuntimeBinding({sessionId:'logical-dispose',onSummary:summary=>events.push(summary)});
+  runInContext(source,context);context._jsbb_.ConfigureThread(1,41,0);
+  const host=context.__godotjsRuntimeHost,entry=host.openEntry();entry.close();host.drain();
+  let resolveStartup,cleanupCalls=0,releases=0;
+  const startup=new Promise(resolve=>{resolveStartup=resolve;});
+  const accepted=startup.then(cleanup=>{entry.ready(true);if(entry.canCleanup())cleanup();});
+  const engine={Release(){releases++;}};context._jsbb_.engine=engine;
+  context._jsbb_.SealNativeEpoch(0);
+  const summary=host.snapshotSummary();
+  assert.equal(summary.sealed,true);assert.equal(summary.entries[0].cleanup,'unconfirmed');
+  assert.equal(context._jsbb_.engine,engine);assert.equal(releases,0);
+  resolveStartup(()=>{cleanupCalls++;});await accepted;
+  assert.equal(cleanupCalls,0,'late startup must not re-enter disposed native bindings');
+  context._jsbb_.SealNativeEpoch(0);context._jsbb_.FreeEngine(0);context._jsbb_.FreeEngine(0);
+  assert.equal(releases,1,'eventual physical release still runs exactly once');
+  assert.equal(events.filter(event=>event==='unregister').length,1);
+  assert.equal(events.filter(event=>event?.sealed===true).length,1);
+  assert.equal(context.__godotjsRuntimeHost,host);
+});
+
+test('old logical seal and physical release preserve a newer route generation',()=>{
+  const n=network(),child=n.realm(42,'script-worker',41);n.drain();
+  child.context._jsbb_.SealNativeEpoch(0);n.drain();
+  child.context._jsbb_.ConfigureThread(2,42,41);n.drain();
+  const next=child.context._jsbb_._runtime;
+  child.context._jsbb_._pending_worker_messages.push({marker:'new-generation'});
+  child.context._jsbb_.FreeEngine(0);n.drain();
+  assert.equal(child.context._jsbb_._routes.get(42).epoch,next.epoch);
+  assert.equal(n.host._jsbb_._routes.get(42).epoch,next.epoch);
+  assert.equal(child.context._jsbb_._pending_worker_messages.length,1);
+});
+
+test('release failure after logical seal remains throwable without changing the sealed summary',()=>{
+  const diagnostics=[],module={exports:{}};
+  const context=createContext({console,module,exports:module.exports,ENVIRONMENT_IS_PTHREAD:true,postMessage(){},addEventListener(){}});
+  runInContext(runtimeHostSource,context);
+  const host=module.exports.createRuntimeBinding({sessionId:'post-seal-failure',onDiagnostic:value=>diagnostics.push(value)});
+  context.__godotjsRuntimeHost=host;
+  runInContext(source,context);context._jsbb_.ConfigureThread(1,41,0);
+  const failure=new Error('physical release failed');
+  context._jsbb_.engine={Release(){throw failure;}};
+  context._jsbb_.SealNativeEpoch(0);const sealed=host.snapshotSummary();
+  assert.throws(()=>context._jsbb_.FreeEngine(0),error=>error===failure);
+  assert.deepEqual(host.snapshotSummary(),sealed,'physical failure must not unseal or mutate observation');
+  assert.deepEqual(diagnostics,[],'the independent runtime owner must observe the rethrown release failure');
+  assert.equal(context._jsbb_.engine,undefined);
+});
+
+test('release failure observation never invokes application error getters',()=>{
+  let getterCalls=0;const diagnostics=[];
+  const failure={get message(){getterCalls++;throw Error('message getter');},get stack(){getterCalls++;throw Error('stack getter');}};
+  const context=createContext({console,ENVIRONMENT_IS_PTHREAD:true,postMessage(){},addEventListener(){},__godotjsRuntimeHost:{
+    assignRole(){},beginNativeEpoch(){},reportDiagnostic(value){diagnostics.push(value);},endNativeEpoch(){},
+  }});
+  runInContext(source,context);context._jsbb_.ConfigureThread(1,41,0);
+  context._jsbb_.engine={Release(){throw failure;}};
+  assert.throws(()=>context._jsbb_.FreeEngine(0),error=>error===failure);
+  assert.equal(getterCalls,0);assert.equal(diagnostics[0].message,'Native JavaScript bridge release failed');
 });

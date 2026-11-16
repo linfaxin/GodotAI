@@ -8,7 +8,7 @@ import {fileURLToPath} from 'node:url';
 
 const app=fileURLToPath(new URL('../',import.meta.url));
 const output=await build({entryPoints:[path.join(app,'src/engine-preview.ts')],bundle:true,write:false,format:'iife',globalName:'PreviewModule',platform:'browser',target:'es2022',plugins:[{name:'snapshot-boundaries',setup(builder){
- builder.onResolve({filter:/^@godot-js\/react-browser\/(?:worker-)?runner$/},()=>({path:'runner',namespace:'snapshot'}));
+ builder.onResolve({filter:/^@godot-js\/engine\/browser\/(?:dedicated\/worker-)?runner$/},()=>({path:'runner',namespace:'snapshot'}));
  builder.onResolve({filter:/^\.\/engine-assets$/},()=>({path:'assets',namespace:'snapshot'}));
  builder.onLoad({filter:/.*/,namespace:'snapshot'},({path})=>({loader:'js',contents:path==='runner'?`class Runner {constructor(options){globalThis.__runnerOptions=options;}subscribe(){}run(artifact){globalThis.__artifact=artifact;return Promise.resolve(artifact);}stop(){}dispose(){}}class Legacy extends Runner {constructor(options){super(options);globalThis.__backend='legacy';}}class Worker extends Runner {constructor(options){super(options);globalThis.__backend='worker';}}export{Legacy as PreviewRunner,Worker as WorkerPreviewRunner};`:`export async function loadEngineRelease(){return globalThis.__manifest;}export async function loadReleaseContext(){return globalThis.__context;}export async function loadRuntimeCandidate(){return globalThis.__candidate;}`}));
 }}]});

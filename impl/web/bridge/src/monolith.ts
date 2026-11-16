@@ -1448,6 +1448,8 @@ class _jsbb_ {
     static interop: InteropProtocol;
     static wasmop: WasmProtocol;
     static engine: jsbb_Engine | undefined;
+    private static _engine_runtime: WorkerRuntime | undefined;
+    private static _sealed_native_epoch: string | undefined;
     private static _i64: BigInt64Array;
     private static _pending_worker_messages: Array<QueuedWorkerMessage> = [];
     // Emscripten pthreads are a transport, not a runtime role. The page may
@@ -1549,6 +1551,7 @@ class _jsbb_ {
         // currectly, engine_id is hardcoded.
         // only one single engine is supported to new simultaneously
         this.engine = new jsbb_Engine(0, opaque);
+        this._engine_runtime = this._runtime;
         // Environment construction has not installed the script's handlers yet.
         // Drain only at the explicit native update checkpoint.
         return 0;
@@ -1560,10 +1563,51 @@ class _jsbb_ {
             return;
         }
         if (!this.engine) return;
-        this.engine.Release();
-        this.engine = undefined;
-        this._pending_worker_messages.length = 0;
-        this.publish_runtime("unregister");
+        try {
+            this.engine.Release();
+        } catch (error) {
+            // Preserve failure while the epoch is active. After logical seal,
+            // the rethrown exception belongs to the independent runtime owner;
+            // its frozen epoch summary must not be reopened.
+            const host = (globalThis as any).__godotjsRuntimeHost;
+            if (typeof host?.reportDiagnostic === "function") {
+                const ownText = (key: string, limit: number): string | undefined => {
+                    if (!error || (typeof error !== "object" && typeof error !== "function")) return;
+                    try {
+                        const descriptor = Object.getOwnPropertyDescriptor(error, key);
+                        return descriptor && "value" in descriptor && typeof descriptor.value === "string" ? descriptor.value.slice(0, limit) : undefined;
+                    } catch { return; }
+                };
+                host.reportDiagnostic({ kind: "runtime", message: ownText("message", 4096) ?? "Native JavaScript bridge release failed", stack: ownText("stack", 32768) });
+            }
+            throw error;
+        } finally {
+            try {
+                // Physical destruction can follow logical Environment disposal.
+                // Keep the fallback for construction failures and older callers.
+                this.SealNativeEpoch(engine_id);
+            } finally {
+                this.engine = undefined;
+                this._engine_runtime = undefined;
+            }
+        }
+    }
+
+    static SealNativeEpoch(engine_id: EngineID): void {
+        if (engine_id !== 0 || !this.engine) return;
+        const runtime = this._engine_runtime ??= this._runtime;
+        if (this._sealed_native_epoch === runtime.epoch) return;
+        this._sealed_native_epoch = runtime.epoch;
+        if (this._runtime.epoch === runtime.epoch) this._pending_worker_messages.length = 0;
+        try {
+            const host = (globalThis as any).__godotjsRuntimeHost;
+            // Revoke entry cleanup and freeze observation at logical disposal.
+            // Retained native handles and the realm binding remain alive until
+            // their normal release; sealing does not run application code.
+            if (typeof host?.endNativeEpoch === "function") host.endNativeEpoch(runtime.epoch);
+        } finally {
+            this.publish_runtime("unregister", runtime);
+        }
     }
 
     static GetEngine(engine_id: EngineID) {
@@ -1964,15 +2008,16 @@ class _jsbb_ {
         this._pending_worker_messages.length = 0;
         const host = (globalThis as any).__godotjsRuntimeHost;
         if (typeof host?.assignRole === "function") host.assignRole(name);
+        if (name !== "host" && typeof host?.beginNativeEpoch === "function") host.beginNativeEpoch(this._runtime.epoch);
         this.install_pthread_worker_listener_hook();
         this.publish_runtime("register");
     }
 
-    private static publish_runtime(action: "register" | "unregister"): void {
-        const message: WorkerControl = { __jsbWorkerControl: true, version: 1, action, runtime: this._runtime };
+    private static publish_runtime(action: "register" | "unregister", runtime = this._runtime): void {
+        const message: WorkerControl = { __jsbWorkerControl: true, version: 1, action, runtime };
         if (jsbb_is_pthread) globalThis.postMessage(message);
         else this.accept_worker_control(message);
-        if (action === "unregister") this._routes.delete(this._runtime.thread);
+        if (action === "unregister" && this._routes.get(runtime.thread)?.epoch === runtime.epoch) this._routes.delete(runtime.thread);
     }
 
     private static accept_worker_control(message: WorkerControl, worker?: EmscriptenPThreadWorker): void {

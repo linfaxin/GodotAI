@@ -3,6 +3,9 @@ import { DEFAULT_DEADLINES, PREVIEW_PROTOCOL, RUN_PHASES, isPreviewEnvelope, isP
 import { validateRelease, type VerifiedRelease } from './verified-loader.js';
 import type {SessionCleanupReceipt} from './engine-session.js';
 import {assertArtifactReceipt} from '../identities.js';
+import {sessionExitReason,type SessionFacts} from '../session-facts.js';
+
+const MAX_PROJECT_EVENTS=64,MAX_PROJECT_BYTES=1048576;
 
 export interface PreviewRunnerOptions {
   container: HTMLElement;
@@ -35,6 +38,9 @@ interface Session {
   exitReport?: ExitReport;
   logCount: number;
   logBytes: number;
+  projectQueue: Array<{data:Record<string,unknown>;bytes:number}>;
+  projectBytes: number;
+  projectDraining: boolean;
 }
 
 /** A fresh host context per run. Worker executions must provide engine progress
@@ -67,6 +73,18 @@ export class PreviewRunner {
   private get workerExecution():boolean {return !!this.options.release.execution&&this.options.release.execution.executionModel!=='window';}
   subscribe(listener: (event: RunnerEvent) => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
   private emit(event: RunnerEvent): void { for (const listener of [...this.listeners]) { try { listener(event); } catch { /* UI listeners cannot break disposal. */ } } }
+  private clearProjectEvents(session:Session):void {session.projectQueue.length=0;session.projectBytes=0;}
+  private drainProjectEvents(session:Session):void {
+    if(session.projectDraining||session.forced||!this.current(session,'running'))return;
+    const epoch=session.transitionEpoch;
+    session.projectDraining=true;
+    try{
+      while(!session.forced&&this.current(session,'running',epoch)&&session.projectQueue.length){
+        const item=session.projectQueue.shift()!;session.projectBytes-=item.bytes;
+        this.emit({type:'project',...session.identity,data:item.data});
+      }
+    }finally{session.projectDraining=false;}
+  }
   private current(session: Session, state = session.state, epoch = session.transitionEpoch): boolean {
     return this.active === session && !session.settled && session.state === state && session.transitionEpoch === epoch;
   }
@@ -93,17 +111,20 @@ export class PreviewRunner {
   }
   private forceStop(session:Session,reason:ExitReport['reason'],detail:string):void {
     if(!this.current(session)||session.forced)return;
+    this.clearProjectEvents(session);
     clearTimeout(session.phaseTimer);clearInterval(session.heartbeatTimer);
     session.forced={reason,detail};
     try{session.port.postMessage({protocolVersion:PREVIEW_PROTOCOL,type:'force-stop',...session.identity});}
     catch{this.finish(session,'unresponsive',undefined,detail+' Host channel unavailable; cleanup unconfirmed.');return;}
     session.phaseTimer=setTimeout(()=>{if(this.current(session))this.finish(session,'unresponsive',undefined,detail+' Whole-session cleanup was not acknowledged; host frame removed.');},Math.min(1000,this.deadlines.stopping));
   }
-  private finish(session: Session, reason: ExitReport['reason'], code?: number, detail?: string, diagnostic?: PreviewDiagnostic,cleanup?:SessionCleanupReceipt): ExitReport {
+  private finish(session: Session, reason: ExitReport['reason'], code?: number, detail?: string, diagnostic?: PreviewDiagnostic,cleanup?:SessionCleanupReceipt,sessionFacts?:SessionFacts): ExitReport {
     if (session.exitReport) return session.exitReport;
-    const report: ExitReport = { ...session.identity, reason, ...(code === undefined ? {} : { code }), ...(detail ? { detail: detail.slice(0, 4096) } : {}), ...(diagnostic ? { diagnostic } : {}),...(cleanup?{cleanup}:{}) };
+    if(sessionFacts){reason=sessionExitReason(sessionFacts);code=code??sessionFacts.nativeExit?.code;if(!diagnostic&&sessionFacts.failure)diagnostic={source:'godotjs',...sessionFacts.failure};}
+    const report: ExitReport = { ...session.identity, reason, ...(code === undefined ? {} : { code }), ...(detail ? { detail: detail.slice(0, 4096) } : {}), ...(diagnostic ? { diagnostic } : {}),...(cleanup?{cleanup}:{}),...(sessionFacts?{sessionFacts}:{}) };
     session.exitReport = report;
     session.settled = true;
+    this.clearProjectEvents(session);
     ++session.transitionEpoch;
     clearTimeout(session.phaseTimer);
     clearInterval(session.heartbeatTimer);
@@ -162,7 +183,7 @@ export class PreviewRunner {
     void runPromise.catch(() => {});
     const exitPromise = new Promise<ExitReport>(resolve => { resolveExit = resolve; });
     const session: Session = { identity, frame, port: channel.port1, peer: channel.port2, state: 'loading-frame', transitionEpoch: 0, lastHeartbeat: Date.now(),lastEngineProgress:0,progress:new Map(),
-      runPromise, resolveRun, rejectRun, exitPromise, resolveExit, settled: false, logCount: 0, logBytes: 0 };
+      runPromise, resolveRun, rejectRun, exitPromise, resolveExit, settled: false, logCount: 0, logBytes: 0,projectQueue:[],projectBytes:0,projectDraining:false };
     this.active = session;
     channel.port1.onmessage = event => {
       if (this.active !== session || session.settled || !isPreviewEnvelope(event.data) || !sameRun(event.data, identity)) return;
@@ -176,7 +197,7 @@ export class PreviewRunner {
       if(message.type==='terminated'){
         const intent=session.forced;
         const complete=sessionCleanupComplete(message.cleanup!);
-        this.finish(session,complete?(intent?.reason??'forced-session-termination'):'unresponsive',undefined,complete?(intent?.detail??'Host terminated the engine session.'):'Whole-session cleanup reported incomplete resources.',undefined,message.cleanup);return;
+        this.finish(session,complete?(intent?.reason??'forced-session-termination'):'unresponsive',undefined,complete?(intent?.detail??'Host terminated the engine session.'):'Whole-session cleanup reported incomplete resources.',undefined,message.cleanup,message.sessionFacts);return;
       }
       if (message.type === 'connected' && session.state === 'handshaking') {
         session.lastHeartbeat = Date.now();
@@ -203,17 +224,26 @@ export class PreviewRunner {
             }
           }, Math.max(10, Math.min(500, this.deadlines.heartbeat / 2)));
           session.resolveRun({ ...identity, state: 'running', releaseId: this.options.release.releaseId });
+          this.drainProjectEvents(session);
         }
       } else if (message.type === 'log') {
         if (++session.logCount > 1000 || (session.logBytes += message.text!.length) > 256_000) return;
         this.emit({ type: 'log', ...identity, level: message.level!, text: message.text!, untrusted: true });
-      } else if(message.type==='project'&&session.state==='running'){
-        this.emit({type:'project',...identity,data:message.data!});
-      } else if (message.type === 'fatal') this.finish(session, 'crashed', undefined, message.text, message.diagnostic,message.cleanup);
+      } else if(message.type==='project'&&!session.forced&&RUN_PHASES.includes(session.state as typeof RUN_PHASES[number])){
+        const data=message.data!;
+        let bytes:number;
+        try{bytes=new TextEncoder().encode(JSON.stringify(data)).byteLength;}
+        catch{this.forceStop(session,'crashed','Project event could not be queued.');return;}
+        if(session.projectQueue.length>=MAX_PROJECT_EVENTS||session.projectBytes+bytes>MAX_PROJECT_BYTES){
+          this.forceStop(session,'crashed','Startup project event budget exceeded.');return;
+        }
+        session.projectQueue.push({data,bytes});session.projectBytes+=bytes;
+        this.drainProjectEvents(session);
+      } else if (message.type === 'fatal') this.finish(session, 'crashed', undefined, message.text, message.diagnostic,message.cleanup,message.sessionFacts);
       else if (message.type === 'exited') {
         const cleanup=message.cleanup;
         const complete=!cleanup||sessionCleanupComplete(cleanup);
-        this.finish(session,message.code===0&&complete?'clean-exit':'crashed',message.code,complete?undefined:'Engine exited but host cleanup was incomplete.',undefined,cleanup);
+        this.finish(session,message.code===0&&complete?'clean-exit':'crashed',message.code,complete?undefined:'Engine exited but host cleanup was incomplete.',undefined,cleanup,message.sessionFacts);
       }
     };
     channel.port1.start();
@@ -238,6 +268,7 @@ export class PreviewRunner {
     if (!session) return Promise.resolve(undefined);
     if (session.state !== 'stopping'&&!session.forced) {
       const priorState = session.state;
+      this.clearProjectEvents(session);
       if (!this.transition(session, 'stopping')) return session.exitPromise;
       if (priorState === 'loading-frame' || priorState === 'handshaking') {
         this.finish(session, 'forced-frame-disposal', undefined, 'Cancelled before engine startup.');

@@ -1,5 +1,5 @@
 import * as React from 'react';
-import {EngineNode,useFrame,type NativeConstructor} from '@godot-js/react/engine';
+import {EngineNode,useFrame,useRuntimeHost,type EngineRuntimeHost,type NativeConstructor} from '@godot-js/react/engine';
 declare const require:(name:string)=>any;
 const G=require('godot');
 export interface PointerAction {x:number;y:number;button:number}
@@ -56,12 +56,13 @@ export function forwardDemoInput(event:any){
   input.pointer={x:event.position.x,y:event.position.y};if(kind==='InputEventMouseButton'){const button=Number(event.button_index);if(button===1)input.down=event.pressed;if(button===4||button===5){if(event.pressed)input.wheel+=button===4?-1:1;}else{const list=event.pressed?input.clicks:input.releases;if(list.length<32)list.push({...input.pointer,button});}}
  }
 }
-function transport(){
+function transport(host:EngineRuntimeHost|undefined){
  if(!G.OS.has_feature('web'))return undefined;
- const host=(globalThis as any).__godotjsRuntimeHost;
+ // Input timing is product instrumentation, independent of project services.
+ const nativeInput=(event:string,code:string)=>G.JavaScriptBridge.get_interface('window').call('__godotjsBenchmarkInput',event,code);
  if(host&&typeof host.bindProjectCommand==='function')return {
-  send(value:unknown){(host.emitProjectEvent??host.projectEvent).call(host,value);},
-  listen(callback:(value:any)=>void){host.bindProjectCommand((raw:string)=>{if(typeof raw==='string'&&raw.length<=262144)callback(JSON.parse(raw));});return()=>host.bindProjectCommand(null);},
+  send(value:Record<string,unknown>){host.emitProjectEvent(value);},nativeInput,
+  listen(callback:(value:any)=>void){return host.bindProjectCommand(callback);},
  };
  const window=G.JavaScriptBridge.get_interface('window');
  return {send(value:unknown){window.call('__godotjsProjectEvent',JSON.stringify(value));},nativeInput(event:string,code:string){window.call('__godotjsBenchmarkInput',event,code);},listen(callback:(value:any)=>void){const native=G.JavaScriptBridge.create_callback(G.Callable.create((args:any)=>{const raw=args.get(0);if(typeof raw==='string'&&raw.length<=262144)callback(JSON.parse(raw));}));window.call('__godotjsSetProjectCommand',native);return ()=>{if(native)window.call('__godotjsSetProjectCommand',null);};}};
@@ -69,10 +70,10 @@ function transport(){
 export function withDemo(Component:React.ComponentType):React.ComponentType<{controls?:Record<string,number>}>{
  return function PlaygroundDemo({controls:initial={}}){
   const [controls,setControls]=React.useState(initial),state=React.useRef<{input:InputState;stats:Record<string,unknown>;frames:number;elapsed:number;sounds:string[]}>({input:emptyInput(),stats:{},frames:0,elapsed:0,sounds:[]}).current;
-  const channel=React.useMemo(transport,[]),players=React.useRef<Record<string,any>>({}),data=resources();
+  const host=useRuntimeHost(),channel=React.useMemo(()=>transport(host),[host]),players=React.useRef<Record<string,any>>({}),data=resources();
   activeInput=state.input;
   const inputCtor=React.useMemo(()=>{G.ResourceLoader.load('res://.playground/demo-input.ts');return require('res://.godot/GodotJS/.playground/demo-input.js').default;},[]);
-  React.useEffect(()=>{const unsubscribe=channel?.listen(command=>{if(command.type==='controls')setControls(command.controls);else if(command.type==='action'&&typeof command.action==='string')state.input.requests.add(command.action);else if(command.type==='import-data')state.input.imported=command.data;else if(command.type==='clear-input')clearDemoInput();else if(command.type==='benchmark-input'&&command.enabled===true){benchmarkNativeInput=(event,code)=>channel?.nativeInput?.(event,code);channel?.send({type:'benchmark-input-ready'});}});return()=>{unsubscribe?.();benchmarkNativeInput=undefined;if(activeInput===state.input)activeInput=undefined;};},[]);
+  React.useEffect(()=>{const unsubscribe=channel?.listen(command=>{if(command.type==='controls')setControls(command.controls);else if(command.type==='action'&&typeof command.action==='string')state.input.requests.add(command.action);else if(command.type==='import-data')state.input.imported=command.data;else if(command.type==='clear-input')clearDemoInput();else if(command.type==='benchmark-input'&&command.enabled===true){benchmarkNativeInput=(event,code)=>channel?.nativeInput?.(event,code);channel?.send({type:'benchmark-input-ready'});}});return()=>{unsubscribe?.();benchmarkNativeInput=undefined;if(activeInput===state.input)activeInput=undefined;};},[channel]);
   useFrame('process',delta=>{state.frames++;state.elapsed+=delta;for(const name of state.sounds.splice(0))players.current[name]?.play();if(state.elapsed>=.1){channel?.send({type:'stats',state:'running',frames:state.frames,fps:Math.round(1/Math.max(delta,.001)),stats:state.stats});state.elapsed=0;}});
   const services:DemoServices={controls,input:state.input,models:data.models,stats:stats=>{state.stats=stats;},sound:name=>{if(state.sounds.length<16)state.sounds.push(name);},exportJSON:(name,value)=>channel?.send({type:'export-data',name,data:value})};
   return <Services.Provider value={services}><EngineNode ctor={inputCtor}/><Component/>{(['jump','coin','land'] as const).map(name=><DemoSound key={name} name={name} reference={players.current}/>)}</Services.Provider>;
