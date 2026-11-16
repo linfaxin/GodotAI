@@ -5,6 +5,7 @@ import {assertCompiledRelease,nativeAudioEnabled,type ReleaseContext} from './sr
 import {verifyPreviewReleaseContext} from './src/preview-release-context';
 import {suppressBrowserSave} from './src/browser-shortcuts';
 import {assertArtifactReceipt} from '@godot-js/engine/identities';
+import {createSessionFacts,type SessionFacts} from '@godot-js/engine/session-facts';
 suppressBrowserSave(window);
 
 const configuredOrigin=new URL(location.href).searchParams.get('editorOrigin');
@@ -21,7 +22,8 @@ function startSession(identity:RunIdentity,port:MessagePort):void {
  let engine:GodotInstance|undefined,loaded:LoadedEngine|undefined,runtime:BrowserEngineSession|undefined;
  let started=false,exited=false,cleaned=false,quitRequested=false,seenEngineProgress=false;
  let cleanupPromise:Promise<SessionCleanupReceipt>|undefined;
- let projectCommand:((json:string)=>void)|undefined;
+ let finalizing=false,forcedTerminationIssued=false;
+ let failure:ReturnType<typeof previewDiagnostic>|undefined,nativeExit:{code:number}|undefined;
  let readyResolve:(()=>void)|undefined,readyReject:((reason:unknown)=>void)|undefined;
  const ready=new Promise<void>((resolve,reject)=>{readyResolve=resolve;readyReject=reject;});void ready.catch(()=>{});
  const aborter=new AbortController(),globals=globalThis as any;
@@ -29,7 +31,7 @@ function startSession(identity:RunIdentity,port:MessagePort):void {
  const post=(data:object)=>{try{port.postMessage({...identity,protocolVersion:PREVIEW_PROTOCOL,...data});}catch{/* The parent may already have retired this session. */}};
  const terminal=(data:object)=>{post(data);port.close();};
  const send=(data:object)=>{if(!exited)post(data);};
- const phase=(value:RunPhase)=>{if(!aborter.signal.aborted)send({type:'phase',phase:value});};
+ const phase=(value:RunPhase)=>{if(!aborter.signal.aborted&&!finalizing)send({type:'phase',phase:value});};
  const check=()=>{if(aborter.signal.aborted)throw aborter.signal.reason;};
  let logs=0,logBytes=0;
  const text=(args:unknown[])=>args.slice(0,20).map(value=>typeof value==='string'?value.slice(0,4096):value===null||['undefined','number','boolean','bigint'].includes(typeof value)?String(value):'[object]').join(' ').slice(0,4096);
@@ -38,39 +40,68 @@ function startSession(identity:RunIdentity,port:MessagePort):void {
  for(const level of ['log','warn','error'] as const)console[level]=(...args:unknown[])=>{originalConsole[level](...args);log(level,args);};
  const heartbeat=setInterval(()=>send({type:'heartbeat'}),250);
  const projectEvent=(raw:unknown)=>{if(exited||cleaned)return;try{const data=typeof raw==='string'?JSON.parse(raw):raw;if(isProjectData(data))send({type:'project',data});}catch{}};
- const bindProject=(callback:unknown)=>{projectCommand=typeof callback==='function'?callback as (json:string)=>void:undefined;};
- globals.__godotjsProjectEvent=projectEvent;globals.__godotjsSetProjectCommand=bindProject;
+ globals.__godotjsProjectEvent=(raw:unknown)=>runtime?.legacyProjectEvent(raw)??false;
+ globals.__godotjsSetProjectCommand=(callback:unknown)=>runtime?.bindLegacyProjectCommand(typeof callback==='function'?callback as (json:string)=>void:null);
  const cleanup=(mode:'clean'|'forced'):Promise<SessionCleanupReceipt>=>{
   if(cleanupPromise)return cleanupPromise;
   cleaned=true;clearInterval(heartbeat);port.onmessage=null;
   removeEventListener('error',onBrowserError);removeEventListener('unhandledrejection',onRejectedPromise);removeEventListener('blur',onBlur);
   for(const level of ['log','warn','error'] as const)console[level]=originalConsole[level];
   if(globals.__godotjsReportReactError===onReactError)delete globals.__godotjsReportReactError;
-  if(globals.__godotjsProjectEvent===projectEvent)delete globals.__godotjsProjectEvent;
-  if(globals.__godotjsSetProjectCommand===bindProject)delete globals.__godotjsSetProjectCommand;
-  projectCommand=undefined;
+  delete globals.__godotjsProjectEvent;delete globals.__godotjsSetProjectCommand;
   const owned=runtime;runtime=undefined;
   const empty:SessionCleanupReceipt={mode,workers:0,terminatedWorkers:0,audioContexts:0,closedAudioContexts:0,clearedTimers:0,removedListeners:0,errors:[]};
-  cleanupPromise=(owned?owned.dispose(mode):Promise.resolve(empty)).then(receipt=>{try{loaded?.dispose();}catch(error){if(receipt.errors.length<64)receipt.errors.push(previewDiagnostic(error).message);}loaded=undefined;return receipt;});
+  cleanupPromise=(owned?owned.dispose(mode):Promise.resolve(empty)).then(receipt=>{
+   try{loaded?.dispose();}catch(error){if(receipt.errors.length<64)receipt.errors.push(previewDiagnostic(error).message);}
+   loaded=undefined;
+   // Loader resources belong to the same host cleanup receipt. An earlier
+   // successful pool/audio cleanup cannot conceal their disposal failure.
+   if(receipt.errors.length&&receipt.status!=='timed-out')receipt.status='failed';
+   return receipt;
+  });
   return cleanupPromise;
  };
  const requestQuit=()=>{if(engine&&!quitRequested){quitRequested=true;engine.requestQuit();}};
- const fatal=(error:unknown,location?:{message?:string;filename?:string;line?:number;column?:number},source:'browser'|'godotjs'='browser')=>{
+ const finishTerminal=async()=>{
   if(exited||cleaned)return;
-  const diagnostic=previewDiagnostic(error,location);diagnostic.source=source;
-  exited=true;aborter.abort(new DOMException('Preview failed','AbortError'));
-  // A fault does not call back into a potentially stuck application pthread.
-  if(runtime?.executionModel==='window')try{requestQuit();}catch{/* Legacy Window runs have no application pthread to stop. */}
-  void cleanup('forced').then(receipt=>terminal({type:'fatal',text:diagnostic.message,diagnostic,cleanup:receipt}));
+  const owned=runtime;
+  const observed=owned&&(owned.executionModel!=='window'||owned.hasRuntimeObservation);
+  if(observed&&!forcedTerminationIssued)await owned.waitForRuntimeSummary();
+  const failureFact=failure?{kind:'runtime' as const,message:failure.message,...(failure.stack?{stack:failure.stack}:{})}:undefined;
+  const facts=observed?owned.sessionFacts({...(nativeExit?{nativeExit}:{}),...(failureFact?{failure:failureFact}:{}),forcedTerminationIssued}):undefined;
+  if(!failure&&facts?.failure)failure={source:'godotjs',...facts.failure};
+  const receipt=await cleanup(failure||forcedTerminationIssued?'forced':'clean');
+  const sessionFacts:SessionFacts|undefined=facts?createSessionFacts({...facts,hostCleanup:receipt.status??(receipt.errors.length?'failed':'complete')}):undefined;
+  exited=true;
+  if(failure)terminal({type:'fatal',text:failure.message,diagnostic:failure,cleanup:receipt,...(sessionFacts?{sessionFacts}:{})});
+  else if(forcedTerminationIssued)terminal({type:'terminated',cleanup:receipt,...(sessionFacts?{sessionFacts}:{})});
+  else terminal({type:'exited',code:nativeExit?.code??0,cleanup:receipt,...(sessionFacts?{sessionFacts}:{})});
+ };
+ const scheduleTerminal=()=>{
+  if(finalizing)return;finalizing=true;
+  void Promise.resolve().then(async()=>{
+   // Diagnostics are already latched. Defer only callbacks into the native realm.
+   if(failure&&runtime?.executionModel==='window')try{requestQuit();}catch{}
+   await finishTerminal();
+  });
+ };
+ const fatal=(error:unknown,location?:{message?:string;filename?:string;line?:number;column?:number},source:'browser'|'godotjs'='browser')=>{
+  if(exited||cleaned||failure)return;
+  failure=previewDiagnostic(error,location);failure.source=source;
+  runtime?.beginDrain();
+  // No native-exit arriving on another transport can erase this first failure.
+  if(runtime?.executionModel!=='window')forcedTerminationIssued=!nativeExit;
+  aborter.abort(new DOMException('Preview failed','AbortError'));
+  scheduleTerminal();
  };
  const onBrowserError=(event:ErrorEvent)=>{if(exited||cleaned)return;fatal(event.error,{message:event.message,filename:event.filename,line:event.lineno,column:event.colno});event.preventDefault();};
  const onRejectedPromise=(event:PromiseRejectionEvent)=>{if(aborter.signal.aborted)return;fatal(event.reason);event.preventDefault();};
- const command=(data:Record<string,unknown>)=>{if(runtime?.command(data))return;projectCommand?.(JSON.stringify(data));};
+ const command=(data:Record<string,unknown>)=>runtime?.command(data)??false;
  const onBlur=()=>{if(!aborter.signal.aborted)try{command({type:'clear-input'});}catch(error){fatal(error);}};
  const diagnostic=(value:RuntimeDiagnostic):boolean=>{
   if(exited||cleaned)return false;
   if(value.kind==='caught'||value.kind==='recoverable')log('warn',[value.message,value.stack??value.componentStack??'']);
-  else queueMicrotask(()=>{if(!exited&&!cleaned){const item=runtimeDiagnostic(value);fatal({message:item.message,stack:item.stack},undefined,'godotjs');}});
+  else if(value.kind==='runtime'||value.kind==='uncaught'){const item=runtimeDiagnostic(value);fatal({message:item.message,stack:item.stack},undefined,'godotjs');}else return false;
   return true;
  };
  const onReactError=(raw:unknown):boolean=>{if(typeof raw!=='string'||raw.length>65536)return false;try{const value=JSON.parse(raw);if(!value||typeof value.message!=='string')return false;return diagnostic(value);}catch{return false;}};
@@ -78,8 +109,8 @@ function startSession(identity:RunIdentity,port:MessagePort):void {
  addEventListener('error',onBrowserError);addEventListener('unhandledrejection',onRejectedPromise);addEventListener('blur',onBlur);
  const forceStop=()=>{
   if(exited||cleaned)return;
-  exited=true;aborter.abort(new DOMException('Engine session terminated','AbortError'));
-  void cleanup('forced').then(receipt=>terminal({type:'terminated',cleanup:receipt}));
+  forcedTerminationIssued=!nativeExit;runtime?.beginDrain();
+  aborter.abort(new DOMException('Engine session terminated','AbortError'));scheduleTerminal();
  };
  port.onmessage=event=>{
   const data=event.data;
@@ -87,6 +118,7 @@ function startSession(identity:RunIdentity,port:MessagePort):void {
   if(data.type==='force-stop'){forceStop();return;}
   if(data.type==='project-command'&&!exited&&!aborter.signal.aborted&&isProjectData(data.data)){try{command(data.data);}catch(error){fatal(error);}return;}
   if(data.type==='stop'){
+   runtime?.beginDrain();
    aborter.abort(new DOMException('Stopped','AbortError'));
    try{requestQuit();}catch(error){fatal(error);}
    if(!engine)forceStop();
@@ -112,7 +144,7 @@ function startSession(identity:RunIdentity,port:MessagePort):void {
    }
    check();
    const execution=release.execution;
-   runtime=new BrowserEngineSession({identity,executionModel:execution?.executionModel??'window',requiresCrossOriginIsolation:execution?.requiresCrossOriginIsolation,
+   runtime=new BrowserEngineSession({identity,cleanupTimeoutMs:500,executionModel:execution?.executionModel??'window',requiresCrossOriginIsolation:execution?.requiresCrossOriginIsolation,
     onProgress:progress=>{if(exited||cleaned)return;seenEngineProgress=true;send({type:'engine-progress',...progress});readyResolve?.();},
     onDiagnostic:diagnostic,onProject:data=>projectEvent(data),onLog:(level,text)=>log(level,[text]),
     onWorkerRole:value=>log('log',[`GODOTJS_WORKER_ROLE ${value.role} ${value.workerId}`]),
@@ -122,16 +154,16 @@ function startSession(identity:RunIdentity,port:MessagePort):void {
    loaded=result;check();
    engine=new loaded.Engine({canvas:document.getElementById('canvas'),executable:loaded.basePath,persistentPaths:[],persistentDrops:false,serviceWorker:'',focusCanvas:false,
     onPrint:(...args:unknown[])=>log('log',args),onPrintError:(...args:unknown[])=>log('error',args),
-    onExit:(code:number)=>{if(exited)return;exited=true;void cleanup('clean').then(receipt=>terminal({type:'exited',code,cleanup:receipt}));},
+    onExit:(code:number)=>{if(exited||cleaned||nativeExit)return;nativeExit={code};runtime?.beginDrain();scheduleTerminal();},
    });
    (loaded.installRuntimeAssets??loaded.installWorklets).call(loaded,engine);
    phase('preloading');await engine.preloadFile(pack,'/application.pck');check();
    phase('initializing');await engine.init();runtime?.attachEngine(engine);check();
    phase('starting');await engine.start({args:nativeAudioEnabled(release.profile)?['--main-pack','/application.pck','--rendering-method','gl_compatibility']:['--main-pack','/application.pck','--rendering-method','gl_compatibility','--audio-driver','Dummy']});check();
-   if(exited)return;phase('waiting-ready');
+   if(exited||finalizing)return;phase('waiting-ready');
    if(execution&&execution.executionModel!=='window'){if(!seenEngineProgress)await ready;}
    else await new Promise<void>(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve())));
-   check();if(exited)return;phase('running');
+   check();if(exited||finalizing)return;phase('running');
   }catch(error){if(!aborter.signal.aborted)fatal(error);}
  }
 }

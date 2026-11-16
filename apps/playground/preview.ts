@@ -1,6 +1,6 @@
-import { normalizedOrigin } from '../../scripts/jsb.react-browser/src/protocol.js';
-import { WORKER_PROTOCOL, isWorkerEnvelope } from '../../scripts/jsb.react-browser/src/worker-protocol.js';
-import { startWorkerPreviewHost } from '../../scripts/jsb.react-browser/src/worker-host.js';
+import { normalizedOrigin } from '@godot-js/engine/browser/protocol';
+import { WORKER_PROTOCOL, isWorkerEnvelope } from '@godot-js/engine/browser/dedicated/worker-protocol';
+import { startWorkerPreviewHost } from '@godot-js/engine/browser/dedicated/worker-host';
 import { assertCompiledRelease, type ReleaseContext } from './src/release-context';
 import { verifyPreviewReleaseContext } from './src/preview-release-context';
 import { suppressBrowserSave } from './src/browser-shortcuts';

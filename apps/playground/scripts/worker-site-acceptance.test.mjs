@@ -9,15 +9,16 @@ import {collectManifestPayloads} from './profile-resources.mjs';
 import {describeWorkerCandidate,WORKER_NATIVE_PATCH_FILES,runConfigurationHash} from './worker-candidate.mjs';
 import {WORKER_RUNTIME_ABI} from '../../../scripts/release/engine-profiles.mjs';
 import {sealSiteAcceptance} from './seal-site-acceptance.mjs';
-import {describeWorkerSdkSources,WORKER_SDK_PACKAGES} from './worker-sdk-proof.mjs';
+import {describeWorkerSdkSources,describeWorkerSdkEntrypoints,WORKER_SDK_PACKAGES} from './worker-sdk-proof.mjs';
 
 test('schema-3 sealing cannot mix legacy reports, presenter identities, old SDK sources or override-browser evidence',async t=>{
  const root=await mkdtemp(path.join(tmpdir(),'worker-site-seal-')),site=path.join(root,'site'),reports=path.join(root,'reports'),repo=fileURLToPath(new URL('../../../',import.meta.url));
  t.after(()=>rm(root,{recursive:true,force:true}));await mkdir(site);await mkdir(reports);
- for(const [name,entry]of [['main.js.map','apps/playground/src/main.ts'],['compiler.worker.js.map','apps/playground/src/compiler.worker.ts'],['preview.js.map','apps/playground/preview.ts'],['runtime.worker.js.map','apps/playground/runtime.worker.ts'],['runtime.audio.worklet.js.map','scripts/jsb.react-browser/src/worker-audio-worklet.ts']])await writeFile(path.join(site,name),JSON.stringify({sources:['../../../'+entry],sourcesContent:[await readFile(path.join(repo,entry),'utf8')]}));
+ for(const [name,entry]of [['main.js.map','apps/playground/src/main.ts'],['compiler.worker.js.map','apps/playground/src/compiler.worker.ts'],['preview.js.map','apps/playground/preview.ts'],['runtime.worker.js.map','apps/playground/runtime.worker.ts'],['runtime.audio.worklet.js.map','packages/engine/src/browser/dedicated/worker-audio-worklet.ts']])await writeFile(path.join(site,name),JSON.stringify({sources:['../../../'+entry],sourcesContent:[await readFile(path.join(repo,entry),'utf8')]}));
+ const runtimeMap=JSON.parse(await readFile(path.join(site,'runtime.worker.js.map'),'utf8'));runtimeMap.sources.push('../../../packages/engine/src/runtime-host.ts');runtimeMap.sourcesContent.push(await readFile(path.join(repo,'packages/engine/src/runtime-host.ts'),'utf8'));await writeFile(path.join(site,'runtime.worker.js.map'),JSON.stringify(runtimeMap));
  for(const name of ['preview.js','runtime.worker.js','runtime.audio.worklet.js'])await writeFile(path.join(site,name),'synthetic '+name);
  const implementation={path:'scripts/release/patch-web-worker-runtime.mjs',sha256:digest('synthetic patch')},patchId='godotjs-web-worker-runtime-v1',files=Object.fromEntries(WORKER_NATIVE_PATCH_FILES.map(name=>[name,digest(name)])),recipe={args:['platform=web','threads=no','dlink_enabled=no','use_quickjs_ng=no'],patches:Object.entries(files).map(([path,afterSha256])=>({patchId,path,afterSha256,beforeSha256:digest('before '+path),implementation}))};
- const sourceInputs=await describeWorkerSdkSources(repo),outputs=Object.fromEntries(WORKER_SDK_PACKAGES.map(directory=>[directory+'/dist/index.js',{sha256:digest('synthetic'),bytes:9}])),sdkBuild={schemaVersion:1,kind:'worker-sdk-source-build-proof',packages:WORKER_SDK_PACKAGES,sourceInputs,sourceSnapshotHash:digest(canonical(sourceInputs)),outputs,outputSnapshotHash:digest(canonical(outputs))};
+ const sourceInputs=await describeWorkerSdkSources(repo),entrypoints=await describeWorkerSdkEntrypoints(repo),outputs=Object.fromEntries(Object.values(entrypoints).flat().map(name=>[name,{sha256:digest('synthetic'),bytes:9}])),sdkBuild={schemaVersion:1,kind:'worker-sdk-source-build-proof',packages:WORKER_SDK_PACKAGES,entrypoints,sourceInputs,sourceSnapshotHash:digest(canonical(sourceInputs)),outputs,outputSnapshotHash:digest(canonical(outputs))};
  const release={schemaVersion:2,runtimeProfile:'full-engine-v1',runtimeAbi:WORKER_RUNTIME_ABI,verifiedRelease:{},engine:{worklets:[{path:'engine/game.audio.worklet.js',sha256:digest('synthetic audio')},{path:'engine/game.audio.position.worklet.js',sha256:digest('synthetic position')}]},payloads:{},build:{sourceCertified:true,sdkBuild,workerPatch:{patchId,version:1,implementation,files},engineRecipe:recipe,recipeSha256:digest(canonical(recipe)),godotSource:{inputs:files,snapshotHash:digest(canonical(files))}}};
  release.id=digest(canonical(release));release.verifiedRelease.releaseId=release.id;await writeFile(path.join(site,'engine-release.json'),JSON.stringify(release));
  const resource=Buffer.from('synthetic resources'),asset={path:'resource.bin',bytes:resource.length,sha256:digest(resource)};await writeFile(path.join(site,asset.path),resource);
@@ -56,4 +57,17 @@ test('schema-3 sealing cannot mix legacy reports, presenter identities, old SDK 
  }
  await writeFile(filename,original);
  const sourceMap=path.join(site,'runtime.worker.js.map'),map=JSON.parse(await readFile(sourceMap,'utf8'));map.sourcesContent[0]+='\n// stale source';await writeFile(sourceMap,JSON.stringify(map));await assert.rejects(sealSiteAcceptance(site,reports),/E_SITE_SOURCE_DRIFT/);
+});
+
+test('pthread sealing binds the pthread preview source rather than the Dedicated Worker entry',async t=>{
+ const root=await mkdtemp(path.join(tmpdir(),'pthread-site-seal-')),site=path.join(root,'site'),reports=path.join(root,'reports'),repo=fileURLToPath(new URL('../../../',import.meta.url));
+ t.after(()=>rm(root,{recursive:true,force:true}));await mkdir(site);await mkdir(reports);
+ for(const [name,entry]of [['main.js.map','apps/playground/src/main.ts'],['compiler.worker.js.map','apps/playground/src/compiler.worker.ts'],['preview.js.map','apps/playground/preview-pthread.ts']])await writeFile(path.join(site,name),JSON.stringify({sources:['../../../'+entry],sourcesContent:[await readFile(path.join(repo,entry),'utf8')]}));
+ const release={schemaVersion:2,runtimeProfile:'full-engine-v1',execution:{executionModel:'proxy-pthread'},verifiedRelease:{},payloads:{},build:{sourceCertified:true}};
+ release.id=digest(canonical(release));release.verifiedRelease.releaseId=release.id;await writeFile(path.join(site,'engine-release.json'),JSON.stringify(release));
+ const resource=Buffer.from('pthread resources'),asset={path:'resource.bin',bytes:resource.length,sha256:digest(resource)};await writeFile(path.join(site,asset.path),resource);
+ await writeFile(path.join(site,'resource-build.json'),JSON.stringify({runtimeProfile:release.runtimeProfile,engineReleaseId:release.id,exporter:{path:'/synthetic/editor',version:'4.6.1.test',sha256:digest('editor')},generatedManifest:asset,output:asset,demoPack:asset}));
+ assert.equal((await sealSiteAcceptance(site,reports,{begin:true})).status,'prepared');
+ const entry='apps/playground/preview.ts';await writeFile(path.join(site,'preview.js.map'),JSON.stringify({sources:['../../../'+entry],sourcesContent:[await readFile(path.join(repo,entry),'utf8')]}));
+ await assert.rejects(sealSiteAcceptance(site,reports,{begin:true}),/E_SITE_ENTRY: apps\/playground\/preview-pthread\.ts/);
 });

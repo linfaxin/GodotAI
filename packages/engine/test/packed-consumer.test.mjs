@@ -57,7 +57,7 @@ assert.equal(globalThis.document,undefined);console.log('isolated-imports-passed
 
  await t.test('browser entry declarations resolve using only standard browser libraries',async()=>{
   await writeFile(path.join(consumer,'browser-consumer.mts'),`import {BrowserEngineSession,PreviewRunner,validateExecution,legacyExecution,type BrowserEngineSessionOptions,type PreviewRunnerOptions,type VerifiedRelease,type BrowserArtifact} from '@godot-js/engine/browser';
-import {installRuntimeHost,getRuntimeHost,type RuntimeHost} from '@godot-js/engine/runtime';
+import {createRuntimeBinding,installRuntimeHost,getRuntimeHost,type RuntimeHost} from '@godot-js/engine/runtime';
 import {createEngineIdentity,assertRuntimeTargetIdentity} from '@godot-js/engine/identities';
 import {parseEngineApi,type EngineApiIR} from '@godot-js/engine/api';
 const identity={runId:'run',revision:1,buildKey:'build',generation:'generation'};
@@ -66,7 +66,7 @@ declare const release:VerifiedRelease;
 declare const container:HTMLElement;
 const runner:PreviewRunnerOptions={container,previewUrl:'https://preview.example/preview.html',release};
 const artifact:BrowserArtifact={revision:1,buildKey:'build',generation:'generation',pack:new Uint8Array([1]),manifest:{}};
-const host:RuntimeHost={sessionId:'run',role:'engine',reportDiagnostic(d){d.message.toUpperCase();return true;}};
+const host:RuntimeHost=createRuntimeBinding({sessionId:'run',role:'engine',onDiagnostic(d){d.message.toUpperCase();return true;}});
 const scope={};const uninstall=installRuntimeHost(host,scope);getRuntimeHost(scope);uninstall();
 validateExecution(legacyExecution());void BrowserEngineSession;void PreviewRunner;void artifact;void runner;void session;
 void createEngineIdentity({wasm:'hash'});assertRuntimeTargetIdentity({engineId:'a'.repeat(64)},{engineId:'a'.repeat(64)});
@@ -112,13 +112,25 @@ import type {ReactNode} from 'react';
   await compile('engine-types',{module:'CommonJS',lib:['ES2022']},['engine-consumer.cts','generated/godot/index.d.ts','generated/godot-jsb/index.d.ts','generated/godot.annotations/index.d.ts']);
  });
 
+ await t.test('runtime contract declarations require only ES2022, without browser or Node ambient types',async()=>{
+  await writeFile(path.join(consumer,'pure-runtime.mts'),`import {createRuntimeBinding,type RuntimeHost,type ProjectData} from '@godot-js/engine/runtime';
+import {createSessionFacts,sessionExitReason} from '@godot-js/engine/session-facts';
+const host:RuntimeHost=createRuntimeBinding({sessionId:'pure',role:'engine'});const data:ProjectData={x:[1,'value']};host.emitProjectEvent(data);sessionExitReason(createSessionFacts());
+// @ts-expect-error Runtime services do not install DOM ambient declarations.
+document.body;
+// @ts-expect-error Runtime services do not install Node ambient declarations.
+process.cwd();
+`);
+  await compile('pure-runtime',{lib:['ES2022']},['pure-runtime.mts']);
+ });
+
  await t.test('runtime hosts and execution/identity validation remain usable without React',async()=>{
   const result=await execute(`import assert from 'node:assert/strict';
-import {installRuntimeHost,getRuntimeHost} from '@godot-js/engine/runtime';
+import {createRuntimeBinding,installRuntimeHost,getRuntimeHost} from '@godot-js/engine/runtime';
 import {validateExecution} from '@godot-js/engine/execution';
 import {createEngineIdentity,createBuildKey,assertRuntimeTargetIdentity} from '@godot-js/engine/identities';
-const scope={},received=[];const a={sessionId:'a',role:'engine',reportDiagnostic(d){received.push(d.message);return true;}},b={...a,sessionId:'b'};
-const dropA=installRuntimeHost(a,scope),dropB=installRuntimeHost(b,scope);assert.equal(getRuntimeHost(scope),b);dropB();assert.equal(getRuntimeHost(scope),a);assert(getRuntimeHost(scope).reportDiagnostic({kind:'runtime',message:'engine-only'}));dropA();assert.throws(()=>getRuntimeHost(scope),/E_RUNTIME_HOST/);assert.deepEqual(received,['engine-only']);
+const scope={},received=[];const a=createRuntimeBinding({sessionId:'a',role:'engine',onDiagnostic(d){received.push(d.message);return true;}}),b=createRuntimeBinding({sessionId:'b',role:'engine'});
+const dropA=installRuntimeHost(a,scope);assert.throws(()=>installRuntimeHost(b,scope),/E_RUNTIME_HOST_IN_USE/);assert.equal(getRuntimeHost(scope),a);assert(getRuntimeHost(scope).reportDiagnostic({kind:'runtime',message:'engine-only'}));dropA();const dropB=installRuntimeHost(b,scope);dropA();assert.equal(getRuntimeHost(scope),b);dropB();assert.throws(()=>getRuntimeHost(scope),/E_RUNTIME_HOST/);assert.deepEqual(received,['engine-only']);
 const execution={schemaVersion:1,executionModel:'proxy-pthread',wasmThreads:true,proxyToPthread:true,requiresCrossOriginIsolation:true,hostProtocolVersion:1,workerBootstrap:'embedded'};validateExecution(execution);assert.throws(()=>validateExecution({...execution,requiresCrossOriginIsolation:false}),/E_EXECUTION_CONTRACT/);
 const first=await createEngineIdentity({wasm:'a',host:'b'}),second=await createEngineIdentity({host:'b',wasm:'a'});assert.equal(first,second);assert.match(first,/^[a-f0-9]{64}$/);assert.throws(()=>createEngineIdentity({react:'required'}),/E_IDENTITY_SELF_REFERENCE/);
 assertRuntimeTargetIdentity({engineId:first},{engineId:first});assert.throws(()=>assertRuntimeTargetIdentity({engineId:first},{engineId:'c'.repeat(64)}),/E_RUNTIME_TARGET_ENGINE/);

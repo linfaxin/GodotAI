@@ -138,7 +138,7 @@ function observeAudio() {
 }
 
 const workerFeatureEditorSource=`
-import {WorkerPreviewRunner} from './scripts/jsb.react-browser/dist/worker-runner.js';
+import {WorkerPreviewRunner} from './packages/engine/dist/browser/dedicated/worker-runner.js';
 globalThis.__startWorkerFeatureFixture=async({release,manifest,previewUrl,presentationBackend,timeout})=>{
  const state=globalThis.__features={events:[],warnings:[],exitCode:null,exit:null,identity:null,state:'idle'};
  const runner=new WorkerPreviewRunner({container:document.getElementById('feature-host'),previewUrl,
@@ -177,7 +177,7 @@ export async function buildWorkerFeatureHarness(release){
   if(!declared||declared.sha256!==hash(bytes)||declared.bytes!==bytes.length)throw Error('E_FEATURE_WORKER_HARNESS_INPUT: '+relative);
   sourceAssets.push({path:relative,sha256:hash(bytes),bytes:bytes.length});
  }
- if(!sourceAssets.some(asset=>asset.path.endsWith('/dist/worker-runner.js')))throw Error('E_FEATURE_WORKER_HARNESS_RUNNER');
+ if(!sourceAssets.some(asset=>asset.path.endsWith('/dist/browser/dedicated/worker-runner.js')))throw Error('E_FEATURE_WORKER_HARNESS_RUNNER');
  const bytes=bundle.outputFiles[0].contents;
  return {bytes,identity:{kind:'synthetic-editor-official-preview',sha256:hash(bytes),sourceSha256:hash(workerFeatureEditorSource),sdkSourceSnapshotHash:proof.sourceSnapshotHash,sdkOutputSnapshotHash:proof.outputSnapshotHash,sourceAssets}};
 }

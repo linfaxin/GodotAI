@@ -32,7 +32,8 @@
     "build:2d:release:worker": "node scripts/build.mjs --profile engine-2d-v1 --target template_release",
     "dev:worker": "node scripts/serve.mjs",
     "dev:2d:worker": "PLAYGROUND_DIRECTORY=dist-2d-debug node scripts/serve.mjs",
-    "dev:2d:release:worker": "PLAYGROUND_DIRECTORY=dist-2d-release node scripts/serve.mjs"
+    "dev:2d:release:worker": "PLAYGROUND_DIRECTORY=dist-2d-release node scripts/serve.mjs",
+    "test:browser:runtime-host": "node scripts/browser-runtime-host-test.mjs"
   },
   "dependencies": {
     "@godot-js/react": "workspace:*",

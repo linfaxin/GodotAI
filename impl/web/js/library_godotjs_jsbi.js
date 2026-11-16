@@ -30,6 +30,7 @@ const GodotJSBrowserInterface = {
     "jsbi_ConfigureThread": function (role, thread_id, parent_thread_id) { _jsbb_.ConfigureThread(role, thread_id >>> 0, parent_thread_id >>> 0); },
     "jsbi_NewEngine": function (opaque) { return _jsbb_.NewEngine(opaque); },
     "jsbi_FreeEngine": function (engine_id) { _jsbb_.FreeEngine(engine_id); },
+    "jsbi_SealNativeEpoch": function (engine_id) { _jsbb_.SealNativeEpoch(engine_id); },
     "jsbi_FlushPendingWorkerMessages": function () { _jsbb_.FlushPendingWorkerMessages(); },
     "jsbi_log": function (str_ptr) { _jsbb_.log(str_ptr); },
     "jsbi_error": function (str_ptr) { _jsbb_.error(str_ptr); },

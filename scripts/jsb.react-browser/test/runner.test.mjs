@@ -318,6 +318,96 @@ test('public immutable caching is opt-in, versioned and omits authentication cre
 
 const workerRelease={...release,execution:{schemaVersion:1,executionModel:'proxy-pthread',wasmThreads:true,proxyToPthread:true,requiresCrossOriginIsolation:true,hostProtocolVersion:1,workerBootstrap:'embedded'}};
 
+async function awaitRunnerPhase(f,phase){
+ const deadline=Date.now()+1000;
+ while(f.runner.state!==phase){assert(Date.now()<deadline,'Runner did not reach '+phase);await pause(1);}
+}
+function finishStartup(f){f.send({type:'phase',phase:'waiting-ready'});f.send({type:'phase',phase:'running'});}
+
+test('startup project events reach ordinary subscriptions once and in FIFO order after running',async()=>{
+ const f=fixture({runtimeRelease:workerRelease,pauseAt:'starting'}),phases=[];
+ f.runner.subscribe(event=>{if(event.type==='project')phases.push(f.runner.state);});
+ try{
+  const run=f.runner.run(artifact);await awaitRunnerPhase(f,'starting');
+  f.send({type:'project',data:{type:'ready',sequence:1}});
+  f.send({type:'project',data:{type:'startup-stats',sequence:2}});
+  await pause(10);assert.equal(f.events.filter(event=>event.type==='project').length,0);
+  finishStartup(f);await run;await pause(10);
+  f.send({type:'project',data:{type:'live-stats',sequence:3}});await pause(10);
+  const projects=f.events.filter(event=>event.type==='project');
+  assert.deepEqual(projects.map(event=>event.data.sequence),[1,2,3]);
+  assert.equal(projects.filter(event=>event.data.type==='ready').length,1);
+  assert.deepEqual(phases,['running','running','running']);
+ }finally{await f.cleanup();}
+});
+
+test('stopping from a running state listener cancels queued startup project events',async()=>{
+ const f=fixture({runtimeRelease:workerRelease,pauseAt:'starting'});let stopped;
+ f.runner.subscribe(event=>{if(event.type==='state'&&event.state==='running')stopped=f.runner.stop();});
+ try{
+  const run=f.runner.run(artifact),rejected=assert.rejects(run,/E_RUN_ENDED/);await awaitRunnerPhase(f,'starting');
+  f.send({type:'project',data:{type:'ready'}});finishStartup(f);await rejected;await stopped;
+  assert.equal(f.events.filter(event=>event.type==='project').length,0);
+ }finally{await f.cleanup();}
+});
+
+test('stopping from a startup project listener cancels the remaining FIFO',async()=>{
+ const f=fixture({runtimeRelease:workerRelease,pauseAt:'starting'});let stopped;
+ f.runner.subscribe(event=>{if(event.type==='project'&&!stopped)stopped=f.runner.stop();});
+ try{
+  const run=f.runner.run(artifact);await awaitRunnerPhase(f,'starting');
+  f.send({type:'project',data:{sequence:1}});f.send({type:'project',data:{sequence:2}});finishStartup(f);
+  await run;await awaitRunnerPhase(f,'exited');await stopped;
+  assert.deepEqual(f.events.filter(event=>event.type==='project').map(event=>event.data.sequence),[1]);
+ }finally{await f.cleanup();}
+});
+
+test('replacing a run from its first startup project cancels old events and resets the full queue budget',async()=>{
+ const f=fixture({runtimeRelease:workerRelease,pauseAt:'starting'});let replacement;
+ f.runner.subscribe(event=>{if(event.type==='project'&&event.revision===artifact.revision&&!replacement)replacement=f.runner.run({...artifact,revision:2});});
+ try{
+  const run=f.runner.run(artifact);await awaitRunnerPhase(f,'starting');
+  for(let sequence=0;sequence<64;sequence++)f.send({type:'project',data:{sequence}});
+  finishStartup(f);await run;
+  while(!replacement)await pause(1);
+  // The replacement has its own frame/identity and must get all 64 credits.
+  while(f.frames.length<2||f.runner.state!=='starting')await pause(1);
+  for(let sequence=0;sequence<64;sequence++)f.send({type:'project',data:{sequence}});
+  finishStartup(f);await replacement;await pause(10);
+  const projects=f.events.filter(event=>event.type==='project');
+  assert.deepEqual(projects.filter(event=>event.revision===artifact.revision).map(event=>event.data.sequence),[0]);
+  assert.deepEqual(projects.filter(event=>event.revision===2).map(event=>event.data.sequence),Array.from({length:64},(_,index)=>index));
+ }finally{await f.cleanup();}
+});
+
+test('startup project queue overflow stops the whole session and releases its message budget',async()=>{
+ const f=fixture({runtimeRelease:workerRelease,pauseAt:'starting'});
+ try{
+  const run=f.runner.run(artifact),rejected=assert.rejects(run,/E_RUN_ENDED/);await awaitRunnerPhase(f,'starting');
+  for(let sequence=0;sequence<65;sequence++)f.send({type:'project',data:{sequence}});
+  await rejected;await awaitRunnerPhase(f,'exited');
+  assert.equal(f.events.filter(event=>event.type==='project').length,0);
+  assert.equal(f.messages.filter(message=>message.type==='force-stop').length,1);
+  assert.match(f.events.find(event=>event.type==='exit').report.detail,/project.*budget/i);
+  const replacement=f.runner.run({...artifact,revision:2});await awaitRunnerPhase(f,'starting');
+  for(let sequence=0;sequence<64;sequence++)f.send({type:'project',data:{sequence}});
+  finishStartup(f);await replacement;await pause(10);
+  assert.equal(f.events.filter(event=>event.type==='project'&&event.revision===2).length,64);
+ }finally{await f.cleanup();}
+});
+
+test('startup project byte budget charges serialized UTF-8 bytes',async()=>{
+ const f=fixture({runtimeRelease:workerRelease,pauseAt:'starting'});
+ try{
+  const run=f.runner.run(artifact),rejected=assert.rejects(run,/E_RUN_ENDED/);await awaitRunnerPhase(f,'starting');
+  // Six valid messages fit in a UTF-16 character count but exceed 1 MiB UTF-8.
+  for(let index=0;index<6;index++)f.send({type:'project',data:{text:'界'.repeat(60000)}});
+  await rejected;await awaitRunnerPhase(f,'exited');
+  assert.equal(f.messages.filter(message=>message.type==='force-stop').length,1);
+  assert.equal(f.events.filter(event=>event.type==='project').length,0);
+ }finally{await f.cleanup();}
+});
+
 test('a live host cannot hide a stalled engine, and cleanup acknowledgement covers the whole pool',async()=>{
  const f=fixture({runtimeRelease:workerRelease,engineProgress:false,deadlines:{heartbeat:35,stopping:30}});
  try{
@@ -356,5 +446,20 @@ test('an exit code of zero cannot conceal incomplete host cleanup',async()=>{
   f.send({type:'exited',code:0,cleanup:{mode:'clean',workers:3,terminatedWorkers:2,audioContexts:1,closedAudioContexts:0,clearedTimers:0,removedListeners:0,errors:['audio close failed']}});
   while(f.runner.state!=='exited')await pause(1);
   const report=f.events.find(event=>event.type==='exit').report;assert.equal(report.reason,'crashed');assert.match(report.detail,/cleanup/);
+ }finally{await f.cleanup();}
+});
+
+for(const [name,patch,reason] of [
+ ['a fatal captured before native exit',{failure:{kind:'runtime',message:'latched failure'}},'crashed'],
+ ['an unconfirmed entry cleanup',{entryCleanup:'unconfirmed'},'cleanup-unconfirmed'],
+ ['a forced termination followed by native exit zero',{forcedTerminationIssued:true},'forced-worker-termination'],
+])test('versioned terminal facts preserve '+name,async()=>{
+ const f=fixture();try{
+  await f.runner.run(artifact);
+  const exit=new Promise(resolve=>f.runner.subscribe(event=>{if(event.type==='exit')resolve(event.report);}));
+  const sessionFacts={schemaVersion:1,nativeExit:{code:0},forcedTerminationIssued:false,runtimeSummary:'sealed',entryCleanup:'complete',hostCleanup:'complete',...patch};
+  f.send({type:'exited',code:0,sessionFacts});const report=await exit;
+  assert.equal(report.reason,reason);assert.deepEqual(report.sessionFacts,sessionFacts);
+  if(patch.failure)assert.equal(report.diagnostic.message,'latched failure');
  }finally{await f.cleanup();}
 });

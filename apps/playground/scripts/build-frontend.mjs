@@ -21,6 +21,6 @@ export async function buildFrontend(dist,mainSource,options={}){
  const common={bundle:true,format:'iife',platform:'browser',target:'es2022',minify:true,sourcemap:true,define:{'process.env.NODE_ENV':'"production"'}};
  await build({...common,...(mainSource?{stdin:{contents:mainSource,loader:'ts',resolveDir:path.join(app,'src')}}:{entryPoints:[path.join(app,'src/main.ts')]}),outfile:path.join(dist,'main.js'),loader:{'.ttf':'file'},assetNames:'assets/[name]-[hash]'});
  await build({...common,entryPoints:[path.join(app,'runtime.worker.ts')],outfile:path.join(dist,'runtime.worker.js')});
- await build({...common,entryPoints:[path.resolve(app,'../../scripts/jsb.react-browser/src/worker-audio-worklet.ts')],outfile:path.join(dist,'runtime.audio.worklet.js')});
+ await build({...common,entryPoints:[path.resolve(app,'../../packages/engine/src/browser/dedicated/worker-audio-worklet.ts')],outfile:path.join(dist,'runtime.audio.worklet.js')});
  await build({...common,entryPoints:{'compiler.worker':path.join(app,'src/compiler.worker.ts'),'monaco-editor-worker':path.join(app,'src/monaco-editor-worker.ts')},outdir:dist});
 }

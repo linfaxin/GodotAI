@@ -47,7 +47,7 @@ const write=(name,text)=>fs.writeFile(path.join(dist,name),text);
 await fs.mkdir(dist,{recursive:true});await fs.mkdir(path.join(project,".godot/GodotJS"),{recursive:true});await fs.mkdir(path.join(project,"generated"),{recursive:true});
 await invalidateSiteDelivery(dist);
 await fs.rm(path.join(dist,'engine-release.json'),{force:true});
-if(!process.argv.includes("--skip-sdk-build")){console.log("Building React SDK");console.log(run(process.execPath,["build.mjs"],sdk));console.log(run('pnpm',['--filter','@godot-js/react-build','build'],repo));console.log(run('pnpm',['--filter','@godot-js/react-browser','build'],repo));}
+if(!process.argv.includes("--skip-sdk-build")){console.log("Building engine and React SDK");console.log(run('pnpm',['--filter','@godot-js/react-browser...','build'],repo));}
 const sdkBuild=await proveWorkerSdkBuild(repo);
 if(!process.argv.includes("--skip-assets"))await prepareAssets({runtimeProfile,project,workDirectory:path.join(workspace,'asset-project'),importer:process.env.GODOT_IMPORTER??host});
 const publicCatalog=await Promise.all(profileCatalog(catalog,runtimeProfile).map(async demo=>({...demo,runtime:'react',source:await fs.readFile(path.join(app,'src/demos',demo.file),'utf8')})));

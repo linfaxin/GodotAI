@@ -17,7 +17,7 @@ const native=patchWorkerRuntimeFile('platform/web/audio_driver_web.cpp',original
 const register=native.match(/void AudioDriverWeb::register_sample\([^]*?\n\}/)?.[0];
 const admission=register?.match(/const bool sample_cancelled = EM_ASM_INT\(\{([^]*?)\}, frames_total\);/)?.[1];
 assert(register&&admission,'Extract the actual checked native predecode admission, not a rewritten simulation');
-const runtime=await readFile(new URL('../dist/worker-runtime.js',import.meta.url),'utf8');
+const runtime=await readFile(new URL('../../../packages/engine/dist/browser/dedicated/worker-runtime.js',import.meta.url),'utf8');
 const controlStart=runtime.indexOf('control.onmessage ='),controlEnd=runtime.indexOf('data.onmessage =',controlStart);
 const actualControl=runtime.slice(controlStart,controlEnd);
 const fatalStart=runtime.indexOf('const fatal ='),fatalEnd=runtime.indexOf('const onError =',fatalStart);
@@ -40,7 +40,7 @@ function runtimeStop(f){
  const scope={control,data:{},identity,isWorkerEnvelope,sameWorkerRun,lease,audio:f.bridge,DOMException,
   dom:{revokeInput(){}},aborter:new AbortController(),presentation:{dispose(){}},xr:{dispose(){}},
   cancelNativeStart(){calls.cancel++;},module:{},post:value=>events.push(value),text:values=>values.join(' '),
-  closed:false,nativeExited:false,failed:false,previewDiagnostic,
+  closed:false,nativeExited:false,failed:false,previewDiagnostic,binding:undefined,
   engine:{requestQuit(){calls.quit++;assert.equal(nativeAdmission(f.bridge),1,'Actual Native cancellation must precede any quit/cleanup callback');}},
  };
  runInNewContext(actualControl+'\n'+actualFatal,scope);
@@ -96,6 +96,7 @@ for(const order of ['audio-first','runtime-first'])test('actual runtime and audi
 test('actual runtime fatal path revokes audio before Native quit and preserves its first diagnostic',async()=>{
  const f=fixture();await f.ready();const r=runtimeStop(f);
  r.scope.actualFatal(new Error('original-runtime-failure'));r.scope.actualFatal(new Error('late-secondary'));
+ assert.equal(r.calls.quit,0,'fatal must not re-enter Native while reporting');await new Promise(resolve=>setImmediate(resolve));
  assert.equal(r.calls.quit,1);assert.equal(r.calls.cancel,1);assert.equal(f.bridge.available(),false);
  const fatal=r.events.filter(event=>event.type==='worker-fatal');assert.equal(fatal.length,1);assert.equal(fatal[0].diagnostic.message,'original-runtime-failure');
 });

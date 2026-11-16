@@ -4,7 +4,7 @@
 
 浏览器产品把完整 Godot Web 内建运行时、业务 JS/TS 和 React 放在同一个引擎执行 realm。React 是可选的响应式语法和生命周期层，普通脚本与 React 使用同一份原生 API。编辑器页面管理项目与存储，编译 Worker 负责编译与打包，独立来源的预览 iframe 负责浏览器宿主能力与会话。
 
-当前 Worker 候选使用 Godot 上游支持的 `threads=yes proxy_to_pthread=yes dlink_enabled=no`。`full-engine-v1` 是能力配置，`proxy-pthread` 是执行模型，两者独立。现有默认构建仍读取 `window` 模型；显式 Worker 构建写入独立目录，不覆盖默认版本。无线程专用 Worker 平台移植不是同时维护的第二条产品线。
+pthread 候选使用 Godot 上游支持的 `threads=yes proxy_to_pthread=yes dlink_enabled=no`。`full-engine-v1` 是能力配置，`proxy-pthread` 是执行模型，两者独立。普通 Dedicated Worker 是默认产品，现有无线程构建仍读取历史 `window` 模型；显式 pthread 构建写入独立目录，不覆盖默认版本。两条路线共享运行宿主合同、入口 scope 与退出事实，各自保留线程、宿主代理和呈现实现。
 
 ## 包与兼容入口
 
@@ -12,18 +12,68 @@
 | --- | --- |
 | API IR、声明和命名 | `@godot-js/engine/api`、`@godot-js/engine/runtime-types` |
 | 纯执行合同与身份 | `@godot-js/engine/execution`、`@godot-js/engine/identities` |
+| 纯运行宿主与退出事实 | `@godot-js/engine/runtime`、`@godot-js/engine/session-facts` |
 | 加载、宿主、会话与 iframe | `@godot-js/engine/browser` |
+| 普通 Dedicated Worker 与浏览器桥 | `@godot-js/engine/browser/dedicated/worker-*` |
 | 源快照、启动计划、overlay、UID、PCK、资源收据 | `@godot-js/project-tools` 及其子路径 |
 | React 节点、阶段提交与生命周期 | `@godot-js/react`、`@godot-js/react/engine` |
 | 编辑器、存储与工作流 | `apps/playground` |
 
-旧 `@godot-js/react-build/core` 和浏览器 SDK 的 engine API、loader、session 入口保留重导出，使用同一份中立实现。React 启动适配仍属于 React 工具层。默认 React exports 使用通用引擎 renderer；旧组件模板显式使用 `@godot-js/react/legacy`。这次改动没有启用 npm 发布。
+旧 `@godot-js/react-build/core` 和浏览器 SDK 的 engine API、loader、session、`worker-*` 入口保留重导出，使用同一份中立实现。普通 Worker 的 runtime、host、runner、音频 worklet 和浏览器桥位于 `packages/engine/src/browser/dedicated/`，浏览器编译器和包解析仍在 `react-browser`。React 启动适配仍属于 React 工具层。默认 React exports 使用通用引擎 renderer；旧组件模板显式使用 `@godot-js/react/legacy`。这些内部包改动没有启用 npm 发布。
 
 React 的显式 `flush()`、`pump()` 和 `shutdown()` 可以推进提交与 ref/effect 清理，但原生节点释放只能在会话私有的异步检查点执行。直接连接的 Godot 信号同样受此限制，宿主的同步唤醒回调不能提供释放许可。释放抛错或立即释放后仍无法确认销毁时，保留整个所有权岛、记录错误并报告 `cleanExit=false`，由会话收尾；不会将失败写成已接受的释放请求。
 
 引擎角色显式区分 `host`、`engine`、`script-worker`，不能从 `ENVIRONMENT_IS_PTHREAD` 推断业务角色。主引擎与用户 JSWorker 的消息及 Variant 转移有独立路由版本和目标线程身份。上游同步宿主代理仍用于需要同步返回的平台接口；引擎节点访问与物理查询不经过逐方法的页面 RPC。
 
 WebGL 的实际归属由运行探针记录。上游 pthread 路线允许宿主页承担 WebGL 代理，因此不能仅凭引擎在 Worker 就声称 Canvas/context 全部在 Worker。音频、IME、权限与 XR 仍受浏览器平台限制。
+
+## 运行宿主与入口 scope
+
+两条浏览器路线在加载任何项目模块前安装同一个纯 `createRuntimeBinding()` 实现。公共 `RuntimeHost` 只包含 `apiVersion: 1`、`sessionId`、`role`、`reportDiagnostic()`、`emitProjectEvent()` 和返回 disposer 的 `bindProjectCommand()`。运行合同和退出事实可由只包含 ES2022 标准库的类型环境消费，不通过浏览器协议声明链引入 DOM、Node、React 或编译器。
+
+每个实际浏览器 realm 只有一个 binding owner。内部 native epoch 对应当前 GodotJS 环境；bootstrap 在 `require(entry)` 前调用 `openEntry()`，把入口专属视图作为 `ctx.host` 传给 `start(ctx)`。React root 接受同一视图，并通过已有 root context 的 `useRuntimeHost()` 供组件和 Playground 服务使用。关闭入口会撤销其事件发送、命令绑定和普通迟到错误上报，而不撤销同一会话的新入口。直接使用全局 binding 的代码只有会话归属，不能自动获得入口隔离保证。
+
+公共接口没有 `signal`，也不新增 `ctx.signal`。内部 lease、会话中止和 bootstrap 的入口关闭标记分别承担自己的生命周期。原生和独立运行程序可以没有浏览器 host；不能仅根据 `OS.has_feature("web")` 就强制要求存在受管理宿主，也不能在 Godot 中 `require` 浏览器 ESM 包。
+
+项目消息按以下规则接入既有传输：
+
+- 接纳前校验并复制有界纯 JSON，保留自有快照，以实际序列化的 UTF-8 字节计算额度。不能执行用户 getter、序列化器或在排队后重新读取原始对象。
+- 生产端与读取端使用一致的 dense JSON、深度、节点数和实际 UTF-8 预算；数组索引不另算对象 key 开销。普通 Worker 宿主丢弃已识别的项目包时归还消费 receipt，正常转发的包仍等编辑器消费后归还，不能重复退款。
+- 事件返回 `true` 仅表示本次会话本地接纳。命令保持单个有效 handler，旧 disposer 只能解除自身绑定；legacy callback shim 也只能清理自己的 slot。
+- 早到命令有界排队，在检查点逐条检查入口、当前绑定和会话业务状态后 FIFO 分发。队列保留接纳时的入口归属；首入口打开时认领此前无归属的早到命令。解绑 handler 不解除队列归属，同入口替换 handler 保留 FIFO，跨入口切换取消旧命令并归还 receipt。关闭旧入口不会删除新入口的队列。
+- 两条 runner 都有界缓存启动期项目事件，在进入 `running` 后经正常订阅按序交付；停止、替换或启动失败会取消尚未交付的事件。
+- receipt 在同步分发完成后归还，不等待返回 Promise 的业务完成。异步拒绝按调用时入口处理；额度约束传输队列，不宣称限制应用自行创建的异步任务。
+- engine 可以收发项目消息，script-worker 可以报告诊断和日志。角色分配、native progress 和日志是内部控制面；宿主心跳、Worker 活性与 native progress 保持不同观测字段。
+
+首个合法 `uncaught/runtime` 诊断同步占位并撤销业务 gate，不与可耗尽的普通日志预算竞争。只有危险的退出操作延后到安全检查点。`caught/recoverable` 不终止会话，普通原生错误日志也不会自动变成 fatal。会话从 active 进入 draining 后停止新业务，但继续处理有界的退出摘要、必要 receipt 和 cleanup 错误；settled 后旧回调不能更改结果。
+
+已锁定的会话首错优先于随后发生的清理错误。宿主清理也包含 verified loader 的资源释放；loader 释放抛错必须进入最终 cleanup 状态，不能沿用此前 Worker/音频清理成功的 `complete`，已有 `timed-out` 则继续保留。
+
+## native epoch 摘要与退出事实
+
+脚本 bootstrap 只保证同步 cleanup 最多调用一次。异步 start 未返回、cleanup 返回 Promise，或结果到达时 native epoch 已封结，都不能记成清理完成。入口已关闭但 epoch 仍有效时，迟到 cleanup 才可能在安全点执行；环境释放后不得为了补齐回执再次访问原生对象。cleanup 抛错走入口捕获的内部收尾接口，不受公共业务接口撤销影响。
+
+React 收尾诊断窗口跟随实际 root 的关闭状态和 native epoch，而不是固定等待一次微任务；physics 阶段推迟到后续安全点的释放错误仍须记录。入口 cleanup 一旦为 `failed`，后续 ready 或完成状态复核不得将其降级为 `complete`。
+
+native bridge 在配置线程时开始 epoch，在 `Environment::dispose()` 成功完成逻辑销毁时封结摘要并撤销该环境路由。物理 `FreeEngine()` 保留幂等封结兜底并执行实际 bridge release；不得等到可能被残留引用延迟的物理析构，才拒绝迟到入口 cleanup。封结只冻结、发送观测数据，不执行用户 cleanup、不等待 ACK，也不卸载浏览器 realm host；它不证明所有原生对象均已析构。池中的浏览器 Worker 可以继续服务后续 native epoch。普通 Worker 将摘要附在原有控制通道的 native-exit 消息中。pthread owner 记录实际注册过的 epoch，在 native exit 后等待其摘要或有界期限，再销毁自己的池和监听。缺失或溢出的摘要保持 `unconfirmed`，不能从“未收到 fatal”推导“没有 fatal”。
+
+两条路线的终态消息使用共同的 `sessionFacts` 子对象：
+
+| 事实 | 含义 |
+| --- | --- |
+| `schemaVersion: 1` | 退出事实格式，与项目文档和产物回执版本独立 |
+| `failure` | 已接纳的首个致命原因，不被 exit 0 覆盖 |
+| `nativeExit` | 实际观测到的原生退出码 |
+| `forcedTerminationIssued` | 应用尚未确认退出时采取的强停，不包括退出后的闲置池回收 |
+| `runtimeSummary` | `sealed`、`unconfirmed` 或兼容范围的 `not-tracked` |
+| `entryCleanup` | `complete`、`failed`、`unconfirmed` 或 `not-applicable` |
+| `hostCleanup` | `complete`、`failed`、`timed-out` 或 `unconfirmed` |
+
+共同纯归约函数保留这些独立事实，再投影已有退出原因。严格的完整正常退出要求 exit 0、无 fatal、无应用强停，并确认运行源摘要与所要求的清理。内核/宿主已停止而入口清理未确认时，结果应保留“清理未确认”，不能写成完整 clean，也不因缺少观测就直接视为崩溃。
+
+外层 preview protocol 1、普通 Worker protocol 2 保持独立；pthread 的内部控制包使用 `__godotjsRuntime: 2`，包括 epoch、摘要和项目消费回执。新增事实由同一密封候选的 writer、reader 和 validator 一起处理，不向旧严格枚举静默塞入新值。原生 Variant router、音频和呈现 ABI 不随这些控制消息联动升级。
+
+epoch hook 跨 native interop 与 `impl/web/bridge` 的 pre-JS glue。只有重新构建匹配的 Web 引擎/template，才能在实际引擎中生成新的开始/封结观测；仅重建 SDK 或刷新 frontend 无法给旧模板补上 hook。旧模板的兼容退出、Node/VM 测试和压缩 bootstrap 的独立执行，都不能代替匹配模板的真实 pthread 生命周期验证。
 
 ## 构建候选
 
@@ -84,6 +134,8 @@ execution schema 记录 `executionModel`、`wasmThreads`、`proxyToPthread`、�
 
 `engineId` 绑定原生字节、执行合同、模块、API 与 engine-only 声明，以及实际执行的 `engine.host` 浏览器宿主 bundle。产品构建先编译不包含 React、项目代码或发布 ID 的 `preview.js`，将其 hash 纳入 engineId，再生成带同一 hash 的 HTML module SRI；最终 frontend 阶段复用该文件，不重新编译。浏览器核对宿主闭包、实际响应字节与执行 script 的 integrity。frontend refresh 保留已封印宿主，宿主实现变化需要重建完整候选。通用 release 脚本的原生 Worker 候选显式传入 `engineHost: {source, path}`，并让部署页面执行该资产。
 
+默认 `runtime.worker.js` 和 `runtime.audio.worklet.js` 还由站点的 runtime assets、payload 清单与 `candidateId` 封印，单独改变它们不一定改变 `engineId`。验收应检查实际变化的资产闭包与对应身份，而非要求所有 ID 一起变化。迁包还会影响 worklet 构建入口、source map、受控源码根路径及 SDK source/build proof；proof 包含实际 `engine`/`project-tools` 的源码、导出结果、生成脚本和声明输入。bootstrap 语义变化也需要更新编译 producer 身份，避免相同 buildKey 对应不同输出。
+
 `extensionId` 绑定 React/adapter vendor、模块映射及 SDK 声明。合并编译快照不进入 engineId。仅改 SDK 声明应改变 extensionId 而保持 engineId；仅改宿主字节应改变 engineId。`buildKey` 由输入和目标身份计算，最终 pack hash 与 `artifactId` 放在外层收据，避免自引用。
 
 发布 reader 会重算 schema 2 描述的完整 `id`、原生 `engineId` 和 SDK `extensionId`，校验全部资产引用的 path/hash/bytes，并核对站点封印的 `engine-release.json` hash/bytes。实际读取合并声明后，分别验证 native declarationsHash 和 SDK typesHash。SDK identity v2 还绑定每个运行模块的 JS hash 与实际导出的声明合同；typesHash、模式和模块闭包不能省略。
@@ -131,3 +183,15 @@ G0 使用同一原生候选的小规模实际运行证明其 scoped 条件；更
 IME 的 DOM/capability 探针不等于 OS 候选窗；`isSessionSupported` 不等于实际 XR session。Linux Playwright WebKit 不等于 macOS/iOS Safari，后者需真实 Apple 环境。没有实际硬件和部署证据的范围须继续明确列出。
 
 回退必须切换完整的 deployment+execution+descriptor+bootstrap+JS/WASM/worklets+API/types/SDK 版本集合，不能只换 WASM。当前脚本会生成和验证候选，不自动发布或更改默认指针。
+
+两个执行模型共用实际产品的 RuntimeHost 核心验收入口。对已经构建的匹配站点执行：
+
+```sh
+PLAYGROUND_TEST_DIRECTORY=/path/to/site \
+PLAYWRIGHT_BROWSERS_PATH=/path/to/pinned-browsers \
+pnpm --filter @godot-js/playground test:browser:runtime-host
+```
+
+该用例导入普通 Schema 4 脚本，检查原生节点读写、入口宿主命令/事件往返、停止重启、异步启动失败和失败后恢复；同时运行真实 Shader React 示例，验证 `useRuntimeHost()`、原生帧回调、资源和命令。终态必须携带相应的 `sessionFacts`。pthread 自动使用本地 TLS fixture。`PLAYGROUND_RUNTIME_HOST_REPORT` 可指定报告路径，默认报告位于临时目录。此验收不替代设备或生产部署验收。
+
+React 现有原生释放依赖同步 unmount 后的私有异步检查点。进程退出可能先于该检查点，残留脚本实例也可能延迟物理环境析构。逻辑销毁成功时来源摘要可以封结，而入口清理仍为 `unconfirmed`；逻辑销毁本身缺少证据时摘要也保持未确认。因此退出码 0 不证明入口已清理或环境摘要已封结，不得据此标成 clean-exit。来源摘要封结与入口清理是独立事实。

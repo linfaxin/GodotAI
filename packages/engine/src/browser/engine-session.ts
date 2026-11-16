@@ -1,4 +1,6 @@
 import {isProjectData, previewDiagnostic, type PreviewDiagnostic, type RunIdentity} from './protocol.js';
+import {createRuntimeBinding, type RuntimeBinding, type RuntimeSummary, type RuntimeDiagnostic as HostDiagnostic} from '../runtime-host.js';
+import {isRuntimeSummary, factsFromRuntimeSummaries, type SessionFacts} from '../session-facts.js';
 
 export type EngineExecutionModel = 'window' | 'dedicated-worker' | 'proxy-pthread';
 export type RuntimeRole = 'host' | 'engine' | 'script-worker';
@@ -8,6 +10,7 @@ export interface RuntimeDiagnostic {
 }
 export interface SessionCleanupReceipt {
   mode: 'clean' | 'forced';
+  status?: 'complete' | 'failed' | 'timed-out';
   workers: number; terminatedWorkers: number;
   audioContexts: number; closedAudioContexts: number;
   clearedTimers: number; removedListeners: number;
@@ -27,122 +30,94 @@ export interface BrowserEngineSessionOptions {
   onProject?: (data: Record<string, unknown>) => void;
   onLog?: (level:'log'|'warn'|'error',text:string)=>void;
   onWorkerRole?: (role: {workerId: number; role: RuntimeRole}) => void;
+  cleanupTimeoutMs?: number;
+  onSummary?: (summary:RuntimeSummary) => void;
 }
 
 interface RuntimePacket {
-  __godotjsRuntime: 1; sessionId: string; workerId: number;
-  type: 'role' | 'progress' | 'diagnostic' | 'project' | 'log';
+  __godotjsRuntime: 2; sessionId: string; workerId: number;
+  type: 'role' | 'progress' | 'diagnostic' | 'project' | 'log' | 'epoch' | 'summary' | 'command-receipt';
   role: RuntimeRole; sequence?: number; data?: unknown;
 }
-interface WorkerRecord {worker: Worker; id: number; role?: RuntimeRole; sequence: number; listener: EventListener; url: string}
-interface RuntimeHost {
-  readonly sessionId: string;
-  readonly role: RuntimeRole;
-  assignRole(role: RuntimeRole): void;
-  markProgress(): void;
-  reportProgress(frame?:number,phase?:string): void;
-  reportDiagnostic(value: unknown): boolean;
-  reportLog(level:'log'|'warn'|'error',text:string):boolean;
-  projectEvent(value: unknown): boolean;
-  emitProjectEvent(value: unknown): boolean;
-  bindProjectCommand(callback: unknown): void;
+interface WorkerRecord {
+  worker: Worker; id: number; role?: RuntimeRole; sequence: number; listener: EventListener; url: string;
+  epochs: Set<string>; summaries: Map<string,RuntimeSummary>;
+  commands: Map<number,number>; commandBytes:number;
 }
 
-/** This function is serialized into each pthread bootstrap. Keep it closure-free. */
-export function installWorkerRuntimeHost(sessionId: string, workerId: number): void {
+/** Serialized into a fresh realm. Every dependency is an explicit argument. */
+export function installWorkerRuntimeHost(sessionId: string, workerId: number, factory:typeof createRuntimeBinding): void {
   const scope = globalThis as unknown as {
-    __godotjsRuntimeHost?: RuntimeHost;
+    __godotjsRuntimeHost?: RuntimeBinding;
     postMessage(value: unknown): void;
     addEventListener(type: string, listener: (event: MessageEvent) => void, options?: boolean): void;
   };
-  let role: RuntimeRole | undefined, sequence = 0, lastProgress = -Infinity;
-  let command: ((json: string) => void) | undefined;
-  const pending: string[] = [];
-  const send = (type: RuntimePacket['type'], data?: unknown, extra: object = {}): boolean => {
-    if (!role) return false;
-    try {scope.postMessage({__godotjsRuntime: 1, sessionId, workerId, type, role, ...extra, ...(data === undefined ? {} : {data})}); return true;}
-    catch {return false;}
+  let role:RuntimeRole='host',sequence=0,lastProgress=-Infinity,projectSerial=0,projectBytes=0,lastCommand=0;
+  const projects=new Map<number,number>();
+  const byteLength=(text:string):number=>{let size=0;for(const character of text){const code=character.codePointAt(0)!;size+=code<128?1:code<2048?2:code<65536?3:4;}return size;};
+  const send=(type:RuntimePacket['type'],data?:unknown,extra:object={}):boolean=>{
+    try{scope.postMessage({__godotjsRuntime:2,sessionId,workerId,type,role,...extra,...(data===undefined?{}:{data})});return true;}catch{return false;}
   };
-  const host: RuntimeHost = {
-    sessionId,
-    get role(){return role??'host';},
-    assignRole(value) {
-      if (!['host','engine','script-worker'].includes(value)) throw new Error('E_RUNTIME_ROLE');
-      if (role && role !== value) throw new Error('E_RUNTIME_ROLE_REASSIGN');
-      if (role === value) return;
-      role = value; send('role');
+  const host=factory({sessionId,schedule:callback=>{void Promise.resolve().then(callback);},
+    onRole(value){role=value;send('role');},
+    onProgress(){if(role!=='engine')return;const time=Date.now();if(time-lastProgress<250)return;lastProgress=time;send('progress',undefined,{sequence:++sequence});},
+    onDiagnostic(value){return send('diagnostic',value);},
+    onLog(level,text){return send('log',{level,text});},
+    onProject(value,serialized){
+      const bytes=byteLength(serialized);
+      if(projects.size>=64||projectBytes+bytes>1048576)return false;
+      const ticket=++projectSerial;projects.set(ticket,bytes);projectBytes+=bytes;
+      if(send('project',value,{sequence:ticket}))return true;
+      projects.delete(ticket);projectBytes-=bytes;return false;
     },
-    markProgress() {
-      // Native Environment.update calls this; a timer is not engine progress.
-      if (role !== 'engine') return;
-      const time = Date.now();
-      if (time - lastProgress < 250) return;
-      lastProgress = time; send('progress', undefined, {sequence: ++sequence});
-    },
-    reportProgress() {host.markProgress();},
-    reportDiagnostic(value) {
-      if (role !== 'engine'&&role!=='script-worker') return false;
-      try {
-        const data = typeof value === 'string' ? JSON.parse(value) : value;
-        if (!data || typeof data !== 'object' || typeof (data as {message?:unknown}).message !== 'string') return false;
-        const item = data as RuntimeDiagnostic;
-        return send('diagnostic', {kind:item.kind, message:item.message.slice(0,4096), stack:typeof item.stack==='string'?item.stack.slice(0,32768):undefined, componentStack:typeof item.componentStack==='string'?item.componentStack.slice(0,8192):undefined});
-      } catch {return false;}
-    },
-    reportLog(level,text){if(!['log','warn','error'].includes(level)||typeof text!=='string')return false;return send('log',{level,text:text.slice(0,4096)});},
-    projectEvent(value) {
-      if (role !== 'engine') return false;
-      try {return send('project', typeof value === 'string' ? JSON.parse(value) : value);} catch {return false;}
-    },
-    emitProjectEvent(value) {return host.projectEvent(value);},
-    bindProjectCommand(callback) {
-      command = typeof callback === 'function' ? callback as (json:string)=>void : undefined;
-      if (command) for (const item of pending.splice(0)) command(item);
-    },
-  };
-  scope.__godotjsRuntimeHost = host;
-  // Application console calls execute in the Worker realm. Preserve DevTools
-  // output and deliver the same bounded text through the owned host channel.
+    onSummary(value){send('summary',value);},
+  });
+  const begin=host.beginNativeEpoch.bind(host);
+  host.beginNativeEpoch=epoch=>{begin(epoch);send('epoch',{epoch});};
+  if(scope.__godotjsRuntimeHost)throw new Error('E_RUNTIME_HOST_IN_USE');
+  scope.__godotjsRuntimeHost=host;
   const output=globalThis.console;
   const format=(value:unknown):string=>{
     if(typeof value==='string')return value.slice(0,4096);
     if(value===null||['undefined','number','boolean','bigint'].includes(typeof value))return String(value);
-    if(typeof value==='function')return '[function]';
-    if(typeof value==='symbol')return '[symbol]';
-    try{const descriptor=Object.getOwnPropertyDescriptor(value,'message');if(descriptor&&'value'in descriptor&&typeof descriptor.value==='string')return descriptor.value.slice(0,4096);}catch{/* Do not invoke application getters or serializers. */}
+    if(typeof value==='function')return '[function]';if(typeof value==='symbol')return '[symbol]';
+    try{const descriptor=Object.getOwnPropertyDescriptor(value,'message');if(descriptor&&'value'in descriptor&&typeof descriptor.value==='string')return descriptor.value.slice(0,4096);}catch{}
     return '[object]';
   };
   if(output)for(const name of ['log','info','debug','warn','error'] as const){
     const original=output[name];if(typeof original!=='function')continue;
-    const wrapped=(...args:unknown[])=>{
-      Reflect.apply(original,output,args);
-      host.reportLog(name==='warn'?'warn':name==='error'?'error':'log',args.slice(0,20).map(format).join(' ').slice(0,4096));
-    };
-    Object.defineProperty(wrapped,'__godotjsConsoleForwarded',{value:true});
-    output[name]=wrapped;
+    const wrapped=(...args:unknown[])=>{Reflect.apply(original,output,args);host.reportLog(name==='warn'?'warn':name==='error'?'error':'log',args.slice(0,20).map(format).join(' ').slice(0,4096));};
+    Object.defineProperty(wrapped,'__godotjsConsoleForwarded',{value:true});output[name]=wrapped;
   }
-  scope.addEventListener('message', event => {
-    const data = event.data;
-    if (!data || data.__godotjsRuntime !== 1 || data.sessionId !== sessionId || data.type !== 'project-command') return;
-    // Do not intercept Emscripten or GodotJS native transfer messages.
+  scope.addEventListener('message',event=>{
+    const data=event.data;
+    if(!data||data.__godotjsRuntime!==2||data.sessionId!==sessionId||!['project-command','project-receipt','drain'].includes(data.type))return;
     event.stopImmediatePropagation();
-    if (role !== 'engine' || typeof data.json !== 'string' || data.json.length > 262144) return;
-    if (command) command(data.json); else if (pending.length < 64) pending.push(data.json);
-  }, true);
+    if(data.type==='drain'){host.drain();return;}
+    if(data.type==='project-receipt'){
+      const bytes=projects.get(data.sequence);if(bytes!==undefined){projects.delete(data.sequence);projectBytes-=bytes;}return;
+    }
+    if(role!=='engine'||!Number.isSafeInteger(data.sequence)||data.sequence<=lastCommand)return;
+    lastCommand=data.sequence;
+    host.receiveProjectCommand(data.data,()=>{send('command-receipt',undefined,{sequence:data.sequence});});
+  },true);
   const ownText=(value:unknown,key:string):string|undefined=>{if(!value||typeof value!=='object')return;try{const descriptor=Object.getOwnPropertyDescriptor(value,key);return descriptor&&'value'in descriptor&&typeof descriptor.value==='string'?descriptor.value:undefined;}catch{return;}};
-  scope.addEventListener('error',event=>{
-    const error=event as unknown as ErrorEvent;
-    void Promise.resolve().then(()=>{if(!event.defaultPrevented)host.reportDiagnostic({kind:'runtime',message:ownText(error.error,'message')??error.message??'Worker execution failed',stack:ownText(error.error,'stack')});});
-  });
-  scope.addEventListener('unhandledrejection',event=>{
-    const rejection=event as unknown as PromiseRejectionEvent;
-    void Promise.resolve().then(()=>{if(!event.defaultPrevented)host.reportDiagnostic({kind:'runtime',message:ownText(rejection.reason,'message')??(typeof rejection.reason==='string'?rejection.reason:'Unhandled Worker rejection'),stack:ownText(rejection.reason,'stack')});});
-  });
+  const browserFailure=(diagnostic:HostDiagnostic)=>{
+    // A native epoch can be logically sealed before its physical teardown.
+    // Browser-global failures still belong to this live Worker/session control
+    // channel; rejecting scoped project work must not hide those failures.
+    const value:HostDiagnostic={kind:diagnostic.kind,message:diagnostic.message.slice(0,4096),
+      ...(typeof diagnostic.stack==='string'?{stack:diagnostic.stack.slice(0,32768)}:{}),
+      ...(typeof diagnostic.componentStack==='string'?{componentStack:diagnostic.componentStack.slice(0,8192)}:{})};
+    if(!host.reportDiagnostic(value))send('diagnostic',value);
+  };
+  scope.addEventListener('error',event=>{const error=event as unknown as ErrorEvent;void Promise.resolve().then(()=>{if(!event.defaultPrevented)browserFailure({kind:'runtime',message:ownText(error.error,'message')??error.message??'Worker execution failed',stack:ownText(error.error,'stack')});});});
+  scope.addEventListener('unhandledrejection',event=>{const rejection=event as unknown as PromiseRejectionEvent;void Promise.resolve().then(()=>{if(!event.defaultPrevented)browserFailure({kind:'runtime',message:ownText(rejection.reason,'message')??(typeof rejection.reason==='string'?rejection.reason:'Unhandled Worker rejection'),stack:ownText(rejection.reason,'stack')});});});
 }
 
-export function runtimeWorkerBootstrap(url: string, sessionId: string, workerId: number, module = false): string {
-  const install = `(${installWorkerRuntimeHost.toString()})(${JSON.stringify(sessionId)},${workerId});\n`;
-  return install + (module ? `await import(${JSON.stringify(url)});\n` : `importScripts(${JSON.stringify(url)});\n`);
+export function runtimeWorkerBootstrap(url:string,sessionId:string,workerId:number,module=false):string {
+  const install=`(${installWorkerRuntimeHost.toString()})(${JSON.stringify(sessionId)},${workerId},(${createRuntimeBinding.toString()}));\n`;
+  return install+(module?`await import(${JSON.stringify(url)});\n`:`importScripts(${JSON.stringify(url)});\n`);
 }
 
 const owners = new WeakMap<object, BrowserEngineSession>();
@@ -168,11 +143,23 @@ export class BrowserEngineSession {
   private stopped = false;
   private workerSerial = 0;
   private cleanup?: Promise<SessionCleanupReceipt>;
-  private localCommand?: (json:string)=>void;
+  private localBinding?:RuntimeBinding;
+  private readonly localEpochs=new Set<string>();
+  private readonly localSummaries=new Map<string,RuntimeSummary>();
+  private observationOverflow=false;
+  private readonly summaryWaiters=new Set<()=>void>();
+  private draining=false;
+  private commandSerial=0;
+  private failure?:HostDiagnostic;
   private readonly options: BrowserEngineSessionOptions;
+  // Captured before the session instruments timers. Its finalization deadline
+  // must still work after business timers have been revoked.
+  private readonly deadlineSet = globalThis.setTimeout.bind(globalThis);
+  private readonly deadlineClear = globalThis.clearTimeout.bind(globalThis);
 
   constructor(options: BrowserEngineSessionOptions) {
     this.options = options; this.identity = {...options.identity};
+    if(options.cleanupTimeoutMs!==undefined&&(!Number.isSafeInteger(options.cleanupTimeoutMs)||options.cleanupTimeoutMs<1||options.cleanupTimeoutMs>2147483647))throw new Error('E_SESSION_CLEANUP_TIMEOUT');
     this.scope = options.scope ?? globalThis;
     this.executionModel = options.executionModel ?? 'window';
     if (owners.has(this.scope)) throw new Error('E_SESSION_CONTEXT_IN_USE');
@@ -191,20 +178,25 @@ export class BrowserEngineSession {
     });
   }
 
-  private installRuntimeHost(): void {
-    let localRole:RuntimeRole='host',lastProgress=-Infinity,sequence=0;
-    const local: RuntimeHost = {
-      sessionId:this.identity.runId,
-      get role(){return localRole;},
-      assignRole:role=>{if(role!=='host'&&this.executionModel!=='window')throw new Error('E_SESSION_ENGINE_ON_HOST');localRole=role;},
-      markProgress:()=>{if(localRole!=='engine'||this.stopped)return;const time=Date.now();if(time-lastProgress<250)return;lastProgress=time;this.options.onProgress?.({workerId:0,sequence:++sequence,role:'engine'});},
-      reportProgress:()=>local.markProgress(),
-      reportDiagnostic:value=>this.report(value),
-      reportLog:(level,text)=>{if(this.stopped||typeof text!=='string'||!['log','warn','error'].includes(level))return false;this.options.onLog?.(level,text.slice(0,4096));return true;},
-      projectEvent:value=>this.project(value),
-      emitProjectEvent:value=>this.project(value),
-      bindProjectCommand:callback=>{this.localCommand=typeof callback==='function'?callback as (json:string)=>void:undefined;},
+  private installRuntimeHost():void {
+    if((this.scope as unknown as {__godotjsRuntimeHost?:unknown}).__godotjsRuntimeHost)throw new Error('E_RUNTIME_HOST_IN_USE');
+    let lastProgress=-Infinity,sequence=0;
+    const local=createRuntimeBinding({sessionId:this.identity.runId,
+      schedule:callback=>{void Promise.resolve().then(callback);},
+      onRole:role=>{if(role!=='host'&&this.executionModel!=='window')throw new Error('E_SESSION_ENGINE_ON_HOST');},
+      onProgress:()=>{if(this.localBinding?.role!=='engine'||this.stopped)return;const time=Date.now();if(time-lastProgress<250)return;lastProgress=time;this.options.onProgress?.({workerId:0,sequence:++sequence,role:'engine'});},
+      onDiagnostic:value=>this.report(value),onProject:value=>this.project(value),
+      onLog:(level,text)=>{if(this.stopped)return false;this.options.onLog?.(level,text);return true;},
+      onSummary:summary=>{if(!this.localEpochs.has(summary.epoch))return;this.localSummaries.set(summary.epoch,summary);this.options.onSummary?.(summary);this.notifySummaries();},
+    });
+    const begin=local.beginNativeEpoch.bind(local);
+    local.beginNativeEpoch=epoch=>{
+      begin(epoch);
+      if(this.localEpochs.has(epoch))return;
+      if(this.localEpochs.size>=256){this.observationOverflow=true;return;}
+      this.localEpochs.add(epoch);
     };
+    this.localBinding=local;
     this.replace(this.scope,'__godotjsRuntimeHost',local);
   }
 
@@ -221,7 +213,7 @@ export class BrowserEngineSession {
       let worker: Worker;
       try {worker = new Original(url,options);} catch (error) {owner.scope.URL.revokeObjectURL(url); throw error;}
       const listener: EventListener = event => owner.receive(worker,event as MessageEvent);
-      const record: WorkerRecord = {worker,id,sequence:0,listener,url};
+      const record: WorkerRecord = {worker,id,sequence:0,listener,url,epochs:new Set(),summaries:new Map(),commands:new Map(),commandBytes:0};
       owner.workers.set(worker,record);
       worker.addEventListener('message',listener,true);
       return worker;
@@ -233,7 +225,7 @@ export class BrowserEngineSession {
 
   private receive(worker: Worker, event: MessageEvent): void {
     const packet = event.data as RuntimePacket;
-    if (!packet || packet.__godotjsRuntime !== 1) return;
+    if (!packet || packet.__godotjsRuntime !== 2) return;
     event.stopImmediatePropagation();
     const record = this.workers.get(worker);
     if (this.stopped || !record || packet.sessionId !== this.identity.runId || packet.workerId !== record.id || !['host','engine','script-worker'].includes(packet.role)) return;
@@ -242,16 +234,73 @@ export class BrowserEngineSession {
       record.role = packet.role; this.options.onWorkerRole?.({workerId:record.id,role:packet.role}); return;
     }
     if(!record.role||packet.role!==record.role)return;
+    if(packet.type==='epoch'){
+      if(isProjectData(packet.data)&&typeof packet.data.epoch==='string'&&packet.data.epoch.length>0&&packet.data.epoch.length<=256&&!record.epochs.has(packet.data.epoch)){
+        if(record.epochs.size>=256)this.observationOverflow=true;
+        else record.epochs.add(packet.data.epoch);
+      }
+      return;
+    }
+    if(packet.type==='summary'){
+      if(!isRuntimeSummary(packet.data)||!record.epochs.has(packet.data.epoch))return;
+      const previous=record.summaries.get(packet.data.epoch);if(previous?.sealed)return;
+      record.summaries.set(packet.data.epoch,packet.data);this.options.onSummary?.(packet.data);this.notifySummaries();return;
+    }
     if(packet.type==='diagnostic'&&(record.role==='engine'||record.role==='script-worker')){this.report(packet.data,{workerId:record.id,workerRole:record.role});return;}
     if(packet.type==='log'&&(record.role==='engine'||record.role==='script-worker')){
       if(isProjectData(packet.data)&&['log','warn','error'].includes(String(packet.data.level))&&typeof packet.data.text==='string')this.options.onLog?.(packet.data.level as 'log'|'warn'|'error',packet.data.text.slice(0,4096));
       return;
     }
-    if (record.role !== 'engine' || packet.role !== 'engine') return;
-    if (packet.type === 'progress') {
-      if (!Number.isSafeInteger(packet.sequence) || packet.sequence! <= record.sequence) return;
-      record.sequence=packet.sequence!; this.options.onProgress?.({workerId:record.id,sequence:record.sequence,role:'engine'});
-    } else if (packet.type === 'project') this.project(packet.data);
+    if(record.role!=='engine')return;
+    if(packet.type==='command-receipt'){
+      const bytes=record.commands.get(packet.sequence!);if(bytes!==undefined){record.commands.delete(packet.sequence!);record.commandBytes-=bytes;}return;
+    }
+    if(packet.type==='progress'){
+      if(!Number.isSafeInteger(packet.sequence)||packet.sequence!<=record.sequence)return;
+      record.sequence=packet.sequence!;this.options.onProgress?.({workerId:record.id,sequence:record.sequence,role:'engine'});
+    }else if(packet.type==='project'){
+      try{this.project(packet.data);}finally{if(Number.isSafeInteger(packet.sequence)&&packet.sequence!>0)record.worker.postMessage({__godotjsRuntime:2,sessionId:this.identity.runId,type:'project-receipt',sequence:packet.sequence});}
+    }
+  }
+
+  private notifySummaries():void {for(const notify of [...this.summaryWaiters])notify();}
+
+  /** Stop business traffic while preserving the control/final-summary channel. */
+  beginDrain():void {
+    if(this.stopped||this.draining)return;this.draining=true;this.localBinding?.drain();
+    for(const record of this.workers.values())try{record.worker.postMessage({__godotjsRuntime:2,sessionId:this.identity.runId,type:'drain'});}catch{}
+  }
+
+  get hasRuntimeObservation():boolean {return this.localEpochs.size>0||[...this.workers.values()].some(record=>record.epochs.size>0);}
+
+  private allSourcesSealed():boolean {
+    if(this.observationOverflow)return false;
+    let sources=0;
+    for(const epoch of this.localEpochs){sources++;if(!this.localSummaries.get(epoch)?.sealed)return false;}
+    for(const record of this.workers.values()){
+      if((record.role==='engine'||record.role==='script-worker')&&!record.epochs.size)return false;
+      for(const epoch of record.epochs){sources++;if(!record.summaries.get(epoch)?.sealed)return false;}
+    }
+    return sources>0;
+  }
+
+  sessionFacts(input:Partial<Omit<SessionFacts,'schemaVersion'|'runtimeSummary'|'entryCleanup'>>={}):SessionFacts {
+    const summaries=[...this.localSummaries.values(),...[...this.workers.values()].flatMap(record=>[...record.summaries.values()])];
+    // The host can latch a browser failure before native teardown reports its
+    // own error. Preserve that first failure rather than replacing its facts.
+    const failure=input.failure??this.failure;
+    return factsFromRuntimeSummaries(summaries,{...input,...(failure?{failure}:{}),allSourcesSealed:this.allSourcesSealed()});
+  }
+
+  /** Never destroy a pthread pool until its pre-exit epoch summaries arrive or
+   * the observation deadline expires. An absent summary remains unconfirmed. */
+  waitForRuntimeSummary(timeoutMs=500):Promise<void> {
+    if(this.allSourcesSealed()||this.stopped)return Promise.resolve();
+    return new Promise(resolve=>{
+      const finish=()=>{this.deadlineClear(timer);this.summaryWaiters.delete(check);resolve();};
+      const check=()=>{if(this.allSourcesSealed()||this.stopped)finish();};
+      const timer=this.deadlineSet(finish,timeoutMs);this.summaryWaiters.add(check);check();
+    });
   }
 
   private report(value: unknown,source?:{workerId:number;workerRole:RuntimeRole}): boolean {
@@ -259,15 +308,17 @@ export class BrowserEngineSession {
     try {
       const data = typeof value === 'string' ? JSON.parse(value) : value;
       if (!isProjectData(data) || typeof data.message !== 'string' || data.message.length > 4096) return false;
+      if(!['caught','recoverable','uncaught','runtime'].includes(String(data.kind)))return false;
       const item: RuntimeDiagnostic={message:data.message,...source};
       if(typeof data.kind==='string')item.kind=data.kind;
       if(typeof data.stack==='string')item.stack=data.stack.slice(0,32768);
       if(typeof data.componentStack==='string')item.componentStack=data.componentStack.slice(0,8192);
+      if((item.kind==='uncaught'||item.kind==='runtime')&&!this.failure){this.failure={kind:item.kind,message:item.message,...(item.stack?{stack:item.stack}:{}),...(item.componentStack?{componentStack:item.componentStack}:{})};this.beginDrain();}
       this.options.onDiagnostic?.(item); return true;
     } catch {return false;}
   }
   private project(value: unknown): boolean {
-    if (this.stopped) return false;
+    if (this.stopped||this.draining) return false;
     try {const data=typeof value==='string'?JSON.parse(value):value;if(!isProjectData(data))return false;this.options.onProject?.(data);return true;} catch {return false;}
   }
 
@@ -276,7 +327,7 @@ export class BrowserEngineSession {
       const Original=(this.scope as unknown as Record<string,unknown>)[key];
       if (typeof Original!=='function') continue;
       const owner=this;
-      const Wrapped=function (this:AudioContext,...args:unknown[]) {if(!new.target)throw new TypeError('AudioContext constructor requires new');const context=Reflect.construct(Original,args) as AudioContext;owner.contexts.add(context);return context;};
+      const Wrapped=function (this:AudioContext,...args:unknown[]) {if(!new.target)throw new TypeError('AudioContext constructor requires new');if(owner.stopped)throw new Error('E_SESSION_DISPOSED');const context=Reflect.construct(Original,args) as AudioContext;owner.contexts.add(context);return context;};
       Wrapped.prototype=Original.prototype;Object.setPrototypeOf(Wrapped,Original);this.replace(this.scope,key,Wrapped);
     }
     // Browser audio activation belongs on the Window that receives the trusted
@@ -408,13 +459,18 @@ export class BrowserEngineSession {
     if(canvas)this.ownCanvas(canvas);
   }
 
-  command(data: Record<string,unknown>): boolean {
-    if(this.stopped||!isProjectData(data))return false;
-    const json=JSON.stringify(data);
-    if(this.executionModel==='window'&&this.localCommand){this.localCommand(json);return true;}
-    let sent=false;
-    for(const record of this.workers.values())if(record.role==='engine'){record.worker.postMessage({__godotjsRuntime:1,sessionId:this.identity.runId,type:'project-command',json});sent=true;}
-    return sent;
+  legacyProjectEvent(value:unknown):boolean {return this.localBinding?.projectEvent(value)??false;}
+  bindLegacyProjectCommand(callback:((json:string)=>void)|null):void {this.localBinding?.bindLegacyProjectCommand(callback);}
+
+  command(data:Record<string,unknown>):boolean {
+    if(this.stopped||this.draining||!isProjectData(data))return false;
+    const json=JSON.stringify(data),bytes=new TextEncoder().encode(json).byteLength,snapshot=JSON.parse(json) as Record<string,unknown>;
+    if(this.executionModel==='window')return this.localBinding?.receiveProjectCommand(snapshot)??false;
+    const record=[...this.workers.values()].find(value=>value.role==='engine');
+    if(!record||record.commands.size>=64||record.commandBytes+bytes>1048576)return false;
+    const sequence=++this.commandSerial;record.commands.set(sequence,bytes);record.commandBytes+=bytes;
+    try{record.worker.postMessage({__godotjsRuntime:2,sessionId:this.identity.runId,type:'project-command',sequence,data:snapshot});return true;}
+    catch{record.commands.delete(sequence);record.commandBytes-=bytes;return false;}
   }
 
   getStats(): {workers:number;engineWorkers:number;scriptWorkers:number;audioContexts:number;messagePorts:number;glContexts:number;stopped:boolean} {
@@ -423,7 +479,7 @@ export class BrowserEngineSession {
 
   dispose(mode:'clean'|'forced'='forced'): Promise<SessionCleanupReceipt> {
     if(this.cleanup)return this.cleanup;
-    this.stopped=true;
+    this.beginDrain();this.stopped=true;this.localBinding?.settle();this.notifySummaries();
     const tracks=[...this.media].flatMap(stream=>stream.getTracks());
     const receipt:SessionCleanupReceipt={mode,workers:this.workers.size,terminatedWorkers:0,audioContexts:this.contexts.size,closedAudioContexts:0,clearedTimers:0,removedListeners:this.listeners.length,mediaStreams:this.media.size,mediaTracks:tracks.length,stoppedMediaTracks:0,networkResources:this.network.size,closedNetworkResources:0,messagePorts:this.ports.size,closedMessagePorts:0,glContexts:this.gl.size,glLossRequested:0,lostGlContexts:0,errors:[]};
     const safely=(callback:()=>void)=>{try{callback();}catch(error){if(receipt.errors.length<64)receipt.errors.push(previewDiagnostic(error).message);}};
@@ -454,13 +510,29 @@ export class BrowserEngineSession {
     }
     this.media.clear();this.network.clear();
     for(const undo of this.restore.reverse())safely(undo);
-    this.restore.length=0;this.localCommand=undefined;
+    this.restore.length=0;this.localBinding=undefined;
     if(owners.get(this.scope)===this)owners.delete(this.scope);
     this.module=undefined;this.workers.clear();this.listeners.length=0;this.canvases.clear();
     const audio=[...this.contexts];this.contexts.clear();
-    this.cleanup=Promise.all(audio.map(async context=>{
-      try{context.onstatechange=null;if(context.state!=='closed')await context.close();receipt.closedAudioContexts++;}catch(error){if(receipt.errors.length<64)receipt.errors.push(previewDiagnostic(error).message);}
-    })).then(()=>receipt);
+    this.cleanup=new Promise(resolve=>{
+      let settled=false;
+      const finish=(status:NonNullable<SessionCleanupReceipt['status']>)=>{
+        if(settled)return;settled=true;this.deadlineClear(timer);receipt.status=status;resolve(receipt);
+      };
+      const timer=this.deadlineSet(()=>{
+        if(receipt.errors.length<64)receipt.errors.push('E_SESSION_CLEANUP_TIMEOUT: Audio cleanup deadline exceeded');
+        finish('timed-out');
+      },this.options.cleanupTimeoutMs??1000);
+      void Promise.all(audio.map(async context=>{
+        try{context.onstatechange=null;if(context.state!=='closed')await context.close();return {closed:true};}
+        catch(error){return {closed:false,error:previewDiagnostic(error).message};}
+      })).then(results=>{
+        // Late close/rejection is observed, but cannot rewrite a published receipt.
+        if(settled)return;
+        for(const result of results){if(result.closed)receipt.closedAudioContexts++;else if(receipt.errors.length<64)receipt.errors.push(result.error!);}
+        finish(receipt.errors.length?'failed':'complete');
+      });
+    });
     return this.cleanup;
   }
 }

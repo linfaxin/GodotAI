@@ -13,7 +13,7 @@ const replacements={
  'worker-dom-host.js':'export function createInputHost(...args){return globalThis.__input(...args)}',
  'worker-browser.js':'export function createWorkerBrowserHost(...args){return globalThis.__browser(...args)}',
 };
-const code=(await build({stdin:{contents:'export {startWorkerPreviewHost} from "./src/worker-host.ts";export {prepareWorkerRunConfiguration} from "./src/worker-protocol.ts";export {WorkerAudioRenderQueue} from "./src/worker-audio-worklet.ts";',resolveDir:directory},
+const code=(await build({stdin:{contents:'export {startWorkerPreviewHost} from "../../packages/engine/src/browser/dedicated/worker-host.ts";export {prepareWorkerRunConfiguration} from "../../packages/engine/src/browser/dedicated/worker-protocol.ts";export {WorkerAudioRenderQueue} from "../../packages/engine/src/browser/dedicated/worker-audio-worklet.ts";',resolveDir:directory},
  bundle:true,write:false,format:'iife',globalName:'WorkerHostUnderTest',platform:'browser',target:'es2022',plugins:[{name:'host-io-edges',setup(builder){
  builder.onResolve({filter:/(verified-loader|worker-presentation|worker-dom-host|worker-browser)\.js$/},args=>({path:args.path.split('/').at(-1),namespace:'test-host'}));
  builder.onLoad({filter:/.*/,namespace:'test-host'},args=>({contents:replacements[args.path],loader:'js'}));
@@ -96,7 +96,7 @@ async function fixture({fetchAsset,loadRuntime,moduleReady,closeReady,inputReady
    const [id,timer]=next;now=timer.due;if(timer.interval)timer.due+=timer.interval;else timers.delete(id);timer.callback();await flush();}now=target;await flush();}
  return {host,editor,identity,counters,channels,contexts,worklets,snapshots,createdUrls,revokedUrls,timers,run,advance,flush,runtime,envelope,clone,makeError:message=>vm.runInContext('new Error('+JSON.stringify(message)+')',context),
   get connect(){return connect;},get inputOptions(){return inputOptions;},get presentationOptions(){return presentationOptions;},get receipt(){return editor.sent.find(message=>message.type==='exit-report');},
-  sendControl(fields){connect.controlPort.postMessage(envelope(fields));},sendData(fields){connect.dataPort.postMessage(envelope(fields));},
+  sendControl(fields){if(fields.type==='native-exit'&&!Object.hasOwn(fields,'runtimeSummary'))fields={...fields,runtimeSummary:clone({schemaVersion:1,epoch:'fixture-native',sealed:true,overflow:false,entries:[]})};connect.controlPort.postMessage(envelope(fields));},sendData(fields){connect.dataPort.postMessage(envelope(fields));},
   sendAudio(fields){connect.audioCommandPort.postMessage({runId:identity.runId,audioEpoch:1,...fields});},
   event(name){for(const callback of [...listeners.get(name)??[]])callback();},
   async ready(){run();await until(()=>connect||editor.sent.some(message=>message.type==='exit-report'));assert.ok(connect,'host should have connected a Worker');},
@@ -126,6 +126,48 @@ test('Host forwards project commands only within its own credits and waits for W
   assert.equal(f.editor.sent.filter(m=>m.type==='project-command-receipt').length,1);
   f.sendControl({type:'project-command-receipt',commandSequence:2});await f.flush();assert.equal(f.editor.sent.filter(m=>m.type==='project-command-receipt').length,1);
   send(3);send(4);await f.flush();assert.equal(f.host.snapshot.closing,true,'direct port bypass cannot exceed Host queue budget');
+ }finally{await f.cleanup();}
+});
+
+test('large dense project arrays reach the editor and keep receipts on the consumption path',async()=>{
+ const f=await fixture();
+ try{
+  await f.ready();
+  const payload={type:'snapshot',ids:Array(25000).fill(0),padding:''};
+  payload.padding='x'.repeat(262144-new TextEncoder().encode(JSON.stringify(payload)).byteLength);
+  assert.equal(new TextEncoder().encode(JSON.stringify(payload)).byteLength,262144);
+  for(let sequence=1;sequence<=4;sequence++)f.sendControl({type:'project',projectSequence:sequence,data:f.clone(payload)});
+  f.sendControl({type:'project',projectSequence:5,data:f.clone({type:'small-normal'})});
+  await f.flush();
+  const delivered=f.editor.sent.filter(message=>message.type==='project');
+  assert.deepEqual(delivered.map(message=>message.projectSequence),[1,2,3,4,5]);
+  assert(delivered.slice(0,4).every(message=>message.data.ids.length===25000));
+  const receipts=()=>f.connect.controlPort.peer.sent.filter(message=>message.type==='project-receipt');
+  assert.equal(receipts().length,0,'valid events wait for the editor consumption receipt');
+  for(const message of delivered)f.editor.onmessage({data:f.envelope({type:'project-receipt',projectSequence:message.projectSequence})});
+  await f.flush();
+  assert.deepEqual(receipts().map(message=>message.projectSequence),[1,2,3,4,5]);
+ }finally{await f.cleanup();}
+});
+
+test('rejected or revoked project packets return credits without acknowledging forwarded events twice',async()=>{
+ const f=await fixture();
+ try{
+  await f.ready();
+  const receipts=()=>f.connect.controlPort.peer.sent.filter(message=>message.type==='project-receipt');
+  f.sendControl({type:'project',projectSequence:1,data:f.clone({text:'x'.repeat(262145)})});
+  f.sendControl({type:'project',projectSequence:2,data:null});
+  f.sendControl({type:'project',projectSequence:0,data:null});
+  f.sendControl({type:'project',projectSequence:3,data:f.clone({type:'valid'})});
+  await f.flush();
+  assert.deepEqual(receipts().map(message=>message.projectSequence),[1,2]);
+  assert.deepEqual(f.editor.sent.filter(message=>message.type==='project').map(message=>message.projectSequence),[3]);
+  f.editor.onmessage({data:f.envelope({type:'project-receipt',projectSequence:3})});await f.flush();
+  assert.deepEqual(receipts().map(message=>message.projectSequence),[1,2,3]);
+  f.host.stop();
+  f.sendControl({type:'project',projectSequence:4,data:f.clone({type:'cancelled'})});await f.flush();
+  assert.deepEqual(receipts().map(message=>message.projectSequence),[1,2,3,4]);
+  assert.equal(f.editor.sent.filter(message=>message.type==='project').length,1);
  }finally{await f.cleanup();}
 });
 
@@ -266,4 +308,17 @@ test('independent late PCM cannot refill a flushed renderer or reopen stopped au
 
 test('Host forwards its actual HTTP document URL into the verified Blob Worker boot',async()=>{
  const f=await fixture();try{f.run();await until(()=>f.connect);assert.equal(f.connect.documentUrl,'https://preview.test/app/preview.html?run=1');}finally{await f.cleanup();}
+});
+
+
+test('native zero without a runtime seal remains explicitly unconfirmed',async()=>{
+ const f=await fixture();try{await f.ready();f.sendControl({type:'native-exit',code:0,runtimeSummary:undefined});await f.flush();
+  assert.equal(f.receipt.reason,'cleanup-unconfirmed');assert.equal(f.receipt.sessionFacts.runtimeSummary,'unconfirmed');
+ }finally{await f.cleanup();}
+});
+
+test('terminal runtime summary retains a fatal even when native zero arrives without an earlier fatal packet',async()=>{
+ const f=await fixture();try{await f.ready();f.sendControl({type:'native-exit',code:0,runtimeSummary:f.clone({schemaVersion:1,epoch:'native-final',sealed:true,overflow:false,entries:[],failure:{kind:'runtime',message:'fatal-before-native-zero',stack:'author.ts:4'}})});await f.flush();
+  assert.equal(f.receipt.reason,'crashed');assert.equal(f.receipt.sessionFacts.failure.message,'fatal-before-native-zero');assert.equal(f.receipt.code,0);
+ }finally{await f.cleanup();}
 });

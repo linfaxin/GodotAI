@@ -14,11 +14,22 @@ const json=async file=>JSON.parse(await readFile(file,'utf8'));
 export const REQUIRED_SITE_REPORTS=Object.freeze(['runtime','editor','bridge','projects','demo-regressions','react-demos','workbench','delivery']);
 export const REQUIRED_2D_SITE_REPORTS=Object.freeze(['features','features.firefox','features.webkit','runtime.firefox','runtime.webkit']);
 export const REQUIRED_2D_FEATURE_CHECKS=Object.freeze(['physicsRay','physicsCollision','navigation','tilemapRendered','textMetrics','textRendered','cjkGlyphCoverage','audioStarted','audioStopped','audioRestarted','nativeButtonInput','nativeCleanup']);
+/** Resolve repository-owned source-map entries without allowing interior traversal.
+ * Leading ../ segments are emitted by esbuild relative to its output location;
+ * once a repository root is reached, the remaining path must be canonical. */
+export function repositorySourcePath(source){
+ if(typeof source!=='string'||!source||source.includes('\\')||source.startsWith('/')||/^[A-Za-z][A-Za-z0-9+.-]*:/.test(source)||/[\x00-\x1f]/.test(source))throw Error('E_SITE_SOURCE_PATH: '+source);
+ const relative=source.replace(/^(?:\.\.\/|\.\/)+/,'');
+ const entry=/^(?:apps|scripts|packages|impl|configs)\//.test(relative)?relative:'apps/playground/'+relative;
+ if(entry.split('/').some(part=>!part||part==='.'||part==='..'))throw Error('E_SITE_SOURCE_PATH: '+source);
+ return entry;
+}
 export async function sealSiteAcceptance(directory,reports,{verify=false,begin=false}={}){
  directory=path.resolve(directory);reports=path.resolve(reports);
  if(reports===directory||reports.startsWith(directory+path.sep))throw Error('E_SITE_EVIDENCE_OUTPUT: reports must remain outside the immutable site');
  const release=await json(path.join(directory,'engine-release.json'));
  const worker=Boolean(release.runtimeAbi);
+ const previewEntry=(release.execution??release.engine?.execution)?.executionModel==='proxy-pthread'?'apps/playground/preview-pthread.ts':'apps/playground/preview.ts';
  const manifest=worker?await json(path.join(directory,'manifest.json')):undefined;
  if(release.schemaVersion!==2||!isEngineProfile(release.runtimeProfile))throw Error('E_SITE_PROFILE');
  if(release.build?.sourceCertified!==true)throw Error('E_SITE_UNCERTIFIED_SOURCE');
@@ -36,7 +47,7 @@ export async function sealSiteAcceptance(directory,reports,{verify=false,begin=f
   async function fixtures(prefix){for(const entry of await readdir(path.join(testRoot,prefix),{withFileTypes:true})){const relative=prefix+'/'+entry.name;if(entry.isDirectory())await fixtures(relative);else if(entry.isFile())testSources['apps/playground/scripts/'+relative]=digest(await readFile(path.join(testRoot,relative)));else throw Error('E_SITE_TEST_SOURCE_SYMLINK: '+relative);}}
   await fixtures('fixtures');
  }
- for(const [mapName,entry]of [['main.js.map','apps/playground/src/main.ts'],['compiler.worker.js.map','apps/playground/src/compiler.worker.ts'],['preview.js.map','apps/playground/preview.ts']]){
+ for(const [mapName,entry]of [['main.js.map','apps/playground/src/main.ts'],['compiler.worker.js.map','apps/playground/src/compiler.worker.ts'],['preview.js.map',previewEntry]]){
   const map=await json(path.join(directory,mapName)),expected=await readFile(path.join(repo,entry),'utf8');
   const suffix=entry.includes('/src/')?'src/'+path.basename(entry):path.basename(entry);
   // Embedded source identity remains valid when the immutable site is moved
@@ -50,15 +61,14 @@ export async function sealSiteAcceptance(directory,reports,{verify=false,begin=f
   assertWorkerCandidate(manifest,release,payloads);
   // Check every repository-owned source in all executable runtime bundles,
   // including their SDK imports, rather than accepting only an entry wrapper.
-  for(const [mapName,required]of [['preview.js.map','apps/playground/preview.ts'],['runtime.worker.js.map','apps/playground/runtime.worker.ts'],['runtime.audio.worklet.js.map','scripts/jsb.react-browser/src/worker-audio-worklet.ts']]){
+  for(const [mapName,required]of [['preview.js.map',previewEntry],['runtime.worker.js.map','apps/playground/runtime.worker.ts'],['runtime.audio.worklet.js.map','packages/engine/src/browser/dedicated/worker-audio-worklet.ts']]){
    const map=await json(path.join(directory,mapName));let found=false,checked=0;
    if(!Array.isArray(map.sources)||!Array.isArray(map.sourcesContent)||map.sources.length!==map.sourcesContent.length)throw Error('E_SITE_SOURCE_MAP: '+mapName);
    for(let index=0;index<map.sources.length;index++){
     const source=map.sources[index].replaceAll('\\','/');
     if(source.includes('node_modules/'))continue;
-    const relative=source.replace(/^(?:\.\.\/|\.\/)+/,'');
-    const entry=/^(?:apps|scripts)\//.test(relative)?relative:'apps/playground/'+relative;
-    if(entry.includes('..')||entry.startsWith('/')||typeof map.sourcesContent[index]!=='string')throw Error('E_SITE_SOURCE_PATH: '+source);
+    const entry=repositorySourcePath(source);
+    if(typeof map.sourcesContent[index]!=='string')throw Error('E_SITE_SOURCE_PATH: '+source);
     let expected;try{expected=await readFile(path.join(repo,entry),'utf8');}catch{throw Error('E_SITE_SOURCE_MISSING: '+entry);}
     if(expected!==map.sourcesContent[index])throw Error('E_SITE_SOURCE_DRIFT: '+entry);
     sources[entry]=digest(expected);checked++;if(entry===required)found=true;
@@ -82,7 +92,7 @@ export async function sealSiteAcceptance(directory,reports,{verify=false,begin=f
  const batchKey=worker?'acceptanceBatchId':'runId';
  if(begin){const candidate={...base,[batchKey]:randomUUID()};await mkdir(reports,{recursive:true});await writeFile(start,JSON.stringify(candidate,null,2)+'\n');return {status:'prepared',profile:candidate.profile,releaseId:candidate.releaseId,candidateId:candidate.candidateId,siteHash:candidate.siteHash,[batchKey]:candidate[batchKey],context:start,files:Object.keys(payloads).length,...(worker?{reportPlan:base.reportPlan}:{})};}
  const prepared=await json(start),candidate={...base,[batchKey]:prepared[batchKey]};
- if(typeof candidate[batchKey]!=='string'||!candidate[batchKey]||canonical(prepared)!==canonical(candidate))throw Error('E_SITE_TEST_INPUT_DRIFT');
+ if(typeof candidate[batchKey]!=='string'||!candidate[batchKey]||canonical(prepared)!==canonical(candidate))throw Error('E_SITE_TEST_INPUT_DRIFT: '+[...new Set([...Object.keys(prepared),...Object.keys(candidate)])].filter(key=>canonical(prepared[key])!==canonical(candidate[key])).join(', '));
  const started=(await stat(start)).mtimeMs;
  const evidence={};
  const required=worker?base.reportPlan:[...REQUIRED_SITE_REPORTS,...(release.runtimeProfile==='engine-2d-v1'?REQUIRED_2D_SITE_REPORTS:[])].map(name=>({name,suite:name,browser:name.includes('.')?name.split('.')[1]:'chromium'}));
@@ -109,7 +119,7 @@ export async function sealSiteAcceptance(directory,reports,{verify=false,begin=f
    if(worker){
     if(!Array.isArray(result.warnings)||result.warnings.length)throw Error('E_SITE_FEATURE_WARNINGS');
     const harness=result.harness,proof=release.build.sdkBuild;
-    if(harness?.kind!=='synthetic-editor-official-preview'||harness.sdkSourceSnapshotHash!==proof.sourceSnapshotHash||harness.sdkOutputSnapshotHash!==proof.outputSnapshotHash||!Array.isArray(harness.sourceAssets)||!harness.sourceAssets.length||!harness.sourceAssets.some(asset=>asset.path==='scripts/jsb.react-browser/dist/worker-runner.js')||harness.sourceAssets.some(asset=>asset.sha256!==proof.outputs[asset.path]?.sha256||asset.bytes!==proof.outputs[asset.path]?.bytes))throw Error('E_SITE_FEATURE_HARNESS_IDENTITY');
+    if(harness?.kind!=='synthetic-editor-official-preview'||harness.sdkSourceSnapshotHash!==proof.sourceSnapshotHash||harness.sdkOutputSnapshotHash!==proof.outputSnapshotHash||!Array.isArray(harness.sourceAssets)||!harness.sourceAssets.length||!harness.sourceAssets.some(asset=>asset.path==='packages/engine/dist/browser/dedicated/worker-runner.js')||harness.sourceAssets.some(asset=>asset.sha256!==proof.outputs[asset.path]?.sha256||asset.bytes!==proof.outputs[asset.path]?.bytes))throw Error('E_SITE_FEATURE_HARNESS_IDENTITY');
     if(result.sessions.length!==result.cases.length)throw Error('E_SITE_FEATURE_WORKER_SESSION');
    }
    for(const item of result.cases){

@@ -1,2 +1,2 @@
-import { installWorkerRuntime } from '../../scripts/jsb.react-browser/src/worker-runtime.js';
+import { installWorkerRuntime } from '@godot-js/engine/browser/dedicated/worker-runtime';
 installWorkerRuntime();

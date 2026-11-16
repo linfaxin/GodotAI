@@ -2,6 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import vm from 'node:vm';
 import {BrowserEngineSession,installWorkerRuntimeHost,runtimeWorkerBootstrap} from '../dist/engine-session.js';
+import {createRuntimeBinding} from '../../../packages/engine/dist/runtime-host.js';
+function installHost(scope,id){scope.globalThis=scope;vm.createContext(scope);vm.runInContext('('+installWorkerRuntimeHost.toString()+')('+JSON.stringify(identity.runId)+','+id+',('+createRuntimeBinding.toString()+'))',scope);}
+const realm=(scope,value)=>vm.runInContext('('+JSON.stringify(value)+')',scope);
 
 const identity={runId:'session-test',buildKey:'build-test',revision:1,generation:'gen-test'};
 function fixture(){
@@ -24,12 +27,12 @@ test('session tracks every pthread, only native engine progress counts, and stal
  const f=fixture(),progress=[],roles=[],projects=[];
  const session=new BrowserEngineSession({identity,scope:f.scope,executionModel:'proxy-pthread',requiresCrossOriginIsolation:true,onProgress:value=>progress.push(value),onWorkerRole:value=>roles.push(value),onProject:value=>projects.push(value)});
  const engine=new f.scope.Worker('https://preview.test/engine.worker.js'),script=new f.scope.Worker('https://preview.test/engine.worker.js');
- const packet=(worker,id,type,fields={})=>worker.deliver({__godotjsRuntime:1,sessionId:identity.runId,workerId:id,type,role:'engine',...fields});
+ const packet=(worker,id,type,fields={})=>worker.deliver({__godotjsRuntime:2,sessionId:identity.runId,workerId:id,type,role:'engine',...fields});
  packet(engine,1,'role');packet(script,2,'role',{role:'script-worker'});
  packet(script,2,'progress',{sequence:1,role:'script-worker'});packet(engine,1,'progress',{sequence:1});packet(engine,1,'progress',{sequence:1});packet(engine,1,'progress',{sequence:99,sessionId:'old-session'});
  assert.equal(progress.length,1);assert.deepEqual(roles.map(item=>item.role),['engine','script-worker']);
  packet(engine,1,'project',{data:{type:'chunk',text:'x'.repeat(65536)}});assert.equal(projects.length,1);
- assert.equal(session.command({type:'controls',speed:2}),true);assert.equal(engine.sent.length,1);assert.equal(script.sent.length,0);
+ assert.equal(session.command({type:'controls',speed:2}),true);assert.equal(engine.sent.filter(item=>item.type==='project-command').length,1);assert.equal(script.sent.length,0);
  assert.equal(engine.sent[0].sessionId,identity.runId);
  const source=await f.urls.get(engine.url).text();assert.match(source,/installWorkerRuntimeHost/);assert.match(source,/importScripts\("https:\/\/preview.test\/engine.worker.js"\)/);
  const cleanup=await session.dispose('forced');assert.equal(cleanup.workers,2);assert.equal(cleanup.terminatedWorkers,2);assert.equal(engine.terminated,1);assert.equal(script.terminated,1);
@@ -69,18 +72,18 @@ test('trusted host gestures resume proxy audio and retired sessions remove their
  retired({isTrusted:true});assert.equal(resumes,2);
 });
 
-test('worker bootstrap binds native role, bounded diagnostics and commands without touching native transfer messages',()=>{
+test('worker bootstrap binds native role, bounded diagnostics and commands without touching native transfer messages',async()=>{
  const sent=[],listeners=[];let time=1000;
  const scope={postMessage:message=>sent.push(message),addEventListener:(name,fn)=>listeners.push(fn),Date:{now:()=>time}};
  scope.globalThis=scope;
- vm.runInNewContext('('+installWorkerRuntimeHost.toString()+')('+JSON.stringify(identity.runId)+',3)',scope);
+ installHost(scope,3);
  const host=scope.__godotjsRuntimeHost;assert.equal(host.role,'host');host.markProgress();assert.equal(sent.length,0);
  host.assignRole('engine');host.markProgress();host.markProgress();time+=300;host.markProgress();
- assert.deepEqual(sent.map(item=>item.type),['role','progress','progress']);assert.equal(host.reportDiagnostic({message:'error',kind:'caught'}),true);
- assert.equal(host.emitProjectEvent({type:'chunk',part:0,text:'asset'}),true);
+ assert.deepEqual(sent.map(item=>item.type),['role','progress','progress']);assert.equal(host.reportDiagnostic(realm(scope,{message:'error',kind:'caught'})),true);
+ assert.equal(host.emitProjectEvent(realm(scope,{type:'chunk',part:0,text:'asset'})),true);
  let stopped=0;listeners[0]({data:{__jsbMessage:true,data:'native'},stopImmediatePropagation(){stopped++;}});assert.equal(stopped,0);
- const command={data:{__godotjsRuntime:1,sessionId:identity.runId,type:'project-command',json:'{"type":"reset"}'},stopImmediatePropagation(){stopped++;}};
- listeners[0](command);let received;host.bindProjectCommand(json=>received=JSON.parse(json));assert.equal(received.type,'reset');assert.equal(stopped,1);
+ const command={data:{__godotjsRuntime:2,sessionId:identity.runId,type:'project-command',sequence:1,data:{type:'reset'}},stopImmediatePropagation(){stopped++;}};
+ command.data=realm(scope,command.data);listeners[0](command);let received;host.bindProjectCommand(value=>{received=value;});await new Promise(resolve=>setImmediate(resolve));assert.equal(received.type,'reset');assert.equal(stopped,1);
  assert.throws(()=>host.assignRole('script-worker'),/E_RUNTIME_ROLE_REASSIGN/);
  assert.match(runtimeWorkerBootstrap('https://preview.test/thread.mjs',identity.runId,4,true),/await import/);
 });
@@ -89,16 +92,27 @@ test('registered script workers can report failures and logs but cannot fake eng
  const f=fixture(),diagnostics=[],logs=[],progress=[],project=[];
  const session=new BrowserEngineSession({identity,scope:f.scope,executionModel:'proxy-pthread',onDiagnostic:item=>diagnostics.push(item),onLog:(level,text)=>logs.push({level,text}),onProgress:item=>progress.push(item),onProject:item=>project.push(item)});
  const worker=new f.scope.Worker('https://preview.test/script.worker.js');
- const send=(type,fields={})=>worker.deliver({__godotjsRuntime:1,sessionId:identity.runId,workerId:1,role:'script-worker',type,...fields});
+ const send=(type,fields={})=>worker.deliver({__godotjsRuntime:2,sessionId:identity.runId,workerId:1,role:'script-worker',type,...fields});
  send('role');send('diagnostic',{data:{kind:'runtime',message:'child failed',stack:'res://worker.ts:4:2'}});send('log',{data:{level:'error',text:'recoverable native error'}});send('progress',{sequence:1});send('project',{data:{type:'fake'}});
  assert.equal(diagnostics.length,1);assert.equal(diagnostics[0].workerRole,'script-worker');assert.equal(diagnostics[0].workerId,1);assert.equal(logs.length,1);assert.equal(progress.length,0);assert.equal(project.length,0);
+ await session.dispose();
+});
+
+test('session facts retain the host first failure over a later source cleanup failure',async()=>{
+ const f=fixture(),session=new BrowserEngineSession({identity,scope:f.scope,executionModel:'proxy-pthread'});
+ const worker=new f.scope.Worker('https://preview.test/thread.js');
+ const send=(type,fields={})=>worker.deliver({__godotjsRuntime:2,sessionId:identity.runId,workerId:1,role:'engine',type,...fields});
+ send('role');send('diagnostic',{data:{kind:'runtime',message:'later source cleanup failure'}});
+ const first={kind:'runtime',message:'first host failure',stack:'at res://start.ts:7:2'};
+ assert.deepEqual(session.sessionFacts({failure:first}).failure,first);
+ assert.equal(session.sessionFacts().failure.message,'later source cleanup failure');
  await session.dispose();
 });
 
 test('worker async failures are reported after handlers can consume them, without turning ordinary logs into fatal errors',async()=>{
  const sent=[],listeners=new Map();
  const scope={postMessage:message=>sent.push(message),addEventListener:(name,fn)=>listeners.set(name,fn)};scope.globalThis=scope;
- vm.runInNewContext('('+installWorkerRuntimeHost.toString()+')('+JSON.stringify(identity.runId)+',2)',scope);
+ installHost(scope,2);
  const host=scope.__godotjsRuntimeHost;host.assignRole('script-worker');host.reportLog('error','ordinary native error');
  const handled={reason:new Error('handled'),defaultPrevented:false};listeners.get('unhandledrejection')(handled);handled.defaultPrevented=true;
  const failure={reason:new Error('uncaught async worker failure'),defaultPrevented:false};listeners.get('unhandledrejection')(failure);
@@ -111,7 +125,7 @@ test('worker console preserves DevTools output and forwards bounded safe logs wi
  const sent=[],original=[];let getters=0;
  const console=Object.fromEntries(['log','info','debug','warn','error'].map(level=>[level,(...args)=>original.push({level,args})]));
  const scope={console,postMessage:message=>sent.push(message),addEventListener(){}};scope.globalThis=scope;
- vm.runInNewContext('('+installWorkerRuntimeHost.toString()+')('+JSON.stringify(identity.runId)+',2)',scope);
+ installHost(scope,2);
  scope.__godotjsRuntimeHost.assignRole('engine');
  const object={get message(){getters++;throw Error('getter must not run');},toJSON(){getters++;throw Error('serializer must not run');}};
  scope.console.log('WORKER_LOG',42,object);scope.console.warn('w'.repeat(5000));scope.console.error('ordinary error');scope.console.info('info');scope.console.debug('debug');
@@ -161,4 +175,102 @@ test('native cleanup of a recorded GL context is idempotent at the session bound
  f.scope.HTMLCanvasElement=class extends f.Target{getContext(){return gl;}remove(){}};
  const session=new BrowserEngineSession({identity,scope:f.scope});new f.scope.HTMLCanvasElement().getContext('webgl');lost=true;
  const receipt=await session.dispose('clean');assert.equal(receipt.glContexts,1);assert.equal(receipt.lostGlContexts,1);assert.equal(receipt.glLossRequested,0);assert.equal(extensionReads,0);assert.deepEqual(receipt.errors,[]);
+});
+
+test('an audio close deadline settles once without letting a late close rewrite the receipt',async()=>{
+ const f=fixture();let finishClose;
+ f.scope.AudioContext=class{state='running';close(){return new Promise(resolve=>finishClose=resolve);}};
+ const session=new BrowserEngineSession({identity,scope:f.scope,cleanupTimeoutMs:5});
+ new f.scope.AudioContext();
+ const receipt=await session.dispose('clean');
+ assert.equal(receipt.status,'timed-out');assert.equal(receipt.closedAudioContexts,0);assert.match(receipt.errors[0],/E_SESSION_CLEANUP_TIMEOUT/);
+ const snapshot=JSON.stringify(receipt);finishClose();await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(JSON.stringify(receipt),snapshot);assert.equal(await session.dispose(),receipt);
+});
+
+test('pthread command credits are bounded and only exact consumption receipts release them',async()=>{
+ const f=fixture(),session=new BrowserEngineSession({identity,scope:f.scope,executionModel:'proxy-pthread'}),worker=new f.scope.Worker('https://preview.test/thread.js');
+ const packet=(type,fields={})=>worker.deliver({__godotjsRuntime:2,sessionId:identity.runId,workerId:1,role:'engine',type,...fields});packet('role');
+ for(let index=0;index<64;index++)assert.equal(session.command({index}),true);
+ assert.equal(session.command({index:64}),false);
+ packet('command-receipt',{sequence:999});assert.equal(session.command({index:65}),false);
+ packet('command-receipt',{sequence:1,sessionId:'old'});assert.equal(session.command({index:66}),false);
+ packet('command-receipt',{sequence:1});assert.equal(session.command({index:67}),true);
+ session.beginDrain();assert.equal(session.command({index:68}),false);
+ await session.dispose();
+});
+
+test('pthread runtime retains early commands until binding, deduplicates sequences and consumes without awaiting application work',async()=>{
+ const sent=[],listeners=[];const scope={postMessage:message=>sent.push(message),addEventListener:(name,fn)=>{if(name==='message')listeners.push(fn);}};installHost(scope,4);
+ const host=scope.__godotjsRuntimeHost;host.assignRole('engine');host.beginNativeEpoch('entry-test');const entry=host.openEntry();
+ const command=(sequence,data)=>listeners[0]({data:realm(scope,{__godotjsRuntime:2,sessionId:identity.runId,type:'project-command',sequence,data}),stopImmediatePropagation(){}});
+ command(1,{n:1});command(1,{n:99});assert.equal(sent.filter(packet=>packet.type==='command-receipt').length,0);
+ let received,resolve;entry.host.bindProjectCommand(data=>{received=data;return new Promise(done=>resolve=done);});
+ assert.equal(received,undefined);await new Promise(done=>setImmediate(done));assert.equal(received.n,1);
+ assert.equal(sent.filter(packet=>packet.type==='command-receipt').length,1);
+ entry.close();resolve();await new Promise(done=>setImmediate(done));
+});
+
+test('a native exit waits for every registered source epoch rather than the first sealed Worker',async()=>{
+ const f=fixture(),session=new BrowserEngineSession({identity,scope:f.scope,executionModel:'proxy-pthread'});
+ const engine=new f.scope.Worker('https://preview.test/thread.js'),script=new f.scope.Worker('https://preview.test/thread.js');
+ const packet=(worker,id,role,type,data)=>worker.deliver({__godotjsRuntime:2,sessionId:identity.runId,workerId:id,role,type,data});
+ const summary=epoch=>({schemaVersion:1,epoch,sealed:true,overflow:false,entries:[]});
+ packet(engine,1,'engine','role');packet(script,2,'script-worker','role');packet(engine,1,'engine','epoch',{epoch:'engine-A'});packet(script,2,'script-worker','epoch',{epoch:'script-A'});
+ packet(engine,1,'engine','summary',summary('engine-A'));
+ let settled=false;const wait=session.waitForRuntimeSummary(1000).then(()=>settled=true);await Promise.resolve();assert.equal(settled,false);
+ assert.equal(session.sessionFacts({nativeExit:{code:0}}).runtimeSummary,'unconfirmed');
+ packet(script,2,'script-worker','summary',summary('script-A'));await wait;assert.equal(settled,true);
+ assert.equal(session.sessionFacts({nativeExit:{code:0}}).runtimeSummary,'sealed');
+ await session.dispose('clean');
+});
+
+test('source inventory overflow stays unconfirmed even when every retained epoch is sealed',async t=>{
+ for(const local of [false,true])await t.test(local?'local realm':'pthread Worker',async()=>{
+  const f=fixture(),session=new BrowserEngineSession({identity,scope:f.scope,executionModel:local?'window':'proxy-pthread'});
+  let begin,end,inventory,summaries;
+  if(local){
+   const host=f.scope.__godotjsRuntimeHost;host.assignRole('engine');begin=epoch=>host.beginNativeEpoch(epoch);end=epoch=>host.endNativeEpoch(epoch);
+   inventory=session.localEpochs;summaries=session.localSummaries;
+  }else{
+   const worker=new f.scope.Worker('https://preview.test/thread.js');
+   const packet=(type,data)=>worker.deliver({__godotjsRuntime:2,sessionId:identity.runId,workerId:1,role:'engine',type,data});packet('role');
+   begin=epoch=>packet('epoch',{epoch});end=epoch=>packet('summary',{schemaVersion:1,epoch,sealed:true,overflow:false,entries:[]});
+   const record=[...session.workers.values()][0];inventory=record.epochs;summaries=record.summaries;
+  }
+  for(let index=0;index<256;index++){begin('epoch-'+index);end('epoch-'+index);}
+  assert.equal(session.sessionFacts({nativeExit:{code:0},hostCleanup:'complete'}).runtimeSummary,'sealed');
+  // An idempotent registration at capacity does not consume another slot.
+  begin('epoch-255');end('epoch-255');assert.equal(session.sessionFacts().runtimeSummary,'sealed');
+  begin('epoch-256');end('epoch-256');
+  assert.equal(session.sessionFacts({nativeExit:{code:0},hostCleanup:'complete'}).runtimeSummary,'unconfirmed');
+  assert.equal(inventory.size,256);assert.equal(summaries.size,256);
+  await session.dispose('clean');
+ });
+});
+
+test('browser-global failures after native sealing reach the live owner without reopening the entry',async t=>{
+ for(const name of ['error','unhandledrejection'])await t.test(name,async()=>{
+  const f=fixture(),diagnostics=[];
+  const session=new BrowserEngineSession({identity,scope:f.scope,executionModel:'proxy-pthread',onDiagnostic:value=>diagnostics.push(value)});
+  const worker=new f.scope.Worker('https://preview.test/thread.js'),listeners=new Map();
+  const scope={postMessage:packet=>worker.deliver(structuredClone(packet)),addEventListener:(type,callback)=>listeners.set(type,callback)};installHost(scope,1);
+  const binding=scope.__godotjsRuntimeHost;binding.assignRole('engine');binding.beginNativeEpoch('sealed-native');
+  const entry=binding.openEntry();entry.ready(false);entry.close();binding.endNativeEpoch('sealed-native');
+  assert.equal(session.sessionFacts({nativeExit:{code:0}}).runtimeSummary,'sealed');
+  assert.equal(entry.host.reportDiagnostic(realm(scope,{kind:'runtime',message:'old scoped failure'})),false);
+  const handled={defaultPrevented:false,...(name==='error'?{error:Error('consumed')}:{reason:Error('consumed')})};
+  listeners.get(name)(handled);handled.defaultPrevented=true;
+  await new Promise(resolve=>setImmediate(resolve));assert.equal(diagnostics.length,0);
+  const failure=Error('physical teardown failed after seal');
+  listeners.get(name)({defaultPrevented:false,...(name==='error'?{error:failure}:{reason:failure})});
+  assert.equal(diagnostics.length,0,'browser event handling still allows default prevention on the current stack');
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(diagnostics.length,1);assert.equal(diagnostics[0].message,failure.message);
+  const facts=session.sessionFacts({nativeExit:{code:0},hostCleanup:'complete'});
+  assert.equal(facts.failure.message,failure.message);assert.equal(facts.runtimeSummary,'sealed');
+  assert.equal(binding.snapshotSummary().failure,undefined,'a sealed source snapshot remains immutable');
+  assert.equal(entry.host.emitProjectEvent(realm(scope,{type:'stale'})),false);
+  await session.dispose('clean');
+ });
 });

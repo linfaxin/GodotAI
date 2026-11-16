@@ -13,7 +13,8 @@ GodotJS combines a native Godot module with embedded JavaScript support code and
 | `scripts/jsb.runtime/` | Private runtime support embedded in the engine |
 | `scripts/jsb.editor/` | Private editor support and type generation |
 | `impl/web/bridge/` | Private TypeScript bridge compiled into Emscripten glue |
-| `packages/engine/` | Neutral API/declarations, execution identities, browser loading and whole-session ownership |
+| `packages/engine/` | Neutral API/declarations, runtime host and entry scopes, execution/exit facts, browser backends and whole-session ownership |
+| `packages/engine/src/browser/dedicated/` | Default Dedicated Worker runtime, runner, host, browser/audio/presentation bridges and worklet |
 | `packages/project-tools/` | Neutral project preparation, launch/build plans, UID/source maps, resource receipts and PCK |
 | `scripts/jsb.react/`, `scripts/jsb.react-build/` | React renderer and React startup/build adapters; compatibility core reexports |
 | `packages/` | Reusable libraries with their own build and package entry points |
@@ -69,11 +70,37 @@ Keep the embedded-script packages private. Their package names identify workspac
 
 New reusable libraries belong in `packages/`, and applications consume those libraries. The existing `@godot-js/react`, `@godot-js/react-build`, and browser-specific `@godot-js/react-browser` packages stay under `scripts/` and are explicitly included in the ecosystem build. Libraries do not depend on application code. Declare package dependencies with `workspace:*` and use package entry points rather than imports into another package's source directory.
 
-`@godot-js/engine/api`, execution contracts and identity helpers do not load React, DOM or a compiler. `@godot-js/engine/browser` intentionally owns browser runtime behavior. `@godot-js/project-tools` owns the shared preparation implementation; old React build `core` paths delegate to it. React bootstrap is an adapter over that preparation. Native scripts do not fetch the React vendor merely to run the engine.
+`@godot-js/engine/api`, `@godot-js/engine/runtime`, `@godot-js/engine/session-facts`, execution contracts and identity helpers do not load React, DOM or a compiler. The runtime and fact entry declarations can be consumed with only ES2022 libraries. `@godot-js/engine/browser` intentionally owns browser runtime behavior. `@godot-js/project-tools` owns the shared preparation implementation; old React build `core` paths delegate to it. React bootstrap is an adapter over that preparation. Native scripts do not fetch the React vendor merely to run the engine.
+
+Dedicated Worker execution modules live under `packages/engine/src/browser/dedicated/` and are exported as `@godot-js/engine/browser/dedicated/worker-*`. Their old `@godot-js/react-browser/worker-*` paths only reexport the implementation. Browser compilation and package resolution remain in `react-browser`. Product entry points, worklet builds, source-map seals and SDK producer proofs follow this same dependency closure, including `engine`, `project-tools`, their build scripts and runtime declaration inputs.
 
 GodotJS provides modules such as `godot`, `godot-jsb`, `godot.lib.api`, and `godot.annotations` inside the engine. Future ecosystem code must use the intended host API and preserve required host modules as external references when bundling. It must not install the private embedded packages as substitute runtimes.
 
 Do not create empty renderer, reactivity, compiler, resolver, or type packages solely to reserve names. Extract an additional package when it has a concrete responsibility and consumer. See [package conventions](../packages/README.md).
+
+## Runtime host and exit observations
+
+Both browser backends install the pure `createRuntimeBinding()` implementation before loading project modules. Its public `RuntimeHost` surface contains `apiVersion`, `sessionId`, `role`, `reportDiagnostic()`, `emitProjectEvent()` and `bindProjectCommand()`. Event and diagnostic booleans mean local admission, not remote delivery or application success. Project commands use one current handler and a disposer that can remove only its own binding. Queued messages own validated JSON snapshots and are charged by their serialized UTF-8 size; command receipts acknowledge synchronous dispatch, not completion of returned Promises.
+
+Queued commands retain their entry owner even when its handler is temporarily unbound. Switching entries cancels the previous entry's commands and returns their receipts; closing an older entry cannot discard a newer entry's queue. Commands received before the first entry are claimed when it opens. Both runners buffer bounded startup project events and deliver them through their normal subscriptions after entering `running`; stopping or replacing a run discards its pending events.
+
+Project-data readers enforce the same dense JSON shape, traversal limits and actual serialized UTF-8 budget as the runtime binding. Array indices do not consume a second object-key budget. A Dedicated host that discards an identified project packet returns its consumption receipt, while a forwarded event retains its credit until the editor consumes it.
+
+One browsing realm has one binding owner. An internal native epoch identifies the current GodotJS environment, and `openEntry()` creates a revocable project entry scope within it. Generated script bootstrap opens that scope before requiring the user's entry and passes its host as `ctx.host`. React roots receive the same scoped host through the root context and `useRuntimeHost()`. Closing one entry revokes its services and command binding without closing another entry or the browser session. Direct access to the global binding has session scope only. Standalone/native programs may omit the browser host; generated programs do not require the browser ESM package inside Godot.
+
+The public host has no cancellation signal. Internal leases and the bootstrap's closed flag control session and entry lifetimes separately. Bootstrap invokes synchronous cleanup at most once. An unresolved start, asynchronous cleanup, or result arriving after its native epoch was sealed remains unconfirmed; it is not permission to call into released native objects. Cleanup errors use the captured entry's internal teardown reporter even after its business services have been revoked.
+
+React's internal teardown reporter remains available while the captured root is still shutting down and its native epoch is alive, including shutdown deferred by a physics frame. A failed entry cleanup is permanent for that entry; a later readiness or completion assessment cannot overwrite it.
+
+Session handling has active, draining and settled stages. The first valid fatal diagnostic is latched synchronously before unsafe exit work is deferred. Draining stops business messages while preserving bounded diagnostics, receipts and exit observations. The shared `session-facts` module validates versioned `sessionFacts`, retains fatal/native-exit/forced-stop/entry-cleanup/host-cleanup facts independently and projects the exit reason. Missing or overflowed summaries remain unconfirmed. A late exit zero cannot erase a fatal or an application force-stop, and pool reclamation after a confirmed exit is not itself an application force-stop.
+
+An already retained session failure takes precedence over errors observed during shutdown. Host cleanup includes the verified loader's resources as well as workers, audio and ports; loader disposal errors make the final cleanup fail without replacing an existing timeout result.
+
+The default runtime attaches its native epoch summary to the existing control-channel exit message. The pthread owner records each registered worker epoch and waits for its sealed summary, or a bounded observation deadline, before destroying the pool. Native bridge initialization starts the epoch; successful logical `Environment::dispose()` seals it and revokes its routing. Physical `FreeEngine()` retains an idempotent seal fallback and performs the actual bridge release. Sealing records data without running user cleanup or uninstalling the realm host, and does not certify that every native object was destroyed. These native interop and pre-JS bridge changes require matching rebuilt Web engine/template assets. A frontend-only refresh cannot add the hooks to an old template.
+
+React's existing native release uses a private asynchronous checkpoint after synchronous unmount. Native process exit can precede that checkpoint and leave script instances retaining an environment, so neither entry cleanup nor an environment seal is inferred from exit code zero. Logical disposal can seal the source while physical destruction remains pending. A sealed source with unconfirmed entry cleanup and a missing source seal are separate observations; both prevent a clean-exit claim.
+
+The outer preview protocol remains 1 and the Dedicated Worker protocol remains 2. Pthread runtime packets use the independent `__godotjsRuntime: 2` control format, and exit facts have `schemaVersion: 1`; native Variant routing, audio and presentation ABI versions remain separate. Reader, writer and validators change together for the sealed candidate. Legacy compatibility exits are not evidence of complete new epoch observation.
 
 ## TypeScript and declarations
 
