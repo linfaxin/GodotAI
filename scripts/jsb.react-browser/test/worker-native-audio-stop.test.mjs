@@ -20,9 +20,12 @@ assert(register&&admission,'Extract the actual checked native predecode admissio
 const runtime=await readFile(new URL('../../../packages/engine/dist/browser/dedicated/worker-runtime.js',import.meta.url),'utf8');
 const controlStart=runtime.indexOf('control.onmessage ='),controlEnd=runtime.indexOf('data.onmessage =',controlStart);
 const actualControl=runtime.slice(controlStart,controlEnd);
+const stoppingStart=runtime.indexOf('function beginStopping('),actualBeginStopping=runtime.slice(stoppingStart,controlStart);
 const fatalStart=runtime.indexOf('const fatal ='),fatalEnd=runtime.indexOf('const onError =',fatalStart);
 const actualFatal=runtime.slice(fatalStart,fatalEnd).replace('const fatal =','globalThis.actualFatal =');
-assert(controlStart>=0&&controlEnd>controlStart&&fatalStart>=0&&fatalEnd>fatalStart);
+const helperStart=runtime.indexOf('const requestNativeQuit ='),helperEnd=runtime.indexOf('const release =',helperStart);
+const actualCloseHelpers=runtime.slice(helperStart,helperEnd);
+assert(controlStart>=0&&controlEnd>controlStart&&fatalStart>=0&&fatalEnd>fatalStart&&stoppingStart>=0&&controlStart>stoppingStart&&helperStart>=0&&helperEnd>helperStart&&actualCloseHelpers.includes('const canCooperativelyClose ='),'Extract the actual compiled stop coordinator, close helpers and callers');
 const identity={runId:'audio-stop-run',revision:1,buildKey:'pack',generation:1,documentId:'document',workerId:'worker',runConfigurationHash:'a'.repeat(64)};
 const audioIdentity={runId:identity.runId,audioEpoch:1};
 class Port {onmessage=null;sent=[];start(){}close(){}postMessage(value,transfer=[]){this.sent.push({value,transfer});}}
@@ -35,20 +38,24 @@ function fixture(limits={}){
  },stop(){control.onmessage({data:{...audioIdentity,type:'stop'}});}};
 }
 const nativeAdmission=(bridge,frames=10)=>runInNewContext('(function(){'+admission+'})()',{__godotWorkerAudio:bridge,$0:frames});
-function runtimeStop(f){
- const control=new Port(),events=[],calls={quit:0,cancel:0},lease=new WorkerSessionLease();
+function runtimeStop(f,{managed=false,nativeStarted=true,entryCount=0}={}){
+ const control=new Port(),events=[],calls={quit:0,cancel:0,beginClose:0,gateClose:0},lease=new WorkerSessionLease();
  const scope={control,data:{},identity,isWorkerEnvelope,sameWorkerRun,lease,audio:f.bridge,DOMException,
-  dom:{revokeInput(){}},aborter:new AbortController(),presentation:{dispose(){}},xr:{dispose(){}},
+  dom:{revokeInput(){}},aborter:new AbortController(),presentation:{dispose(){},setVisible(){}},xr:{dispose(){}},
   cancelNativeStart(){calls.cancel++;},module:{},post:value=>events.push(value),text:values=>values.join(' '),
   closed:false,nativeExited:false,failed:false,previewDiagnostic,binding:undefined,
+  managedClose:managed,nativeStarted,stopping:false,quitScheduled:false,browser:undefined,
+  lifecycleGate:managed?{beginClose(){calls.gateClose++;}}:undefined,
   engine:{requestQuit(){calls.quit++;assert.equal(nativeAdmission(f.bridge),1,'Actual Native cancellation must precede any quit/cleanup callback');}},
  };
- runInNewContext(actualControl+'\n'+actualFatal,scope);
+ if(managed)scope.binding={snapshotSummary:()=>({sealed:false,entries:Array(entryCount).fill({})}),beginClose(){calls.beginClose++;},reportDiagnostic(){return false;}};
+ scope.fatal=(...args)=>scope.actualFatal(...args);
+ runInNewContext(actualCloseHelpers+'\n'+actualBeginStopping+'\n'+actualControl+'\n'+actualFatal,scope);
  return {control,scope,calls,events,lease,stop(){control.onmessage({data:{...identity,protocolVersion:2,type:'stop'}});}};
 }
 
 test('checked Native gate keeps the ten-file ABI and cannot decode after audio-port revocation',async()=>{
- assert.equal(WORKER_RUNTIME_PATHS.length,10);assert.deepEqual(WORKER_RUNTIME_ABI,{protocolVersion:2,host:1,audio:1,presentation:1});
+ assert.equal(WORKER_RUNTIME_PATHS.length,10);assert.deepEqual(WORKER_RUNTIME_ABI,{protocolVersion:2,host:1,audio:1,presentation:1,lifecycle:1});
  assert.equal(patchWorkerRuntimeFile('platform/web/audio_driver_web.cpp',native).changed,false);
  const f=fixture();await f.ready();assert.equal(nativeAdmission(f.bridge),0);assert.equal(f.bridge.samplePreflight(10,2),true);
  f.stop();assert.equal(f.bridge.available(),false);assert.equal(f.bridge.hasWorklet(),true,'The descriptor remains present; stop is a separate irreversible fence');
@@ -84,13 +91,90 @@ test('local revocation does not suppress the actual Native close/Host closed han
  assert.equal(f.bridge.available(),false);assert.equal(f.bridge.snapshot().stopped,true);
 });
 
+test('managed audio drain cancels native admission while ordered release commands and ACKs remain live',async()=>{
+ const f=fixture();await f.ready();
+ f.bridge.sampleRegister('sample',new Float32Array(20),10,'disabled',0,0);
+ f.bridge.sampleStart('voice','sample',0,0,1,[1,1]);
+ const initial=f.control.sent.filter(entry=>entry.value.type==='command').map(entry=>entry.value);
+ for(const command of initial)f.control.onmessage({data:{...audioIdentity,type:'ack',seq:command.seq}});
+ assert.equal(f.bridge.snapshot().retainedSampleBytes,80);
+ f.bridge.beginDrain();f.bridge.beginDrain();
+ assert.equal(f.bridge.available(),false);assert.equal(f.bridge.snapshot().stopped,false,'Draining preserves the release lane until native audio close');
+ assert.equal(nativeAdmission(f.bridge,100000000),1,'The real predecode gate cancels before evaluating an oversized allocation');
+ assert.equal(f.bridge.samplePreflight(10,2),false);
+ const commands=f.control.sent.length;let reads=0;
+ const unreadable=new Proxy({},{get(){reads++;throw Error('Draining creation inspected caller bytes');}});
+ assert.doesNotThrow(()=>{
+  f.bridge.sampleRegister('late',unreadable,10,'disabled',0,0);
+  f.bridge.sampleStart('late-voice','sample',0,0,1,unreadable);
+ });
+ assert.equal(reads,0);assert.equal(f.control.sent.length,commands);
+ assert.equal(f.bridge.sampleIsRegistered('sample'),true);assert.equal(f.bridge.sampleIsActive('voice'),true);
+ f.bridge.sampleStop('voice');f.bridge.sampleUnregister('sample');
+ const releases=f.control.sent.slice(commands).map(entry=>entry.value);
+ assert.deepEqual(releases.map(value=>value.operation),['stop','unregister']);
+ assert(releases[0].seq<releases[1].seq);assert.equal(f.bridge.snapshot().pendingCommands,2);
+ assert.equal(f.bridge.snapshot().retainedSampleBytes,80,'Logical unregister retains physical credit until its matching ACK');
+ f.control.onmessage({data:{...audioIdentity,audioEpoch:2,type:'ack',seq:releases[1].seq}});
+ assert.equal(f.bridge.snapshot().retainedSampleBytes,80,'An old/different epoch cannot retire the current sample');
+ for(const command of releases)f.control.onmessage({data:{...audioIdentity,type:'ack',seq:command.seq}});
+ assert.equal(f.bridge.snapshot().pendingCommands,0);assert.equal(f.bridge.snapshot().retainedSampleBytes,0);assert.equal(f.bridge.snapshot().retainedSampleCount,0);
+ assert.equal(f.bridge.snapshot().stopped,false);
+ const closing=f.bridge.close();assert.equal(f.control.sent.at(-1).value.type,'close');
+ f.control.onmessage({data:{...audioIdentity,type:'closed'}});await closing;
+ assert.equal(f.bridge.snapshot().stopped,true);
+});
+
+test('actual managed Stop keeps bounded audio cleanup credits when business commands are saturated',async()=>{
+ const f=fixture({pendingCommands:2,voices:1,sampleCount:1});await f.ready();
+ const acknowledge=command=>f.control.onmessage({data:{...audioIdentity,type:'ack',seq:command.seq}});
+ f.bridge.sampleRegister('sample',new Float32Array(20),10,'disabled',0,0);acknowledge(f.control.sent.at(-1).value);
+ f.bridge.sampleStart('voice','sample',0,0,1,[1,1]);acknowledge(f.control.sent.at(-1).value);
+ f.bridge.inputStart();f.bridge.resume();assert.equal(f.bridge.snapshot().pendingCommands,2);
+ assert.throws(()=>f.bridge.resume(),/Audio command budget exceeded/);
+ const before=f.control.sent.length,r=runtimeStop(f,{managed:true});
+ assert.doesNotThrow(()=>r.stop());f.bridge.sampleStop('voice');f.bridge.sampleUnregister('sample');r.stop();
+ const releases=f.control.sent.slice(before).map(entry=>entry.value);
+ assert.deepEqual(releases.map(value=>value.operation),['input-stop','stop','unregister']);
+ assert(releases.every((value,index)=>!index||value.seq>releases[index-1].seq));
+ assert.equal(f.bridge.snapshot().pendingCommands,5,'Two ordinary credits plus one release per owned handle');
+ for(const command of releases)f.control.onmessage({data:{...audioIdentity,audioEpoch:2,type:'ack',seq:command.seq}});
+ assert.equal(f.bridge.snapshot().pendingCommands,5,'Wrong-epoch receipts cannot return cleanup credits');
+ for(const command of releases)acknowledge(command);
+ assert.equal(f.bridge.snapshot().pendingCommands,2,'Cleanup ACKs do not release unrelated business commands');
+ assert.equal(f.bridge.snapshot().retainedSampleBytes,0);assert.equal(f.bridge.snapshot().retainedSampleCount,0);
+ await new Promise(resolve=>setImmediate(resolve));assert.equal(r.calls.quit,1);assert.equal(r.calls.gateClose,1);
+ assert(!r.events.some(event=>event.type==='worker-fatal'));
+});
+
+test('an audio drain transport error cannot skip the native gate or safe-point quit',async()=>{
+ const f=fixture();await f.ready();f.bridge.inputStart();
+ const r=runtimeStop(f,{managed:true});f.control.postMessage=()=>{throw Error('audio cleanup transport failed');};
+ assert.doesNotThrow(()=>r.stop());assert.equal(f.bridge.available(),false);
+ assert.equal(r.calls.gateClose,1);assert.equal(r.calls.quit,0);
+ await new Promise(resolve=>setImmediate(resolve));assert.equal(r.calls.quit,1);
+ assert.match(r.events.find(event=>event.type==='worker-fatal')?.diagnostic.message??'',/audio cleanup transport failed/);
+ r.stop();assert.equal(r.calls.gateClose,1);assert.equal(r.calls.quit,1);
+});
+
 for(const order of ['audio-first','runtime-first'])test('actual runtime and audio-port handlers both fence Native quit callbacks: '+order,async()=>{
  const f=fixture();await f.ready();const r=runtimeStop(f);
  if(order==='audio-first'){f.stop();assert.equal(nativeAdmission(f.bridge),1);r.stop();}
  else {r.stop();assert.equal(nativeAdmission(f.bridge),1);f.stop();}
- r.stop();assert.equal(r.calls.quit,1);assert.equal(r.calls.cancel,1);assert.equal(r.lease.active,false);
+ r.stop();assert.equal(r.calls.quit,0,'quit enters native only after the control callback returns');await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(r.calls.quit,1);assert.equal(r.calls.cancel,1);assert.equal(r.lease.active,false);
  assert.equal(f.bridge.available(),false);assert(f.control.sent.some(entry=>entry.value.type==='worker-stopped'),'Audio ACK remains owned by the actual audio-port stop handler');
  assert.equal(r.scope.aborter.signal.aborted,true);
+});
+
+for(const nativeStarted of [false,true])test('actual runtime managed admission preserves the audio release lane '+(nativeStarted?'after startup':'for a first entry before start resolves'),async()=>{
+ const f=fixture();await f.ready();f.bridge.sampleRegister('sample',new Float32Array(20),10,'disabled',0,0);
+ const r=runtimeStop(f,{managed:true,nativeStarted,entryCount:1});r.stop();r.stop();
+ assert.equal(nativeAdmission(f.bridge),1);assert.equal(f.bridge.snapshot().stopped,false,'Managed stop drains admission without revoking ordered release commands');
+ assert.equal(r.lease.active,true);assert.equal(r.scope.aborter.signal.aborted,false);assert.equal(r.calls.cancel,0);assert.equal(r.calls.quit,0);
+ assert.equal(r.calls.beginClose,1);assert.equal(r.calls.gateClose,1);
+ const before=f.control.sent.length;f.bridge.sampleUnregister('sample');assert.equal(f.control.sent.length,before+1);assert.equal(f.control.sent.at(-1).value.operation,'unregister');
+ await new Promise(resolve=>setImmediate(resolve));assert.equal(r.calls.quit,1);
 });
 
 test('actual runtime fatal path revokes audio before Native quit and preserves its first diagnostic',async()=>{

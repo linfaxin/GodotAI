@@ -3,6 +3,7 @@ import path from 'node:path';
 import {WORKER_RUNTIME_ABI,assertWorkerRuntimeAbi} from '../../../scripts/release/engine-profiles.mjs';
 import {WORKER_RUNTIME_PATHS,WORKER_RUNTIME_PATCH} from '../../../scripts/release/patch-web-worker-runtime.mjs';
 import {digest,canonical} from './site-evidence.mjs';
+import {executionFromReport} from '../../../scripts/release/execution-contract.mjs';
 
 export const WORKER_CANDIDATE_ASSETS=Object.freeze({host:'preview.js',worker:'runtime.worker.js',audio:'runtime.audio.worklet.js'});
 export const WORKER_NATIVE_PATCH_FILES=WORKER_RUNTIME_PATHS;
@@ -21,6 +22,7 @@ export function assertWorkerBuildProof(report){
   if(receipt?.length!==1||!hash.test(proof.files[name])||receipt[0].afterSha256!==proof.files[name]||report.godotSource?.inputs?.[name]!==proof.files[name]||canonical(receipt[0].implementation)!==canonical(proof.implementation)||!hash.test(receipt[0].beforeSha256))throw Error('E_WORKER_BUILD_PROOF_FILE: '+name);
  }
  if(digest(canonical(report.godotSource?.inputs))!==report.godotSource?.snapshotHash)throw Error('E_WORKER_BUILD_PROOF_SOURCE');
+ if(report.runtimeAbi.lifecycle===1||report.execution?.lifecycleAbi===1)executionFromReport(report);
  return proof;
 }
 /** Static bytes are hashed before manifest.json exists; no candidate/release
@@ -31,11 +33,12 @@ export async function describeWorkerCandidate(directory,release){
  for(const name of Object.values(WORKER_CANDIDATE_ASSETS)){
   const bytes=await readFile(path.join(directory,name));assets[name]={sha256:digest(bytes),bytes:bytes.length};
  }
- return {executionBackend:'worker',presentationBackends:['direct','bitmap'],defaultPresentationBackend:'direct',abi:{...WORKER_RUNTIME_ABI},entry:WORKER_CANDIDATE_ASSETS.worker,audioWorklet:WORKER_CANDIDATE_ASSETS.audio,assets};
+ return {executionBackend:'worker',presentationBackends:['direct','bitmap'],defaultPresentationBackend:'direct',abi:{...release.runtimeAbi},entry:WORKER_CANDIDATE_ASSETS.worker,audioWorklet:WORKER_CANDIDATE_ASSETS.audio,assets};
 }
 export function assertWorkerCandidate(manifest,release,payloads){
  if(Object.keys(payloads).some(name=>/^preview\.legacy\./.test(name)))throw Error('E_WORKER_CANDIDATE_RETIRED_ENTRY');
  const runtime=manifest.runtime;assertWorkerRuntimeAbi(release.runtimeAbi);assertWorkerRuntimeAbi(runtime?.abi);
+ if(canonical(runtime.abi)!==canonical(release.runtimeAbi))throw Error('E_WORKER_CANDIDATE_ABI: candidate differs from the actual release');
  if(manifest.schemaVersion!==3||runtime.executionBackend!=='worker'||canonical(runtime.presentationBackends)!==canonical(['direct','bitmap'])||runtime.defaultPresentationBackend!=='direct'||runtime.entry!==WORKER_CANDIDATE_ASSETS.worker||runtime.audioWorklet!==WORKER_CANDIDATE_ASSETS.audio)throw Error('E_WORKER_CANDIDATE_RUNTIME');
  for(const [role,name]of Object.entries(WORKER_CANDIDATE_ASSETS)){
   const asset=runtime.assets?.[name];

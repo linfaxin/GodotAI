@@ -5,10 +5,12 @@ import { WorkerSessionLease } from './worker-session.js';
 import { loadVerifiedWorkerEngine, type GodotInstance, type LoadedWorkerEngine, type VerifiedRelease } from '../verified-loader.js';
 import { createWorkerPresentation, installPresentationHooks, type CanvasGeometry } from './worker-presentation.js';
 import { createWorkerDom } from './worker-dom.js';
+import {DOM_CLEANUP_COMMAND_LIMIT,isDomCleanupOperation} from './worker-dom-policy.js';
 import { createWorkerAudioBridge } from './worker-audio.js';
 import { createWorkerXRBridge } from './worker-xr.js';
 import { WorkerBenchmark } from './worker-benchmark.js';
 import { WorkerLogBudget } from './worker-log.js';
+import {installNativeLifecycleGate, type NativeLifecycleGate, type NativeLifecycleModule} from '../lifecycle-gate.js';
 
 interface RuntimeScope {
   __godotjsRuntimeHost?: RuntimeBinding;
@@ -46,6 +48,9 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
   let engine: GodotInstance | undefined, loaded: LoadedWorkerEngine | undefined;
   let module: Record<string, any> | undefined;
   let binding:RuntimeBinding|undefined,uninstallHost:(()=>void)|undefined;
+  let lifecycleGate:NativeLifecycleGate|undefined;
+  const managedClose=boot.release.runtimeAbi?.lifecycle===1||boot.release.execution?.lifecycleAbi===1;
+  let stopping=false,nativeStarted=false,quitScheduled=false;
   let pendingFatalSource:'browser'|'godotjs'|undefined;
   let pendingFatalLocation:{message?:string;filename?:string;line?:number;column?:number}|undefined;
   let lastProjectCommand=0;
@@ -64,22 +69,36 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
     const forward=(...args:unknown[])=>{originals[level](...args);log(level,args);};
     Object.defineProperty(forward,'__godotjsConsoleForwarded',{value:true});console[level]=forward;
   }
-  const phase = (value: RunPhase) => { lease.assertActive(); post({ type: 'phase', phase: value }); };
+  const assertStarting = () => { lease.assertActive(); if(stopping||closed||nativeExited)throw new DOMException('Worker startup cancelled','AbortError'); };
+  const phase = (value: RunPhase) => { assertStarting(); post({ type: 'phase', phase: value }); };
   let presentation: ReturnType<typeof createWorkerPresentation> | undefined;
   let dom: ReturnType<typeof createWorkerDom> | undefined;
   let audio: ReturnType<typeof createWorkerAudioBridge> | undefined;
-  let browser: { dispose(): void } | undefined;
+  let browser: { dispose(): void; beginDrain?(): void } | undefined;
   let xr: ReturnType<typeof createWorkerXRBridge> | undefined;
   let benchmark:WorkerBenchmark|undefined;
   const pendingHostStates: any[] = [];
   const pendingHostCommands = new Set<number>();
+  const pendingCleanupHostCommands = new Set<number>();
+  const receiveHostCommandReceipt=(sequence:number)=>{if(pendingHostCommands.delete(sequence))pendingCleanupHostCommands.delete(sequence);};
   let commandSequence = 0, latestGeometry: CanvasGeometry | undefined;
   let projectSequence = 0, pendingProjectBytes = 0, droppedProjectMessages = 0;
   const pendingProjects = new Map<number, number>();
   const cancelNativeStart = () => { try { module?.godotWorkerCancelStart?.(); } catch { /* The host owns hard termination. */ } };
+  const requestNativeQuit = () => {
+    if(quitScheduled)return;quitScheduled=true;
+    // A fatal can originate on a native callback stack, including start().
+    // Broadcast cancellation now, then enter native only at a JS safe point.
+    void Promise.resolve().then(()=>{
+      if(closed||nativeExited||binding?.snapshotSummary().sealed)return;
+      try{engine?.requestQuit();}catch(error){post({type:'worker-stop-error',detail:text([error])});}
+    });
+  };
+  const canCooperativelyClose = () => managedClose&&(nativeStarted||!!(lifecycleGate&&binding?.snapshotSummary().entries.length));
   const release = () => {
-    if (closed) return; closed = true; lease.cancel(); binding?.settle();uninstallHost?.();clearInterval(heartbeat);
+    if (closed) return; closed = true; lease.cancel(); lifecycleGate?.dispose();binding?.settle();uninstallHost?.();clearInterval(heartbeat);
     presentation?.dispose(); dom?.dispose(); browser?.dispose(); xr?.dispose(); loaded?.dispose();
+    pendingHostCommands.clear();pendingCleanupHostCommands.clear();
     scope.removeEventListener('error', onError); scope.removeEventListener('unhandledrejection', onRejection);
     for (const level of ['log', 'warn', 'error'] as const) console[level] = originals[level];
   };
@@ -100,12 +119,13 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
     }
     failed = true;
     post({ type: 'worker-fatal', diagnostic, detail: diagnostic.message });
+    if(canCooperativelyClose()){beginStopping('runtime-failed');return;}
     binding?.drain();lease.cancel(error);audio?.revoke();dom?.revokeInput();
     // Never re-enter an application/native callback merely to request exit.
     void Promise.resolve().then(()=>{
       if(closed||nativeExited)return;
       aborter.abort(error);cancelNativeStart();presentation?.dispose();xr?.dispose();
-      try { engine?.requestQuit(); } catch { /* Bounded termination follows at host. */ }
+      requestNativeQuit();
     });
   };
   const onError = (event: ErrorEvent) => {
@@ -139,23 +159,33 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
     if (closed || !lease.active) return;
     post({ type: 'worker-heartbeat', sequence: ++beatSequence, resumeEpoch, memory: metrics() });
   }, 250);
+  function beginStopping(reason:string,requestQuit=true):void {
+    if(stopping||closed||nativeExited)return;
+    stopping=true;
+    const attempt=(cleanup:()=>void)=>{try{cleanup();}catch(error){try{fatal(error);}catch{/* A lost diagnostic channel cannot block the remaining cleanup. */}}};
+    if(canCooperativelyClose()){
+      attempt(()=>binding?.beginClose(reason));attempt(()=>dom?.revokeInput());attempt(()=>audio?.beginDrain());
+      attempt(()=>browser?.beginDrain?.());attempt(()=>presentation?.setVisible(false));attempt(()=>lifecycleGate?.beginClose(reason));
+      if(requestQuit)requestNativeQuit();
+      return;
+    }
+    lease.cancel();binding?.beginClose(reason);audio?.revoke();dom?.revokeInput();
+    aborter.abort(new DOMException('Stopped','AbortError'));presentation?.dispose();xr?.dispose();cancelNativeStart();
+    if(requestQuit)requestNativeQuit();
+    if(!module||!engine)post({type:'worker-termination-required',stage:'before-native-start'});
+  }
   control.onmessage = event => {
     if (!isWorkerEnvelope(event.data) || !sameWorkerRun(event.data, identity)) return;
     const m: any = event.data;
     if (m.type === 'stop') {
-      if (!lease.cancel()) return;
-      binding?.drain();
-      audio?.revoke(); dom?.revokeInput(); aborter.abort(new DOMException('Stopped', 'AbortError')); presentation?.dispose(); xr?.dispose(); cancelNativeStart();
-      try { engine?.requestQuit(); } catch (error) { post({ type: 'worker-stop-error', detail: text([error]) }); }
-      // Partial native setup is disposed by Worker termination, not Main.cleanup.
-      if (!module || !engine) post({ type: 'worker-termination-required', stage: 'before-native-start' });
+      beginStopping(typeof m.cause==='string'?m.cause:'session-stop');
     } else if (!closed && m.type === 'project-receipt' && Number.isSafeInteger(m.projectSequence)) {
       const bytes = pendingProjects.get(m.projectSequence); if(bytes!==undefined){pendingProjects.delete(m.projectSequence);pendingProjectBytes-=bytes;}
-    } else if (lease.active && m.type === 'project-command' && isProjectData(m.data)) {
+    } else if (!closed && m.type === 'project-command' && isProjectData(m.data)) {
       if(!Number.isSafeInteger(m.commandSequence)||m.commandSequence<=lastProjectCommand)return;
       lastProjectCommand=m.commandSequence;
       const receipt=()=>post({type:'project-command-receipt',commandSequence:m.commandSequence});
-      if(binding)binding.receiveProjectCommand(m.data,receipt);else receipt();
+      if(lease.active&&!stopping&&binding)binding.receiveProjectCommand(m.data,receipt);else receipt();
     } else if (lease.active && m.type === 'resume' && Number.isSafeInteger(m.resumeEpoch) && Number(m.resumeEpoch) > resumeEpoch) {
       resumeEpoch = Number(m.resumeEpoch); beatSequence = 0;
       post({ type: 'worker-resume-ack', sequence: ++beatSequence, resumeEpoch });
@@ -164,13 +194,17 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
   data.onmessage = event => {
     if (!isWorkerEnvelope(event.data) || !sameWorkerRun(event.data, identity) || closed) return;
     const m: any = event.data;
+    const cleanupPacket=['host-command-receipt','present-ack','host-result'].includes(m.type)||(m.type==='host-state'&&m.state?.requestId!==undefined);
+    if((stopping&&!cleanupPacket)||(binding?.snapshotSummary().sealed&&m.type!=='host-command-receipt')){
+      if(Number.isSafeInteger(m.dataSequence))dataPost({type:'data-receipt',dataSequence:m.dataSequence});return;
+    }
     if(!lease.active){
-      if(m.type==='host-command-receipt')pendingHostCommands.delete(m.commandSequence);
+      if(m.type==='host-command-receipt')receiveHostCommandReceipt(m.commandSequence);
       if(Number.isSafeInteger(m.dataSequence))dataPost({type:'data-receipt',dataSequence:m.dataSequence});
       return;
     }
     try {
-      if (m.type === 'host-command-receipt') { pendingHostCommands.delete(m.commandSequence); }
+      if (m.type === 'host-command-receipt') { receiveHostCommandReceipt(m.commandSequence); }
       else if (m.type === 'present-ack') presentation?.ack(m as any);
       else if (m.type === 'input') { benchmark?.inputReceived(m.packet);const accepted=dom?.dispatchInput(m.packet as any)??false;benchmark?.inputDispatched(m.packet.sequence,accepted); }
       else if (m.type === 'geometry') { if (presentation && dom && !xr?.active) { presentation.resize(m.geometry); dom.resize(m.geometry); } else latestGeometry = m.geometry; }
@@ -178,7 +212,7 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
         if (dom) dom.applyHostState(m.state);
         else if (pendingHostStates.length < 32) pendingHostStates.push(m.state);
         else throw Error('E_WORKER_HOST_STATE_BUDGET');
-        if (typeof m.state?.visible === 'boolean') presentation?.setVisible(m.state.visible && !xr?.active);
+        if (!stopping&&typeof m.state?.visible === 'boolean') presentation?.setVisible(m.state.visible && !xr?.active);
       }
       else if (m.type === 'host-result') dom?.applyHostState(m as any);
     } catch (error) { fatal(error); }
@@ -199,15 +233,20 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
       limits: { maxPixels: boot.configuration.budgets.maxCanvasPixels, maxDimension: boot.configuration.budgets.maxCanvasDimension,
         maxBytes: boot.configuration.budgets.maxPresentationBytes, setupTimeoutMs: boot.configuration.budgets.hostSetupTimeoutMs },
       onActiveChange: active => {
-        if(!lease.active)return;
+        if(!lease.active||stopping)return;
         presentation?.setVisible(!active && scope.document?.visibilityState !== 'hidden');
         if(!active && latestGeometry){presentation?.resize(latestGeometry);dom?.resize(latestGeometry);latestGeometry=undefined;}
       }, onError: fatal });
     scope.__godotWorkerXR = xr;
     dom = createWorkerDom({ canvas: boot.canvas, geometry: boot.geometry, baseUrl: boot.documentUrl, scope, sendHostCommand: command => {
-      if (pendingHostCommands.size >= boot.configuration.budgets.maxHostCommands) throw Error('E_WORKER_HOST_COMMAND_BACKPRESSURE');
+      const cleanup=managedClose&&stopping&&isDomCleanupOperation(command.operation);
+      if(closed||binding?.snapshotSummary().sealed||(!lease.active&&!cleanup)||(stopping&&!cleanup))throw Error('E_WORKER_DOM_CLOSED');
+      const pending=cleanup?pendingCleanupHostCommands.size:pendingHostCommands.size-pendingCleanupHostCommands.size;
+      if(pending>=(cleanup?DOM_CLEANUP_COMMAND_LIMIT:boot.configuration.budgets.maxHostCommands))throw Error(cleanup?'E_WORKER_HOST_CLEANUP_BACKPRESSURE':'E_WORKER_HOST_COMMAND_BACKPRESSURE');
       const sequence = ++commandSequence; pendingHostCommands.add(sequence);
-      dataPost({ type: 'host-command', command, commandSequence: sequence });
+      if(cleanup)pendingCleanupHostCommands.add(sequence);
+      try{dataPost({ type: 'host-command', command, commandSequence: sequence });}
+      catch(error){receiveHostCommandReceipt(sequence);throw error;}
     } });
     if (latestGeometry && !xr.active) { presentation.resize(latestGeometry); dom.resize(latestGeometry); latestGeometry=undefined; }
     for (const state of pendingHostStates.splice(0)) dom.applyHostState(state);
@@ -234,6 +273,18 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
       onSummary:summary=>post({type:'runtime-summary',runtimeSummary:summary}),
     });
     uninstallHost=installRuntimeHost(binding,scope);
+    const previousLifecycle=Object.getOwnPropertyDescriptor(scope,'__godotjsInstallLifecycle');
+    const installLifecycle=(nativeModule:NativeLifecycleModule)=>{
+      if(!managedClose)return;
+      if(lifecycleGate)return;
+      lifecycleGate=installNativeLifecycleGate(nativeModule,binding!,{
+        onBegin(){nativeStarted=true;beginStopping('native-quit',false);post({type:'worker-closing'});},
+        onError:error=>fatal(error),
+      });
+    };
+    Object.defineProperty(scope,'__godotjsInstallLifecycle',{configurable:true,writable:true,value:installLifecycle});
+    const removeHost=uninstallHost;
+    uninstallHost=()=>{removeHost?.();if(scope.__godotjsInstallLifecycle===installLifecycle){if(previousLifecycle)Object.defineProperty(scope,'__godotjsInstallLifecycle',previousLifecycle);else delete scope.__godotjsInstallLifecycle;}};
     // JavaScriptBridge's window proxy and direct project code reach one owner.
     publish('__godotjsRuntimeHost',binding);
     publish('__godotjsProjectEvent',(raw:unknown)=>{
@@ -264,12 +315,21 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
       value.onRuntimeInitialized = (() => { const before = value.onRuntimeInitialized; return function (this: unknown, ...values: unknown[]) { if (typeof before === 'function') before.apply(this, values); }; })();
       return value;
     };
-    phase('preloading'); await engine.preloadFile(boot.pack, '/application.pck'); lease.assertActive();
-    phase('initializing'); await engine.init(); lease.assertActive();
+    phase('preloading'); await engine.preloadFile(boot.pack, '/application.pck'); assertStarting();
+    phase('initializing'); await engine.init(); assertStarting();
     module = (engine as any).rtenv ?? module;
-    phase('starting'); await engine.start({ args: ['--main-pack', '/application.pck', '--rendering-method', 'gl_compatibility'] }); lease.assertActive();
+    if(managedClose&&typeof module?._godotjs_release_exit!=='function')throw Error('E_NATIVE_LIFECYCLE_ABI: native pre-exit export is missing');
+    phase('starting'); await engine.start({ args: ['--main-pack', '/application.pck', '--rendering-method', 'gl_compatibility'] }); assertStarting();
+    nativeStarted=true;
+    if(managedClose&&!lifecycleGate)throw Error('E_NATIVE_LIFECYCLE_ABI: matching native hook was not installed');
+    if(stopping)return;
     // Engine.start resolves only after native resume/setup2/start, not callMain.
-    phase('waiting-ready'); await Promise.resolve(); lease.assertActive(); phase('running');
+    phase('waiting-ready'); await Promise.resolve(); assertStarting(); phase('running');
     post({ type: 'worker-metrics', memory: metrics() });
-  } catch (error) { if (lease.active) fatal(error); else post({ type: 'worker-termination-required', stage: 'cancelled-startup' }); }
+  } catch (error) {
+    if(closed||nativeExited)return;
+    if(stopping||!lease.active||aborter.signal.aborted){
+      if(!canCooperativelyClose())post({type:'worker-termination-required',stage:'cancelled-startup'});
+    }else fatal(error);
+  }
 }

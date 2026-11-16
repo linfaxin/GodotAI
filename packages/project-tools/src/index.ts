@@ -13,3 +13,6 @@ export * from './script-renames.js';
 export * from './scene-text.js';
 export * from './module-loading.js';
 export * from './errors.js';
+export * from './compiler-policy.js';
+export * from './type-environment.js';
+export * from './compiler.js';

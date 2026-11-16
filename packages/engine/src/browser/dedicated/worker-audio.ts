@@ -20,8 +20,10 @@ export class WorkerAudioBridge implements GodotWorkerAudio {
   private resolveClose?: () => void;
   private rejectClose?: (error: Error) => void;
   private stopped = false;
+  private draining = false;
   private sequence = 0;
   private pending = new Set<number>();
+  private pendingCleanup = new Set<number>();
   private samples = new Map<string, number>();
   private voices = new Map<string, VoiceMirror>();
   private voiceEpoch = 0;
@@ -68,6 +70,7 @@ export class WorkerAudioBridge implements GodotWorkerAudio {
         break;
       case 'ack': {
         if (!this.pending.delete(data.seq)) break;
+        this.pendingCleanup.delete(data.seq);
         const registration = this.sampleRegistrations.get(data.seq);
         if (registration !== undefined) {
           // Host finished copying the transfer buffer into its AudioBuffer.
@@ -105,7 +108,7 @@ export class WorkerAudioBridge implements GodotWorkerAudio {
       case 'closed': this.stopLocal(); this.retireSamples(); this.receivedClosed = true; this.resolveClose?.(); break;
     }
   }
-  available(): boolean { return !this.stopped; }
+  available(): boolean { return !this.stopped && !this.draining; }
   hasWorklet(): boolean { return this.descriptor?.kind === 'worklet'; }
   prepare(preferences: WorkerAudioPreferences): Promise<WorkerAudioDescriptor> {
     if (this.stopped) return Promise.reject(new Error('Audio bridge is stopped'));
@@ -128,11 +131,17 @@ export class WorkerAudioBridge implements GodotWorkerAudio {
   }
   private command(operation: string, payload: Record<string, unknown> = {}, transfer: Transferable[] = []): number {
     if (this.stopped) return 0;
+    if (this.draining && !['stop', 'unregister', 'input-stop'].includes(operation)) return 0;
     const d = this.requireDescriptor();
-    if (this.pending.size >= d.limits.pendingCommands) throw new Error('Audio command budget exceeded');
+    // Once draining, each live voice/sample and the input can retire once.
+    // Earlier business commands keep their credits until their own ACKs arrive.
+    const cleanup = this.draining;
+    if (cleanup ? this.pendingCleanup.size >= d.limits.voices + d.limits.sampleCount + 1
+      : this.pending.size - this.pendingCleanup.size >= d.limits.pendingCommands) throw new Error('Audio command budget exceeded');
     const seq = ++this.sequence; this.pending.add(seq);
+    if (cleanup) this.pendingCleanup.add(seq);
     try { this.control.postMessage({ ...this.envelope(), type: 'command', seq, operation, ...payload }, transfer); }
-    catch (error) { this.pending.delete(seq); throw error; }
+    catch (error) { this.pending.delete(seq); this.pendingCleanup.delete(seq); throw error; }
     return seq;
   }
   resume(): void { if (!this.stopped && this.descriptor?.kind === 'worklet') this.command('resume'); }
@@ -146,10 +155,15 @@ export class WorkerAudioBridge implements GodotWorkerAudio {
   }
   /** Synchronous local fence; Host stop/close messages still own their ACKs. */
   revoke(): void { this.stopLocal(); }
+  /** Keep release commands and receipts alive until native atexit closes audio. */
+  beginDrain(): void {
+    if (this.draining || this.stopped) return;
+    this.draining = true; this.stream = undefined; this.inputStop();
+  }
   private stopLocal(): void {
     if (!this.descriptor) this.rejectPrepare?.(new Error('Audio preparation canceled'));
     this.stopped = true; this.inputEnabled = false; this.inputState = 'stopped'; this.stream = undefined; this.voices.clear(); this.samples.clear();
-    this.voiceBytes = 0; this.sampleBytes = 0; this.pending.clear();
+    this.voiceBytes = 0; this.sampleBytes = 0; this.pending.clear(); this.pendingCleanup.clear();
     // Detached in-flight buffers remain charged to their original epoch until returned or port disposal.
   }
   private retireSamples(): void {
@@ -157,6 +171,7 @@ export class WorkerAudioBridge implements GodotWorkerAudio {
   }
   streamCreate(channels: number): void { if (channels !== this.requireDescriptor().channels) throw new Error('Native audio channel count mismatch'); }
   streamStart(stream: WorkerAudioStream): void {
+    if (this.draining || this.stopped) return;
     const d = this.requireDescriptor();
     if (this.stream) throw new Error('Native audio stream already started');
     if (stream.outSamples <= 0 || stream.outSamples % d.channels !== 0) throw new Error('Invalid native audio ring');
@@ -199,7 +214,7 @@ export class WorkerAudioBridge implements GodotWorkerAudio {
     if (!this.stopped && this.stream) this.sendBlock(data.blockId, data.buffer, loan.ringPosition, loan.samples, true);
   }
   inputStart(): number {
-    if (this.stopped || this.descriptor?.kind !== 'worklet') return 1;
+    if (this.stopped || this.draining || this.descriptor?.kind !== 'worklet') return 1;
     if (this.inputEnabled) return 0;
     this.inputEnabled = true; this.inputState = 'pending'; this.inputEpoch++; this.inputPosition = 0;
     this.command('input-start', { inputEpoch: this.inputEpoch });
@@ -231,14 +246,14 @@ export class WorkerAudioBridge implements GodotWorkerAudio {
   }
   setFinishedCallback(callback: (id: string) => void): void { this.finished = callback; }
   samplePreflight(frames: number, channels: number): boolean {
-    if (this.stopped) return false;
+    if (this.stopped || this.draining) return false;
     const d = this.requireDescriptor();
     const bytes = frames * channels * 4;
     // Native AudioFrame decode + native planar staging + transfer copy + host AudioBuffer.
     return d.kind === 'worklet' && channels === 2 && Number.isSafeInteger(frames) && frames > 0 && Number.isSafeInteger(bytes * 4) && this.retainedSampleCount < d.limits.sampleCount && this.retainedSampleBytes + bytes * 4 <= d.limits.sampleBytes;
   }
   sampleRegister(id: string, data: Float32Array, frames: number, loopMode: string, loopBegin: number, loopEnd: number): void {
-    if (this.stopped) return;
+    if (this.stopped || this.draining) return;
     const d = this.requireDescriptor();
     const bytes = frames * 2 * 4;
     if (!Number.isSafeInteger(frames) || frames < 1 || data.length !== frames * 2) throw new Error('Invalid native planar sample');
@@ -259,7 +274,7 @@ export class WorkerAudioBridge implements GodotWorkerAudio {
   }
   sampleIsRegistered(id: string): boolean { return this.samples.has(id); }
   sampleStart(id: string, streamId: string, bus: number, offset: number, pitch: number, volume: ArrayLike<number>): void {
-    if (this.stopped) return;
+    if (this.stopped || this.draining) return;
     const d = this.requireDescriptor(); const bytes = this.samples.get(streamId);
     if (bytes === undefined) throw new Error('Starting an unregistered audio sample');
     if (this.voices.has(id)) this.sampleStop(id);

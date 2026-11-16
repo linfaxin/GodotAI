@@ -13,7 +13,7 @@ function buildProof(){
  const implementation={path:'scripts/release/patch-web-worker-runtime.mjs',sha256:digest('patch')},patchId='godotjs-web-worker-runtime-v1';
  const files=Object.fromEntries(WORKER_NATIVE_PATCH_FILES.map(name=>[name,digest(name)]));
  const recipe={args:['platform=web','threads=no','dlink_enabled=no','use_quickjs_ng=no'],patches:Object.entries(files).map(([path,afterSha256])=>({patchId,path,afterSha256,beforeSha256:digest('before '+path),implementation}))};
- return {kind:'godot-js-browser-engine-build',status:'built',runtimeAbi:WORKER_RUNTIME_ABI,workerPatch:{patchId,version:1,implementation,files},recipe,recipeSha256:digest(canonical(recipe)),godotSource:{inputs:files,snapshotHash:digest(canonical(files))}};
+ return {kind:'godot-js-browser-engine-build',status:'built',runtimeAbi:{protocolVersion:2,host:1,audio:1,presentation:1},workerPatch:{patchId,version:1,implementation,files},recipe,recipeSha256:digest(canonical(recipe)),godotSource:{inputs:files,snapshotHash:digest(canonical(files))}};
 }
 test('native ABI cannot be attached to old, snapshotted or differently patched bytes',()=>{
  const proof=buildProof();assert.doesNotThrow(()=>assertWorkerBuildProof(proof));
@@ -71,4 +71,21 @@ test('Worker acceptance plan distinguishes both presenters and browser suites fo
   for(const browser of ['chromium','firefox','webkit'])for(const presentationBackend of ['direct','bitmap'])assert(plan.some(entry=>entry.suite==='runtime'&&entry.browser===browser&&entry.presentationBackend===presentationBackend));
   assert.equal(plan.filter(entry=>entry.suite==='features').length,profile==='engine-2d-v1'?6:0);
  }
+});
+
+
+test('candidate uses the actual historical ABI and refuses an unbuilt lifecycle upgrade',async t=>{
+ const directory=await mkdtemp(path.join(tmpdir(),'worker-candidate-abi-'));t.after(()=>rm(directory,{recursive:true,force:true}));
+ for(const name of Object.values(WORKER_CANDIDATE_ASSETS))await writeFile(path.join(directory,name),'actual '+name);
+ const release={runtimeAbi:{protocolVersion:2,host:1,audio:1,presentation:1}};
+ const runtime=await describeWorkerCandidate(directory,release),payloads=await sitePayloads(directory);
+ assert.equal(runtime.abi.lifecycle,undefined);
+ const manifest={schemaVersion:3,runtime,payloads};assert.doesNotThrow(()=>assertWorkerCandidate(manifest,release,payloads));
+ runtime.abi.lifecycle=1;assert.throws(()=>assertWorkerCandidate(manifest,release,payloads),/E_WORKER_CANDIDATE_ABI/);
+});
+
+
+test('a worker patch alone cannot certify the new lifecycle capability',()=>{
+ const report=buildProof();report.runtimeAbi.lifecycle=1;
+ assert.throws(()=>assertWorkerBuildProof(report),/lifecycle/);
 });

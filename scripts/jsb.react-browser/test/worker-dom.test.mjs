@@ -119,6 +119,31 @@ test('unresolved privileged operations have a Host-side admission limit',async t
  assert.equal(f.host.command({type:'dom-command',operation:'fullscreen',requestId:33}),false);assert.match(f.states.at(-1).error,/REQUEST_BUDGET/);
  const disposal=f.host.dispose();grant();await disposal;assert.equal(f.document.fullscreenElement,null);
 });
+
+test('draining releases pointer/fullscreen ownership while all ordinary privileged slots are occupied',async t=>{
+ const f=hostSetup(t),reads=[];
+ f.window.navigator.clipboard={readText:()=>new Promise(resolve=>reads.push(resolve))};
+ try{
+  for(let requestId=1;requestId<=32;requestId++)assert.equal(f.host.command({type:'dom-command',operation:'clipboard-read',requestId}),true);
+  f.document.fullscreenElement=f.canvas;f.document.pointerLockElement=f.canvas;f.host.beginDrain();
+  assert.equal(f.host.command({type:'dom-command',operation:'exit-fullscreen',requestId:33}),true);
+  assert.equal(f.host.command({type:'dom-command',operation:'pointer-unlock',requestId:34}),true);
+  await new Promise(resolve=>setImmediate(resolve));
+  for(const requestId of [33,34]){const reply=f.states.find(state=>state.requestId===requestId);assert(reply);assert.equal(reply.error,undefined);}
+  assert.equal(f.document.fullscreenElement,null);assert.equal(f.document.pointerLockElement,null);assert.deepEqual(f.errors,[]);
+ }finally{for(const resolve of reads)resolve('done');await f.host.dispose();}
+});
+
+test('privileged drain requests have a separate finite budget while native exit is pending',async t=>{
+ const f=hostSetup(t);let finish;
+ const pending=new Promise(resolve=>finish=resolve);f.document.fullscreenElement=f.canvas;
+ f.document.exitFullscreen=()=>pending.then(()=>{f.document.fullscreenElement=null;});f.host.beginDrain();
+ try{
+  for(let requestId=1;requestId<=32;requestId++)assert.equal(f.host.command({type:'dom-command',operation:'exit-fullscreen',requestId}),true);
+  assert.equal(f.host.command({type:'dom-command',operation:'exit-fullscreen',requestId:33}),false);
+  assert.match(f.states.at(-1).error,/E_WORKER_DOM_REQUEST_BUDGET/);
+ }finally{finish();await f.host.dispose();}
+});
 for(const api of ['promise','void'])test(`concurrent ${api} pointer-lock requests share one browser operation and late cleanup`,async t=>{
  const f=hostSetup(t),grants=[];let exits=0;
  f.window.navigator.userActivation.isActive=true;

@@ -12,9 +12,26 @@ export interface RuntimeHost {
 }
 export interface EntrySummary {entryId:string;state:'starting'|'ready'|'closed';cleanup:'pending'|'complete'|'failed'|'unconfirmed'|'not-applicable'}
 export interface RuntimeSummary {schemaVersion:1;epoch:string;sealed:boolean;failure?:RuntimeDiagnostic;entries:EntrySummary[];overflow:boolean}
+export type RuntimeCleanup=()=>void|PromiseLike<void>;
+/** Cooperative entry lifetime; intentionally independent of DOM AbortSignal. */
+export interface EntryLifetime {
+ readonly cancelled:boolean;
+ onCancel(callback:()=>void):()=>void;
+ defer(cleanup:RuntimeCleanup):()=>void;
+}
+/** Internal renderer/resource participant; no framework or native types leak here. */
+export interface RuntimeCleanupParticipant {
+ beginClose():void;tick():void;seal():void;close():void|PromiseLike<void>;
+}
+export interface RuntimeCloseProgress {
+ status:'pending'|'complete'|'failed'|'unconfirmed';closing:boolean;accepting:boolean;canNativeCleanup:boolean;
+ pendingStartup:number;pendingCleanups:number;entries:EntrySummary[];
+}
 export interface RuntimeEntryScope {
- readonly entryId:string;readonly host:RuntimeHost;
+ readonly entryId:string;readonly host:RuntimeHost;readonly lifetime:EntryLifetime;
  ready(hasCleanup?:boolean):void;close():void;canCleanup():boolean;cleanupComplete():void;cleanupUnconfirmed():void;
+ finishStartup(cleanup?:RuntimeCleanup):void;
+ onNativeSeal(callback:()=>void):()=>void;onCleanupTick(callback:()=>void):()=>void;
  reportCleanupFailure(value:RuntimeDiagnostic):void;summary():EntrySummary;
 }
 export interface RuntimeBindingOptions {
@@ -32,6 +49,9 @@ export interface RuntimeBinding extends RuntimeHost {
  receiveProjectCommand(value:unknown,receipt?:()=>void):boolean;
  openEntry():RuntimeEntryScope;beginNativeEpoch(epoch:string):void;endNativeEpoch(epoch:string):void;
  snapshotSummary():RuntimeSummary;drain():void;settle():void;
+ beginClose(reason?:string):void;drainClose():Promise<RuntimeCloseProgress>;closeProgress():RuntimeCloseProgress;
+ attachEntryCleanup(host:RuntimeHost,participant:RuntimeCleanupParticipant):boolean;
+ detachEntryCleanup(host:RuntimeHost,participant:RuntimeCleanupParticipant):boolean;
 }
 
 /** pthread bootstrap serializes this exact function. All runtime helpers must
@@ -47,8 +67,13 @@ export function createRuntimeBinding(options:RuntimeBindingOptions):RuntimeBindi
  let phase:'active'|'draining'|'settled'='active',role:RuntimeRole=options.role??'host',assigned=options.role!==undefined;
  let epoch='untracked',epochAlive=true,epochSealed=false,generation=0,serial=0,overflow=false,failure:RuntimeDiagnostic|undefined,sealedSummary:RuntimeSummary|undefined;
  const settled=()=>phase==='settled';
- type Entry={summary:EntrySummary;generation:number;closed:boolean};
+ type Cleanup={callback:RuntimeCleanup;active:boolean;done:boolean;retire?:()=>void};
+ type Entry={summary:EntrySummary;generation:number;closed:boolean;startupPending:boolean;legacyCleanup:boolean;
+  cleanups:Cleanup[];running?:Cleanup;cancelCallbacks:Set<()=>void>;sealCallbacks:Set<()=>void>;tickCallbacks:Set<()=>void>};
  let entries=new Map<string,Entry>();
+ type Participant={entry:Entry;cleanup:Cleanup;retire:()=>void};
+ const hostEntries=new WeakMap<object,Entry>(),participantEntries=new WeakMap<object,Participant>();
+ let closing=false,closeScheduled=false,closePumping=false,closeRepeat=false;
  let binding:{handler:ProjectCommandHandler;entry?:Entry}|undefined,legacyDrop:(()=>void)|undefined,commandEntry:Entry|undefined;
  type QueuedCommand={data:ProjectData;bytes:number;receipt?:()=>void;entry?:Entry};
  const queue:QueuedCommand[]=[];
@@ -111,11 +136,85 @@ export function createRuntimeBinding(options:RuntimeBindingOptions):RuntimeBindi
   }
   try{return !!options.onDiagnostic&&options.onDiagnostic(item)!==false;}catch{return false;}
  };
- const failureFrom=(error:unknown,entry?:Entry)=>{
+ const failureFrom=(error:unknown,entry?:Entry,teardown=false)=>{
   let message='Project command failed',stack:string|undefined;
   if(typeof error==='string')message=error;
   else if(error&&typeof error==='object')try{const d=Object.getOwnPropertyDescriptors(error);if(d.message&&'value'in d.message&&typeof d.message.value==='string')message=d.message.value;if(d.stack&&'value'in d.stack&&typeof d.stack.value==='string')stack=d.stack.value;else if(intrinsicStackGetter&&d.stack?.get===intrinsicStackGetter&&(!d.message||('value'in d.message&&typeof d.message.value==='string'))&&(!d.name||('value'in d.name&&typeof d.name.value==='string'))){const captured=intrinsicStackGetter.call(error);if(typeof captured==='string')stack=captured;}}catch{/* Never invoke application getters. */}
-  report({kind:'runtime',message,...(stack?{stack}:{})},entry);
+  report({kind:'runtime',message,...(stack?{stack}:{})},entry,teardown);
+ };
+ const entryAlive=(entry:Entry)=>phase!=='settled'&&epochAlive&&entry.generation===generation;
+ const retireCleanup=(entry:Entry,item:Cleanup)=>{
+  item.active=false;const index=entry.cleanups.indexOf(item);if(index>=0)entry.cleanups.splice(index,1);
+  const retire=item.retire;item.retire=undefined;retire?.();
+ };
+ const cleanupFailure=(error:unknown,entry:Entry)=>{if(!entryAlive(entry))return;entry.summary.cleanup='failed';failureFrom(error,entry,true);};
+ const refreshCleanup=(entry:Entry)=>{
+  if(!entryAlive(entry)||entry.summary.cleanup==='failed')return;
+  const pending=entry.startupPending||entry.legacyCleanup||entry.cleanups.some(item=>item.active&&!item.done);
+  entry.summary.cleanup=pending?'pending':entry.closed?'complete':'not-applicable';
+ };
+ const closeProgress=():RuntimeCloseProgress=>{
+  let pendingStartup=0,pendingCleanups=0,failed=false,unconfirmed=false,open=false;
+  for(const entry of entries.values()){
+   pendingStartup+=Number(entry.startupPending);pendingCleanups+=Number(entry.legacyCleanup)+entry.cleanups.filter(item=>item.active&&!item.done).length+(entry.closed?entry.cancelCallbacks.size:0);
+   failed||=entry.summary.cleanup==='failed';unconfirmed||=entry.summary.cleanup==='unconfirmed';open||=!entry.closed;
+  }
+  const canNativeCleanup=phase!=='settled'&&epochAlive;
+  const pending=open||pendingStartup>0||pendingCleanups>0;
+  return {status:!canNativeCleanup&&(pending||unconfirmed)?'unconfirmed':pending?'pending':failed?'failed':unconfirmed?'unconfirmed':'complete',
+   closing,accepting:phase==='active'&&epochAlive,canNativeCleanup,pendingStartup,pendingCleanups,entries:summary().entries};
+ };
+ const requestClose=()=>{
+  if(closeScheduled||closePumping||phase==='settled'||!epochAlive)return;closeScheduled=true;
+  try{schedule(()=>{closeScheduled=false;runClosePass();});}catch(error){closeScheduled=false;for(const entry of entries.values())if(entry.closed)cleanupFailure(error,entry);}
+ };
+ const runClosePass=()=>{
+  if(closePumping||phase==='settled'||!epochAlive)return;closePumping=true;
+  try{
+   const current=[...entries.values()].filter(entry=>entry.closed&&entryAlive(entry));
+   // Broadcast cancellation to every entry before awaiting any entry's LIFO cleanup.
+   for(const entry of current)for(const callback of [...entry.cancelCallbacks]){
+    if(!entry.cancelCallbacks.delete(callback))continue;if(!entryAlive(entry))break;
+    try{callback();}catch(error){cleanupFailure(error,entry);}
+   }
+   for(const entry of current){
+    if(!entryAlive(entry))continue;
+    for(const callback of [...entry.tickCallbacks]){if(!entryAlive(entry))break;if(!entry.tickCallbacks.has(callback))continue;try{callback();}catch(error){cleanupFailure(error,entry);}}
+   }
+   let work=0;
+   for(const entry of current){
+    if(!entryAlive(entry)||entry.running)continue;
+    for(const item of [...entry.cleanups].reverse()){
+     if(!item.active||item.done)continue;if(++work>128){closeRepeat=true;break;}
+     item.done=true;entry.running=item;
+     try{
+      const result=item.callback();
+      if(result!==null&&(typeof result==='object'||typeof result==='function')){
+       item.done=false;
+       void Promise.resolve(result).then(()=>{
+        item.done=true;entry.running=undefined;retireCleanup(entry,item);if(!entryAlive(entry))return;refreshCleanup(entry);requestClose();
+       },error=>{
+        item.done=true;entry.running=undefined;retireCleanup(entry,item);if(!entryAlive(entry))return;cleanupFailure(error,entry);requestClose();
+       });
+       break;
+      }
+     }catch(error){cleanupFailure(error,entry);}
+     entry.running=undefined;retireCleanup(entry,item);
+    }
+    refreshCleanup(entry);
+   }
+  }finally{closePumping=false;if(closeRepeat){closeRepeat=false;requestClose();}}
+ };
+ const closeEntry=(entry:Entry)=>{
+  if(entry.closed||!entryAlive(entry))return;entry.closed=true;entry.summary.state='closed';
+  if(binding?.entry===entry)binding=undefined;dropQueue(item=>item.entry===entry);refreshCleanup(entry);requestClose();
+ };
+ const sealEntries=()=>{
+  for(const entry of entries.values()){
+   if(entry.summary.cleanup!=='failed'&&(entry.startupPending||entry.legacyCleanup||entry.cleanups.some(item=>item.active&&!item.done)))entry.summary.cleanup='unconfirmed';
+   entry.cancelCallbacks.clear();entry.tickCallbacks.clear();
+   for(const callback of [...entry.sealCallbacks]){if(!entry.sealCallbacks.delete(callback))continue;try{callback();}catch{/* Sealing cannot reenter released native state. */}}
+  }
  };
  const pump=()=>{
   scheduled=false;if(pumping)return;pumping=true;
@@ -134,7 +233,7 @@ export function createRuntimeBinding(options:RuntimeBindingOptions):RuntimeBindi
   dropQueue(item=>item.entry!==entry);requestPump();return ()=>{if(binding===current)binding=undefined;};
  };
  const emit=(value:ProjectData,entry?:Entry)=>{if(role!=='engine'||!active(entry)||!options.onProject)return false;const observedGeneration=generation,owned=snapshot(value);if(!owned||generation!==observedGeneration||!active(entry))return false;try{return options.onProject(owned.data,owned.serialized)!==false;}catch{return false;}};
- const publicHost=(entry?:Entry):RuntimeHost=>Object.freeze({apiVersion:1 as const,sessionId:options.sessionId,get role(){return role;},reportDiagnostic:(v:RuntimeDiagnostic)=>report(v,entry),emitProjectEvent:(v:ProjectData)=>emit(v,entry),bindProjectCommand:(h:ProjectCommandHandler)=>bind(h,entry)});
+ const publicHost=(entry?:Entry):RuntimeHost=>{const value=Object.freeze({apiVersion:1 as const,sessionId:options.sessionId,get role(){return role;},reportDiagnostic:(v:RuntimeDiagnostic)=>report(v,entry),emitProjectEvent:(v:ProjectData)=>emit(v,entry),bindProjectCommand:(h:ProjectCommandHandler)=>bind(h,entry)});if(entry)hostEntries.set(value,entry);return value;};
  const summary=():RuntimeSummary=>{const value=sealedSummary??{schemaVersion:1 as const,epoch,sealed:epochSealed,...(failure?{failure}:{}),entries:[...entries.values()].map(e=>e.summary),overflow};return {...value,...(value.failure?{failure:{...value.failure}}:{}),entries:value.entries.map(e=>({...e}))};};
  const host=publicHost();
  const runtime:RuntimeBinding={
@@ -148,24 +247,71 @@ export function createRuntimeBinding(options:RuntimeBindingOptions):RuntimeBindi
   receiveProjectCommand(value,receipt){if(role!=='engine'||!active(commandEntry)){ack(receipt);return false;}const observedGeneration=generation,entry=commandEntry,owned=snapshot(value);if(!owned||generation!==observedGeneration||commandEntry!==entry||!active(entry)||queue.length>=maxCommands||queuedBytes+owned.bytes>maxBytes){ack(receipt);return false;}queue.push({...owned,receipt,entry});queuedBytes+=owned.bytes;requestPump();return true;},
   openEntry(){
    if(role!=='engine')fail('E_RUNTIME_ROLE');if(!active())fail('E_RUNTIME_CLOSING');if(entries.size>=maxEntries){overflow=true;fail('E_RUNTIME_ENTRY_BUDGET');}
-   const entry:Entry={summary:{entryId:String(++serial),state:'starting',cleanup:'pending'},generation,closed:false};entries.set(entry.summary.entryId,entry);
+   const entry:Entry={summary:{entryId:String(++serial),state:'starting',cleanup:'pending'},generation,closed:false,startupPending:true,legacyCleanup:false,
+    cleanups:[],cancelCallbacks:new Set(),sealCallbacks:new Set(),tickCallbacks:new Set()};entries.set(entry.summary.entryId,entry);
    if(!binding){commandEntry=entry;claimQueue(entry);}
+   const registerCleanup=(callback:RuntimeCleanup,lateStartup=false)=>{
+    if(typeof callback!=='function')return fail('E_RUNTIME_CLEANUP');
+    if(!entryAlive(entry)||(!lateStartup&&entry.closed))return fail('E_RUNTIME_CLOSING');
+    if(entry.cleanups.length>=128)return fail('E_RUNTIME_CLEANUP_BUDGET');
+    const item:Cleanup={callback,active:true,done:false};entry.cleanups.push(item);entry.legacyCleanup=false;refreshCleanup(entry);if(entry.closed)requestClose();
+    return ()=>{if(!entry.closed){retireCleanup(entry,item);refreshCleanup(entry);}};
+   };
+   const lifetime:EntryLifetime=Object.freeze({get cancelled(){return entry.closed||!entryAlive(entry);},
+    onCancel(callback:()=>void){if(typeof callback!=='function')return fail('E_RUNTIME_CANCEL_CALLBACK');if(!entryAlive(entry)||entry.closed)return fail('E_RUNTIME_CLOSING');
+     const slot=()=>callback();entry.cancelCallbacks.add(slot);return ()=>{if(!entry.closed)entry.cancelCallbacks.delete(slot);};},
+    defer:(callback:RuntimeCleanup)=>registerCleanup(callback),
+   });
    return {
-    entryId:entry.summary.entryId,host:publicHost(entry),
-    ready(hasCleanup=false){if(entry.generation!==generation||!epochAlive)return;if(!entry.closed)entry.summary.state='ready';if(!hasCleanup&&entry.summary.cleanup!=='failed')entry.summary.cleanup=entry.closed?'complete':'not-applicable';},
-    close(){if(entry.closed||entry.generation!==generation||!epochAlive)return;entry.closed=true;entry.summary.state='closed';if(binding?.entry===entry)binding=undefined;dropQueue(item=>item.entry===entry);if(entry.summary.cleanup==='not-applicable')entry.summary.cleanup='complete';},
+    entryId:entry.summary.entryId,host:publicHost(entry),lifetime,
+    ready(hasCleanup=false){if(!entryAlive(entry))return;entry.startupPending=false;if(!entry.closed)entry.summary.state='ready';entry.legacyCleanup=hasCleanup&&!entry.cleanups.some(item=>item.active);refreshCleanup(entry);},
+    finishStartup(cleanup){if(!entryAlive(entry))return;if(!entry.startupPending)return fail('E_RUNTIME_STARTUP_SETTLED');
+     if(cleanup!==undefined&&typeof cleanup!=='function')return fail('E_RUNTIME_CLEANUP');entry.startupPending=false;entry.legacyCleanup=false;
+     if(!entry.closed)entry.summary.state='ready';if(cleanup)registerCleanup(cleanup,true);refreshCleanup(entry);if(entry.closed)requestClose();},
+    close(){closeEntry(entry);},
+    onNativeSeal(callback){if(typeof callback!=='function')return fail('E_RUNTIME_SEAL_CALLBACK');if(!entryAlive(entry)){callback();return ()=>{};}const slot=()=>callback();entry.sealCallbacks.add(slot);return ()=>{entry.sealCallbacks.delete(slot);};},
+    onCleanupTick(callback){if(typeof callback!=='function')return fail('E_RUNTIME_TICK_CALLBACK');if(!entryAlive(entry))return ()=>{};const slot=()=>callback();entry.tickCallbacks.add(slot);return ()=>{entry.tickCallbacks.delete(slot);};},
     canCleanup(){return phase!=='settled'&&epochAlive&&entry.generation===generation;},
-    cleanupComplete(){if(entry.generation===generation&&epochAlive&&entry.summary.cleanup!=='failed')entry.summary.cleanup='complete';},
+    cleanupComplete(){if(entry.generation===generation&&epochAlive&&entry.summary.cleanup!=='failed'){entry.legacyCleanup=false;entry.summary.cleanup='complete';}},
     cleanupUnconfirmed(){if(entry.generation===generation&&epochAlive&&entry.summary.cleanup!=='failed')entry.summary.cleanup='unconfirmed';},
     reportCleanupFailure(value){if(entry.generation!==generation||!epochAlive||phase==='settled')return;entry.summary.cleanup='failed';report(value,entry,true);},
     summary(){return {...entry.summary};},
    };
   },
-  beginNativeEpoch(value){if(typeof value!=='string'||!value||value.length>256)fail('E_RUNTIME_EPOCH');if(epoch===value&&epochAlive)return;if(phase==='settled')return;if(epoch!=='untracked'&&epochAlive)runtime.endNativeEpoch(epoch);epoch=value;epochAlive=true;epochSealed=false;sealedSummary=undefined;generation++;entries=new Map();overflow=false;binding=undefined;commandEntry=undefined;dropQueue();},
-  endNativeEpoch(value){if(value!==epoch||!epochAlive)return;epochAlive=false;epochSealed=true;binding=undefined;dropQueue();for(const entry of entries.values())if(entry.summary.cleanup==='pending')entry.summary.cleanup='unconfirmed';sealedSummary=summary();try{options.onSummary?.(summary());}catch{/* Missing summary remains unconfirmed at owner. */}},
+   beginNativeEpoch(value){if(typeof value!=='string'||!value||value.length>256)fail('E_RUNTIME_EPOCH');if(epoch===value&&epochAlive)return;if(phase==='settled')return;if(epochAlive){if(epoch!=='untracked')runtime.endNativeEpoch(epoch);else if(entries.size){epochAlive=false;sealEntries();}}epoch=value;epochAlive=true;epochSealed=false;sealedSummary=undefined;generation++;entries=new Map();overflow=false;binding=undefined;commandEntry=undefined;dropQueue();},
+  endNativeEpoch(value){if(value!==epoch||!epochAlive)return;epochAlive=false;epochSealed=true;binding=undefined;dropQueue();sealEntries();for(const entry of entries.values())if(entry.summary.cleanup==='pending')entry.summary.cleanup='unconfirmed';sealedSummary=summary();try{options.onSummary?.(summary());}catch{/* Missing summary remains unconfirmed at owner. */}},
   snapshotSummary:summary,
   drain(){if(phase==='settled')return;phase='draining';binding=undefined;dropQueue();},
-  settle(){runtime.drain();phase='settled';epochAlive=false;},
+  settle(){runtime.drain();phase='settled';epochAlive=false;sealEntries();},
+  beginClose(){if(phase==='settled'||!epochAlive)return;closing=true;runtime.drain();for(const entry of entries.values())closeEntry(entry);requestClose();},
+  async drainClose(){runClosePass();await Promise.resolve();runClosePass();return closeProgress();},
+  closeProgress,
+  attachEntryCleanup(host,participant){
+   const entry=hostEntries.get(host);if(!entry||!active(entry)||!participant||typeof participant!=='object')return false;
+   const previous=participantEntries.get(participant);if(previous)return previous.entry===entry;
+   let callbacks:{beginClose:()=>void;tick:()=>void;seal:()=>void;close:RuntimeCleanup};
+   try{
+    const descriptors=Object.getOwnPropertyDescriptors(participant),values:Record<string,Function>={};
+    for(const key of ['beginClose','tick','seal','close']){const descriptor=descriptors[key];if(!descriptor||!('value'in descriptor)||typeof descriptor.value!=='function')return false;values[key]=descriptor.value;}
+    callbacks={beginClose:()=>values.beginClose!.call(participant),tick:()=>values.tick!.call(participant),seal:()=>values.seal!.call(participant),close:()=>values.close!.call(participant)};
+   }catch{return false;}
+   if(!active(entry)||entry.cleanups.length>=128)return false;
+   const cleanup:Cleanup={callback:callbacks.close,active:true,done:false};
+   const registration:Participant={entry,cleanup,retire:()=>{
+    if(participantEntries.get(participant)===registration)participantEntries.delete(participant);
+    entry.cancelCallbacks.delete(callbacks.beginClose);entry.tickCallbacks.delete(callbacks.tick);entry.sealCallbacks.delete(callbacks.seal);
+   }};
+   cleanup.retire=registration.retire;participantEntries.set(participant,registration);
+   entry.cancelCallbacks.add(callbacks.beginClose);entry.tickCallbacks.add(callbacks.tick);entry.sealCallbacks.add(callbacks.seal);
+   entry.cleanups.push(cleanup);entry.legacyCleanup=false;refreshCleanup(entry);return true;
+  },
+  detachEntryCleanup(host,participant){
+   const entry=hostEntries.get(host),registration=participantEntries.get(participant);
+   if(!entry||registration?.entry!==entry)return false;
+   // An already claimed async close stays charged until its Promise settles.
+   if(entry.running===registration.cleanup)registration.retire();else retireCleanup(entry,registration.cleanup);
+   refreshCleanup(entry);return true;
+  },
  };
  return runtime;
 }

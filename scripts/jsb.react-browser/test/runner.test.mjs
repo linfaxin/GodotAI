@@ -426,7 +426,10 @@ test('a live host cannot hide a stalled engine, and cleanup acknowledgement cove
 test('pthread stop timeout terminates the session and never reports a cooperative exit',async()=>{
  const f=fixture({runtimeRelease:workerRelease,exitOnStop:false});
  try{
-  await f.runner.run(artifact);await pause(10);assert.equal(f.runner.getHealth().engineWorkers,1);
+  await f.runner.run(artifact);
+  const progressDeadline=Date.now()+1000;
+  while(f.runner.getHealth()?.engineWorkers!==1&&Date.now()<progressDeadline)await pause(5);
+  assert.equal(f.runner.getHealth().engineWorkers,1);
   const report=await f.runner.stop();assert.equal(report.reason,'forced-session-termination');assert.equal(report.code,undefined);assert.equal(report.cleanup.mode,'forced');
  }finally{await f.cleanup();}
 });

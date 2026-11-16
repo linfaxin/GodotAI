@@ -8,7 +8,7 @@ The independently selected `proxy-pthread` candidate is documented in the [compl
 
 ## Engine profiles
 
-The default `full-engine-v1` builds all eight demos. `engine-2d-v1` uses the same native GodotJS/React runtime with 3D scenes, physics, navigation and XR disabled, and publishes Shader, Lights, Match3 and Dungeon. SDK inputs are built once; engine, resource, export and output directories are isolated per profile and target. New project documents use Schema 3 and carry their engine profile.
+The default `full-engine-v1` builds all eight demos. `engine-2d-v1` uses the same native GodotJS/React runtime with 3D scenes, physics, navigation and XR disabled, and publishes Shader, Lights, Match3 and Dungeon. SDK inputs are built once; engine, resource, export and output directories are isolated per profile and target. The explicit new React project action creates a Schema 4 engine document with an ordinary `start(ctx)` entry. Existing native/component templates and bundled demos retain Schema 3; all carry their engine profile, and reading an old project does not rewrite its stored format.
 
 New 2D Web builds also omit ENet (native UDP is unavailable in the browser), UPnP (no browser implementation), the optional ObjectDB snapshot profiler and advanced text layout. They use `TextServerFallback`, retaining FreeType/MSDF fonts, GUI, 2D physics/navigation, audio, GDScript, texture formats and WebSocket/WebRTC multiplayer. Full builds retain advanced text. Fallback supports basic horizontal text; complex shaping, BiDi and advanced line/word breaking are outside this 2D template's text capabilities. Historical source-bound 2D archives with advanced text remain readable; fresh builds verify omitted modules are absent. Changed build arguments select a new artifact namespace, so rebuild the engine before using the default 2D product command.
 
@@ -47,6 +47,12 @@ The build exports the pinned upstream resources once, then produces `demo-resour
 ## Editing and project data
 
 The workbench retains its explorer, tabs, Monaco diagnostics, split panes, console, mobile layout, project controls, share URLs and JSON import/export. Project files preserve native scenes, resources, arbitrary binary attachments, UID mappings and project settings. Relative paths, root paths, `res://` imports and JSON resolve through the shared compiler module index. Helpers can use `.mjs`, `.mts`, `.cjs` and `.cts`; entries accept TS, JS, TSX and JSX.
+
+The product compiler uses `project-tools`' shared compiler policy, owned type environment and artifact facade. Browser-specific loading and completion/hover messages stay in the workbench. The separate `godotjs` Node CLI supports `check`, `build` and `export-pck` against a matching release; it does not replace the retained legacy React CLI or conformance workbench. See [project-tools](../../packages/project-tools/README.md).
+
+Ordinary script entries receive `ctx.lifetime` for cancellation and synchronous or asynchronous registered cleanup. Passing the captured `ctx.host` to `createRoot()` automatically registers the React root with the entry, including roots created by the new Schema 4 React template. Matching lifecycle-ABI-1 engines wait at a native pre-exit gate for tracked cleanup and actual queued deletion before native shutdown. Unfinished startup, cleanup timeout and forced termination remain explicit outcomes. Old templates do not gain this native hook from a frontend refresh.
+
+PNG/JPEG and PCM WAV conversion retains `ImageTexture` and `AudioStreamWAV`, using native Base64 `PackedByteArray` TRES output. Internal build bytes stay in owned `Uint8Array` storage, with generated-output and PCK budgets checked before final allocation. This does not raise the editor's existing file/source limits or remove the 64 MiB runner limit. CTEX and custom compressed-resource routes are not the product resource format. See the [implementation and verification guide](../../docs/engine-evolution-implementation.zh-CN.md).
 
 Native projects follow Godot's last-assignment rule for project settings. React replaces the launch scene with its generated bootstrap while preserving the rest of the project configuration.
 

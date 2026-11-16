@@ -1,12 +1,12 @@
 import ts from "typescript";
-import {engineModuleDeclaration} from '@godot-js/react/engine-modules';
+import {ENGINE_SDK_MODULES} from '@godot-js/react/engine-modules';
+import {createProjectTypeEnvironment,checkProjectTypes} from '@godot-js/project-tools/type-environment';
+import {createCompilerEnvironment} from '@godot-js/project-tools/compiler';
 import {decodeProjectText,readProjectBooleanSetting} from '@godot-js/project-tools/project-settings';
 import {prepareScriptRename} from '@godot-js/project-tools/script-renames';
-import {projectScript,projectModulePath} from '@godot-js/project-tools/project-modules';
 import {compileEngineProject} from "./engine-project";
 import {loadReactModules,loadEngineRelease,fetchReleaseAsset,loadDemoRuntime,loadDemoDeclarations,initializeReleaseContext,type ReleaseContext} from "./engine-assets";
 import {DEMO_INPUT_SOURCE} from "./demo-input-source";
-import {moduleCandidates} from "./module-resolution";
 import type {TypeDiagnostic} from './compiler-types';
 import {projectRuntimeDependencies} from './project-runtime-dependencies';
 import {projectResourceConverters} from './project-resource-converters';
@@ -19,7 +19,6 @@ async function initialize(request:Request){
  if(!declarations){const release=await loadEngineRelease();declarations=JSON.parse(new TextDecoder().decode(await fetchReleaseAsset(release.api.typeSnapshot)));}
  return context;
 }
-const options:ts.CompilerOptions={target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS,moduleResolution:ts.ModuleResolutionKind.Node10,jsx:ts.JsxEmit.React,strict:true,skipLibCheck:true,esModuleInterop:true,lib:['lib.es2022.d.ts'],ignoreDeprecations:'6.0',inlineSourceMap:true,inlineSources:true,resolveJsonModule:true,allowJs:true,rewriteRelativeImportExtensions:true,outDir:"/__emit"};
 self.onmessage=async(event:MessageEvent<Request>)=>{
  const request=event.data,{id,kind='compile'}=request;
  try{
@@ -28,10 +27,13 @@ self.onmessage=async(event:MessageEvent<Request>)=>{
   if(runtime!=='godot'&&runtime!=='react'&&runtime!=='engine')throw Error('Unsupported engine launch');
   const allFiles=request.files??{['/src/'+request.file]:request.source??''};
   if(kind==='rename'){self.postMessage({id,renamePlan:prepareScriptRename(allFiles,request.path!,request.newPath!)});return;}
+  const release=await loadEngineRelease();
   let activeDeclarations=declarations!;
+  let naming:'snake'|'camel'='snake';
   {
-   const release=await loadEngineRelease(),configuration=decodeProjectText(allFiles['/project.godot']);
+   const configuration=decodeProjectText(allFiles['/project.godot']);
    const camel=readProjectBooleanSetting(configuration??'','GodotJS','runtime/core/camel_case_bindings_enabled')??false;
+   naming=camel?'camel':'snake';
    const descriptor=release.api.namingProfiles?.[camel?'camel':'snake']?.typeSnapshot??(!camel?release.api.typeSnapshot:undefined);
    if(!descriptor)throw Error('当前引擎未提供 camel 命名类型快照');
    activeDeclarations=JSON.parse(new TextDecoder().decode(await fetchReleaseAsset(descriptor)));
@@ -39,18 +41,12 @@ self.onmessage=async(event:MessageEvent<Request>)=>{
   const user=Object.fromEntries(Object.entries(allFiles).filter((entry):entry is [string,string]=>typeof entry[1]==='string')),entry=request.entry??'/src/'+request.file;
   const runtimeDependencies=projectRuntimeDependencies(user);
   if(runtimeDependencies.demoTypes||runtimeDependencies.demo)activeDeclarations={...activeDeclarations,'/api.d.ts':await loadDemoDeclarations()};
-  const snapshot={...activeDeclarations,...user},roots=Object.keys(user).filter(p=>projectScript.test(p));
-  // The worker checks native projects; the shared core owns their sole emit
-  // pass, including res:// and source-extension -> output-path rewriting.
-  const compilerOptions={...options,noEmit:true,allowImportingTsExtensions:true,rewriteRelativeImportExtensions:false};
-  const resolve=(name:string,from:string):ts.ResolvedModule|undefined=>{
-   const fixed:Record<string,string>={'@playground/api':'/api.d.ts','godot':'/godot/index.d.ts','godot-jsb':'/godot-jsb/index.d.ts','godot.annotations':'/godot.annotations/index.d.ts'};
-   const base=projectModulePath(name,from);
-   const file=fixed[name]??engineModuleDeclaration(name,runtime==='engine'?'godot':runtime)??(base?moduleCandidates(base).find(p=>p in snapshot):undefined);
-   return file&&file in snapshot?{resolvedFileName:file,isExternalLibraryImport:!(file in user)}:undefined;
-  };
-  const host:ts.LanguageServiceHost={getScriptFileNames:()=>[...roots,...Object.keys(activeDeclarations).filter(name=>name.startsWith('/godot/')||name.startsWith('/godot-jsb/')||name.startsWith('/godot.annotations/'))],getScriptVersion:()=> '1',getScriptSnapshot:name=>name in snapshot?ts.ScriptSnapshot.fromString(snapshot[name]):undefined,getCompilationSettings:()=>compilerOptions,getCurrentDirectory:()=> '/',getDefaultLibFileName:()=>'/lib/lib.es2022.d.ts',fileExists:name=>name in snapshot,readFile:name=>snapshot[name],readDirectory:()=>[],resolveModuleNames:(names,from)=>names.map(n=>resolve(n,from))};
-  const service=ts.createLanguageService(host);
+  const sdkContract=(release.sdk as typeof release.sdk&{moduleContract?:Record<string,{declaration:string}>}).moduleContract??ENGINE_SDK_MODULES;
+  const moduleDeclarations={'godot':'/godot/index.d.ts','godot-jsb':'/godot-jsb/index.d.ts','godot.annotations':'/godot.annotations/index.d.ts',
+   ...Object.fromEntries(Object.entries(sdkContract).map(([name,value])=>[name,value.declaration])),
+   ...(Object.hasOwn(activeDeclarations,'/api.d.ts')?{'@playground/api':'/api.d.ts'}:{})};
+  const typeEnvironment=createProjectTypeEnvironment({sources:allFiles,declarations:activeDeclarations,moduleDeclarations});
+  const service=typeEnvironment.createLanguageService();
   try{
    if(kind==='completion'){
     const result=service.getCompletionsAtPosition(request.path!,request.offset!,{includeCompletionsForModuleExports:true,includeCompletionsWithInsertText:true});
@@ -59,35 +55,21 @@ self.onmessage=async(event:MessageEvent<Request>)=>{
    if(kind==='hover'){
     const v=service.getQuickInfoAtPosition(request.path!,request.offset!);self.postMessage({id,result:v?{start:v.textSpan.start,length:v.textSpan.length,display:ts.displayPartsToString(v.displayParts),documentation:ts.displayPartsToString(v.documentation)}:null});return;
    }
-   const program=service.getProgram()!;
-   const diagnostics:TypeDiagnostic[]=ts.getPreEmitDiagnostics(program).filter(d=>!d.file||d.file.fileName in user).map(d=>{
-    const p=d.file&&d.start!==undefined?d.file.getLineAndCharacterOfPosition(d.start):undefined;
-    return {file:d.file?.fileName,message:ts.flattenDiagnosticMessageText(d.messageText,'\n'),line:p?p.line+1:0,column:p?p.character+1:0,start:d.start,length:d.length,code:d.code,category:d.category===ts.DiagnosticCategory.Error?'error':d.category===ts.DiagnosticCategory.Warning?'warning':'info'};
-   });
-   // Match TypeScript's dependency graph: unrelated JSON is not executable input.
-   // Parse reachable JSON for both checks and builds, with a navigable diagnostic.
-   const jsonFiles:Record<string,unknown>={};
-   for(const source of program.getSourceFiles().filter(s=>s.fileName in user&&s.fileName.endsWith('.json'))){
-    try{jsonFiles[source.fileName]=JSON.parse(source.text);}
-    catch(error){
-     if(diagnostics.some(d=>d.file===source.fileName&&d.category==='error'))continue;
-     const message=String(error),match=/position (\d+)/.exec(message),location=/line (\d+) column (\d+)/.exec(message);
-     const start=match?Number(match[1]):location?source.getPositionOfLineAndCharacter(Number(location[1])-1,Number(location[2])-1):source.text.length;
-     const point=source.getLineAndCharacterOfPosition(start);
-     diagnostics.push({file:source.fileName,message,line:point.line+1,column:point.character+1,start,length:1,code:0,category:'error'});
-    }
-   }
+   const diagnostics:TypeDiagnostic[]=checkProjectTypes(typeEnvironment,service);
    if(kind==='compile'&&!diagnostics.some(d=>d.category==='error')){
     const usesDemo=runtimeDependencies.demo;
     // Demo helpers import React and the engine renderer even from native scripts.
     const useReact=runtime==='react'||runtimeDependencies.react;
-    const release=await loadEngineRelease();
     const sdk:Partial<Awaited<ReturnType<typeof loadReactModules>>>=useReact?await loadReactModules(request.mode??'production'):{};
     const demo=usesDemo?await loadDemoRuntime():undefined;
     if(demo&&request.demoApiVersion!==undefined&&request.demoApiVersion!==demo.demoApiVersion)throw Error('E_DEMO_API_VERSION');
-    const files=demo?{...allFiles,'/.playground/demo-input.ts':DEMO_INPUT_SOURCE,'/.playground/demo-resources.pck':Array.from(demo.resources)}:allFiles;
-    const result=await compileEngineProject({files,runtime,entry,mainScene:request.mainScene,...(request.launch!==undefined?{launch:request.launch}:{}),...(request.importReceipts?{importReceipts:request.importReceipts}:{}),...(request.importCacheObservations?{importCacheObservations:request.importCacheObservations}:{}),...(request.resourceImports?{resourceImports:request.resourceImports,resourceConverters:projectResourceConverters(),resourceTarget:{resourceAbi:'godot-4-text-resource-v1',features:{engineId:release.engineId??release.id}}}:{}),identityInputs:{engineId:release.engineId??release.id,...(useReact&&release.extensionId?{extensionId:release.extensionId}:{}),bindingVersion:release.api.bindingVersion??'unknown',typescriptVersion:ts.version},...sdk,
-     ...(demo?{runtimeModules:{...sdk.runtimeModules,'@playground/api':demo.runtime},props:{controls:request.controls??{}}}:{}),
+    const files=demo?{...allFiles,'/.playground/demo-input.ts':DEMO_INPUT_SOURCE,'/.playground/demo-resources.pck':demo.resources}:allFiles;
+    const runtimeModules={...sdk.runtimeModules,...(demo?{'@playground/api':demo.runtime}:{})};
+    const compilerEnvironment=await createCompilerEnvironment({target:{engineId:release.engineId??release.id,engineReleaseId:release.id,engineProfile:release.runtimeProfile,naming,
+     ...(useReact&&release.extensionId?{extensionId:release.extensionId}:{}),bindingVersion:release.api.bindingVersion??'unknown'},
+     declarations:activeDeclarations,moduleDeclarations,runtimeModules,vendor:sdk.vendor});
+    const result=await compileEngineProject({files,runtime,entry,mainScene:request.mainScene,...(request.launch!==undefined?{launch:request.launch}:{}),...(request.importReceipts?{importReceipts:request.importReceipts}:{}),...(request.importCacheObservations?{importCacheObservations:request.importCacheObservations}:{}),...(request.resourceImports?{resourceImports:request.resourceImports,resourceConverters:projectResourceConverters(),resourceTarget:{resourceAbi:'godot-4-text-resource-v1',features:{engineId:release.engineId??release.id}}}:{}),identityInputs:{engineProfile:release.runtimeProfile,engineId:release.engineId??release.id,...(useReact&&release.extensionId?{extensionId:release.extensionId}:{}),bindingVersion:release.api.bindingVersion??'unknown',typescriptVersion:ts.version},...sdk,
+     compilerEnvironment,...(demo?{runtimeModules,props:{controls:request.controls??{}}}:{}),
     });
     self.postMessage({id,code:'',diagnostics:[...diagnostics,...result.diagnostics.map(d=>({...d,file:d.file?.startsWith('res://')?'/'+d.file.slice(6):d.file}))],pack:result.pack,manifest:{...result.manifest,buildKey:result.buildKey,artifactId:result.artifactId,artifactReceipt:result.receipt,outputOverlay:result.overlay,...(release.engineId?{engineId:release.engineId}:{}),...(useReact&&release.extensionId?{extensionId:release.extensionId}:{}),engineReleaseId:release.id,engineProfile:release.runtimeProfile,releaseContext,...(demo?{demoApiVersion:demo.demoApiVersion,demoDescriptorHash:demo.demoDescriptorHash}:{})}},[result.pack.buffer]);return;
    }

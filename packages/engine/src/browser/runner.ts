@@ -206,6 +206,8 @@ export class PreviewRunner {
         try { channel.port1.postMessage({ protocolVersion: PREVIEW_PROTOCOL, type: 'run', ...identity, release: this.options.release,
           artifact: snapshot }, [snapshot.pack.buffer]); }
         catch { this.finish(session, 'crashed', undefined, 'Could not send the project to the preview.'); }
+      } else if (message.type === 'closing') {
+        void this.stopActive();
       } else if (message.type === 'phase' && session.state !== 'stopping'&&!session.forced) {
         const current = RUN_PHASES.indexOf(session.state as typeof RUN_PHASES[number]);
         const next = RUN_PHASES.indexOf(message.phase!);

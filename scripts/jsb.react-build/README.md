@@ -1,5 +1,9 @@
 # GodotJS React build
 
+The Node toolchain and `godot-react` CLI require Node.js 22.14.0 or later,
+matching their shared `@godot-js/project-tools` dependency. Repository builds
+and CI use Node.js 24 or later.
+
 Full-engine Web projects use the shared `prepareEngineProject({files, runtime, ...})` API from `@godot-js/react-build/core`. It returns project bytes, a manifest and diagnostics for the browser PCK adapter or Node tooling. Native main scenes, autoloads, UID metadata and imported resource caches are preserved; the browser does not run Godot editor importers.
 
 The commands and managed-entry policies documented below describe the legacy React CLI pipeline. Its unmanaged-main-scene and business-autoload restrictions do not apply to full-engine projects prepared through the shared core API. Runtime component imports must use `@godot-js/react/legacy` explicitly. The default `@godot-js/react` and `/engine` entries belong to the engine renderer and are rejected by this CLI with `E_LEGACY_ENTRY`, including runtime imports in bundled dependencies. Type-only imports remain available. Frozen aliases in old artifacts remain readable.

@@ -62,7 +62,7 @@ export const DEFAULT_DEADLINES: PhaseDeadlines = {
 export const RUN_PHASES: readonly RunPhase[] = ['downloading', 'preloading', 'initializing', 'starting', 'waiting-ready', 'running'];
 export interface PreviewEnvelope extends RunIdentity {
   protocolVersion: typeof PREVIEW_PROTOCOL;
-  type: 'connected' | 'phase' | 'heartbeat' | 'engine-progress' | 'terminated' | 'log' | 'fatal' | 'exited' | 'project';
+  type: 'connected' | 'phase' | 'heartbeat' | 'engine-progress' | 'terminated' | 'log' | 'fatal' | 'exited' | 'project' | 'closing';
   data?: Record<string,unknown>;
   phase?: RunPhase;
   level?: 'log' | 'warn' | 'error';
@@ -130,7 +130,7 @@ export function isPreviewEnvelope(value: unknown): value is PreviewEnvelope {
   const v = value as unknown as Record<string, unknown>;
   if (v.protocolVersion !== PREVIEW_PROTOCOL||(v.sessionFacts!==undefined&&!isSessionFacts(v.sessionFacts))) return false;
   switch (v.type) {
-    case 'connected': case 'heartbeat': return true;
+    case 'connected': case 'heartbeat': case 'closing': return true;
     case 'engine-progress': return v.role==='engine'&&Number.isSafeInteger(v.sequence)&&Number(v.sequence)>0&&Number.isSafeInteger(v.workerId)&&Number(v.workerId)>=0;
     case 'terminated': return isSessionCleanupReceipt(v.cleanup)&&v.cleanup.mode==='forced';
     case 'project': return isProjectData(v.data);

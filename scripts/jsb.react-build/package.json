@@ -68,7 +68,7 @@
     "@types/node": "^24.12.2"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.14.0"
   },
   "license": "MIT"
 }

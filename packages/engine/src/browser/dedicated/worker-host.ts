@@ -23,6 +23,7 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
   const lease = new WorkerSessionLease(), loaderAbort = new AbortController(), ledger = new WorkerExitLedger(identity);
   const heartbeat = new WorkerHeartbeat(performance.now());
   let started = false, ending = false, finalized = false, running = false;
+  let managedClose = false;
   let configuration: Readonly<WorkerRunConfiguration> | undefined;
   let runtime: Awaited<ReturnType<typeof loadVerifiedRuntimeWorker>> | undefined;
   let control: MessagePort | undefined, data: MessagePort | undefined;
@@ -37,6 +38,7 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
   let diagnostic: PreviewDiagnostic | undefined, memory: unknown = null, workerState = 'uncreated';
   let projectRuntime: 'godot' | 'react' | null = null, dataSequence = 0;
   const pendingData = new Set<number>();
+  const pendingCleanupData = new Set<number>();
   const pendingPresentationData = new Set<number>();
   let projectCommands:WorkerProjectCommandCredits|undefined;
   const workerErrors: string[] = [], glErrors: string[] = [];
@@ -59,12 +61,15 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
   const post = (fields: object) => { if (!finalized) editorPort.postMessage({ ...identity, protocolVersion: WORKER_PROTOCOL, ...fields }); };
   const toWorker = (fields: object) => control?.postMessage({ ...identity, protocolVersion: WORKER_PROTOCOL, ...fields });
   const toData = (fields: object) => {
-    if (!lease.active || !data) return;
-    if (pendingData.size >= (configuration?.budgets.maxInputEvents ?? 1024)) { fail(Error('E_WORKER_INPUT_BACKPRESSURE')); return; }
-    const sequence = ++dataSequence; pendingData.add(sequence);
+    const packet=fields as {type?:string;state?:{requestId?:unknown}};
+    const cleanup=managedClose&&ending&&(['host-command-receipt','present-ack'].includes(packet.type??'')||(packet.type==='host-state'&&packet.state?.requestId!==undefined));
+    if ((!lease.active&&!cleanup) || !data || finalized) return;
+    const pending=cleanup?pendingCleanupData.size:pendingData.size-pendingCleanupData.size;
+    if (pending >= (configuration?.budgets.maxInputEvents ?? 1024)) { workerFailure(Error(cleanup?'E_WORKER_CLEANUP_BACKPRESSURE':'E_WORKER_INPUT_BACKPRESSURE')); return; }
+    const sequence = ++dataSequence; pendingData.add(sequence);if(cleanup)pendingCleanupData.add(sequence);
     const type=(fields as {type?:unknown}).type;if(type==='geometry'||type==='present-ack')pendingPresentationData.add(sequence);
     try{data.postMessage({ ...identity, protocolVersion: WORKER_PROTOCOL, dataSequence: sequence, ...fields });}
-    catch(error){pendingData.delete(sequence);pendingPresentationData.delete(sequence);throw error;}
+    catch(error){pendingData.delete(sequence);pendingCleanupData.delete(sequence);pendingPresentationData.delete(sequence);throw error;}
   };
   function publish(): void {
     snapshot = Object.freeze({ schemaVersion: 1, ...identity, executionBackend: 'worker', presentationBackend: configuration?.presentationBackend ?? null,
@@ -103,7 +108,7 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
     // cannot create a second cleanup or adoption window.
     finalized = true; ending = true; running = false; lease.cancel(); heartbeat.close();
     projectCommands?.clear();
-    pendingData.clear();pendingPresentationData.clear();
+    pendingData.clear();pendingCleanupData.clear();pendingPresentationData.clear();
     clearTimeout(stopTimer); clearInterval(watchdog); observer?.disconnect();
     removeEventListener('resize', resize); removeEventListener('visibilitychange', visibility);
     removeEventListener('pagehide', pagehide);
@@ -152,9 +157,11 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
     if(runtime)stopTimer = setTimeout(() => terminate(detail), stopTimeoutMs);
     // Browser requests cease at the fence; audio is muted synchronously before
     // asking the Worker to quit. stop() also flushes the old audio epoch.
-    closeInput(); disposeSafely(()=>browser?.dispose()); observer?.disconnect(); disposeSafely(()=>presentation?.dispose());
+    if(managedClose){disposeSafely(()=>input?.beginDrain?.());disposeSafely(()=>browser?.beginDrain?.());disposeSafely(()=>audio?.beginDrain());}
+    else {closeInput();disposeSafely(()=>browser?.dispose());disposeSafely(()=>presentation?.dispose());}
+    observer?.disconnect();
     closeXR();
-    void audio?.stop().catch(() => {});
+    if(!managedClose)void audio?.stop().catch(() => {});
     publish();
     if (!runtime) { loaderAbort.abort(new DOMException('Stopped', 'AbortError')); void finalize({ kind: 'startup-failed', detail: detail ?? cause }); return; }
     try { toWorker({ type: 'stop', cause, detail }); }
@@ -197,6 +204,7 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
       projectRuntime = message.artifact?.manifest?.runtime === 'godot' ? 'godot' : message.artifact?.manifest?.runtime === 'react' ? 'react' : null;
       if (frozen.hash !== identity.runConfigurationHash) throw Error('E_WORKER_CONFIGURATION_HASH');
       const release = message.release as VerifiedRelease;
+      managedClose=release.runtimeAbi?.lifecycle===1||release.execution?.lifecycleAbi===1;
       if (!release.runtimeAbi || !release.runtimeWorker || !release.runtimeAudioWorklet) throw Error('E_WORKER_RELEASE_ABI');
       if (release.runtimeAbi.host !== configuration.hostAbiVersion || release.runtimeAbi.audio !== configuration.audioAbiVersion || release.runtimeAbi.presentation !== configuration.presentationAbiVersion) throw Error('E_WORKER_RELEASE_ABI');
       if (!(message.artifact?.pack instanceof Uint8Array) || !message.artifact.pack.byteLength || message.artifact.pack.byteLength > 64 * 1024 * 1024) throw Error('E_ARTIFACT_PACK');
@@ -235,6 +243,7 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
           if(!isRuntimeSummary(m.runtimeSummary)){fail(Error('E_RUNTIME_SUMMARY'));return;}
           runtimeSummary=m.runtimeSummary;return;
         }
+        if(m.type==='worker-closing'){post({type:'worker-closing'});stop('stopped');return;}
         if (m.type === 'native-exit' && Number.isSafeInteger(m.code)) {
           if(m.runtimeSummary!==undefined&&!isRuntimeSummary(m.runtimeSummary)){fail(Error('E_RUNTIME_SUMMARY'));return;}
           runtimeSummary=m.runtimeSummary??runtimeSummary;
@@ -271,10 +280,11 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
         if (!isWorkerEnvelope(raw) || !sameWorkerRun(raw, identity)) { (raw?.bitmap as ImageBitmap | undefined)?.close?.(); return; }
         const m: any = raw;
         if (m.type === 'data-receipt') {
+          pendingCleanupData.delete(m.dataSequence);
           if(Number.isSafeInteger(m.dataSequence)&&pendingData.delete(m.dataSequence)&&pendingPresentationData.delete(m.dataSequence))presentation?.observeWorkerCheckpoint(m.presentationCheckpoint,m.dataSequence);
           return;
         }
-        if (!lease.active) { m.bitmap?.close?.(); return; }
+        if (!lease.active && !(managedClose&&ending&&!finalized&&['host-command','present-frame'].includes(m.type))) { m.bitmap?.close?.(); return; }
         if (m.type === 'present-frame') presentation?.consume(m);
         else if (m.type === 'host-command') {
           try { if (m.command?.type === 'dom-command') input?.command(m.command); }

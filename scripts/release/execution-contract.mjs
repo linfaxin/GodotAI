@@ -21,6 +21,7 @@ export function validateExecutionContract(value, { requireWorkerAssets = false }
   if (!value || value.schemaVersion !== 1 || !models.has(value.executionModel)) reject('Unsupported schema or execution model');
   for (const key of ['wasmThreads', 'proxyToPthread', 'requiresCrossOriginIsolation']) if (typeof value[key] !== 'boolean') reject('Expected boolean ' + key);
   if (!Number.isSafeInteger(value.hostProtocolVersion) || value.hostProtocolVersion < 1) reject('Invalid host protocol');
+  if (value.lifecycleAbi !== undefined && value.lifecycleAbi !== 1) reject('Unsupported lifecycle ABI');
   if (value.routerProtocolVersion !== undefined && (!Number.isSafeInteger(value.routerProtocolVersion) || value.routerProtocolVersion < 1)) reject('Invalid router protocol');
   if (value.proxyToPthread !== (value.executionModel === 'proxy-pthread')) reject('Proxy/model mismatch');
   if (value.proxyToPthread && !value.wasmThreads) reject('Proxy execution requires WASM threads');
@@ -40,6 +41,25 @@ export function validateExecutionContract(value, { requireWorkerAssets = false }
 }
 export const legacyExecution = () => ({ schemaVersion: 1, executionModel: 'window', wasmThreads: false, proxyToPthread: false, requiresCrossOriginIsolation: false, hostProtocolVersion: 1 });
 
+const lifecyclePaths = ['platform/web/web_main.cpp', 'scene/main/scene_tree.h', 'scene/main/scene_tree.cpp'];
+function assertLifecycleProof(report) {
+  const proof = report.lifecyclePatch;
+  if (proof?.abi !== 1 || proof.patchId !== 'godotjs-web-lifecycle-v1' || Object.keys(proof.files ?? {}).length !== lifecyclePaths.length) reject('Missing native lifecycle source proof');
+  for (const path of lifecyclePaths) {
+    const edges = (report.recipe?.patches ?? []).filter(patch => patch.path === path);
+    const latest = edges.at(-1), file = proof.files[path];
+    const allowed = path === 'platform/web/web_main.cpp' ? ['godotjs-web-lifecycle-v1', 'godotjs-web-worker-runtime-v1'] : ['godotjs-web-lifecycle-v1'];
+    if (!latest || !allowed.includes(latest.patchId) || !hash(file?.sha256) || file.sha256 !== latest.afterSha256 || report.godotSource?.inputs?.[path] !== file.sha256) reject('Native lifecycle source differs: ' + path);
+    const implementation = file.implementation;
+    if (!implementation || !hash(implementation.sha256) || implementation.path !== latest.implementation?.path || implementation.sha256 !== latest.implementation?.sha256 || report.source?.inputs?.[implementation.path] !== implementation.sha256) reject('Native lifecycle implementation differs: ' + path);
+    let previous;
+    for (const edge of edges) {
+      if (!hash(edge.beforeSha256) || !hash(edge.afterSha256) || (previous && previous !== edge.beforeSha256)) reject('Broken native lifecycle patch chain: ' + path);
+      previous = edge.afterSha256;
+    }
+  }
+}
+
 /** Never certify threaded execution from requested arguments alone. Older
  * source-bound, single-thread reports retain their existing reader contract. */
 export function executionFromReport(report, { requireWorkerAssets = false } = {}) {
@@ -56,6 +76,10 @@ export function executionFromReport(report, { requireWorkerAssets = false } = {}
   const supplied = report.execution;
   const value = supplied ? { schemaVersion: 1, ...supplied } : { ...legacyExecution(), executionModel: actualProxy ? 'proxy-pthread' : 'window', wasmThreads: actualThreads, proxyToPthread: actualProxy, requiresCrossOriginIsolation: actualThreads };
   validateExecutionContract(value, { requireWorkerAssets });
+  if (value.lifecycleAbi === 1 || report.runtimeAbi?.lifecycle === 1) {
+    if (value.lifecycleAbi !== 1 || (report.runtimeAbi && report.runtimeAbi.lifecycle !== 1)) reject('Native lifecycle ABI declarations differ');
+    assertLifecycleProof(report);
+  }
   if (value.wasmThreads !== actualThreads || value.proxyToPthread !== actualProxy) reject('Descriptor does not match resolved flags');
   return value;
 }

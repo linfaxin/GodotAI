@@ -2,6 +2,7 @@ import { drawingBufferSize, type CanvasGeometry } from './worker-presentation.js
 import { createDropTransfer, type DropPayload } from './worker-drop.js';
 import { createWorkerHostServicesClient, type HostServiceState } from './worker-host-services.js';
 import type { BenchmarkInputTiming } from './worker-benchmark.js';
+import {DOM_ELEMENT_LIMIT,isDomCleanupOperation} from './worker-dom-policy.js';
 
 export interface DomInputPacket {
   type: 'dom-input'; sequence: number; target: string; event: string;
@@ -97,10 +98,10 @@ export function createWorkerDom(options: WorkerDomOptions) {
   let activeDrop:number|undefined,dropTimer:ReturnType<typeof setTimeout>|undefined;
   let dispatchingInput:{target:string;event:string}|undefined;
   function send(operation: string, target?: string, name?: string, value?: unknown, requestId?: number): void {
-    if (!closed&&!inputRevoked) options.sendHostCommand({ type: 'dom-command', operation, target, name, value, requestId });
+    if (!closed&&(!inputRevoked||isDomCleanupOperation(operation))) options.sendHostCommand({ type: 'dom-command', operation, target, name, value, requestId });
   }
   function request(operation: string, value?: unknown): Promise<unknown> {
-    if (closed||inputRevoked) return Promise.reject(Error('E_WORKER_DOM_CLOSED'));
+    if (closed||(inputRevoked&&!['pointer-unlock','exit-fullscreen'].includes(operation))) return Promise.reject(Error('E_WORKER_DOM_CLOSED'));
     if (pending.size >= 32) return Promise.reject(Error('E_WORKER_DOM_REQUEST_BUDGET'));
     const id = ++requestSerial;
     return new Promise((resolve, reject) => {
@@ -143,9 +144,10 @@ export function createWorkerDom(options: WorkerDomOptions) {
     target.__hostFields = (fields: Record<string, unknown>) => { for (const property of ['value','selectionStart','selectionEnd']) if (property in fields) values[`@${property}`] = fields[property]; };
   }
   function createElement(tag: string): any {
+    if (closed || inputRevoked) throw Error('E_WORKER_DOM_CLOSED');
     tag = tag.toLowerCase();
     if (tag === 'canvas') return new scope.OffscreenCanvas(1, 1);
-    if (!['div','input','textarea','link','a'].includes(tag) || elements.size >= 16) throw Error(`E_WORKER_DOM_ELEMENT: ${tag}`);
+    if (!['div','input','textarea','link','a'].includes(tag) || elements.size >= DOM_ELEMENT_LIMIT) throw Error(`E_WORKER_DOM_ELEMENT: ${tag}`);
     const key = `element-${++elementSerial}`, element = new EventTarget() as EventTarget & Record<string, any>;
     elements.set(key, element); mirror(element, key); element.__domKey = key;
     if (tag === 'a') element.click = () => {
@@ -281,7 +283,11 @@ export function createWorkerDom(options: WorkerDomOptions) {
       try{dispatch(target, packet.event, fields);}finally{dispatchingInput=previous;}return true;
     },
     applyHostState(state: DomHostState): void {
-      if (closed || inputRevoked || state.type !== 'dom-state') return;
+      if (closed || state.type !== 'dom-state') return;
+      if (inputRevoked) {
+        if (state.requestId !== undefined) { const entry = pending.get(state.requestId); if (entry) { clearTimeout(entry.timer); pending.delete(state.requestId); if (state.error) entry.reject(Error(state.error)); else entry.resolve(state.result); } }
+        return;
+      }
       if(state.services)services.applyState(state.services);
       if(state.clipboard)navigator.clipboard=state.clipboard.write||state.clipboard.read?{
         ...(state.clipboard.write?{writeText:clipboardMethods.writeText}:{}),...(state.clipboard.read?{readText:clipboardMethods.readText}:{})}:undefined;

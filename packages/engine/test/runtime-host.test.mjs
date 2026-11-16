@@ -141,3 +141,133 @@ test('native Error stack formatting does not evaluate an application message acc
  let calls=0;const failure=new Error('original');Object.defineProperty(failure,'message',{get(){calls++;return 'custom';}});
  const binding=engine();binding.bindProjectCommand(()=>{throw failure;});binding.receiveProjectCommand({});await flush();assert.equal(calls,0);assert.equal(binding.failure.message,'Project command failed');
 });
+
+test('session close broadcasts cancellation before independent entry cleanup and waits for owned promises',async()=>{
+ const events=[],binding=engine(),a=binding.openEntry(),b=binding.openEntry();let resolve;
+ a.lifetime.onCancel(()=>events.push('cancel-a'));b.lifetime.onCancel(()=>events.push('cancel-b'));
+ a.lifetime.defer(()=>{events.push('cleanup-a');return new Promise(accept=>resolve=accept);});
+ b.lifetime.defer(()=>events.push('cleanup-b'));a.finishStartup();b.finishStartup();
+ binding.beginClose();assert.equal(a.lifetime.cancelled,true);assert.equal(b.lifetime.cancelled,true);
+ const first=await binding.drainClose();assert.deepEqual(events,['cancel-a','cancel-b','cleanup-a','cleanup-b']);assert.equal(first.status,'pending');assert.equal(first.pendingCleanups,1);
+ binding.beginClose();resolve();await flush();assert.equal(binding.closeProgress().status,'complete');assert.equal(events.filter(value=>value==='cleanup-a').length,1);
+});
+
+test('entry cleanup is LIFO, continues after a failure, and registration disposers cannot remove claimed jobs',async()=>{
+ const events=[],binding=engine(),entry=binding.openEntry();
+ const remove=entry.lifetime.defer(()=>events.push('first'));
+ entry.lifetime.defer(()=>{events.push('second');throw Error('cleanup failed');});
+ entry.finishStartup();entry.close();remove();await flush();
+ assert.deepEqual(events,['second','first']);assert.equal(binding.closeProgress().status,'failed');assert.equal(binding.failure.message,'cleanup failed');
+ assert.throws(()=>entry.lifetime.defer(()=>{}),/E_RUNTIME_CLOSING/);
+});
+
+test('bounded close progress keeps pending startup and admits only its captured late cleanup while native is alive',async()=>{
+ const binding=engine(),entry=binding.openEntry();let cleanup=0;
+ binding.beginClose();const pending=await binding.drainClose();assert.equal(pending.pendingStartup,1);assert.equal(pending.status,'pending');
+ entry.finishStartup(()=>{cleanup++;});await flush();assert.equal(cleanup,1);assert.equal(binding.closeProgress().status,'complete');
+ const other=engine(),late=other.openEntry();other.beginClose();other.endNativeEpoch('untracked');late.finishStartup(()=>cleanup++);
+ assert.equal(cleanup,1);assert.equal(other.closeProgress().status,'unconfirmed');assert.equal(other.closeProgress().canNativeCleanup,false);
+});
+
+test('cleanup ticks progress after entry close and sealing revokes hooks without inventing native exit proof',async()=>{
+ const binding=engine(),entry=binding.openEntry();let ticks=0,seals=0,resolve;
+ entry.onCleanupTick(()=>{ticks++;if(ticks===3)resolve?.();});entry.onNativeSeal(()=>seals++);
+ entry.lifetime.defer(()=>new Promise(accept=>resolve=accept));entry.finishStartup();binding.beginClose();
+ for(let pass=0;pass<3;pass++)await binding.drainClose();await flush();assert.equal(binding.closeProgress().status,'complete');
+ const before=ticks;binding.settle();await binding.drainClose();assert.equal(ticks,before);assert.equal(seals,1);assert.equal(binding.snapshotSummary().sealed,false);
+});
+
+test('serialized runtime factory owns lifetime callbacks and finite close progress without module helpers',async()=>{
+ const context=vm.createContext({});
+ vm.runInContext(`this.binding=(${createRuntimeBinding.toString()})({sessionId:'serialized-close',role:'engine'});
+  this.events=[];const entry=binding.openEntry();entry.lifetime.onCancel(()=>events.push('cancel'));
+  entry.lifetime.defer(async()=>{await Promise.resolve();events.push('cleanup');});entry.finishStartup();binding.beginClose();`,context);
+ await context.binding.drainClose();await flush();assert.deepEqual([...context.events],['cancel','cleanup']);assert.equal(context.binding.closeProgress().status,'complete');
+});
+
+test('business draining closes admission before coordinated cleanup starts without revoking the native cleanup lease',()=>{
+ const binding=engine(),entry=binding.openEntry();entry.finishStartup();
+ assert.equal(binding.closeProgress().accepting,true);binding.drain();
+ const progress=binding.closeProgress();assert.equal(progress.accepting,false);assert.equal(progress.closing,false);assert.equal(progress.canNativeCleanup,true);assert.equal(entry.canCleanup(),true);
+ binding.beginClose();assert.equal(binding.closeProgress().closing,true);
+});
+
+test('owned entry participants receive coordinated cancel, cleanup ticks and seal without public host lifecycle methods',async()=>{
+ const binding=engine(),entry=binding.openEntry(),events=[];let resolve,ticks=0;
+ const participant={beginClose(){events.push('begin');},tick(){events.push('tick');if(++ticks===3)resolve?.();},seal(){events.push('seal');},close(){events.push('close');return new Promise(accept=>resolve=accept);}};
+ assert.equal(binding.attachEntryCleanup(entry.host,participant),true);assert.equal(binding.attachEntryCleanup(entry.host,participant),true);
+ assert.equal('attachEntryCleanup' in entry.host,false);entry.finishStartup();binding.beginClose();
+ for(let pass=0;pass<3;pass++)await binding.drainClose();await flush();
+ assert.equal(events.filter(value=>value==='begin').length,1);assert.equal(events.filter(value=>value==='close').length,1);assert.equal(binding.closeProgress().status,'complete');
+ binding.endNativeEpoch('untracked');assert.equal(events.filter(value=>value==='seal').length,0,'Completed resources retire their epoch callbacks');
+});
+
+test('cleanup budgets count owned jobs rather than cumulative registrations',async()=>{
+ const binding=engine(),entry=binding.openEntry();entry.finishStartup();let calls=0;
+ for(let i=0;i<512;i++){const remove=entry.lifetime.defer(()=>calls++);remove();remove();}
+ assert.equal(binding.closeProgress().pendingCleanups,0);
+ for(let i=0;i<128;i++)entry.lifetime.defer(()=>calls++);
+ assert.throws(()=>entry.lifetime.defer(()=>{}),/E_RUNTIME_CLEANUP_BUDGET/,'Live registrations remain bounded');
+ binding.beginClose();await flush();assert.equal(calls,128);assert.equal(binding.closeProgress().status,'complete');
+});
+
+test('retired participants release callbacks and cannot detach another entry owner',async()=>{
+ const binding=engine(),entry=binding.openEntry(),other=binding.openEntry();entry.finishStartup();other.finishStartup();
+ let cancel=0,tick=0,seal=0,close=0;
+ const resource={beginClose(){cancel++;},tick(){tick++;},seal(){seal++;},close(){close++;}};
+ for(let i=0;i<512;i++){
+  assert.equal(binding.attachEntryCleanup(entry.host,resource),true);
+  assert.equal(binding.detachEntryCleanup(other.host,resource),false);
+  assert.equal(binding.detachEntryCleanup({...entry.host},resource),false);
+  assert.equal(binding.detachEntryCleanup(entry.host,resource),true);
+ }
+ assert.equal(binding.closeProgress().pendingCleanups,0);
+ binding.beginClose();await binding.drainClose();binding.endNativeEpoch('untracked');
+ assert.deepEqual({cancel,tick,seal,close},{cancel:0,tick:0,seal:0,close:0});
+});
+
+test('detaching a claimed participant does not certify its unsettled close Promise',async()=>{
+ const binding=engine(),entry=binding.openEntry();let resolve;
+ const resource={beginClose(){},tick(){},seal(){},close(){return new Promise(done=>resolve=done);}};
+ binding.attachEntryCleanup(entry.host,resource);entry.finishStartup();binding.beginClose();await binding.drainClose();
+ assert.equal(binding.detachEntryCleanup(entry.host,resource),true);
+ assert.equal(binding.closeProgress().pendingCleanups,1);assert.equal(binding.closeProgress().status,'pending');
+ resolve();await flush();assert.equal(binding.closeProgress().pendingCleanups,0);assert.equal(binding.closeProgress().status,'complete');
+});
+
+test('serialized factory supports participant retirement and slot reuse',async()=>{
+ const context=vm.createContext({});
+ vm.runInContext(`this.binding=(${createRuntimeBinding.toString()})({sessionId:'retirement',role:'engine'});
+  const entry=binding.openEntry();entry.finishStartup();
+  for(let i=0;i<512;i++){
+   entry.lifetime.defer(()=>{})();
+   const p={beginClose(){},tick(){},seal(){},close(){}};
+   if(!binding.attachEntryCleanup(entry.host,p)||!binding.detachEntryCleanup(entry.host,p))throw Error('retirement failed');
+  }
+  binding.beginClose();`,context);
+ await context.binding.drainClose();assert.equal(context.binding.closeProgress().status,'complete');
+});
+
+test('participant attachment rejects forged, foreign, retired and globally scoped hosts before running participant accessors',()=>{
+ const binding=engine(),entry=binding.openEntry(),other=engine(),foreign=other.openEntry();let reads=0;
+ const valid={beginClose(){},tick(){},seal(){},close(){}};
+ assert.equal(binding.attachEntryCleanup(binding,valid),false);
+ assert.equal(binding.attachEntryCleanup({...entry.host},valid),false);
+ assert.equal(binding.attachEntryCleanup(foreign.host,valid),false);
+ const getter={...valid};Object.defineProperty(getter,'close',{get(){reads++;return ()=>{};}});
+ assert.equal(binding.attachEntryCleanup(entry.host,getter),false);assert.equal(reads,0);
+ assert.equal(binding.attachEntryCleanup(entry.host,valid),true);
+ assert.equal(binding.attachEntryCleanup(binding.openEntry().host,valid),false,'one participant has one entry owner');
+ entry.finishStartup();entry.close();assert.equal(binding.attachEntryCleanup(entry.host,{...valid}),false);
+ const live=binding.openEntry();binding.endNativeEpoch('untracked');assert.equal(binding.attachEntryCleanup(live.host,{...valid}),false);
+});
+
+test('serialized factory can attach a renderer participant using its own scoped host identity',async()=>{
+ const context=vm.createContext({});
+ vm.runInContext(`this.binding=(${createRuntimeBinding.toString()})({sessionId:'serialized-participant',role:'engine'});
+  this.closed=0;const entry=binding.openEntry();
+  this.attached=binding.attachEntryCleanup(entry.host,{beginClose(){},tick(){},seal(){},async close(){closed++;}});
+  entry.finishStartup();binding.beginClose();`,context);
+ assert.equal(context.attached,true);await context.binding.drainClose();await flush();
+ assert.equal(context.closed,1);assert.equal(context.binding.closeProgress().status,'complete');
+});

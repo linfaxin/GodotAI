@@ -388,6 +388,7 @@ class jsbb_External {
 }
 
 class jsbb_Engine {
+    private _native_alive = true;
     private _id: EngineID;
 
     // a fake global for Environment
@@ -405,6 +406,14 @@ class jsbb_Engine {
     get handles() { return this._handles; }
 
     get opaque() { return this._opaque; }
+    get native_alive() { return this._native_alive; }
+
+    /** Logical Environment disposal precedes physical handle/registry release. */
+    SealNative(): void { this._native_alive = false; }
+
+    private assert_native_alive(): void {
+        if (!this._native_alive || !this._stack) throw new Error("E_NATIVE_EPOCH_CLOSED");
+    }
 
     /** If calling from C++ side, use `_throw(err)` to raise an error instead of `throw`. */
     private _throw(value: any) {
@@ -461,6 +470,7 @@ class jsbb_Engine {
     }
 
     Release() {
+        this.SealNative();
         // this._global = <any>undefined;
         this._registry.Release();
         this._handles = <any>undefined;
@@ -471,7 +481,7 @@ class jsbb_Engine {
     SetHostPromiseRejectionTracker(cb: FunctionPointer, data: Pointer) {
         const self = this;
         globalThis.addEventListener("unhandledrejection", function (event: Event) {
-            if (!self._stack) {
+            if (!self._native_alive || !self._stack) {
                 return;
             }
 
@@ -830,6 +840,7 @@ class jsbb_Engine {
 
         Object.defineProperty(obj, key, {
             "get": function () {
+                self.assert_native_alive();
                 self._stack.EnterScope();
 
                 // prepare: fixed initial call stack positions
@@ -1248,9 +1259,7 @@ class jsbb_Engine {
         jsbb_console.trace("NewCFunction", func_name, cb, data);
 
         return this._stack.Push(function (this: any) {
-            if (!self._stack) {
-                return undefined;
-            }
+            self.assert_native_alive();
 
             const stack = self._stack;
             stack.EnterScope();
@@ -1293,7 +1302,9 @@ class jsbb_Engine {
     // [stack-based]
     // return: stack position of the wrapper function
     NewNoopConstructor(): StackPosition {
+        const self = this;
         return this._stack.Push(function () {
+            self.assert_native_alive();
         });
     }
 
@@ -1305,6 +1316,14 @@ class jsbb_Engine {
         jsbb_console.trace("NewClass", class_name, cb, data);
 
         const ctor = function (this: any) {
+            self.assert_native_alive();
+            if (class_name === "JSWorker") {
+                const host = (globalThis as any).__godotjsRuntimeHost;
+                if (typeof host?.closeProgress === "function") {
+                    const progress = host.closeProgress();
+                    if (progress.closing || progress.accepting === false) throw new Error("E_RUNTIME_CLOSING");
+                }
+            }
             jsbb_console.trace("new class", class_name);
             self._stack.EnterScope();
 
@@ -1353,6 +1372,7 @@ class jsbb_Engine {
     // simulate the behaviour of JS_NewObjectProtoClass
     NewInstance(proto_sp: StackPosition): StackPosition {
         try {
+            this.assert_native_alive();
             const proto = this._stack.GetValue(proto_sp);
             const thiz = {};
             const ctor = proto?.constructor;
@@ -1595,6 +1615,9 @@ class _jsbb_ {
 
     static SealNativeEpoch(engine_id: EngineID): void {
         if (engine_id !== 0 || !this.engine) return;
+        // Retire captured JS wrappers even while ScriptInstances retain the
+        // physical Isolate. This does not dispose another entry in a live epoch.
+        if (typeof this.engine.SealNative === "function") this.engine.SealNative();
         const runtime = this._engine_runtime ??= this._runtime;
         if (this._sealed_native_epoch === runtime.epoch) return;
         this._sealed_native_epoch = runtime.epoch;
@@ -2119,7 +2142,7 @@ class _jsbb_ {
         to_parent: boolean): number {
         const engine = this.engine;
 
-        if (!engine) {
+        if (!engine || engine.native_alive === false) {
             return jsbb_PostMessageResult.Failed;
         }
 
@@ -2153,6 +2176,7 @@ class _jsbb_ {
     }
 
     private static flush_pending_worker_messages(): void {
+        if (this.engine?.native_alive === false) { this._pending_worker_messages.length = 0; return; }
         if (this._pending_worker_messages.length === 0 || !this.engine || !this.interop) {
             return;
         }
@@ -2175,6 +2199,7 @@ class _jsbb_ {
     static handle_message(message: QueuedWorkerMessage): void {
         const { data, transfer_id, route } = message;
         if (route.target !== this._runtime.thread || route.targetEpoch !== this._runtime.epoch) return;
+        if (this.engine?.native_alive === false) return;
         if (!this.engine || !this.interop) {
             this._pending_worker_messages.push(message);
             return;

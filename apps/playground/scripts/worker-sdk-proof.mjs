@@ -4,12 +4,19 @@ import ts from 'typescript';
 import {canonical,digest} from './site-evidence.mjs';
 
 export const WORKER_SDK_PACKAGES=Object.freeze(['packages/engine','packages/project-tools','scripts/jsb.react','scripts/jsb.react-build','scripts/jsb.react-browser']);
+/** Ordered tsc producers in the actual package build. Later passes may replace
+ * declarations emitted by an earlier pass (neutral plus Node, for example). */
+function buildConfigs(manifest){
+ const configs=[...String(manifest.scripts?.build??'').matchAll(/\btsc\b[^;&|]*?\s(?:-p|--project)\s+("[^"]+"|'[^']+'|[^\s;&|]+)/g)]
+  .map(match=>match[1].replace(/^['"]|['"]$/g,''));
+ return configs.length?configs:['tsconfig.json'];
+}
 export async function describeWorkerSdkEntrypoints(repository,packages=WORKER_SDK_PACKAGES){
  const result={};
  for(const directory of packages){
   const manifest=JSON.parse(await readFile(path.join(repository,directory,'package.json'),'utf8')),targets=new Set();
-  const visit=value=>{if(typeof value==='string'){if(value.startsWith('./dist/')&&!value.includes('*'))targets.add(directory+'/'+value.slice(2));}else if(value&&typeof value==='object')for(const child of Object.values(value))visit(child);};
-  visit(manifest.exports);visit(manifest.main);visit(manifest.types);
+  const visit=value=>{if(typeof value==='string'){const target=value.replace(/^\.\//,'');if(target.startsWith('dist/')&&!target.includes('*'))targets.add(directory+'/'+target);}else if(value&&typeof value==='object')for(const child of Object.values(value))visit(child);};
+  visit(manifest.exports);visit(manifest.main);visit(manifest.types);visit(manifest.bin);
   result[directory]=[...targets].sort();
  }
  return result;
@@ -22,7 +29,9 @@ export async function describeWorkerSdkSources(repository,packages=WORKER_SDK_PA
  async function config(filename){filename=path.resolve(filename);if(seen.has(filename))return;seen.add(filename);await add(filename);const data=ts.readConfigFile(filename,ts.sys.readFile);if(data.error)throw Error('E_WORKER_SDK_CONFIG: '+filename);for(const parent of [data.config.extends??[]].flat())if(typeof parent==='string'&&parent.startsWith('.'))await config(path.resolve(path.dirname(filename),parent.endsWith('.json')?parent:parent+'.json'));}
  for(const directory of packages){
   const root=path.join(repository,directory),manifest=JSON.parse(await readFile(path.join(root,'package.json'),'utf8'));
-  await add(path.join(root,'package.json'));await config(path.join(root,'tsconfig.json'));await walk(path.join(root,'src'));await walk(path.join(root,'scripts'),true);
+  await add(path.join(root,'package.json'));await config(path.join(root,'tsconfig.json'));
+  for(const filename of buildConfigs(manifest))await config(path.resolve(root,filename));
+  await walk(path.join(root,'src'));await walk(path.join(root,'scripts'),true);
   for(const filename of ['build.mjs','engine-modules.cjs'])try{await add(path.join(root,filename));}catch(error){if(error.code!=='ENOENT')throw error;}
   // Root export adapters can be producer inputs even when they are not TS.
   const visit=async value=>{if(typeof value==='string'){if(value.startsWith('./')&&!value.startsWith('./dist/')&&!value.includes('*'))await add(path.join(root,value));}else if(value&&typeof value==='object')for(const child of Object.values(value))await visit(child);};
@@ -47,11 +56,14 @@ export async function proveWorkerSdkBuild(repository,{packages=WORKER_SDK_PACKAG
   outputs[relative]={sha256:digest(actual),bytes:actual.length};
  };
  for(const directory of packages){
-  const configPath=path.join(repository,directory,'tsconfig.json'),config=ts.readConfigFile(configPath,ts.sys.readFile);
-  if(config.error)throw Error('E_WORKER_SDK_CONFIG: '+directory);
-  const parsed=ts.parseJsonConfigFileContent(config.config,ts.sys,path.dirname(configPath)),emitted=[];
-  const program=ts.createProgram(parsed.fileNames,parsed.options),result=program.emit(undefined,(filename,text)=>emitted.push([filename,text]));
-  if(result.emitSkipped||parsed.errors.length)throw Error('E_WORKER_SDK_EMIT: '+directory+' '+ts.formatDiagnosticsWithColorAndContext([...parsed.errors,...ts.getPreEmitDiagnostics(program)].slice(0,5),{getCanonicalFileName:value=>value,getCurrentDirectory:()=>repository,getNewLine:()=> '\n'}));
+  const manifest=JSON.parse(await readFile(path.join(repository,directory,'package.json'),'utf8')),emitted=new Map();
+  for(const filename of buildConfigs(manifest)){
+   const configPath=path.resolve(repository,directory,filename),config=ts.readConfigFile(configPath,ts.sys.readFile);
+   if(config.error)throw Error('E_WORKER_SDK_CONFIG: '+directory+'/'+filename);
+   const parsed=ts.parseJsonConfigFileContent(config.config,ts.sys,path.dirname(configPath));
+   const program=ts.createProgram(parsed.fileNames,parsed.options),result=program.emit(undefined,(output,text)=>emitted.set(output,text));
+   if(result.emitSkipped||parsed.errors.length)throw Error('E_WORKER_SDK_EMIT: '+directory+'/'+filename+' '+ts.formatDiagnosticsWithColorAndContext([...parsed.errors,...ts.getPreEmitDiagnostics(program)].slice(0,5),{getCanonicalFileName:value=>value,getCurrentDirectory:()=>repository,getNewLine:()=> '\n'}));
+  }
   for(const [filename,text]of emitted){
    // This one entry is deliberately replaced by the package build script.
    if(directory==='scripts/jsb.react'&&filename===path.join(repository,directory,'dist/reconciler.js'))continue;
@@ -68,6 +80,7 @@ export async function proveWorkerSdkBuild(repository,{packages=WORKER_SDK_PACKAG
    for(const output of compiled.outputFiles)await compare(output.path,output.contents);
   }
  }
+ for(const entries of Object.values(entrypoints))for(const filename of entries)if(!outputs[filename])throw Error('E_WORKER_SDK_EXPORT_EMIT: '+filename);
  if(canonical(await describeWorkerSdkSources(repository,packages))!==canonical(sources))throw Error('E_WORKER_SDK_SOURCE_DRIFT');
  return {schemaVersion:1,kind:'worker-sdk-source-build-proof',typescript:ts.version,packages:[...packages],entrypoints,sourceInputs:sources,sourceSnapshotHash:digest(canonical(sources)),outputs,outputSnapshotHash:digest(canonical(outputs))};
 }

@@ -10,9 +10,9 @@ import {factsFromRuntimeSummary,sessionExitReason} from '@godot-js/engine/sessio
 const directory=fileURLToPath(new URL('../',import.meta.url));
 const replacements={
  'verified-loader.js':`export async function loadVerifiedWorkerEngine(release,options){globalThis.__engineOptions=options;return {Engine:globalThis.__Engine,basePath:'engine',dispose(){}};}`,
- 'worker-presentation.js':`export function createWorkerPresentation(options){let epoch=options.geometry.epoch;return {dispose(){},resize(value){epoch=Math.max(epoch,value.epoch);},ack(){globalThis.__presentationAcks=(globalThis.__presentationAcks??0)+1;},checkpoint(){return {geometryEpoch:epoch,outstanding:null};},setVisible(){},stats(){return {};}};}export function installPresentationHooks(){}`,
+ 'worker-presentation.js':`export function createWorkerPresentation(options){let epoch=options.geometry.epoch;return {dispose(){},resize(value){epoch=Math.max(epoch,value.epoch);},ack(){globalThis.__presentationAcks=(globalThis.__presentationAcks??0)+1;},checkpoint(){return {geometryEpoch:epoch,outstanding:null};},setVisible(value){(globalThis.__visibility??=[]).push(value);},stats(){return {};}};}export function installPresentationHooks(){}`,
  'worker-dom.js':`export function createWorkerDom(options){globalThis.__domOptions=options;return {window:{},dispose(){},revokeInput(){},resize(){},applyHostState(){}};}`,
- 'worker-audio.js':`export function createWorkerAudioBridge(){return {revoke(){}};}`,
+ 'worker-audio.js':`export function createWorkerAudioBridge(){return {revoke(){globalThis.__audioRevoked=true;},beginDrain(){globalThis.__audioDraining=true;}};}`,
  'worker-xr.js':`export function createWorkerXRBridge(){return {active:false,dispose(){},snapshot(){return {};}};}`,
  'worker-browser.js':`export function installWorkerBrowserBridge(){return {dispose(){}};}`,
 };
@@ -104,7 +104,7 @@ test('slow native initialization cannot make heartbeat memory observation termin
  }
 });
 
-async function hostRuntimeFixture({onStart}={}){
+async function hostRuntimeFixture({onStart,onQuit,managed=false,waitPhase='running',allowFatal=false}={}){
  const listeners=new Map(),consoleErrors=[],events=[],tasks=[];
  class Port{sent=[];onmessage=null;postMessage(value){this.sent.push(value);}start(){}}
  class Scope{
@@ -116,9 +116,9 @@ async function hostRuntimeFixture({onStart}={}){
  class Engine{
   constructor(options){engine=this;this.options=options;this.config={getModuleConfig(){return {HEAPU8:new Uint8Array(64)};}};}
   async preloadFile(){}
-  async init(){this.rtenv=this.config.getModuleConfig();scope.__godotjsRuntimeHost.beginNativeEpoch('test-native-epoch');}
-  async start(){await onStart?.(scope,this);}
-  requestQuit(){events.push('quit');scope.__godotjsRuntimeHost.endNativeEpoch('test-native-epoch');this.options.onExit(0);}
+  async init(){this.rtenv=this.config.getModuleConfig();scope.__godotjsRuntimeHost.beginNativeEpoch('test-native-epoch');if(managed){this.rtenv.godotjsLifecycleVersion=1;this.rtenv._godotjs_release_exit=()=>events.push('release');this.rtenv.godotjsReleaseExit=this.rtenv._godotjs_release_exit;scope.__godotjsInstallLifecycle(this.rtenv);}}
+  async start(){await onStart?.(scope,this,clone);}
+  requestQuit(){events.push('quit');if(onQuit)return onQuit(scope,this);scope.__godotjsRuntimeHost.endNativeEpoch('test-native-epoch');this.options.onExit(0);}
  }
  const context=vm.createContext({console:{log(){},warn(){},error:value=>consoleErrors.push(String(value))},crypto,MessagePort:Port,ArrayBuffer,Uint8Array,TextEncoder,AbortController,DOMException,queueMicrotask,
   setInterval(callback){tasks.push(callback);return tasks.length;},clearInterval(){},__Engine:Engine});
@@ -126,16 +126,18 @@ async function hostRuntimeFixture({onStart}={}){
  const prepared=await context.RuntimeUnderTest.prepareWorkerRunConfiguration(clone({}));
  const control=new Port(),data=new Port();
  const boot=Object.assign(clone({}),{protocolVersion:2,type:'worker-connect',runId:'host-runtime',revision:1,buildKey:'pack',generation:1,documentId:'doc',workerId:'worker',runConfigurationHash:prepared.hash,
-  configuration:prepared.configuration,release:{runtimeAbi:{protocolVersion:2,host:1,audio:1,presentation:1}},pack:new Uint8Array([1]),canvas:{},geometry:{width:1,height:1,dpr:1,epoch:0},controlPort:control,dataPort:data});
+  configuration:prepared.configuration,release:{runtimeAbi:{protocolVersion:2,host:1,audio:1,presentation:1,...(managed?{lifecycle:1}:{})}},pack:new Uint8Array([1]),canvas:{},geometry:{width:1,height:1,dpr:1,epoch:0},controlPort:control,dataPort:data});
  const uninstall=context.RuntimeUnderTest.installWorkerRuntime(scope);
  const connect=[...listeners.get('message')][0];connect({data:boot});
- const deadline=Date.now()+2000;while(!control.sent.some(m=>m.type==='worker-fatal'||(m.type==='phase'&&m.phase==='running'))){assert(Date.now()<deadline,JSON.stringify(control.sent));await flush();}
- assert.equal(control.sent.some(m=>m.type==='worker-fatal'),false,JSON.stringify(control.sent));
+ const deadline=Date.now()+2000;while(!control.sent.some(m=>m.type==='worker-fatal'||(m.type==='phase'&&m.phase===waitPhase))){assert(Date.now()<deadline,JSON.stringify(control.sent));await flush();}
+ if(!allowFatal)assert.equal(control.sent.some(m=>m.type==='worker-fatal'),false,JSON.stringify(control.sent));
  assert(scope.__godotjsRuntimeHost,JSON.stringify({messages:control.sent,events,keys:Object.keys(scope)}));
  return {scope,context,control,data,clone,events,consoleErrors,get engine(){return engine;},
   heartbeat(){tasks[0]();return control.sent.filter(message=>message.type==='worker-heartbeat').at(-1);},
   event(name,value){for(const listener of [...listeners.get(name)??[]])listener(value);},
   command(sequence,value){control.onmessage({data:Object.assign(clone({}),boot,{type:'project-command',commandSequence:sequence,data:clone(value)})});},
+  input(fields){data.onmessage({data:Object.assign(clone({}),boot,fields)});},
+  stop(){control.onmessage?.({data:Object.assign(clone({}),boot,{type:'stop'})});},
   async cleanup(){if(!scope.closed)control.onmessage?.({data:Object.assign(clone({}),boot,{type:'stop'})});await flush();uninstall();}};
 }
 
@@ -222,5 +224,97 @@ test('a browser teardown error after the native seal is reported independently b
   const summary=JSON.parse(JSON.stringify(terminal.runtimeSummary));
   const facts=factsFromRuntimeSummary(summary,{nativeExit:{code:terminal.code},hostCleanup:'complete',failure:{kind:'runtime',message:fatal.diagnostic.message}});
   assert.equal(sessionExitReason(facts),'crashed');assert.equal(f.control.sent.filter(message=>message.type==='worker-fatal').length,1);
+ }finally{await f.cleanup();}
+});
+
+test('a fatal from the first entry drains cooperatively before start resolves and quits at a safe point',async()=>{
+ const order=[];let entry;
+ const f=await hostRuntimeFixture({managed:true,allowFatal:true,onStart(scope,engine,clone){
+  entry=scope.__godotjsRuntimeHost.openEntry();entry.finishStartup();
+  entry.lifetime.onCancel(()=>order.push('cancel'));entry.lifetime.defer(()=>order.push('cleanup'));
+  scope.__godotjsRuntimeHost.reportDiagnostic(clone({kind:'runtime',message:'first entry failed'}));
+  assert(!order.includes('quit'),'fatal must not re-enter native start');order.push('callback-returned');
+  throw new DOMException('E_START_ABORT','AbortError');
+ },onQuit(_scope,engine){order.push('quit');engine.rtenv.godotjsBeginExit();}});
+ try{
+  await flush();assert.equal(f.context.__audioDraining,true);assert.equal(f.context.__audioRevoked,undefined);
+  assert(order.indexOf('quit')>order.indexOf('callback-returned'));assert(order.includes('cancel'));assert(order.includes('cleanup'));
+  assert.equal(f.control.sent.filter(m=>m.type==='worker-fatal').length,1);
+  assert.equal(f.scope.__godotjsRuntimeHost.failure.message,'first entry failed');
+  assert(!f.control.sent.some(m=>m.type==='worker-termination-required'||m.phase==='running'));
+  f.scope.__godotjsRuntimeHost.endNativeEpoch('test-native-epoch');f.engine.options.onExit(0);await flush();
+  const terminal=f.control.sent.find(m=>m.type==='native-exit');assert.equal(terminal.runtimeSummary.failure.message,'first entry failed');assert.equal(terminal.runtimeSummary.entries[0].cleanup,'complete');
+ }finally{await f.cleanup();}
+});
+
+test('stop during pending native start preserves cleanup receipts and suppresses late business work',async()=>{
+ let resolveStart;const start=new Promise(resolve=>resolveStart=resolve);let cleanups=0;
+ const f=await hostRuntimeFixture({managed:true,waitPhase:'starting',onStart(scope){const entry=scope.__godotjsRuntimeHost.openEntry();entry.finishStartup();entry.lifetime.defer(()=>{cleanups++;});return start;},
+  onQuit(_scope,engine){engine.rtenv.godotjsBeginExit();}});
+ try{
+  f.stop();f.command(7,{type:'late-command'});f.input({type:'host-state',dataSequence:8,state:{visible:true}});resolveStart();await flush();
+  assert.equal(cleanups,1);assert.equal(f.context.__audioDraining,true);assert.equal(f.context.__audioRevoked,undefined);
+  assert(f.control.sent.some(m=>m.type==='project-command-receipt'&&m.commandSequence===7));assert(f.data.sent.some(m=>m.type==='data-receipt'&&m.dataSequence===8));
+  assert.equal(f.context.__visibility.at(-1),false);assert(!f.control.sent.some(m=>m.type==='worker-fatal'||m.type==='worker-termination-required'||m.phase==='running'));
+  f.scope.__godotjsRuntimeHost.endNativeEpoch('test-native-epoch');f.engine.options.onExit(0);await flush();
+ }finally{resolveStart();await f.cleanup();}
+});
+
+test('managed stop reserves bounded DOM release credits independently of saturated business commands',async()=>{
+ let entry,complete;
+ const f=await hostRuntimeFixture({managed:true,onStart(scope){
+  entry=scope.__godotjsRuntimeHost.openEntry();entry.finishStartup();
+  entry.lifetime.defer(()=>{
+   const send=f.context.__domOptions.sendHostCommand;
+   for(let i=1;i<=16;i++)send({type:'dom-command',operation:'remove',target:'element-'+i});
+   for(const operation of ['pointer-unlock','exit-fullscreen','tts-cancel','drop-release'])send({type:'dom-command',operation});
+   return new Promise(resolve=>complete=resolve);
+  });
+ },onQuit(_scope,engine){engine.rtenv.godotjsBeginExit();}});
+ try{
+  const send=f.context.__domOptions.sendHostCommand,limit=512;
+  for(let i=0;i<limit;i++)send({type:'dom-command',operation:'title',value:'busy'});
+  assert.throws(()=>send({type:'dom-command',operation:'title',value:'over-budget'}),/E_WORKER_HOST_COMMAND_BACKPRESSURE/);
+  f.stop();await flush();
+  const cleanup=f.data.sent.filter(m=>m.type==='host-command'&&m.command.operation!=='title');assert.equal(cleanup.length,20);
+  assert.equal(entry.summary().cleanup,'pending');assert.equal(f.scope.__godotjsRuntimeHost.failure,undefined);
+  assert.throws(()=>send({type:'dom-command',operation:'title'}),/E_WORKER_DOM_CLOSED/);
+  const release=()=>send({type:'dom-command',operation:'pointer-unlock'});
+  assert.throws(release,/E_WORKER_HOST_CLEANUP_BACKPRESSURE/);
+  f.input({type:'host-command-receipt',commandSequence:cleanup[0].commandSequence,runId:'old-run'});
+  f.input({type:'host-command-receipt',commandSequence:10000});
+  f.input({type:'host-command-receipt',commandSequence:f.data.sent.find(m=>m.type==='host-command').commandSequence});
+  assert.throws(release,/E_WORKER_HOST_CLEANUP_BACKPRESSURE/,'Old, unknown and ordinary receipts cannot return cleanup credit');
+  f.input({type:'host-command-receipt',commandSequence:cleanup[0].commandSequence});release();
+  f.input({type:'host-command-receipt',commandSequence:cleanup[0].commandSequence});
+  assert.throws(release,/E_WORKER_HOST_CLEANUP_BACKPRESSURE/,'A duplicate receipt cannot return credit twice');
+  for(const message of f.data.sent.filter(m=>m.type==='host-command'&&m.command.operation!=='title'))f.input({type:'host-command-receipt',commandSequence:message.commandSequence});
+  complete();await flush();f.engine.rtenv.godotjsCleanupTick();await flush();
+  assert.equal(entry.summary().cleanup,'complete');assert(f.events.includes('release'));
+  assert(!f.control.sent.some(m=>m.type==='worker-fatal'));
+  f.scope.__godotjsRuntimeHost.endNativeEpoch('test-native-epoch');f.engine.options.onExit(0);await flush();
+  const terminal=f.control.sent.find(m=>m.type==='native-exit');assert.equal(terminal.runtimeSummary.entries[0].cleanup,'complete');
+  assert.throws(release,/E_WORKER_DOM_CLOSED/);
+ }finally{complete?.();await f.cleanup();}
+});
+
+test('a failed DOM cleanup transport send returns its reserved credit',async()=>{
+ const f=await hostRuntimeFixture({managed:true,onQuit(){}});
+ try{
+  f.stop();await flush();const send=f.context.__domOptions.sendHostCommand,post=f.data.postMessage;
+  f.data.postMessage=()=>{throw Error('DOM transport unavailable');};
+  assert.throws(()=>send({type:'dom-command',operation:'pointer-unlock'}),/DOM transport unavailable/);
+  f.data.postMessage=post;
+  for(let i=0;i<20;i++)assert.doesNotThrow(()=>send({type:'dom-command',operation:'pointer-unlock'}));
+  assert.throws(()=>send({type:'dom-command',operation:'pointer-unlock'}),/E_WORKER_HOST_CLEANUP_BACKPRESSURE/);
+ }finally{await f.cleanup();}
+});
+
+test('native self quit during start treats the startup abort as cancellation',async()=>{
+ const f=await hostRuntimeFixture({managed:true,waitPhase:'starting',onStart(_scope,engine){engine.rtenv.godotjsBeginExit();throw new DOMException('E_START_ABORT','AbortError');}});
+ try{
+  await flush();assert(f.control.sent.some(m=>m.type==='worker-closing'));assert(!f.control.sent.some(m=>m.type==='worker-fatal'||m.type==='worker-termination-required'||m.phase==='running'));
+  assert(!f.events.includes('quit'),'native self quit needs no second requestQuit');
+  f.scope.__godotjsRuntimeHost.endNativeEpoch('test-native-epoch');f.engine.options.onExit(0);await flush();
  }finally{await f.cleanup();}
 });

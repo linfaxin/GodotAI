@@ -1,4 +1,5 @@
 import {ProjectToolError} from './errors.js';
+import {hashOwnedBytes} from './owned-bytes.js';
 
 /** Deterministic finite JSON; omitted/undefined fields must be resolved by the caller. */
 export function canonicalJson(value:unknown):string {
@@ -22,6 +23,6 @@ export function canonicalJson(value:unknown):string {
 }
 export async function hashBytes(value:string|Uint8Array):Promise<string> {
  const bytes=typeof value==='string'?new TextEncoder().encode(value):new Uint8Array(value);
- return Array.from(new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256',bytes)),byte=>byte.toString(16).padStart(2,'0')).join('');
+ return hashOwnedBytes(bytes);
 }
 export function hashJson(value:unknown):Promise<string>{return hashBytes(canonicalJson(value));}

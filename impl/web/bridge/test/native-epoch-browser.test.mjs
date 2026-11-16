@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import {readFile,writeFile,mkdtemp,rm} from 'node:fs/promises';
 import {createServer} from 'node:http';
-import {createRequire} from 'node:module';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {execFileSync} from 'node:child_process';
@@ -16,7 +15,8 @@ test('real pthread native disposal publishes its epoch summary to the host',{
 },async t=>{
   const report=JSON.parse(await readFile(process.env.GODOTJS_WEB_ENGINE_REPORT,'utf8'));
   assert.equal(report.status,'built');assert.equal(report.execution?.executionModel,'proxy-pthread');
-  const templateSha256=createHash('sha256').update(await readFile(report.template.path)).digest('hex');
+  const template=path.resolve(path.dirname(path.resolve(process.env.GODOTJS_WEB_ENGINE_REPORT)),report.template.path);
+  const templateSha256=createHash('sha256').update(await readFile(template)).digest('hex');
   assert.equal(templateSha256,report.template.sha256,'probe template bytes must match the source-bound report');
   const directory=await mkdtemp(path.join(tmpdir(),'godotjs-native-epoch-'));
   let server,browser;
@@ -25,7 +25,7 @@ test('real pthread native disposal publishes its epoch summary to the host',{
     if(server){server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
     await rm(directory,{recursive:true,force:true});
   });
-  execFileSync(process.env.PYTHON??'python3',['-m','zipfile','-e',report.template.path,directory]);
+  execFileSync(process.env.PYTHON??'python3',['-m','zipfile','-e',template,directory]);
   const {createSourceSnapshot,createBuildPlan,packBuildPlan}=await import('../../../../packages/project-tools/dist/build-plan.js');
   const plan=await createBuildPlan(await createSourceSnapshot({
     '/project.godot':'config_version=5\n[application]\nrun/main_scene="res://main.tscn"\n[rendering]\nrenderer/rendering_method="gl_compatibility"\n',
@@ -62,8 +62,8 @@ test('real pthread native disposal publishes its epoch summary to the host',{
     try{const bytes=await readFile(filename);response.setHeader('Content-Type',filename.endsWith('.wasm')?'application/wasm':filename.endsWith('.js')?'text/javascript':filename.endsWith('.html')?'text/html':'application/octet-stream');response.end(bytes);}catch{response.writeHead(404);response.end();}
   });
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
-  const require=createRequire(new URL('../../../../apps/playground/package.json',import.meta.url));
-  browser=await require('playwright').chromium.launch({headless:true,args:['--no-sandbox','--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader']});
+  const {launchTestBrowser}=await import('../../../../apps/playground/scripts/browser-harness.mjs');
+  browser=await launchTestBrowser({browser:'chromium',headless:true,args:['--no-sandbox','--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader']});
   const page=await browser.newPage(),pageErrors=[];
   page.on('pageerror',error=>pageErrors.push(String(error)));
   await page.goto('http://127.0.0.1:'+server.address().port);

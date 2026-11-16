@@ -132,3 +132,11 @@ test('Blob Worker loads relative engine, WASM and worklets using an explicit ver
 test('runtime loader exposes original HTTP script URL without changing its verified Blob bytes',async t=>{
  const f=setup(t);class Worker{terminate(){}}const loaded=await loadVerifiedRuntimeWorker(f.release.runtimeWorker,{fetch:f.network,Worker});assert.equal(loaded.scriptUrl,f.release.runtimeWorker.url);loaded.dispose();
 });
+
+
+test('a Dedicated release cannot upgrade lifecycle ABI on only one descriptor',t=>{
+ const f=setup(t);f.release.execution={schemaVersion:1,executionModel:'window',wasmThreads:false,proxyToPthread:false,requiresCrossOriginIsolation:false,hostProtocolVersion:1};
+ assert.throws(()=>validateRelease({...f.release,runtimeAbi:{...f.release.runtimeAbi,lifecycle:1}}),/E_RELEASE_LIFECYCLE_ABI/);
+ assert.throws(()=>validateRelease({...f.release,execution:{...f.release.execution,lifecycleAbi:1}}),/E_RELEASE_LIFECYCLE_ABI/);
+ assert.doesNotThrow(()=>validateRelease({...f.release,runtimeAbi:{...f.release.runtimeAbi,lifecycle:1},execution:{...f.release.execution,lifecycleAbi:1}}));
+});
