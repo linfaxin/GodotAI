@@ -18,8 +18,10 @@ namespace jsb::impl
         static void SetDeleter(Variant* p_pointer, const v8::Local<v8::Object> p_object, v8::BackingStore::DeleterCallback callback, void *deleter_data)
         {
             v8::Isolate* isolate = p_object->GetIsolate();
-            p_object->Set(isolate->GetCurrentContext(), 0,
-                // in this way, the scavenger could gc it efficiently
+            // The backing store owns a native cell. A public property would
+            // let JS detach or replace it while IF_Pointer still points at it.
+            const auto key = v8::Private::ForApi(isolate, v8::String::NewFromUtf8Literal(isolate, "godotjs.nativeVariantCell"));
+            p_object->SetPrivate(isolate->GetCurrentContext(), key,
                 v8::ArrayBuffer::New(isolate, v8::ArrayBuffer::NewBackingStore(p_pointer, sizeof(Variant), callback, deleter_data))
             ).Check();
         }

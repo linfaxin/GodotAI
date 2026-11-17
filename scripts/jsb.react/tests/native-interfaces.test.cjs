@@ -26,7 +26,7 @@ test('static schema canonical SHA-256 agrees with standard crypto and normalizes
 });
 
 test('invalid static native schemas and inherited native method overrides are rejected',()=>{
-  const bad=[null,[],{}, {...schema(),version:2},{...schema(),nativeLeaf:'PackedScene'},{...schema(),dynamic:true},{...schema(),callbacks:['_ready','_ready']},{...schema(),callbacks:['_enter_tree']},{...schema(),rpc:{queue_free:{arguments:[]}}},{...schema(),rpc:{rpc_id:{arguments:[]}}},{...schema(),rpc:{rpcPing:{arguments:['Node']}}},{...schema(),rpc:{rpcPing:{arguments:[],mode:'disabled'}}},{...schema(),rpc:{rpcPing:{arguments:[],channel:-1}}},{...schema(),rpc:{rpcPing:{arguments:[],channel:256}}},{...schema(),rpc:{rpcPing:{arguments:[],unknown:true}}}];
+  const bad=[null,[],{}, {...schema(),version:2},{...schema(),nativeLeaf:'PackedScene'},{...schema(),dynamic:true},{...schema(),callbacks:['_ready','_ready']},{...schema(),callbacks:['_enter_tree']},{...schema(),rpc:{queue_free:{arguments:[]}}},{...schema(),rpc:{rpc_id:{arguments:[]}}},{...schema(),rpc:{rpcId:{arguments:[]}}},{...schema(),rpc:{rpcConfig:{arguments:[]}}},{...schema(),rpc:{rpcPing:{arguments:['Node']}}},{...schema(),rpc:{rpcPing:{arguments:[],mode:'disabled'}}},{...schema(),rpc:{rpcPing:{arguments:[],channel:-1}}},{...schema(),rpc:{rpcPing:{arguments:[],channel:256}}},{...schema(),rpc:{rpcPing:{arguments:[],unknown:true}}}];
   for(const input of bad)assert.throws(()=>n.validateNativeInterfaceSchema(input),/E_NATIVE_INTERFACE/);
   let called=false;
   assert.throws(()=>n.validateNativeInterfaceSchema({version:1,nativeLeaf:'Node',get callbacks(){called=true;return[];}}));

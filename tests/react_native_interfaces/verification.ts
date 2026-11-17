@@ -22,7 +22,7 @@ export function start(controller:any,module:any,nativeRoot?:any):Promise<unknown
   const args=(Array.isArray(packed)?packed:typeof packed.size==="function"?Array.from({length:call(packed,"size")},(_,index)=>call(packed,"get_indexed",index)):Array.from(packed)) as string[];
   if(args.includes("--godot-react-verify")){resolve({framework:true});return;}
   const role=args.find(arg=>arg.startsWith("--role="))?.slice(7),port=Number(args.find(arg=>arg.startsWith("--port="))?.slice(7));
-  const mode=controller.root.options.mode,expectedMode=args.find(arg=>arg.startsWith('--expected-mode='))?.slice(16);
+  const mode=controller.mode,expectedMode=args.find(arg=>arg.startsWith('--expected-mode='))?.slice(16);
   const initialLifecycle={...module.lifecycle};
   let peer:any,round=0,requests=0,replies=0,local=0,unreliable=0,ready=0,finished=false,disconnects=0;
   const tree=call(nativeRoot,"get_tree"),api=call(nativeRoot,"get_multiplayer");

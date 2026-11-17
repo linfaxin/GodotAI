@@ -5,6 +5,7 @@ import type {VerifiedRelease} from '@godot-js/engine/browser/verified-loader';
 import {loadEngineRelease,loadReleaseContext,loadRuntimeCandidate,type ReleaseContext} from './engine-assets';
 import {assertCompiledRelease,assertArtifactTarget} from './release-context';
 import {assertArtifactReceipt} from '@godot-js/engine/identities';
+import {assertArtifactSet,type ArtifactSet} from '@godot-js/engine/artifact-set';
 
 /** A fresh cross-origin preview consumes the editor's pinned release tuple. */
 export async function createEnginePreview(container:HTMLElement, listener:(event:RunnerEvent)=>void,options:{allowLegacyArtifacts?:boolean}={}) {
@@ -53,11 +54,25 @@ export async function createEnginePreview(container:HTMLElement, listener:(event
  }
  runner.subscribe(listener);
  let operationSequence=0,disposed=false;
- return {manifest,context,runner,async run(pack:Uint8Array,revision:number,details:unknown){
+ return {manifest,context,runner,async run(pack:Uint8Array|undefined,revision:number,details:unknown,artifactSet?:ArtifactSet){
   if(disposed)throw Error('E_RUNNER_DISPOSED');
-  const snapshot=pack.slice(),compiled=structuredClone(details) as {buildKey?:unknown;generation?:unknown;packSha256?:unknown;artifactId?:string;artifactReceipt?:{buildKey?:unknown;packSha256?:unknown}};
+  const compiled=structuredClone(details) as {buildKey?:unknown;generation?:unknown;packSha256?:unknown;artifactId?:string;artifactReceipt?:{buildKey?:unknown;packSha256?:unknown}};
   assertCompiledRelease(context,compiled);assertArtifactTarget(manifest,compiled);
   const operation=++operationSequence;
+  const generation=compiled.generation??crypto.randomUUID();
+  if(!(typeof generation==='string'&&generation.length>0&&generation.length<=256)&&!(typeof generation==='number'&&Number.isSafeInteger(generation)&&generation>=0))throw Error('E_ARTIFACT_GENERATION');
+  if(artifactSet){
+   const captured=await assertArtifactSet(artifactSet);
+   if(release.execution?.artifactSetAbi!==1)throw Error('E_ARTIFACT_SET_ABI');
+   if(captured.manifest.target.engineReleaseId!==release.releaseId||captured.manifest.target.engineProfile!==release.profile)throw Error('E_ARTIFACT_RELEASE_MISMATCH');
+   assertArtifactTarget(manifest,captured.manifest.target);
+   if(compiled.artifactId!==captured.manifest.artifactSetId)throw Error('E_ARTIFACT_IDENTITY');
+   if(typeof compiled.buildKey!=='string'||!/^[a-f0-9]{64}$/i.test(compiled.buildKey))throw Error('E_ARTIFACT_BUILD_KEY');
+   if(disposed||operation!==operationSequence)throw new DOMException('Superseded','AbortError');
+   return runner.run({variant:'pack-set',revision,buildKey:compiled.buildKey,generation,artifactId:captured.manifest.artifactSetId,artifactSet:captured,manifest:{...compiled,generation}});
+  }
+  if(!(pack instanceof Uint8Array))throw Error('E_ARTIFACT_PACK');
+  const snapshot=pack.slice();
   const bytes=new Uint8Array(await crypto.subtle.digest('SHA-256',snapshot.buffer));
   if(disposed||operation!==operationSequence)throw new DOMException('Superseded','AbortError');
   const packSha256=Array.from(bytes,n=>n.toString(16).padStart(2,'0')).join('');
@@ -69,8 +84,6 @@ export async function createEnginePreview(container:HTMLElement, listener:(event
   const buildKey=typeof compiled.buildKey==='string'&&/^[a-f0-9]{64}$/i.test(compiled.buildKey)?compiled.buildKey:packSha256;
   const receipt=await assertArtifactReceipt(compiled.artifactReceipt,{pack:snapshot,buildKey,artifactId:compiled.artifactId,allowLegacy:allowLegacyArtifacts||(!manifest.artifactReceiptVersion&&!!runtime)});
   if(disposed||operation!==operationSequence)throw new DOMException('Superseded','AbortError');
-  const generation=compiled.generation??crypto.randomUUID();
-  if(!(typeof generation==='string'&&generation.length>0&&generation.length<=256)&&!(typeof generation==='number'&&Number.isSafeInteger(generation)&&generation>=0))throw Error('E_ARTIFACT_GENERATION');
   return runner.run({revision,buildKey,generation,packSha256,artifactId:receipt?.artifactId,pack:snapshot,manifest:{...compiled,generation}});
  },stop:()=>{++operationSequence;return runner.stop();},dispose:()=>{disposed=true;++operationSequence;return runner.dispose();}};
 }

@@ -188,6 +188,16 @@ ScriptInstance* GodotJSScript::instance_construct(Object* p_this, bool p_is_temp
     const Error err = env->load(script_class_info_.module_id, &module);
     jsb_ensuref(module && err == OK, "JS Module not found: %s", script_class_info_.module_id);
 
+    List<Pair<StringName, Variant>> shadow_state;
+    if (ScriptInstance* previous = p_this->get_script_instance(); previous
+        && !previous->is_placeholder() && previous->get_language() == get_language())
+    {
+        if (static_cast<GodotJSScriptInstanceBase*>(previous)->is_shadow())
+        {
+            previous->get_property_state(shadow_state);
+        }
+    }
+
     /* STEP 1, CREATE */
     GodotJSScriptInstance* instance = memnew(GodotJSScriptInstance);
 
@@ -218,6 +228,9 @@ ScriptInstance* GodotJSScript::instance_construct(Object* p_this, bool p_is_temp
         return nullptr;
     }
 
+    // Serialized values override constructor initializers. Capture them before
+    // set_script_instance() deletes the Shadow and cache only the final values.
+    GodotJSShadowScriptInstance::restore_state(p_this, shadow_state);
     instance->postbind();
 
     return instance;

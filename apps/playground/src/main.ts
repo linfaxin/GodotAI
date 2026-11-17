@@ -3,7 +3,9 @@ import {createExplorer} from './workbench/explorer';
 import {createCodeEditor} from './workbench/code-editor';
 import {createFileMenu} from './workbench/file-menu';
 import {filePath,parseProject,addProjectFiles,renameProjectFile,canRenameProjectFile,MAX_PROJECT_DOCUMENT_BYTES,exportProject,projectCompileRequest,newEngineProject,type EditorProject} from './project-model';
-import {createProjectStorage,openProjectDatabase} from './project-storage';
+import {importProjectAssets} from './project-asset-import';
+import {applyCompiledImportReceipts} from './compiled-project-metadata';
+import {createProjectStorage,openProjectDatabase,projectBlobDatabaseName,isProjectPersistenceUnavailable} from './project-storage';
 import type {TypeDiagnostic} from './compiler-types';
 import {defaultProject,demoProject,newEngineReactProject,migrateDemoProject as migrateDemo} from './project-templates';
 import {createEnginePreview} from './engine-preview';
@@ -12,15 +14,16 @@ import {assertCompiledRelease} from './release-context';
 import {getEngineProfile} from '../../../scripts/release/engine-profiles.mjs';
 import type {RunnerEvent} from '@godot-js/engine/browser/protocol';
 import {suppressBrowserSave} from './browser-shortcuts';
+import {CompilerSourceSender} from './compiler-source-sync';
+import {CompilerWorkerClient} from './compiler-worker-client';
 suppressBrowserSave(window);
 interface Control {key:string;label:string;min:number;max:number;step:number;value:number}
 interface Demo {id:string;name:string;subtitle:string;file:string;hint:string;source:string;controls:Control[];runtime?:'godot'|'react';actions?:{key:string;label:string}[]}
 const $=<T extends HTMLElement=HTMLElement>(id:string)=>document.getElementById(id) as T;
-const worker=new Worker('compiler.worker.js'),projects=new Map<string,EditorProject>();
+const projects=new Map<string,EditorProject>();
 let demos:Demo[]=[],selected:Demo,current:EditorProject,ready=false,serial=0,revision=0,runSerial=0,checking=0,logCount=0,lastCityNotice='';
 let diagnostics:TypeDiagnostic[]=[],toastTimer:ReturnType<typeof setTimeout>,checkTimer:ReturnType<typeof setTimeout>,saveTimer:ReturnType<typeof setTimeout>;
 const projectEvents:Record<string,unknown>[]=[];
-const requests=new Map<number,{resolve:(data:any)=>void;reject:(error:Error)=>void}>();
 let nativePreview:Awaited<ReturnType<typeof createEnginePreview>>|undefined,nativePreviewPending:Promise<Awaited<ReturnType<typeof createEnginePreview>>>|undefined;
 let runtimeSerial=0,activeEngineRevision=-1;
 let siteEngineProfile='full-engine-v1',shellOnly=false,sessionReleaseContext:ReleaseContext|undefined;
@@ -35,17 +38,35 @@ function log(message:string,level='log'){
 }
 function status(text:string,kind=''){$('status').textContent=text;$('run-dot').className=`status-dot ${kind}`;$('runtime-name').textContent=ready?(siteEngineProfile==='engine-2d-v1'?'Godot Web · 2D':'Godot Web · Full'):'加载运行环境';$('runtime-meta').textContent=selected?.name??'Godot WASM + React';document.querySelector('.runtime-card .status-dot')!.className=`status-dot ${kind}`;}
 function send(data:Record<string,unknown>){nativePreview?.runner.command(data);}
+const compilerSources=new CompilerSourceSender();
+const compiler=new CompilerWorkerClient(()=>new Worker('compiler.worker.js'),error=>{
+ log(error.message,'error');status('编译器异常，请重试','error');$('run').removeAttribute('disabled');workbench.setReady();
+},()=>compilerSources.reset());
 function rpc(kind:string,extra:Record<string,unknown>={}):Promise<any>{
  if(current.engineProfile!==siteEngineProfile)return Promise.reject(Error('当前项目需要 '+current.engineProfile+'；原文已保留，请在匹配站点打开或另存兼容副本'));
- const id=++serial,files=current.files;
- return new Promise((resolve,reject)=>{requests.set(id,{resolve,reject});worker.postMessage({id,kind,files,entry:current.entry,mainScene:current.mainSceneSource==='project'?undefined:current.mainScene,...projectCompileRequest(current),mode:current.mode,controls:current.controls,engineProfile:current.engineProfile,demoApiVersion:current.demoApiVersion,releaseContext:sessionReleaseContext,...extra});});
+ const id=++serial,sources=compilerSources.prepare(selected.id,revision,current.files);
+ const payload={...structuredClone({id,kind,documentId:selected.id,revision,entry:current.entry,mainScene:current.mainSceneSource==='project'?undefined:current.mainScene,...projectCompileRequest(current),mode:current.mode,controls:current.controls,engineProfile:current.engineProfile,demoApiVersion:current.demoApiVersion,releaseContext:sessionReleaseContext,...extra}),sourceSync:sources.patch};
+ const pinInput=kind==='compile'?{files:sources.snapshotFiles()}:undefined;
+ return compiler.request(payload,pinInput?()=>storage.pinSnapshot(pinInput,'compile:'+id):undefined);
 }
-worker.onmessage=({data})=>{const pending=requests.get(data.id);if(pending){requests.delete(data.id);pending.resolve(data);}};
-worker.onerror=event=>{for(const request of requests.values())request.reject(Error(event.message));requests.clear();log(event.message,'error');status('编译器异常','error');$('run').removeAttribute('disabled');workbench.setReady();};
 async function languageQuery(kind:'completion'|'hover',path:string,offset:number){const response=await rpc(kind,{path,offset});return response.result;}
 let db:Promise<IDBDatabase|undefined>,storage:ReturnType<typeof createProjectStorage>;
+let persistenceWarningShown=false;
+function reportPersistenceUnavailable(error?:unknown){
+ $('saved').textContent='保存失败';
+ if(persistenceWarningShown)return;persistenceWarningShown=true;
+ toast('本地存储不可用；仍可编辑、运行和导出，当前修改尚未保存');
+ if(error)log('本地存储不可用：'+String(error),'warn');
+}
 async function initializeProjectStorage(profile:string){
- db=openProjectDatabase(profile);storage=createProjectStorage(db);await db;if(await storage.consumeLegacyMigrationNotice())toast('已复制旧版存档；旧页面后续修改请通过导出和导入迁移，不会自动同步');
+ db=openProjectDatabase(profile);storage=createProjectStorage(db,{onPersistenceUnavailable:reportPersistenceUnavailable});
+ let database:IDBDatabase|undefined;
+ try{database=await db;}catch(error){if(!isProjectPersistenceUnavailable(error))throw error;persistenceBlocked=true;reportPersistenceUnavailable(error);}
+ if(!database){persistenceBlocked=true;reportPersistenceUnavailable();}
+ else try{if(await storage.consumeLegacyMigrationNotice())toast('已复制存档；旧页面后续修改会保留为独立分支，不会覆盖当前项目');}
+ catch(error){if(!isProjectPersistenceUnavailable(error))throw error;reportPersistenceUnavailable(error);}
+ const button=document.createElement('button');button.id='export-storage-recovery';button.textContent='导出完整恢复存档';button.onclick=async()=>{try{download('godot-playground-storage-recovery.json',await storage.exportRecovery());}catch(error){toast('无法导出恢复存档：'+String(error));}};$('export-recovery').parentElement?.append(button);
+ const importButton=document.createElement('button');importButton.id='import-storage-recovery';importButton.textContent='导入恢复存档';importButton.onclick=()=>{const input=document.createElement('input');input.type='file';input.accept='.json,application/json';input.onchange=async()=>{const file=input.files?.[0];if(!file)return;try{if(file.size>256*1024*1024)throw Error('恢复存档超过 256 MiB');const imported=await storage.importRecovery(JSON.parse(await file.text()));if(!imported.currentKey)throw Error('存档已保留，但没有可恢复的项目快照');recoverySnapshot=await storage.recovery(imported.currentKey);$('export-recovery').hidden=false;$('restore-recovery').hidden=false;toast('恢复存档已保留，可使用恢复备份还原项目');}catch(error){toast('无法导入恢复存档：'+String(error));}};input.click();};$('export-recovery').parentElement?.append(importButton);
 }
 let persistenceBlocked=false,recoverySnapshot:unknown,retainedImport:unknown;
 const protectedProjectIds=new Set<string>();
@@ -58,7 +79,7 @@ async function save():Promise<boolean>{
   if(result.conflicts.includes(selected.id)){$('saved').textContent='保存冲突';toast('另一个标签页已更新当前项目。本地修改尚未保存，请先导出本地修改，然后刷新页面。');return false;}
   if(result.invalid.has(selected.id)){$('saved').textContent='保存失败';toast('未保存当前修改：'+result.invalid.get(selected.id));return false;}
   if(storage.hasPending(selected.id)){$('saved').textContent='正在保存';return false;}
-  $('saved').textContent='已自动保存';return true;
+  $('saved').textContent='已自动保存';void storage.collectBlobs().catch(()=>{});return true;
  }catch(error){$('saved').textContent='保存失败';toast('未保存当前修改：'+String(error));return false;}
 }
 function appendDemoButton(demo:Demo){
@@ -77,8 +98,9 @@ function registerProjectDemo(id:string,project:EditorProject):Demo{
  demos.push(demo);appendDemoButton(demo);return demo;
 }
 async function restore(){
- const database=await db;if(!database)return;
+ if(persistenceBlocked)return;
  try{
+  const database=await db;if(!database)return;
   const loaded=await storage.load();recoverySnapshot=await storage.recovery();retainedImport=await storage.recovery('last-import');if(retainedImport!==undefined)registerRetainedImport();for(const id of loaded.invalid.keys())protectedProjectIds.add(id);
   if(recoverySnapshot!==undefined){$('export-recovery').hidden=false;$('restore-recovery').hidden=false;}
   if(!loaded.snapshot)return;
@@ -98,7 +120,7 @@ async function restore(){
   toast('本地项目恢复失败，已暂停自动保存');log(String(error),'error');
  }
 }
-function changed(){storage.stage(selected.id,current);revision++;$('saved').textContent='正在保存';clearTimeout(saveTimer);saveTimer=setTimeout(()=>void save(),250);clearTimeout(checkTimer);checkTimer=setTimeout(()=>void check(),1100);}
+function changed(){storage.stage(selected.id,current);revision++;$('saved').textContent=persistenceBlocked?'保存失败':'正在保存';clearTimeout(saveTimer);saveTimer=setTimeout(()=>void save(),250);clearTimeout(checkTimer);checkTimer=setTimeout(()=>void check(),1100);}
 function initialProject(demo:Demo):EditorProject{return demo.id==='native'||demo.id==='react'?defaultProject(demo.runtime??'react',siteEngineProfile):demoProject(demo,siteEngineProfile);}
 
 function visibleFile(path:string){return path.split('/').at(-1)!=='package.json';}
@@ -117,10 +139,11 @@ async function compile(focusPreview=false){
   if(diagnostics.some(d=>d.category==='error')){status('编译未通过','error');log(`TypeScript 检查未通过：${diagnostics.length} 个问题`,'warn');return;}
   log(`✓ ${selected.name} 编译通过，正在运行`);
   {
-   if(!(response.pack instanceof Uint8Array))throw Error('原生项目编译未产生 PCK');
+   if(!(response.pack instanceof Uint8Array)&&!response.artifactSet)throw Error('原生项目编译未产生运行包');
    if(!sessionReleaseContext)throw Error('E_RELEASE_CONTEXT_REQUIRED');
    assertCompiledRelease(sessionReleaseContext,response.manifest);
-   activeEngineRevision=rev;await nativePreview!.run(response.pack,rev,response.manifest);
+   if(applyCompiledImportReceipts(current,response.manifest)){storage.stage(selected.id,current);void save();}
+   activeEngineRevision=rev;await nativePreview!.run(response.pack,rev,response.manifest,response.artifactSet);
    if(focusPreview&&key===runSerial)$('preview').querySelector('iframe')?.focus();
   }
   workbench.runStarted();
@@ -164,7 +187,7 @@ $<HTMLInputElement>('asset-import').onchange=async event=>{
  try{
   const additions:[string,string|number[]][]=[];
   for(const file of files){if(file.size>1048576)throw Error('单个资源不能超过 1 MB');const path=filePath('assets/'+file.name);additions.push([path,/\.(?:tres|tscn|godot|gd|gdshader|gdshaderinc|cfg|uid|import|gltf|svg|json)$/i.test(file.name)?await file.text():Array.from(new Uint8Array(await file.arrayBuffer()))]);}
-  addProjectFiles(target,additions);
+  importProjectAssets(target,additions);
   if(current===target){renderFiles();changed();}else{const id=[...projects].find(([,project])=>project===target)?.[0];if(id)storage.stage(id,target);void save();}
   toast('资源已添加，可在项目面板查看与导出');
  }catch(error){toast(String(error));}finally{input.value='';}
@@ -174,7 +197,21 @@ $('export').onclick=()=>download('godot-playground-project.json',exportProject(c
 $('new-engine-project').onclick=()=>{const project=newEngineProject(siteEngineProfile),id='project-'+crypto.randomUUID();projects.set(id,project);storage.stage(id,project);select(registerProjectDemo(id,project));menu.open=false;};
 $('new-react-project').onclick=()=>{const project=newEngineReactProject(siteEngineProfile),id='project-'+crypto.randomUUID();projects.set(id,project);storage.stage(id,project);select(registerProjectDemo(id,project));menu.open=false;};
 $('export-original').onclick=()=>download('godot-playground-original.json',exportProject(current,'original'));
-$('restore-recovery').onclick=async()=>{try{const recovery=recoverySnapshot??await storage.recovery();if(!await save())throw Error('当前编辑尚未安全保存，请先导出修改');const result=await storage.restore(recovery as any);if(!result.snapshot)throw Error(result.interrupted?'恢复期间有新编辑或未保存项目，已取消切换；请先保存或导出修改':'本地项目存在保存冲突，未恢复任何内容');const snapshot=result.snapshot;persistenceBlocked=false;recoverySnapshot=await storage.recovery();projects.clear();for(const [id,document]of snapshot.projects){try{const parsed=parseProject(document),demo=demos.find(item=>item.id===id),project=demo&&parsed.engineProfile===siteEngineProfile?migrateDemo(parsed,demo):parsed;projects.set(id,project);registerProjectDemo(id,project);if(project!==parsed)storage.stage(id,project);}catch{}}const demo=demos.find(d=>d.id===snapshot.selected)??demos[0];select(demo);toast('已从恢复备份还原项目');}catch(error){toast(String(error));}};
+$('restore-recovery').onclick=async()=>{
+ const started=revision,startedEdit=storage.editRevision;
+ const assertUnchanged=()=>{if(revision!==started||storage.editRevision!==startedEdit)throw Error('恢复期间项目已变化，已取消切换；请先保存或导出修改');};
+ try{
+  const recovery=recoverySnapshot??await storage.recovery();assertUnchanged();
+  if(!await save())throw Error('当前编辑尚未安全保存，请先导出修改');assertUnchanged();
+  const result=await storage.restore(recovery as any);
+  if(!result.snapshot)throw Error(result.interrupted?'恢复期间有新编辑或未保存项目，已取消切换；请先保存或导出修改':'本地项目存在保存冲突，未恢复任何内容');
+  const nextRecovery=await storage.recovery();assertUnchanged();
+  if(!result.canApply())throw Error('恢复期间项目已变化，已取消切换；请先保存或导出修改');
+  const snapshot=result.snapshot;persistenceBlocked=false;recoverySnapshot=nextRecovery;projects.clear();
+  for(const [id,document]of snapshot.projects){try{const parsed=parseProject(document),demo=demos.find(item=>item.id===id),project=demo&&parsed.engineProfile===siteEngineProfile?migrateDemo(parsed,demo):parsed;projects.set(id,project);registerProjectDemo(id,project);if(project!==parsed)storage.stage(id,project);}catch{}}
+  const demo=demos.find(d=>d.id===snapshot.selected)??demos[0];select(demo);toast('已从恢复备份还原项目');
+ }catch(error){toast(String(error));}
+};
 $('export-recovery').onclick=()=>download('godot-playground-recovery.json',recoverySnapshot);
 function registerRetainedImport(){
  let button=document.getElementById('retained-import');if(!button){button=document.createElement('button');button.id='retained-import';button.textContent='查看保留的导入项目';$('export-recovery').parentElement?.append(button);button.onclick=()=>showRetainedImport(retainedImport);}
@@ -193,12 +230,13 @@ function showRetainedImport(raw:unknown,project?:EditorProject){
 async function importDocument(document:unknown,{shared=false,convert=false}:{shared?:boolean;convert?:boolean}={}):Promise<string|undefined>{
  const project=parseProject(document);
  if(project.engineProfile!==siteEngineProfile&&!convert){
-  await storage.retainImport(document);retainedImport=structuredClone(document);registerRetainedImport();showRetainedImport(document,project);toast('项目原文已保留，需要匹配的引擎配置');return;
+  try{await storage.retainImport(document);}catch(error){if(!isProjectPersistenceUnavailable(error))throw error;reportPersistenceUnavailable(error);}
+  retainedImport=structuredClone(document);registerRetainedImport();showRetainedImport(document,project);toast('项目原文已保留在当前页面，需要匹配的引擎配置');return;
  }
  const base=convert?parseProject({...project,engineProfile:siteEngineProfile,migration:project.migration??{fromSchemaVersion:3,originalDocument:structuredClone(document)}}):project;
  const sourceDemo=demos.find(demo=>demo.id===base.demoId),imported=sourceDemo?migrateDemo(base,sourceDemo):base;
  const id='project-'+crypto.randomUUID();projects.set(id,imported);const demo=registerProjectDemo(id,imported);storage.stage(id,imported);
- if(!shared){select(demo,!convert);toast(convert?'已创建独立副本，请检查 API 与资源兼容性':'项目已导入并独立保存');}
+ if(!shared){select(demo,!convert);toast(convert?'已创建独立副本，请检查 API 与资源兼容性':'项目已导入，可编辑、运行和导出');}
  return id;
 }
 $<HTMLInputElement>('import').onchange=async event=>{
@@ -273,5 +311,5 @@ async function start(){
 }
 start().catch(error=>{status('加载失败','error');log(String(error),'error');});
 // Read-only diagnostics for integration tests and local debugging.
-(globalThis as any).__playgroundWorkbench={inspect:()=>({project:structuredClone(current),projectId:selected?.id,engineProfile:siteEngineProfile,storageDatabaseName:'godotjs-playground-v3:'+siteEngineProfile,diagnostics:structuredClone(diagnostics),ready,revision,events:structuredClone(projectEvents),engine:nativePreview?{releaseId:nativePreview.manifest.id,profile:nativePreview.manifest.runtimeProfile,state:nativePreview.runner.state}:undefined,releaseContext:structuredClone(sessionReleaseContext)})};
+(globalThis as any).__playgroundWorkbench={inspect:()=>({project:structuredClone(current),projectId:selected?.id,engineProfile:siteEngineProfile,storageDatabaseName:projectBlobDatabaseName(siteEngineProfile),diagnostics:structuredClone(diagnostics),ready,revision,events:structuredClone(projectEvents),engine:nativePreview?{releaseId:nativePreview.manifest.id,profile:nativePreview.manifest.runtimeProfile,state:nativePreview.runner.state}:undefined,releaseContext:structuredClone(sessionReleaseContext)})};
 if(new URL(location.href).searchParams.get('benchmarkTimings')==='1')(globalThis as any).__playgroundWorkbench.enableNativeInputBenchmark=()=>send({type:'benchmark-input',enabled:true});

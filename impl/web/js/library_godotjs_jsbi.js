@@ -31,6 +31,10 @@ const GodotJSBrowserInterface = {
     "jsbi_NewEngine": function (opaque) { return _jsbb_.NewEngine(opaque); },
     "jsbi_FreeEngine": function (engine_id) { _jsbb_.FreeEngine(engine_id); },
     "jsbi_SealNativeEpoch": function (engine_id) { _jsbb_.SealNativeEpoch(engine_id); },
+    "jsbi_CanDestroyCheckpoint__sig": "ii",
+    "jsbi_CanDestroyCheckpoint": function (engine_id) { return _jsbb_.CanDestroyCheckpoint(engine_id) ? 1 : 0; },
+    "jsbi_ScheduleCheckpoint__sig": "iii",
+    "jsbi_ScheduleCheckpoint": function (engine_id, callback_sp) { return _jsbb_.ScheduleCheckpoint(engine_id, callback_sp) ? 1 : 0; },
     "jsbi_FlushPendingWorkerMessages": function () { _jsbb_.FlushPendingWorkerMessages(); },
     "jsbi_log": function (str_ptr) { _jsbb_.log(str_ptr); },
     "jsbi_error": function (str_ptr) { _jsbb_.error(str_ptr); },
@@ -168,6 +172,12 @@ const GodotJSBrowserInterface = {
     "jsbi_IsArrayBuffer": function (engine_id, stack_pos) { return _jsbb_.GetEngine(engine_id).stack.GetValue(stack_pos) instanceof ArrayBuffer; },
 
     "jsbi_PostMessage": function (pthread_id, engine_id, data_sp, transfer_id, transfer_sp, to_parent) { return _jsbb_.PostMessage(pthread_id >>> 0, engine_id, data_sp, transfer_id >>> 0, transfer_sp, !!to_parent); },
+    "jsbi_PrepareMessage__sig": "iiiiiii",
+    "jsbi_PrepareMessage": function (pthread_id, engine_id, data_sp, transfer_id, transfer_sp, to_parent) { return _jsbb_.PrepareMessage(pthread_id >>> 0, engine_id, data_sp, transfer_id >>> 0, transfer_sp, !!to_parent); },
+    "jsbi_PublishMessage__sig": "ii",
+    "jsbi_PublishMessage": function (ticket) { return _jsbb_.PublishMessage(ticket >>> 0); },
+    "jsbi_DiscardMessage__sig": "vi",
+    "jsbi_DiscardMessage": function (ticket) { _jsbb_.DiscardMessage(ticket >>> 0); },
 
     "jsbi_MapSize": function (engine_id, stack_pos) { return _jsbb_.GetEngine(engine_id).MapSize(stack_pos); },
 

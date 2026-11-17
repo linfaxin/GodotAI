@@ -1,5 +1,6 @@
 import * as React from "react";
-import { Node2D, defineNativeInterface, useNativeInterface, useNodeRef, type NativeInterfaceSchema } from "@godot-js/react/legacy";
+import { Node2D, defineNativeInterface, useNativeInterface, useNodeRef } from "@godot-js/react/engine-components";
+import type {NativeInterfaceSchema} from "@godot-js/react/native-interface-contracts";
 import schema from "./interface.json";
 
 const endpointInterface=defineNativeInterface("endpoint",schema as NativeInterfaceSchema);

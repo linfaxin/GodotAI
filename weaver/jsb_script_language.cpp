@@ -6,6 +6,7 @@
 #include "../jsb_project_preset.h"
 #include "../internal/jsb_internal.h"
 #include "../bridge/jsb_worker.h"
+#include "../bridge/jsb_native_world.h"
 
 #include "jsb_script.h"
 
@@ -106,12 +107,27 @@ void GodotJSScriptLanguage::init()
 
 void GodotJSScriptLanguage::finish()
 {
+    const auto native_world = jsb::NativeWorld::current();
     jsb_check(once_inited_);
+#if JSB_WITH_WEB
+    {
+        // Main::cleanup drains ResourceLoader tasks and detaches pool language
+        // threads before this point. Web shadows retire on their borrower, so
+        // a remaining lease is a shutdown failure, never permission to free rt0
+        // from this unrelated main realm or silently discard its holder.
+        MutexLock shadow_lock(shadow_mutex_);
+        jsb_checkf(shadow_environments_.empty(), "E_NATIVE_SHADOW_BORROW: outstanding shadow metadata lease at language finish; physical cleanup is unconfirmed");
+    }
+#endif
 #if JSB_DEBUG
     if (monitor_) memdelete(monitor_);
 #endif
     once_inited_ = false;
     environment_->dispose();
+#if JSB_WITH_WEB
+    // Main cleanup runs on this realm after the owner loop unwinds.
+    environment_->release_runtime_on_owner();
+#endif
     environment_.reset();
 #if !JSB_WITH_WEB
     jsb::Worker::finish();
@@ -125,10 +141,16 @@ void GodotJSScriptLanguage::finish()
         }
         for (const ShadowEnvironment& env : shadow_environments)
         {
+#if JSB_WITH_WEB
+            // The precondition above proves this branch has no Web holders.
+            jsb_check(false);
+#else
             env.holder->dispose();
+#endif
         }
     }
     JSB_LOG(VeryVerbose, "jsb lang finish");
+    jsb::NativeWorld::end(native_world);
 }
 
 void GodotJSScriptLanguage::frame()
@@ -569,7 +591,10 @@ std::shared_ptr<jsb::Environment> GodotJSScriptLanguage::create_shadow_environme
 
         for (ShadowEnvironment& shadow : shadow_environments_)
         {
-            if (shadow.rc == 0 || shadow.thread_id == caller_id)
+            // VM stack limits and Web rt0 belong to the creating thread.
+            // Native may cache inactive Shadows, but never lend them across
+            // threads. Web retires an empty Shadow instead of caching it.
+            if (shadow.thread_id == caller_id)
             {
                 shadow.rc++;
                 return shadow.holder;
@@ -603,7 +628,9 @@ void GodotJSScriptLanguage::destroy_shadow_environment(const std::shared_ptr<jsb
     bool should_dispose = false;
     {
         MutexLock shadow_lock(shadow_mutex_);
+#if !JSB_WITH_WEB
         const size_t num = shadow_environments_.size();
+#endif
         for (auto it = shadow_environments_.begin();
             it != shadow_environments_.end();
             ++it)
@@ -611,7 +638,11 @@ void GodotJSScriptLanguage::destroy_shadow_environment(const std::shared_ptr<jsb
             if (it->holder == p_env)
             {
                 found = true;
+#if JSB_WITH_WEB
+                if (--it->rc == 0)
+#else
                 if (--it->rc == 0 && num > JSB_MAX_CACHED_SHADOW_ENVIRONMENTS)
+#endif
                 {
                     should_dispose = true;
                     shadow_environments_.erase(it);
@@ -621,5 +652,13 @@ void GodotJSScriptLanguage::destroy_shadow_environment(const std::shared_ptr<jsb
         }
     }
     jsb_checkf(found, "not a registered shadow environment");
-    if (should_dispose) p_env->dispose();
+    if (should_dispose)
+    {
+        // JSEnvironment outlives load()/metadata's scoped VM handles, and this
+        // runs after dropping shadow_mutex_. Nested same-realm borrows keep rc>0.
+        p_env->dispose();
+#if JSB_WITH_WEB
+        p_env->release_runtime_on_owner();
+#endif
+    }
 }

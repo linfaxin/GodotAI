@@ -74,8 +74,8 @@ func _process(_delta: float) -> bool:
                 return false
             if OS.get_cmdline_user_args().has("--inject-foreign-node"):
                 var foreign := Node.new()
-                foreign.name = "ExternalForeignSibling"
-                root.add_child(foreign)
+                foreign.name = "UnregisteredManagedChild"
+                app.add_child(foreign)
                 print("GODOT_REACT_FOREIGN_NODE_INJECTED")
                 phase = 99
                 return false

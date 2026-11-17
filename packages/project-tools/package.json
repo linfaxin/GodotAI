@@ -7,6 +7,10 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
+    "./artifact-set": {
+      "types": "./dist/artifact-set.d.ts",
+      "import": "./dist/artifact-set.js"
+    },
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
@@ -99,6 +103,10 @@
       "types": "./dist/compiler.d.ts",
       "import": "./dist/compiler.js"
     },
+    "./runtime-entry": {
+      "types": "./dist/runtime-entry.d.ts",
+      "import": "./dist/runtime-entry.js"
+    },
     "./node": {
       "types": "./dist/node/compiler.d.ts",
       "import": "./dist/node/compiler.js"
@@ -112,19 +120,21 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json && tsc -p tsconfig.node.json",
+    "build": "node scripts/build-native-namespace-source.mjs && tsc -p tsconfig.json && tsc -p tsconfig.node.json",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.node.json --noEmit",
     "test": "pnpm build && node --test test/*.test.mjs"
   },
   "dependencies": {
-    "typescript": "6.0.3",
-    "spark-md5": "3.0.2",
+    "@godot-js/engine": "workspace:*",
     "esbuild": "^0.25.0",
-    "@godot-js/engine": "workspace:*"
+    "fflate": "0.8.2",
+    "jpeg-js": "0.4.4",
+    "spark-md5": "3.0.2",
+    "typescript": "6.0.3"
   },
   "devDependencies": {
-    "@types/spark-md5": "3.0.5",
-    "@types/node": "^24.12.2"
+    "@types/node": "^24.12.2",
+    "@types/spark-md5": "3.0.5"
   },
   "engines": {
     "node": ">=22.14.0"

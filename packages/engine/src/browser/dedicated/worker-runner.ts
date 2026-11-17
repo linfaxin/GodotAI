@@ -7,6 +7,7 @@ import { WORKER_PROTOCOL, prepareWorkerRunConfiguration, isWorkerEnvelope, sameW
 import { isWorkerEngineOutcome, isWorkerHostCleanupOutcome } from './worker-session.js';
 import { WorkerProjectCommandCredits,workerProjectCommandBytes } from './worker-project-channel.js';
 import { WorkerLogBudget } from './worker-log.js';
+import {captureBrowserArtifact,browserArtifactTransfers} from '../artifact-input.js';
 const now = () => performance.now();
 
 export interface WorkerPreviewRunnerOptions {
@@ -95,13 +96,13 @@ export class WorkerPreviewRunner {
   }
   async run(artifact: BrowserArtifact): Promise<WorkerRunResult> {
     if (this.disposed) throw Error('E_RUNNER_DISPOSED');
-    if (!(artifact.pack instanceof Uint8Array) || !artifact.pack.byteLength || artifact.pack.byteLength > 64 * 1024 * 1024) throw Error('E_ARTIFACT_PACK');
+    if (!artifact.artifactSet&&(!(artifact.pack instanceof Uint8Array) || !artifact.pack.byteLength || artifact.pack.byteLength > 64 * 1024 * 1024)) throw Error('E_ARTIFACT_PACK');
     if (!isIdentity({ runId: 'validate', ...artifact }) || !artifact.manifest || typeof artifact.manifest !== 'object' || (artifact.manifest as { generation?: unknown }).generation !== artifact.generation) throw Error('E_ARTIFACT_GENERATION');
     const manifest = artifact.manifest as { engineReleaseId?: unknown; engineProfile?: unknown };
     if (manifest.engineReleaseId !== undefined && manifest.engineReleaseId !== this.release.releaseId) throw Error('E_ARTIFACT_ENGINE_RELEASE');
     if (manifest.engineProfile !== undefined && manifest.engineProfile !== this.release.profile) throw Error('E_ARTIFACT_ENGINE_PROFILE');
     const sequence = ++this.sequence;
-    const snapshot = { ...artifact, manifest: structuredClone(artifact.manifest), pack: artifact.pack.slice() };
+    const snapshot = await captureBrowserArtifact(artifact,this.release,this.release.artifactReceiptVersion!==2);
     const frozen = await prepareWorkerRunConfiguration(this.options.configuration ?? {});
     // A slower, superseded hash must never stop the newer active session.
     if (sequence !== this.sequence || this.disposed) throw new DOMException('Superseded', 'AbortError');
@@ -149,7 +150,7 @@ export class WorkerPreviewRunner {
         if (!this.transition(s, 'downloading')) return;
         s.port.postMessage({ ...identity, protocolVersion: WORKER_PROTOCOL, type: 'run', release: this.release,
           configuration: frozen.configuration, artifact: snapshot, stopTimeoutMs: Math.max(1, Math.floor(this.deadlines.stopping * 0.6)),
-          cleanupTimeoutMs: Math.max(1, Math.min(frozen.configuration.budgets.cleanupTimeoutMs, Math.floor(this.deadlines.stopping * 0.3))) }, [snapshot.pack.buffer]);
+          cleanupTimeoutMs: Math.max(1, Math.min(frozen.configuration.budgets.cleanupTimeoutMs, Math.floor(this.deadlines.stopping * 0.3))) }, browserArtifactTransfers(snapshot));
       } else if (m.type === 'worker-closing') {
         this.beginStop(s, 'stopped', 'Native exit is preparing project cleanup');
       } else if (m.type === 'phase' && RUN_PHASES.includes(s.state as typeof RUN_PHASES[number])) {

@@ -12,6 +12,7 @@ namespace jsb
     // object or the opaque root capabilities accepted by its JS entry points.
     class ReactBridge
     {
+#if JSB_WITH_LEGACY_REACT
         struct Impl;
         std::unique_ptr<Impl> impl_;
 
@@ -36,6 +37,24 @@ namespace jsb
 
     private:
         static void dispatch(const v8::FunctionCallbackInfo<v8::Value>& p_info);
+#else
+    public:
+        // Existing generic bridge callsites keep their signatures while the
+        // deprecated ownership/audit implementation is absent from the build.
+        explicit ReactBridge(Environment*) {}
+        void install(const v8::Local<v8::Context>&, const v8::Local<v8::Object>&) {}
+        void notify_removed(NativeObjectID, uint64_t, ObjectID, bool, const String&) {}
+        void dispose() {}
+        bool has_active_roots() const { return false; }
+        bool allows_method(Object*, const StringName&, const Variant**, int) const { return true; }
+        bool allows_free(Object*) const { return true; }
+        static bool is_owned(Object*) { return false; }
+        static bool protects_structure(Object*) { return false; }
+        static bool allows_bound_method(Object*, const StringName&, const Variant**, int, int = 0) { return true; }
+        static bool allows_bound_free(Object*) { return true; }
+        static bool allows_callable(const Callable&, const Variant** = nullptr, int = 0, int = 0) { return true; }
+        void invoke_signal(uint64_t, const Variant**, int) const {}
+#endif
     };
 }
 

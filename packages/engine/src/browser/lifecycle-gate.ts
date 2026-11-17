@@ -5,6 +5,8 @@ export interface NativeLifecycleModule {
   godotjsBeginExit?: () => void;
   godotjsCleanupTick?: () => void;
   godotjsReleaseExit?: () => void;
+  godotjsCheckpointAbi?: number;
+  godotjsScheduleCleanupCheckpoint?: (callback: () => unknown) => boolean;
   [key: string]: unknown;
 }
 export interface NativeLifecycleGateOptions {
@@ -19,9 +21,8 @@ export interface NativeLifecycleGate {
   readonly begun: boolean;
 }
 
-/** This factory is also serialized into Emscripten pthreads. Keep runtime
- * dependencies inside the factory; the binding and native module are owned by
- * the actual engine realm, never by its Window proxy. */
+/** The binding and native module are owned by the actual engine realm. The
+ * generated pthread bootstrap bundles this factory and its dependencies. */
 export function installNativeLifecycleGate(module: NativeLifecycleModule, binding: RuntimeBinding, options: NativeLifecycleGateOptions = {}): NativeLifecycleGate {
   if (module.godotjsLifecycleVersion !== 1 || typeof module.godotjsReleaseExit !== 'function') throw Error('E_NATIVE_LIFECYCLE_ABI');
   let begun = false, nativeClosing = false, closed = false, pending = false, released = false;
@@ -35,7 +36,15 @@ export function installNativeLifecycleGate(module: NativeLifecycleModule, bindin
     // A tick returns to C++ before its deletion queue is consumed. Completion
     // can therefore be observed only by a subsequent tick, never by assuming
     // that queue_free or React's logical unmount destroyed the native object.
-    void Promise.resolve().then(() => binding.drainClose()).then(progress => {
+    const drain = () => {
+      if (module.godotjsCheckpointAbi !== 1) return binding.drainClose();
+      return new Promise<RuntimeCloseProgress>((resolve, reject) => {
+        if (typeof module.godotjsScheduleCleanupCheckpoint !== 'function' || !module.godotjsScheduleCleanupCheckpoint(() => {
+          try { resolve(binding.drainClose()); } catch (error) { reject(error); }
+        })) reject(Error('E_NATIVE_CHECKPOINT_SCHEDULE'));
+      });
+    };
+    void Promise.resolve().then(drain).then(progress => {
       pending = false;
       if (closed || released || binding.snapshotSummary().epoch !== epoch) return;
       options.onProgress?.(progress);

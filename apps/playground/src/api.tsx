@@ -30,7 +30,6 @@ interface Manifest {assets:Record<string,{uri:string;type:string}>;models:Record
 let manifest:Manifest|undefined;
 function resources():Manifest{
  if(manifest)return manifest;
- if(!G.ProjectSettings.load_resource_pack('res://.playground/demo-resources.pck',false))throw Error('Demo resource pack could not be mounted');
  return manifest=JSON.parse(G.FileAccess.get_file_as_string('res://.playground/demo-manifest.json'));
 }
 const loaded=new Map<string,any>();

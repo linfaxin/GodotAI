@@ -22,6 +22,9 @@ export function validateExecutionContract(value, { requireWorkerAssets = false }
   for (const key of ['wasmThreads', 'proxyToPthread', 'requiresCrossOriginIsolation']) if (typeof value[key] !== 'boolean') reject('Expected boolean ' + key);
   if (!Number.isSafeInteger(value.hostProtocolVersion) || value.hostProtocolVersion < 1) reject('Invalid host protocol');
   if (value.lifecycleAbi !== undefined && value.lifecycleAbi !== 1) reject('Unsupported lifecycle ABI');
+  if (value.artifactSetAbi !== undefined && value.artifactSetAbi !== 1) reject('Unsupported ArtifactSet ABI');
+  if (value.hostResourceAbi !== undefined && value.hostResourceAbi !== 1) reject('Unsupported host resource ABI');
+  if (value.shutdownQueueAbi !== undefined && value.shutdownQueueAbi !== 1) reject('Unsupported shutdown queue ABI');
   if (value.routerProtocolVersion !== undefined && (!Number.isSafeInteger(value.routerProtocolVersion) || value.routerProtocolVersion < 1)) reject('Invalid router protocol');
   if (value.proxyToPthread !== (value.executionModel === 'proxy-pthread')) reject('Proxy/model mismatch');
   if (value.proxyToPthread && !value.wasmThreads) reject('Proxy execution requires WASM threads');
@@ -49,9 +52,10 @@ function assertLifecycleProof(report) {
     const edges = (report.recipe?.patches ?? []).filter(patch => patch.path === path);
     const latest = edges.at(-1), file = proof.files[path];
     const allowed = path === 'platform/web/web_main.cpp' ? ['godotjs-web-lifecycle-v1', 'godotjs-web-worker-runtime-v1'] : ['godotjs-web-lifecycle-v1'];
-    if (!latest || !allowed.includes(latest.patchId) || !hash(file?.sha256) || file.sha256 !== latest.afterSha256 || report.godotSource?.inputs?.[path] !== file.sha256) reject('Native lifecycle source differs: ' + path);
+    const applied=edges.findLast(edge=>allowed.includes(edge.patchId));
+    if (!latest || !applied || (!allowed.includes(latest.patchId)&&!(path==='scene/main/scene_tree.cpp'&&latest.patchId==='godotjs-managed-shutdown-queue-v1')) || !hash(file?.sha256) || file.sha256 !== latest.afterSha256 || report.godotSource?.inputs?.[path] !== file.sha256) reject('Native lifecycle source differs: ' + path);
     const implementation = file.implementation;
-    if (!implementation || !hash(implementation.sha256) || implementation.path !== latest.implementation?.path || implementation.sha256 !== latest.implementation?.sha256 || report.source?.inputs?.[implementation.path] !== implementation.sha256) reject('Native lifecycle implementation differs: ' + path);
+    if (!implementation || !hash(implementation.sha256) || implementation.path !== applied.implementation?.path || implementation.sha256 !== applied.implementation?.sha256 || report.source?.inputs?.[implementation.path] !== implementation.sha256) reject('Native lifecycle implementation differs: ' + path);
     let previous;
     for (const edge of edges) {
       if (!hash(edge.beforeSha256) || !hash(edge.afterSha256) || (previous && previous !== edge.beforeSha256)) reject('Broken native lifecycle patch chain: ' + path);
@@ -79,6 +83,29 @@ export function executionFromReport(report, { requireWorkerAssets = false } = {}
   if (value.lifecycleAbi === 1 || report.runtimeAbi?.lifecycle === 1) {
     if (value.lifecycleAbi !== 1 || (report.runtimeAbi && report.runtimeAbi.lifecycle !== 1)) reject('Native lifecycle ABI declarations differ');
     assertLifecycleProof(report);
+  }
+  if(value.artifactSetAbi===1){
+    const proof=report.artifactSetPatch,edges=(report.recipe?.patches??[]).filter(edge=>edge.path==='main/main.cpp');
+    const applied=edges.find(edge=>edge.patchId==='godotjs-artifact-set-early-mount-v1'),latest=edges.at(-1);
+    if(proof?.abi!==1||proof.patchId!=='godotjs-artifact-set-early-mount-v1'||proof.path!=='main/main.cpp'||!applied||!latest||!hash(proof.sha256)||!hash(proof.implementation?.sha256)||proof.implementation?.path!=='scripts/release/patch-artifact-set-mount.mjs'||proof.sha256!==latest.afterSha256||report.godotSource?.inputs?.['main/main.cpp']!==proof.sha256||proof.implementation?.path!==applied.implementation?.path||proof.implementation?.sha256!==applied.implementation?.sha256||report.source?.inputs?.[proof.implementation?.path]!==proof.implementation?.sha256||!hash(report.source?.inputs?.['bridge/jsb_artifact_set.cpp'])||!hash(report.source?.inputs?.['bridge/jsb_artifact_set.h']))reject('ArtifactSet mount source proof differs');
+    let previous;for(const edge of edges){if(!hash(edge.beforeSha256)||!hash(edge.afterSha256)||previous&&previous!==edge.beforeSha256)reject('Broken ArtifactSet source patch chain');previous=edge.afterSha256;}
+  }
+  if(value.shutdownQueueAbi===1){
+    const proof=report.shutdownQueuePatch;
+    if(proof?.abi!==1||proof.patchId!=='godotjs-managed-shutdown-queue-v1')reject('Missing shutdown queue source proof');
+    for(const path of ['main/main.cpp','scene/main/scene_tree.cpp']){
+      const edges=(report.recipe?.patches??[]).filter(edge=>edge.path===path),applied=edges.find(edge=>edge.patchId===proof.patchId),file=proof.files?.[path];
+      if(!applied||!file||file.sha256!==edges.at(-1)?.afterSha256||report.godotSource?.inputs?.[path]!==file.sha256||file.implementation?.path!==applied.implementation?.path||file.implementation?.sha256!==applied.implementation?.sha256||report.source?.inputs?.[file.implementation?.path]!==file.implementation?.sha256)reject('Shutdown queue proof differs: '+path);
+    }
+  }
+  if(value.hostResourceAbi===1){
+    const proof=report.hostResourcePatch;
+    const paths=['platform/web/js/libs/library_godot_os.js','platform/web/js/patches/patch_em_gl.js','platform/web/js/libs/library_godot_runtime.js','platform/web/js/libs/library_godot_audio.js','platform/web/js/libs/library_godot_display.js','modules/websocket/library_godot_websocket.js','modules/webrtc/library_godot_webrtc.js'];
+    if(proof?.abi!==1||proof.patchId!=='godotjs-host-resource-owner-v1')reject('Missing host resource source proof');
+    for(const path of paths){
+      const edges=(report.recipe?.patches??[]).filter(edge=>edge.path===path),applied=edges.find(edge=>edge.patchId===proof.patchId),final=edges.at(-1),file=proof.files?.[path];
+      if(!applied||!file||file.sha256!==final?.afterSha256||report.godotSource?.inputs?.[path]!==file.sha256||file.implementation?.path!==applied.implementation?.path||file.implementation?.sha256!==applied.implementation?.sha256||report.source?.inputs?.[file.implementation?.path]!==file.implementation?.sha256)reject('Host resource proof differs: '+path);
+    }
   }
   if (value.wasmThreads !== actualThreads || value.proxyToPthread !== actualProxy) reject('Descriptor does not match resolved flags');
   return value;

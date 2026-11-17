@@ -11,6 +11,8 @@ import { createWorkerXRBridge } from './worker-xr.js';
 import { WorkerBenchmark } from './worker-benchmark.js';
 import { WorkerLogBudget } from './worker-log.js';
 import {installNativeLifecycleGate, type NativeLifecycleGate, type NativeLifecycleModule} from '../lifecycle-gate.js';
+import {assertArtifactSet,type ArtifactSet} from '../../artifact-set.js';
+import {assertArtifactSetTarget,preloadArtifactSet} from '../artifact-input.js';
 
 interface RuntimeScope {
   __godotjsRuntimeHost?: RuntimeBinding;
@@ -21,6 +23,7 @@ interface RuntimeScope {
 interface WorkerBoot extends WorkerRunIdentity {
   protocolVersion: 2; type: 'worker-connect'; release: VerifiedRelease; configuration: WorkerRunConfiguration;
   pack: Uint8Array; canvas: OffscreenCanvas; geometry: CanvasGeometry; documentUrl?: string;
+  artifactSet?:ArtifactSet;
   controlPort: MessagePort; dataPort: MessagePort; audioCommandPort: MessagePort; audioPcmPort: MessagePort; browserPort: MessagePort; xrPort: MessagePort;
 }
 
@@ -223,6 +226,9 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
   try {
     const frozen = await prepareWorkerRunConfiguration(boot.configuration); lease.assertActive();
     if (frozen.hash !== identity.runConfigurationHash || !boot.release.runtimeAbi || !(boot.pack instanceof Uint8Array) || !boot.pack.byteLength || boot.pack.byteLength > 64 * 1024 * 1024) throw Error('E_WORKER_BOOT');
+    const artifactSet=boot.artifactSet?await assertArtifactSet(boot.artifactSet):undefined;
+    if(artifactSet)assertArtifactSetTarget(artifactSet,boot.release);
+    lease.assertActive();
     if (boot.configuration.hostAbiVersion !== 1 || boot.configuration.audioAbiVersion !== 1 || boot.configuration.presentationAbiVersion !== 1) throw Error('E_WORKER_ABI');
     if(boot.configuration.budgets.benchmarkTimingSamples)benchmark=new WorkerBenchmark(boot.configuration.budgets.benchmarkTimingSamples);
     const limits = { maxDimension: boot.configuration.budgets.maxCanvasDimension, maxPixels: boot.configuration.budgets.maxCanvasPixels, maxAggregateBytes: boot.configuration.budgets.maxPresentationBytes };
@@ -315,7 +321,10 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
       value.onRuntimeInitialized = (() => { const before = value.onRuntimeInitialized; return function (this: unknown, ...values: unknown[]) { if (typeof before === 'function') before.apply(this, values); }; })();
       return value;
     };
-    phase('preloading'); await engine.preloadFile(boot.pack, '/application.pck'); assertStarting();
+    phase('preloading');
+    if(artifactSet)await preloadArtifactSet(engine,artifactSet,assertStarting);
+    else await engine.preloadFile(boot.pack, '/application.pck');
+    assertStarting();
     phase('initializing'); await engine.init(); assertStarting();
     module = (engine as any).rtenv ?? module;
     if(managedClose&&typeof module?._godotjs_release_exit!=='function')throw Error('E_NATIVE_LIFECYCLE_ABI: native pre-exit export is missing');

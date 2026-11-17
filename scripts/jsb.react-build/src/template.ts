@@ -88,7 +88,7 @@ export function freezeResourceText(text:string,uris:ReadonlyMap<string,string>):
 
 export async function rewriteTemplateModule(template:ImportedTemplate):Promise<void>{
   const {plan}=template;
-  await write(template.module,`// Generated from ${plan.source}; every node is owned by React.\nimport type {ComponentProps,ComponentType} from "react";\nimport {createTemplateComponent,${plan.nodes[0].nativeType}} from "@godot-js/react/legacy";\nexport type TemplateProps = Omit<ComponentProps<typeof ${plan.nodes[0].nativeType}>, "children">;\nconst Template = createTemplateComponent(${canonicalJson(plan)}) as ComponentType<TemplateProps>;\nexport default Template;\n`);
+  await write(template.module,`// Generated from ${plan.source}; every node is owned by React.\nimport type {ComponentProps,ComponentType} from "react";\nimport {createTemplateComponent,${plan.nodes[0].nativeType}} from "@godot-js/react/engine-components";\nexport type TemplateProps = Omit<ComponentProps<typeof ${plan.nodes[0].nativeType}>, "children">;\nconst Template = createTemplateComponent(${canonicalJson(plan)}) as ComponentType<TemplateProps>;\nexport default Template;\n`);
 }
 
 export interface ImportedTemplate { id: string; plan: TemplatePlanV1; module: string; declaration: string; resourceFiles: string[]; }
@@ -168,8 +168,8 @@ export async function importTemplate(id: string, source: string, snapshot: Snaps
   const plan: TemplatePlanV1 = { schemaVersion: 1, assetId: id, source: sourceUri, sourceHash: sha256(bytes), snapshotHash: snapshot.hash, profile: options.profile ?? "template-t0", rootId: nodes[0]?.nodeId ?? "", nodes, resources: [...graph.resources.values()] };
   validateTemplatePlan(plan);
   const module = path.join(generatedRoot, `${id}.tsx`), declaration = path.join(generatedRoot, `${id}.d.ts`);
-  await write(module, `// Generated from ${sourceUri}; every node is owned by React.\nimport type {ComponentProps,ComponentType} from "react";\nimport {createTemplateComponent,${nodes[0].nativeType}} from "@godot-js/react/legacy";\nexport type TemplateProps = Omit<ComponentProps<typeof ${nodes[0].nativeType}>, "children">;\nconst Template = createTemplateComponent(${canonicalJson(plan)}) as ComponentType<TemplateProps>;\nexport default Template;\n`);
-  await write(declaration, `import type {ComponentProps,ReactElement} from "react";\nimport {${nodes[0].nativeType}} from "@godot-js/react/legacy";\nexport type TemplateProps = Omit<ComponentProps<typeof ${nodes[0].nativeType}>, "children">;\nexport default function Template(props:TemplateProps):ReactElement;\n`);
+  await write(module, `// Generated from ${sourceUri}; every node is owned by React.\nimport type {ComponentProps,ComponentType} from "react";\nimport {createTemplateComponent,${nodes[0].nativeType}} from "@godot-js/react/engine-components";\nexport type TemplateProps = Omit<ComponentProps<typeof ${nodes[0].nativeType}>, "children">;\nconst Template = createTemplateComponent(${canonicalJson(plan)}) as ComponentType<TemplateProps>;\nexport default Template;\n`);
+  await write(declaration, `import type {ComponentProps,ReactElement} from "react";\nimport {${nodes[0].nativeType}} from "@godot-js/react/engine-components";\nexport type TemplateProps = Omit<ComponentProps<typeof ${nodes[0].nativeType}>, "children">;\nexport default function Template(props:TemplateProps):ReactElement;\n`);
   return { id, plan, module, declaration, resourceFiles: [...new Set([...graph.files, ...dependencyFiles])] };
 }
 

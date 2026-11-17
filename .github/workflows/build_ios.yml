@@ -27,6 +27,7 @@ env:
     tests=no
     debug_symbols=no
     skip_js_runtime=yes
+    enable_legacy_react=no
 
 jobs:
   ios-template:
@@ -52,6 +53,19 @@ jobs:
           path: ${{github.workspace}}/modules/GodotJS/
           lfs: true
           submodules: recursive
+
+      - name: Setup Node.js for the pinned native integration
+        if: inputs.version == '4.6.1'
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+
+      - name: Prepare the verified Godot 4.6.1 native source hooks
+        if: inputs.version == '4.6.1'
+        shell: bash
+        run: >-
+          node modules/GodotJS/scripts/test/prepare-native-engine.mjs
+          --godot-source . --out native-integration.json
 
       # From https://github.com/actions/runner-images/blob/main/images/macos
       - name: Select Xcode 26
@@ -92,3 +106,11 @@ jobs:
         uses: ./.github/actions/upload-artifact
         with:
           name: ios-${{ matrix.target }}-${{inputs.version}}-${{ matrix.engine }}
+
+      - name: Upload the native source integration receipt
+        if: always() && inputs.version == '4.6.1'
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-integration-ios-${{ matrix.target }}-${{ inputs.version }}-${{ matrix.engine }}
+          path: native-integration.json
+          if-no-files-found: warn

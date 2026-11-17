@@ -3,6 +3,8 @@
 
 #include "jsb_internal_pch.h"
 #include "jsb_macros.h"
+#include <atomic>
+#include <vector>
 
 namespace jsb::internal
 {
@@ -12,6 +14,12 @@ namespace jsb::internal
         Vector<Variant*> front_;
         Vector<Variant*> back_;
         SpinLock spin_lock_;
+        // The intrusive metadata shares each paged allocation with its Variant.
+        // Native math values do not allocate a separate tracking node.
+        struct Cell : Variant { Cell* previous = nullptr; Cell* next = nullptr; };
+        Cell* first_live_ = nullptr;
+        size_t live_count_ = 0;
+        std::atomic<bool> sealed_{false};
 
 #if JSB_DEBUG
         SafeNumeric<uint32_t> alive_variants_num_;
@@ -20,10 +28,10 @@ namespace jsb::internal
 #if JSB_WITH_V8 || JSB_WITH_JAVASCRIPTCORE
         // v8 and jsc implementation of deleter are probably called from JS gc threads
         // so we need thread-safe version
-        PagedAllocator<Variant, true> paged_allocator_;
+        PagedAllocator<Cell, true> paged_allocator_;
 #else
         // web and quickjs implementation of deleter are called from owner thread only
-        PagedAllocator<Variant, false> paged_allocator_;
+        PagedAllocator<Cell, false> paged_allocator_;
 #endif
 
     public:
@@ -51,10 +59,46 @@ namespace jsb::internal
             return rval;
         }
 
-        jsb_force_inline Variant* alloc() { increment(); return paged_allocator_.alloc(); }
+        jsb_force_inline Variant* alloc()
+        {
+            jsb_check(!is_sealed());
+            Cell* cell = paged_allocator_.alloc();
+            spin_lock_.lock();
+            cell->next = first_live_;
+            if (first_live_) first_live_->previous = cell;
+            first_live_ = cell; ++live_count_;
+            spin_lock_.unlock();
+            increment(); return cell;
+        }
+
+        bool is_sealed() const { return sealed_.load(std::memory_order_acquire); }
+
+        // Owner thread only. Move leaves every still-live cell as NIL, so its
+        // late VM deleter can free the cell exactly once. No Ref destructor or
+        // native callback runs under the registry lock.
+        void seal_payloads()
+        {
+            std::vector<Variant> retired;
+            spin_lock_.lock();
+            sealed_.store(true, std::memory_order_release);
+            retired.reserve(live_count_);
+            for (Cell* cell = first_live_; cell; cell = cell->next)
+                retired.emplace_back(std::move(static_cast<Variant&>(*cell)));
+            spin_lock_.unlock();
+        }
 
         //NOTE safe to call from other threads only if p_var is not reference-based type
-        jsb_force_inline void free(Variant* p_var) { decrement(); paged_allocator_.free(p_var); }
+        jsb_force_inline void free(Variant* p_var)
+        {
+            Cell* cell = static_cast<Cell*>(p_var);
+            spin_lock_.lock();
+            if (cell->previous) cell->previous->next = cell->next;
+            else { jsb_check(first_live_ == cell); first_live_ = cell->next; }
+            if (cell->next) cell->next->previous = cell->previous;
+            --live_count_;
+            spin_lock_.unlock();
+            decrement(); paged_allocator_.free(cell);
+        }
 
         // gc thread
         void free_safe(Variant* p_var)

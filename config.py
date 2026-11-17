@@ -14,6 +14,7 @@ def get_opts(platform):
 
     return [
         BoolVariable("skip_js_runtime", "Skip building GodotJS JavaScript runtime files", False),
+        BoolVariable("enable_legacy_react", "Build the deprecated React native ownership pipeline (compatibility tests only)", False),
         BoolVariable("use_typescript", "Build with typescript support (enabled by default)", True),
         BoolVariable("use_jsc", "Prefer to use JavaScriptCore (only for macos and ios)", False),
         BoolVariable("use_quickjs", "Prefer to use QuickJS rather than the default VM on the current platform", False),

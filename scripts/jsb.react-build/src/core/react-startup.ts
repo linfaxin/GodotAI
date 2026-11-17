@@ -1,4 +1,5 @@
 import {runtimeModulePath as modulePath} from '@godot-js/project-tools/engine-project';
+import {runtimeBindingBootstrap} from '@godot-js/project-tools/runtime-entry';
 export function reactBootstrap(entry:string,exportName:string,props:Record<string,unknown>):string {
  return `const intrinsicStackGetter = Object.getOwnPropertyDescriptor(new Error(), 'stack')?.get;
 const G = require('godot');
@@ -6,10 +7,11 @@ const React = require(${JSON.stringify(modulePath('react'))});
 const EngineReact = require(${JSON.stringify(modulePath('@godot-js/react/engine'))});
 const names = require('godot-jsb').internal.names;
 const call = (object: any, name: string, ...args: any[]) => object[names.get_member(name)](...args);
+${runtimeBindingBootstrap()}
 export default class PlaygroundEngineBootstrap extends G.Node {
  private root: any; private closingRoot: any; private entryScope: any; private host: any; private closed = false; private closing = false; private managed = false;
  _ready() {
-  const binding = (globalThis as any).__godotjsRuntimeHost;
+  const binding = ensureRuntimeBinding();
   const admission = typeof binding?.closeProgress === 'function' ? binding.closeProgress() : undefined;
   if (admission && (admission.closing || admission.accepting === false)) { this.closed = true; return; }
   this.entryScope = typeof binding?.openEntry === 'function' ? binding.openEntry() : undefined;
@@ -18,7 +20,7 @@ export default class PlaygroundEngineBootstrap extends G.Node {
    const entry = require(${JSON.stringify(entry)});
    const Component = entry[${JSON.stringify(exportName)}] ?? (${JSON.stringify(exportName)} === 'default' && typeof entry === 'function' ? entry : undefined);
    if (Component === undefined) throw Error(${JSON.stringify(`React entry does not export "${exportName}"`)});
-   this.root = EngineReact.createRoot(this, {autoProcess: false, runtimeHost:this.host,lifetime:this.entryScope?.lifetime, onError: (error: any, info: any) => this.report(error, info)});
+   this.root = EngineReact.createRoot(this, {autoProcess: false, entry:this.entryScope?.capability,runtimeHost:this.host,lifetime:this.entryScope?.lifetime, onError: (error: any, info: any) => this.report(error, info)});
    const root = this.root;
    this.managed = !!this.entryScope?.lifetime && typeof root.close === 'function';
    if (this.managed) {

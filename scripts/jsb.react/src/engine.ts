@@ -3,6 +3,9 @@ import ReconcilerFactory from './reconciler';
 import {drainScheduler,schedulerHasReadyWork,schedulerWorkRevision,subscribeSchedulerWakeup} from './scheduler';
 import {mapEngineStack} from './engine-source-map';
 import {captureValue, nativeAlive, nativeCall, nativeIdentity, nativeReleaseState, propertyDescriptions, signalDescriptions, sameValue, sequence, writeNativeProperty, type NativePropertyWriter, type CapturedValue, type PropertyDescription} from './engine-native';
+import type {NativeInterfaceToken} from './engine-native-interfaces';
+import {engineNodeIntegration,type EngineNodeIntegration} from './engine-node-integration';
+import {nativeInterfaceSchema} from './native-interface-contracts';
 
 declare const require: (name: string) => any;
 export type NativeConstructor<T extends object = any> = new (...args: any[]) => T;
@@ -20,6 +23,9 @@ interface CommonNodeProps<T> {
   on?: NativeEvents<T>;
   children?: React.ReactNode;
   ref?: React.Ref<T>;
+  nativeInterface?: NativeInterfaceToken;
+  /** Private, branded integration used by generated component/template adapters. */
+  __engineIntegration?:EngineNodeIntegration;
 }
 export interface EngineNodeProps<C extends NativeConstructor = NativeConstructor> extends CommonNodeProps<NoInfer<InstanceType<C>>> {
   ctor: C;
@@ -44,6 +50,30 @@ export interface EngineRuntimeHost {
   emitProjectEvent(value:Readonly<Record<string,unknown>>):boolean;
   bindProjectCommand(handler:(data:Record<string,unknown>)=>void|Promise<void>):()=>void;
 }
+/** Local entry capability supplied by start(ctx), never serialized to a Worker. */
+export interface EngineEntryCapability {
+  readonly apiVersion:1;readonly entryId:string;readonly epoch:string;
+  readonly host:EngineRuntimeHost;readonly lifetime:{readonly cancelled:boolean};
+  assertActive(host?:EngineRuntimeHost):void;
+  attachCleanup(participant:EntryCleanupParticipant):()=>void;
+}
+export interface EngineNativeChange {kind:'structure'|'native-retired';objectId:string;parentId:string;sequence:string}
+export interface EngineNativeReleaseDescriptor {node:object;parent:object|null;children:readonly object[];opaque:boolean}
+export interface EngineNativeObservation {
+  revision:string;sequence:string;mutationInProgress:boolean;overflow:boolean;sealed:boolean;wrongThread:boolean;
+  changes:readonly EngineNativeChange[];
+}
+/** Private native adapter, injectable by host conformance fixtures. */
+export interface EngineNativeRuntime {
+  readonly abi:1;readonly observationAbi:number;readonly checkpointAbi?:number;readonly worldId:string;
+  openScope():unknown;watch(scope:unknown,node:object):boolean;claim(scope:unknown,node:object):boolean;
+  requestRelease(scope:unknown,node:object):boolean;relinquish(scope:unknown,node:object):boolean;
+  closeScope(scope:unknown):{pending:number;retiring:number;quarantined:number;sealed:boolean};
+  takeChanges(scope:unknown):EngineNativeObservation;
+  checkpoint():{canCommitStructure:boolean;canDestroy:boolean};
+  scheduleCheckpoint?(callback:()=>void):boolean;
+  requestReleaseBatch?(scope:unknown,descriptors:readonly EngineNativeReleaseDescriptor[],frontier:readonly object[]):boolean;
+}
 export interface EngineSessionOptions {
   /** Additional engine-owned stage check. A true result never overrides physics. */
   canCommit?: ()=>boolean;
@@ -63,6 +93,8 @@ export interface EngineRootOptions {
   publicName?: (nativeName: string)=>string;
   className?: (nativeName: string)=>string;
   runtimeHost?: EngineRuntimeHost;
+  entry?: EngineEntryCapability;
+  nativeRuntime?:EngineNativeRuntime;
   /** Entry-scoped admission without importing the browser/runtime package. */
   lifetime?: {readonly cancelled:boolean};
 }
@@ -71,8 +103,14 @@ export interface EngineStats {
   prepared: number; created: number; adopted: number; freed: number; invalidations: number;
   releaseRequested: number; pendingReleases: number; orphaned: number;
   commits: number; connections: number; disconnects: number; liveRecords: number;
+  /** Published business hosts; excludes retiring, orphaned and release-requested hosts. */
+  publishedRecords:number;
   processHooks: number; physicsHooks: number; portals: number;
   cleanExit: boolean;
+  auditRecordsVisited:number; retirementRecordsVisited:number; releaseRecordsVisited:number;
+  publicationRecordsVisited:number; portalRecordsVisited:number;
+  observationBatches:number; observationChanges:number; fullAudits:number;
+  batchReleaseRequests:number;releaseFrontiers:number;
 }
 export interface EngineFrameToken {epoch:string|number;counter:number}
 export interface EngineCloseResult {status:'complete'|'failed'|'unconfirmed';pendingReleases:number}
@@ -92,9 +130,11 @@ interface Instance {
   kind: 'instance'; root: EngineRoot; props: NodeProps; native?: any; identity?: string;
   children: Instance[]; parent?: Parent; status?: Status; invalidated: boolean; attached: boolean;
   scope: ChildScope; hidden: boolean; published: boolean; deletionReceipt: boolean; orphaned: boolean;
-  wasInsideTree: boolean; args: CapturedValue[];
+  wasInsideTree: boolean;nativeRetired:boolean; args: CapturedValue[];
   defaults: Map<string, CapturedValue>; values: Map<string, CapturedValue>; applied: Map<string, CapturedValue>; properties?: Map<string, PropertyDescription>;
   events: Map<string, EventSlot>; dependents: Set<Container>;
+  releaseNativeInterface?:()=>void;
+  releaseIntegration?:()=>void;
 }
 interface Container {kind:'container';root:EngineRoot;native:any;identity:string;children:Instance[];owner?:Instance}
 type Parent = Instance|Container;
@@ -103,9 +143,24 @@ const Context = React.createContext<EngineRoot|null>(null);
 const owners = new WeakMap<object, Instance>();
 const mounts = new WeakMap<object, Container>();
 const sessions = new WeakMap<object, EngineSession>();
+const nativeRuntimes = new WeakMap<object,EngineNativeRuntime>();
 const noop = ()=>{};
 const emptyContext = {};
 const error = (code:string,text:string)=>new Error(`${code}: ${text}`);
+const intrinsicStackGetter=Object.getOwnPropertyDescriptor(new Error(),'stack')?.get;
+function safeErrorStack(value:unknown):string|undefined {
+  if(!value||(typeof value!=='object'&&typeof value!=='function'))return undefined;
+  try{
+    const descriptor=Object.getOwnPropertyDescriptor(value,'stack');
+    const stack=descriptor&&'value'in descriptor?descriptor.value:descriptor?.get&&descriptor.get===intrinsicStackGetter&&['message','name'].every(key=>{const field=Object.getOwnPropertyDescriptor(value,key);return !field||'value'in field;})?intrinsicStackGetter!.call(value):undefined;
+    return typeof stack==='string'?stack:undefined;
+  }catch{return undefined;}
+}
+function safeErrorMessage(value:unknown):string {
+  if(typeof value==='string')return value.slice(0,4096);
+  try{const descriptor=value&&(typeof value==='object'||typeof value==='function')?Object.getOwnPropertyDescriptor(value,'message'):undefined;if(descriptor&&'value'in descriptor&&typeof descriptor.value==='string')return descriptor.value.slice(0,4096);}catch{}
+  return 'Engine callback failed';
+}
 // The pinned reconciler and scheduler are singletons in this JavaScript realm.
 const rendererMicrotasks:Array<()=>void> = [];
 const rendererTimers = new Map<number,{at:number;callback:()=>void}>();
@@ -146,6 +201,8 @@ export class EngineSession {
     const check=engine?.is_in_physics_frame??engine?.isInPhysicsFrame;
     try {
       if(typeof check==='function'&&check.call(engine))return false;
+      const native=nativeRuntimes.get(this.godot);
+      if(native&&native.checkpoint().canCommitStructure!==true)return false;
       return this.options.canCommit?.()!==false;
     }catch{return false;}
   }
@@ -174,16 +231,21 @@ export class EngineSession {
     this.workVersion++;
     if(this.scheduled)return;
     this.scheduled=true;
-    // Only this private browser microtask can authorize destruction. An explicit
-    // pump(), including one in a raw Godot signal callback, cannot attest that
-    // the enclosing JS/WASM/native stack has returned.
-    void Promise.resolve().then(()=>{
+    // Web owns a native ticket only after the enclosing JS/WASM stack returns.
+    // Native VMs already own their explicit microtask checkpoint.
+    const pump=()=>{
       this.scheduled=false;
       if((!this.roots.size&&!this.releasingRoots.size)||!this.canCommit())return;
       this.releaseCheckpoint=true;
       try{this.pump();}catch(value){for(const root of this.roots)root.failSession(value);}
       finally{this.releaseCheckpoint=false;}
-    });
+    };
+    const native=nativeRuntimes.get(this.godot);
+    try{
+      if(native?.scheduleCheckpoint){
+        if(!native.scheduleCheckpoint(pump))throw error('E_NATIVE_CHECKPOINT_SCHEDULE','Native owner refused the release checkpoint');
+      }else void Promise.resolve().then(pump);
+    }catch(value){this.scheduled=false;throw value;}
     if(notifyHost)this.options.requestPump?.();
   }
   /** Raw frame callbacks may mutate Godot without going through React. */
@@ -307,8 +369,10 @@ export class EngineSession {
           this.invalidateValidation();
           const tasks=frame&&remaining<=0?0:rendererCall(()=>drainScheduler(budget,Math.max(1,remaining)));
           remaining-=tasks;work=!!tasks||work;
+          for(const root of [...this.roots])root.publishReferences();
           const passive=rendererCall(()=>EngineRoot.flushPassiveEffects());
           work=passive||work;
+          for(const root of [...this.roots]){root.publishReferences();root.maintain();}
           this.refreshVisibility();
           this.invalidateValidation();
           for(const root of [...this.roots]){
@@ -330,7 +394,11 @@ export class EngineSession {
   drainClose():void {this.pump();}
   private reapCloseRoots():void {for(const root of [...this.releasingRoots]){root.reapReleased();root.refreshCloseResult();if(root.getCloseProgress().status!=='pending')this.releasingRoots.delete(root);}this.releaseSchedulerIfIdle();}
   private releaseSchedulerIfIdle():void {if(!this.roots.size&&!this.releasingRoots.size){this.schedulerUnsubscribe?.();this.schedulerUnsubscribe=undefined;}}
-  releaseAllowed():boolean {return this.releaseCheckpoint&&this.hasPermission()&&!rendererDepth&&!this.nativeDepth&&!this.callbackDepth;}
+  releaseAllowed():boolean {
+    if(!this.releaseCheckpoint||!this.hasPermission()||rendererDepth||this.nativeDepth||this.callbackDepth)return false;
+    const native=nativeRuntimes.get(this.godot);
+    return !native||native.checkpointAbi===1&&native.checkpoint().canDestroy===true;
+  }
   forget(root:EngineRoot):void {this.roots.delete(root);if(root.getCloseProgress().pendingReleases)this.releasingRoots.add(root);this.workVersion++;this.invalidateValidation();this.releaseSchedulerIfIdle();}
   forgetSealed(root:EngineRoot):void {this.roots.delete(root);this.releasingRoots.delete(root);this.workVersion++;this.invalidateValidation();this.releaseSchedulerIfIdle();}
   completeRelease(root:EngineRoot):void {this.releasingRoots.delete(root);this.releaseSchedulerIfIdle();}
@@ -365,6 +433,9 @@ export function useRuntimeHost():EngineRuntimeHost|undefined {
   return root.options.runtimeHost;
 }
 
+/** Internal hook shared with engine-native interface adapters. */
+export function getCurrentEngineRoot():EngineRoot|null {return React.useContext(Context);}
+
 export class EngineRoot {
   private static sharedRenderer:any;
   readonly godot:any;
@@ -383,11 +454,31 @@ export class EngineRoot {
   private renderer:any;
   private readonly errors:unknown[]=[];
   private readonly records=new Set<Instance>();
+  private readonly liveRecords=new Set<Instance>();
+  private readonly publishedRecords=new Set<Instance>();
+  private readonly unpublishedRecords=new Set<Instance>();
+  private readonly retiringRecords=new Set<Instance>();
+  private readonly pendingReleaseRecords=new Set<Instance>();
+  private readonly orphanedRecords=new Set<Instance>();
+  private readonly nativeRecords=new Map<string,Instance>();
+  private readonly dirtyRecords=new Set<Instance>();
+  private readonly nativeRuntime?:EngineNativeRuntime;
+  private nativeScope?:unknown;
+  private observationReady=false;
+  private observationRevision?:string;
+  private retirementAuditRequired=false;
   private readonly portals=new Map<object,Container>();
   private readonly frames={process:new Set<(delta:number)=>void>(),physics:new Set<(delta:number)=>void>()};
   private readonly events:Array<()=>void>=[];
   private readonly automatic:Array<()=>void>=[];
-  private readonly counters={prepared:0,created:0,adopted:0,freed:0,invalidations:0,releaseRequested:0,orphaned:0,commits:0,connections:0,disconnects:0};
+  private readonly counters={prepared:0,created:0,adopted:0,freed:0,invalidations:0,releaseRequested:0,orphaned:0,commits:0,connections:0,disconnects:0,auditRecordsVisited:0,retirementRecordsVisited:0,releaseRecordsVisited:0,publicationRecordsVisited:0,portalRecordsVisited:0,observationBatches:0,observationChanges:0,fullAudits:0,batchReleaseRequests:0,releaseFrontiers:0};
+  private readonly shutdownCallbacks=new Set<()=>void>();
+  private readonly commitCallbacks=new Set<()=>void>();
+  private readonly logicalDisposeCallbacks=new Set<()=>void>();
+  private logicalDisposeNotified=false;
+  private readonly publicationCallbacks=new Set<()=>void>();
+  private readonly maintenanceCallbacks=new Set<()=>void>();
+  private publicationPending=false;
   private cleanExit=true;
   private nativeSealed=false;
   private closePromise:Promise<EngineCloseResult>|undefined;
@@ -396,7 +487,21 @@ export class EngineRoot {
   private detachEntryCleanup:(()=>void)|undefined;
   private readonly automaticFrames=new Map<'process'|'physics',EngineFrameToken>();
   constructor(containerNativeNode:object,options:EngineRootOptions={}) {
-    const binding=(globalThis as unknown as {__godotjsRuntimeHost?:RealmRuntimeBinding}).__godotjsRuntimeHost;
+    const entry=options.entry;
+    if(entry){
+      entry.assertActive(options.runtimeHost??entry.host);
+      if(entry.host.role!=='engine')throw error('E_ENGINE_ROLE','Only an engine entry can own native roots');
+    }
+    // Explicit entry capabilities never discover a global runtime owner.
+    const binding=entry?undefined:(globalThis as unknown as {__godotjsRuntimeHost?:RealmRuntimeBinding}).__godotjsRuntimeHost;
+    if((binding?.role!==undefined&&binding.role!=='engine')||(options.runtimeHost?.role!==undefined&&options.runtimeHost.role!=='engine'))throw error('E_ENGINE_ROLE','Only the engine realm can own native roots');
+    let internal:any;try{internal=require('godot-jsb').internal;}catch{}
+    if(entry){
+      const validate=internal?.validate_entry_capability;
+      if(typeof validate==='function'&&validate.call(internal,entry,options.runtimeHost??entry.host)!==true)throw error('E_ENGINE_ENTRY','Entry capability does not belong to the native environment');
+      if(options.lifetime&&options.lifetime!==entry.lifetime)throw error('E_ENGINE_ENTRY','Entry and lifetime must belong to the same project');
+      options={...options,runtimeHost:entry.host,lifetime:entry.lifetime};
+    }
     const admission=binding?.role==='engine'?binding.closeProgress?.():undefined;
     if(options.lifetime?.cancelled||admission?.closing||admission?.accepting===false)throw error('E_ENGINE_CLOSING','The project entry or native session is closing');
     this.options=options;this.godot=options.godot??options.session?.godot??require('godot');
@@ -406,42 +511,68 @@ export class EngineRoot {
     if(mounts.has(containerNativeNode)||owners.has(containerNativeNode))throw error('E_ENGINE_OWNERSHIP','Node is already managed');
     if(this.session.owningAncestor(containerNativeNode))throw error('E_ENGINE_NESTED_ROOT','Use a registered portal beneath an owned native subtree');
     this.container={kind:'container',root:this,native:containerNativeNode,identity:nativeIdentity(containerNativeNode),children:[]};
-    let names:any;try{names=require('godot-jsb').internal.names;}catch{}
+    const acquireWorld=internal?.acquire_renderer_world??internal?.acquireRendererWorld;
+    if(typeof acquireWorld==='function')acquireWorld.call(internal,'engine');
+    if(options.nativeRuntime&&internal?.native_runtime?.abi===1&&options.nativeRuntime!==internal.native_runtime)throw error('E_ENGINE_NATIVE_ABI','The native runtime adapter cannot be replaced in a live engine environment');
+    const native=options.nativeRuntime??internal?.native_runtime;
+    if(native?.abi===1){
+      if(typeof native.worldId!=='string'||!native.worldId)throw error('E_ENGINE_NATIVE_ABI','Native world identity is required');
+      for(const method of ['openScope','watch','claim','requestRelease','relinquish','closeScope','takeChanges','checkpoint'])if(typeof native[method]!=='function')throw error('E_ENGINE_NATIVE_ABI',`Native runtime lacks ${method}`);
+      const established=nativeRuntimes.get(this.godot);
+      if(established&&established.worldId!==native.worldId)throw error('E_ENGINE_SESSION','Native world identity changed without replacing its Godot module');
+      this.nativeRuntime=native;nativeRuntimes.set(this.godot,native);
+    }
+    const names=internal?.names;
     this.memberName=options.publicName??(names?(name:string)=>names.get_member(name):(name:string)=>name);
     this.typeName=options.className??(names?(name:string)=>names.get_class(name):(name:string)=>name);
-    this.renderer=EngineRoot.sharedRenderer??=EngineRoot.createRenderer();
-    const report=(kind:EngineErrorInfo['kind'])=>(value:unknown,info?:{componentStack?:string})=>this.recordError(value,{kind,componentStack:info?.componentStack});
-    this.fiber=this.renderer.createContainer(this.container,1,null,!!options.strictMode,null,'godot-',report('uncaught'),report('caught'),report('recoverable'),null);
-    this.session.register(this);mounts.set(containerNativeNode,this.container);
     try{
-      if(options.runtimeHost&&binding?.role==='engine'&&binding.attachEntryCleanup){
+      if(this.nativeRuntime){this.nativeScope=this.nativeRuntime.openScope();this.nativeRuntime.watch(this.nativeScope,containerNativeNode);}
+      this.renderer=EngineRoot.sharedRenderer??=EngineRoot.createRenderer();
+      const report=(kind:EngineErrorInfo['kind'])=>(value:unknown,info?:{componentStack?:string})=>this.recordError(value,{kind,componentStack:info?.componentStack});
+      this.fiber=this.renderer.createContainer(this.container,1,null,!!options.strictMode,null,'godot-',report('uncaught'),report('caught'),report('recoverable'),null);
+      this.session.register(this);mounts.set(containerNativeNode,this.container);
+      if(entry||(options.runtimeHost&&binding?.role==='engine'&&binding.attachEntryCleanup)){
         const participant:EntryCleanupParticipant={
           beginClose:()=>this.requestShutdown(),tick:()=>this.session.drainClose(),seal:()=>{this.sealClose();},
           close:async()=>{const result=await this.close();if(result.status!=='complete')throw error('E_ENGINE_CLEANUP',`Native root cleanup ${result.status}`);},
         };
-        this.runtimeManagedCleanup=binding.attachEntryCleanup(options.runtimeHost,participant);
+        if(entry){this.detachEntryCleanup=entry.attachCleanup(participant);this.runtimeManagedCleanup=true;}
+        else {
+          this.runtimeManagedCleanup=binding!.attachEntryCleanup!(options.runtimeHost!,participant);
+          this.detachEntryCleanup=()=>{binding!.detachEntryCleanup?.(options.runtimeHost!,participant);};
+        }
         if(!this.runtimeManagedCleanup)throw error('E_ENGINE_ENTRY','Runtime host does not belong to an active project entry');
-        this.detachEntryCleanup=()=>{binding.detachEntryCleanup?.(options.runtimeHost!,participant);};
       }
       if(options.autoProcess!==false)this.installAutomaticProcessing();
-    }catch(value){this.shutdown();throw value;}
+    }catch(value){
+      // No project render has been admitted yet. Roll back reservations now so
+      // a failed attachment/automatic-driver setup cannot strand this mount.
+      this.nativeSealed=true;this.state='disposed';
+      for(const dispose of this.automatic.splice(0))try{dispose();}catch{}
+      try{this.detachEntryCleanup?.();}catch{}this.detachEntryCleanup=undefined;
+      if(this.nativeRuntime&&this.nativeScope!==undefined)try{this.nativeRuntime.closeScope(this.nativeScope);}catch{}
+      this.nativeScope=undefined;
+      if(mounts.get(containerNativeNode)===this.container)mounts.delete(containerNativeNode);
+      this.session.forgetSealed(this);throw value;
+    }
   }
   recordError(value:unknown,info:EngineErrorInfo={kind:'runtime'}):void {
     this.errors.push(value);
     if(this.pendingShutdown&&!this.closeResult&&(info.kind==='runtime'||info.kind==='uncaught'))this.cleanExit=false;
     try{
-      const stack=(value as {stack?:unknown})?.stack;
+      const stack=this.nativeSealed||this.closeResult?undefined:safeErrorStack(value)?.slice(0,32768);
       if(!this.nativeSealed&&!this.closeResult&&typeof stack==='string')info={...info,stack:mapEngineStack(stack,file=>{
         const access=this.godot[this.typeName('FileAccess')];
         return access&&nativeCall(access,'file_exists',file)?String(nativeCall(access,'get_file_as_string',file)):undefined;
       })};
     }catch{}
-    try{if(this.options.onError)this.options.onError(value,info);else (info.kind==='caught'||info.kind==='recoverable'?console.warn:console.error)(value);}catch(callbackError){this.errors.push(callbackError);}
+    try{if(this.options.onError)this.options.onError(value,info);else (info.kind==='caught'||info.kind==='recoverable'?console.warn:console.error)(safeErrorMessage(value)+(info.stack?'\n'+info.stack:''));}catch(callbackError){this.errors.push(callbackError);}
   }
   private fault(value:unknown):void {
     if(this.state==='disposed')return;
     if(!this.pendingShutdown)this.recordError(value);
     this.cleanExit=false;this.state=this.shutdownStarted?'disposing':'faulted';this.pendingShutdown=true;this.pendingRender=undefined;
+    this.notifyShutdown();
     this.session.requestPump();
   }
   /** A session checkpoint failure cannot leave a running, clean root. */
@@ -449,11 +580,44 @@ export class EngineRoot {
   getErrors():readonly unknown[] {return [...this.errors];}
   getStats():EngineStats {
     if(!this.nativeSealed)this.reapReleased();
-    return {...this.counters,state:this.state,pendingReleases:[...this.records].filter(r=>r.status==='release-requested').length,
-      liveRecords:[...this.records].filter(r=>r.status!=='release-requested'&&r.status!=='freed'&&!r.orphaned).length,
+    return {...this.counters,state:this.state,pendingReleases:this.pendingReleaseRecords.size,
+      liveRecords:this.liveRecords.size,publishedRecords:this.publishedRecords.size,
       processHooks:this.frames.process.size,physicsHooks:this.frames.physics.size,portals:this.portals.size,cleanExit:this.cleanExit};
   }
   portalContainers():Iterable<Container> {return this.portals.values();}
+  isNativeOwned(object:object):boolean {const record=owners.get(object);this.session.invalidateValidation();return !this.nativeSealed&&!this.pendingShutdown&&this.state==='running'&&!!record&&record.root===this&&!record.orphaned&&this.valid(record);}
+  isNativeReadable(object:object):boolean {const record=owners.get(object);this.session.invalidateValidation();return !this.nativeSealed&&!!record&&record.root===this&&!record.orphaned&&record.status!=='freed'&&record.status!=='release-requested'&&this.valid(record);}
+  /** Native domain adapters must validate this opaque scope again in C++. */
+  nativeOperationContext(object?:object):Readonly<{scope:unknown;worldId:string}> {
+    if(this.nativeSealed||this.pendingShutdown||this.state!=='running'||object&&!this.isNativeOwned(object)||!this.nativeRuntime||this.nativeScope===undefined)throw error('E_ENGINE_OWNERSHIP','A native operation requires an active renderer scope and claimed object');
+    return Object.freeze({scope:this.nativeScope,worldId:this.nativeRuntime.worldId});
+  }
+  /** Facts-only seal callbacks revoke JS admission without entering native state. */
+  nativeCleanupAvailable():boolean {return !this.nativeSealed;}
+  nativeReadOperationContext(object:object):Readonly<{scope:unknown;worldId:string}> {
+    if(!this.isNativeReadable(object)||!this.nativeRuntime||this.nativeScope===undefined)throw error('E_ENGINE_OWNERSHIP','A native read requires an active claimed object');
+    return Object.freeze({scope:this.nativeScope,worldId:this.nativeRuntime.worldId});
+  }
+  onShutdown(callback:()=>void):()=>void {
+    if(typeof callback!=='function')throw error('E_ENGINE_CLEANUP','Shutdown callback must be a function');
+    if(this.pendingShutdown||this.nativeSealed||this.state==='disposed'){callback();return noop;}
+    this.shutdownCallbacks.add(callback);return ()=>{this.shutdownCallbacks.delete(callback);};
+  }
+  /** Generated domain bindings run after all native structural commit writes. */
+  onCommit(callback:()=>void):()=>void {if(typeof callback!=='function')throw error('E_ENGINE_COMMIT','Commit callback must be a function');if(this.pendingShutdown||this.nativeSealed||this.state!=='running')return noop;this.commitCallbacks.add(callback);return()=>{this.commitCallbacks.delete(callback);};}
+  /** React cleanup has finished; native objects may still await retirement. */
+  onLogicalDispose(callback:()=>void):()=>void {if(this.logicalDisposeNotified){callback();return noop;}this.logicalDisposeCallbacks.add(callback);return()=>{this.logicalDisposeCallbacks.delete(callback);};}
+  onReferencesPublished(callback:()=>void):()=>void {if(this.nativeSealed||this.pendingShutdown)return noop;this.publicationCallbacks.add(callback);return()=>{this.publicationCallbacks.delete(callback);};}
+  onMaintenance(callback:()=>void):()=>void {if(this.nativeSealed||this.pendingShutdown)return noop;this.maintenanceCallbacks.add(callback);return()=>{this.maintenanceCallbacks.delete(callback);};}
+  publishReferences():void {if(!this.publicationPending||this.nativeSealed)return;this.publicationPending=false;for(const callback of [...this.publicationCallbacks])try{callback();}catch(value){this.recordError(value);}}
+  maintain():void {if(this.nativeSealed||this.pendingShutdown||this.state!=='running')return;for(const callback of [...this.maintenanceCallbacks])callback();}
+  dispatchEvent(callback:()=>void):void {if(this.nativeSealed||this.pendingShutdown||this.state!=='running')return;this.requirePermission();rendererCall(()=>this.renderer.flushSyncFromReconciler(callback));}
+  private notifyLogicalDispose():void {if(this.logicalDisposeNotified)return;this.logicalDisposeNotified=true;for(const callback of [...this.logicalDisposeCallbacks]){this.logicalDisposeCallbacks.delete(callback);try{callback();}catch(value){this.cleanExit=false;this.recordError(value);}}}
+  private notifyShutdown():void {for(const callback of [...this.shutdownCallbacks]){this.shutdownCallbacks.delete(callback);try{callback();}catch(value){this.cleanExit=false;this.recordError(value);}}}
+  enqueueNativeCallback(callback:()=>void):void {
+    if(this.nativeSealed||this.state!=='running'||this.pendingShutdown)return;
+    this.session.runNativeCallback(()=>{this.events.push(()=>{if(!this.nativeSealed&&this.state==='running'&&!this.pendingShutdown)callback();});});
+  }
   dependencyRoots():Iterable<EngineRoot> {return new Set([...this.records].flatMap(record=>[...record.dependents].map(container=>container.root)).filter(root=>root!==this));}
   writeProperty(object:any,name:string,value:unknown):unknown {
     return this.mutation(()=>{
@@ -478,15 +642,15 @@ export class EngineRoot {
     return ReconcilerFactory({
       rendererVersion:'0.3.0',rendererPackageName:'@godot-js/react/engine',supportsMutation:true,supportsPersistence:false,supportsHydration:false,isPrimaryRenderer:true,
       getRootHostContext:()=>emptyContext,getChildHostContext:()=>emptyContext,
-      getPublicInstance:(record:Instance)=>{record.root.session.invalidateValidation();if(!record.root.valid(record))throw error('E_ENGINE_REF','Native instance is unavailable');record.published=true;if(record.status==='materialized')record.status='published';return record.native;},
+      getPublicInstance:(record:Instance)=>{record.root.session.invalidateValidation();if(!record.root.valid(record))throw error('E_ENGINE_REF','Native instance is unavailable');record.published=true;if(record.status==='materialized')record.status='published';if(record.status==='published'&&!record.orphaned)record.root.publishedRecords.add(record);record.root.unpublishedRecords.delete(record);return record.native;},
       prepareForCommit:(container:Container)=>{const root=container.root;root.requirePermission();root.session.invalidateValidation();root.audit();root.committing=true;return null;},
-      resetAfterCommit:(container:Container)=>{const root=container.root;root.committing=false;root.counters.commits++;for(const record of root.records)if(record.status==='materialized'){record.published=true;record.status='published';}root.session.markVisibilityDirty();root.session.refreshVisibility();},
+      resetAfterCommit:(container:Container)=>{const root=container.root;root.committing=false;root.publicationPending=true;root.counters.commits++;for(const record of root.unpublishedRecords){root.counters.publicationRecordsVisited++;if(record.status==='materialized'){record.published=true;record.status='published';root.publishedRecords.add(record);}}root.unpublishedRecords.clear();root.session.markVisibilityDirty();root.session.refreshVisibility();for(const callback of [...root.commitCallbacks])callback();},
       preparePortalMount:noop,
       createInstance:(_type:string,props:NodeProps,container:Container)=>{
         const root=container.root;root.counters.prepared++;
         const scope=props.childScope??'react-managed';
         if(scope!=='react-managed'&&scope!=='native-owned-opaque')throw error('E_ENGINE_SCOPE','Unknown child scope');
-        return {kind:'instance',root,props,scope,children:[],invalidated:false,attached:false,hidden:false,published:false,deletionReceipt:false,orphaned:false,wasInsideTree:false,args:[],defaults:new Map(),values:new Map(),applied:new Map(),events:new Map(),dependents:new Set()};
+        return {kind:'instance',root,props,scope,children:[],invalidated:false,attached:false,hidden:false,published:false,deletionReceipt:false,orphaned:false,wasInsideTree:false,nativeRetired:false,args:[],defaults:new Map(),values:new Map(),applied:new Map(),events:new Map(),dependents:new Set()};
       },
       appendInitialChild:(parent:Instance,child:Instance)=>{
         if(parent.scope==='native-owned-opaque')throw error('E_ENGINE_OPAQUE','Use a borrowed portal to insert React content into an opaque subtree');
@@ -534,12 +698,19 @@ export class EngineRoot {
     }
     if(!nativeAlive(this.godot,object)||!nativeCall(object,'is_class','Node'))throw error('E_ENGINE_NODE','EngineNode requires a native Node');
     if(owners.has(object)||mounts.has(object))throw error('E_ENGINE_OWNERSHIP','Node already belongs to a root');
-    record.native=object;record.identity=nativeIdentity(object);record.status='materialized';owners.set(object,record);this.records.add(record);
+    if(this.nativeRuntime&&this.nativeScope!==undefined)this.nativeRuntime.claim(this.nativeScope,object);
+    record.native=object;record.identity=nativeIdentity(object);record.status='materialized';owners.set(object,record);this.records.add(record);this.liveRecords.add(record);this.unpublishedRecords.add(record);
+    this.nativeRecords.set(record.identity,record);this.dirtyRecords.add(record);
     if('object'in props)this.counters.adopted++;else this.counters.created++;
     try{
+      const integration=props.__engineIntegration&&engineNodeIntegration(props.__engineIntegration);
+      const dispose=integration?.afterCreate?.(this,object);if(dispose)record.releaseIntegration=dispose;
       record.properties=propertyDescriptions(object,this.memberName);this.apply(record,props);
+      integration?.apply?.(this,object,true);
+      if(props.nativeInterface)record.releaseNativeInterface=require('./engine-native-interfaces').bindEngineNativeInterface(this,object,props.nativeInterface);
       if(record.scope==='react-managed'&&nativeChildren(object).length)throw error('E_ENGINE_STRUCTURE','Composite native children require native-owned-opaque scope');
       for(const child of record.children){nativeCall(object,'add_child',this.make(child));child.attached=true;}
+      integration?.afterSubtree?.(this,object);
       return object;
     }catch(value){this.markRetiring(record);throw value;}
   }
@@ -603,11 +774,28 @@ export class EngineRoot {
     if(record.orphaned||record.status==='retiring')return;
     if(('ctor'in next)!==('ctor'in record.props)||('ctor'in next&&'ctor'in record.props&&next.ctor!==record.props.ctor)||('object'in next&&'object'in record.props&&next.object!==record.props.object))throw error('E_ENGINE_CONSTRUCTOR','Change key when changing the constructor/object');
     if((next.childScope??'react-managed')!==record.scope)throw error('E_ENGINE_SCOPE','Change key when changing child scope');
+    if(next.nativeInterface)nativeInterfaceSchema(next.nativeInterface);
+    if(next.nativeInterface!==record.props.nativeInterface)throw error('E_ENGINE_INTERFACE','Change key when changing the native interface token');
+    if(!!next.__engineIntegration!==!!record.props.__engineIntegration)throw error('E_ENGINE_INTEGRATION','Change key when adding or removing a renderer integration');
+    const integration=next.__engineIntegration&&engineNodeIntegration(next.__engineIntegration);
     const args='args'in next?next.args??[]:[];
     if(args.length!==record.args.length||args.some((value,index)=>!sameValue(record.args[index],captureValue(this.godot,value,this.typeName))))throw error('E_ENGINE_ARGUMENTS','Change key when changing constructor args');
     this.auditRecord(record);
     if(record.orphaned||!this.valid(record)){this.orphanIsland(record,'Native identity or parent changed');return;}
-    this.apply(record,next);record.props=next;
+    this.apply(record,next);integration?.apply?.(this,record.native,false);record.props=next;
+  }
+  /** A native release batch validates a snapshot. Later commits must not add
+   * children anywhere below that retiring frontier, including existing portals. */
+  private assertMountAccepting(target:any):void {
+    const visited=new Set<any>();
+    for(let node=target;node;node=nativeCall(node,'get_parent')){
+      if(visited.has(node))throw error('E_ENGINE_CYCLE','Cyclic native ancestry');
+      visited.add(node);
+      if(!nativeAlive(this.godot,node))throw error('E_ENGINE_PORTAL','Native mount ancestry has been released');
+      const owner=owners.get(node),root=owner?.root;
+      if(nativeCall(node,'is_queued_for_deletion')||owner&&(owner.orphaned||owner.invalidated||owner.status==='retiring'||owner.status==='release-requested'||owner.status==='freed'||root!.nativeSealed||root!.pendingShutdown||root!.state!=='running'))
+        throw error('E_ENGINE_PORTAL','Native mount ancestry is closing or retiring');
+    }
   }
   private append(parent:Parent,child:Instance,before?:Instance):void {
     if(parent.kind==='instance'&&parent.scope==='native-owned-opaque')throw error('E_ENGINE_OPAQUE','React children require a borrowed portal');
@@ -615,6 +803,7 @@ export class EngineRoot {
     if(parent.kind==='instance'&&parent.native){this.auditRecord(parent);if(parent.orphaned)return;}
     const target=parent.kind==='container'?parent.native:this.make(parent);
     if(parent.kind==='container'&&!alive(this.godot,target,parent.identity))throw error('E_ENGINE_CONTAINER','Native mount has been released');
+    this.assertMountAccepting(target);
     if(child.native&&!this.valid(child)){this.orphanIsland(child,'Native child changed');return;}
     const object=this.make(child);
     if(child.parent&&child.parent!==parent)child.parent.children=child.parent.children.filter(item=>item!==child);
@@ -623,7 +812,11 @@ export class EngineRoot {
     parent.children.splice(at<0?parent.children.length:at,0,child);child.parent=parent;
     const previous=nativeCall(object,'get_parent');
     if(previous&&previous!==target)nativeCall(previous,'remove_child',object);
-    if(previous!==target)nativeCall(target,'add_child',object);
+    if(previous!==target){
+      // Constructors, property setters and remove_child callbacks can close a
+      // different root after the first check. Revalidate at the native write.
+      this.assertMountAccepting(target);nativeCall(target,'add_child',object);
+    }
     child.attached=true;child.wasInsideTree=!!nativeCall(object,'is_inside_tree');
     if(before?.native&&nativeAlive(this.godot,before.native)){
       const oldIndex=Number(nativeCall(object,'get_index')),nextIndex=Number(nativeCall(before.native,'get_index'));
@@ -637,12 +830,17 @@ export class EngineRoot {
     this.counters.disconnects++;
   }
   private disconnect(record:Instance):void {for(const [name,slot]of record.events)this.disconnectSlot(record,name,slot);record.events.clear();}
+  private releaseDisposer(record:Instance,field:'releaseNativeInterface'|'releaseIntegration'):void {const dispose=record[field];record[field]=undefined;if(dispose)try{dispose();}catch(value){this.cleanExit=false;this.recordError(value);}}
+  private releaseInterface(record:Instance):void {this.releaseDisposer(record,'releaseNativeInterface');}
+  private releaseIntegration(record:Instance):void {this.releaseDisposer(record,'releaseIntegration');}
   private markRetiring(record:Instance):void {
     if(record.status==='freed'||record.status==='release-requested')return;
-    if(record.status)record.status='retiring';
-    if(record.native&&record.identity&&alive(this.godot,record.native,record.identity))record.wasInsideTree=record.wasInsideTree||!!nativeCall(record.native,'is_inside_tree');
+    if(record.status)record.status='retiring';this.publishedRecords.delete(record);this.unpublishedRecords.delete(record);this.releaseInterface(record);
+    if(!(this.nativeRuntime?.observationAbi===1&&this.nativeRuntime.requestReleaseBatch)&&record.native&&record.identity&&alive(this.godot,record.native,record.identity))record.wasInsideTree=record.wasInsideTree||!!nativeCall(record.native,'is_inside_tree');
     this.disconnect(record);
     for(const child of record.children)this.markRetiring(child);
+    // Children enter first even when React retires a subtree in several steps.
+    if(record.status==='retiring')this.retiringRecords.add(record);
   }
   private remove(parent:Parent,child:Instance):void {
     if(parent.kind==='instance')this.auditRecord(parent);
@@ -678,8 +876,7 @@ export class EngineRoot {
       if(actual.length!==expected.length||actual.some((object,index)=>object!==expected[index]))this.orphanIsland(record,'Unregistered public child or native order change');
     }
   }
-  audit():void {
-    if(this.nativeSealed||this.state==='disposed')return;
+  private auditContainers():void {
     if(alive(this.godot,this.container.native,this.container.identity)){
       const enclosing=this.session.owningAncestor(this.container.native);
       if(enclosing&&enclosing.root!==this){
@@ -694,7 +891,51 @@ export class EngineRoot {
         this.fault(error('E_ENGINE_PORTAL','Registered portal mount changed native ownership'));
       }
     }
-    for(const record of this.records)this.auditRecord(record);
+  }
+  audit():void {
+    if(this.nativeSealed)return;
+    const observed=this.nativeRuntime?.observationAbi===1&&this.nativeScope!==undefined;
+    if(this.state==='disposed'&&!observed)return;
+    let full=!this.nativeRuntime||this.nativeRuntime.observationAbi!==1||this.nativeScope===undefined||!this.observationReady;
+    let containers=full;
+    if(this.nativeRuntime?.observationAbi===1&&this.nativeScope!==undefined){
+      const batch=this.nativeRuntime.takeChanges(this.nativeScope);this.counters.observationBatches++;this.counters.observationChanges+=batch.changes.length;
+      if(batch.sealed||batch.wrongThread){this.cleanExit=false;this.recordError(error('E_ENGINE_OBSERVATION',batch.wrongThread?'A watched native structure changed on another thread':'Native observation was sealed'));this.sealClose();return;}
+      if(batch.mutationInProgress){this.session.requestPump();return;}
+      if(batch.revision!==this.observationRevision)this.session.invalidateValidation();
+      this.observationRevision=batch.revision;full=full||batch.overflow;
+      this.retirementAuditRequired||=batch.overflow&&this.pendingReleaseRecords.size>0;
+      for(const change of batch.changes){
+        const record=this.nativeRecords.get(change.objectId),parent=this.nativeRecords.get(change.parentId);
+        if(change.kind==='native-retired'&&record?.status==='release-requested'){this.forgetRecord(record,true);continue;}
+        if(record)this.dirtyRecords.add(record);if(parent)this.dirtyRecords.add(parent);
+        // A watched external ancestor or borrowed mount moved. Inspect the
+        // container ancestry without turning that into a whole-island scan.
+        if(!record||change.objectId===this.container.identity)containers=true;
+        if(change.kind==='native-retired'&&change.objectId===this.container.identity)this.requestShutdown();
+      }
+      this.observationReady=true;
+    }
+    // Logical disposal keeps only the native retirement ledger alive. Observer
+    // tombstones remain authoritative until every queued object is really gone.
+    if(this.state==='disposed'){this.dirtyRecords.clear();return;}
+    if(full){
+      this.counters.fullAudits++;this.auditContainers();
+      this.refreshContainerWatches();
+      for(const record of this.records){this.counters.auditRecordsVisited++;this.auditRecord(record);}
+      this.dirtyRecords.clear();return;
+    }
+    if(containers){
+      this.auditContainers();
+      this.refreshContainerWatches();
+    }
+    for(const record of this.dirtyRecords){this.counters.auditRecordsVisited++;this.auditRecord(record);}
+    this.dirtyRecords.clear();
+  }
+  private refreshContainerWatches():void {
+    if(!this.nativeRuntime||this.nativeScope===undefined)return;
+    if(alive(this.godot,this.container.native,this.container.identity))this.nativeRuntime.watch(this.nativeScope,this.container.native);
+    for(const container of this.portals.values())if(alive(this.godot,container.native,container.identity))this.nativeRuntime.watch(this.nativeScope,container.native);
   }
   private orphanIsland(record:Instance,reason:string):void {
     if(record.orphaned)return;
@@ -709,7 +950,14 @@ export class EngineRoot {
     }
     const mark=(item:Instance)=>{
       if(visited.has(item))return;visited.add(item);
-      if(!item.orphaned){item.orphaned=true;item.invalidated=true;this.counters.invalidations++;this.counters.orphaned++;this.disconnect(item);}
+      if(!item.orphaned){
+        item.orphaned=true;item.invalidated=true;this.counters.invalidations++;this.counters.orphaned++;this.orphanedRecords.add(item);this.liveRecords.delete(item);this.publishedRecords.delete(item);
+        // Relinquishing revokes JS finalization rights without freeing a Node
+        // which an external native owner has taken. The native registry keeps
+        // this quarantine until actual retirement/world teardown.
+        if(this.nativeRuntime&&this.nativeScope!==undefined&&item.native&&item.identity&&alive(this.godot,item.native,item.identity))try{this.nativeRuntime.relinquish(this.nativeScope,item.native);}catch(value){this.recordError(value);}
+        this.releaseInterface(item);this.releaseIntegration(item);this.disconnect(item);
+      }
       if(item.native&&owners.get(item.native)===item)owners.delete(item.native);
       for(const child of item.children)mark(child);
       for(const child of retiredChildren.get(item)??[])mark(child);
@@ -719,39 +967,69 @@ export class EngineRoot {
     this.fault(error('E_ENGINE_STRUCTURE',`${reason}; retained ownership island ${island.identity??'unmaterialized'}`));
   }
   closeDependentPortals():void {
-    for(const record of this.records)if(record.status==='retiring'||record.orphaned)for(const container of record.dependents){
+    for(const record of new Set([...this.retiringRecords,...this.orphanedRecords])){this.counters.portalRecordsVisited++;for(const container of record.dependents){
       if(container.children.some(child=>child.status!=='retiring'&&child.status!=='release-requested'&&child.status!=='freed'))container.root.requestShutdown();
-    }
+    }}
   }
   private descendantsSettled(record:Instance):boolean {
     for(const child of record.children){
       if(child.status&&child.status!=='freed'&&child.status!=='release-requested'&&!child.orphaned)return false;
     }
-    for(const container of record.dependents){
-      if(container.children.some(child=>child.status!=='freed'&&child.status!=='release-requested'&&!child.orphaned))return false;
-      // Native queued children must actually be gone before their owner cascades free.
-      if(container.children.some(child=>child.native&&child.identity&&alive(this.godot,child.native,child.identity)))return false;
+    return this.dependentPortalsSettled(record);
+  }
+  private dependentPortalsSettled(record:Instance):boolean {
+    for(const container of record.dependents)for(const child of container.children){
+      if(child.nativeRetired||!child.native)continue;
+      // A retired JS record or invalid wrapper alone cannot authorize its
+      // opaque native owner's cascading destruction.
+      const lookup=this.godot.instance_from_id??this.godot.instanceFromId;
+      if(!child.identity||typeof lookup!=='function'||nativeReleaseState(this.godot,child.native,child.identity)!=='released')return false;
     }
     return true;
+  }
+  private releaseRetirementFrontiers():void {
+    const native=this.nativeRuntime!;
+    for(const record of [...this.retiringRecords])if(record.orphaned)this.forgetRecord(record,false);
+    const frontiers=[...this.retiringRecords].filter(record=>!record.attached||record.parent?.kind!=='instance'||record.parent.status!=='retiring');
+    for(const frontier of frontiers){
+      const records:Instance[]=[],descriptors:EngineNativeReleaseDescriptor[]=[],stack=[frontier],seen=new Set<Instance>();let ready=true;
+      while(stack.length){
+        const record=stack.pop()!;if(seen.has(record))continue;seen.add(record);this.counters.retirementRecordsVisited++;
+        if(record.orphaned||record.status!=='retiring'||record.published&&!record.deletionReceipt||!record.native||!record.identity||!this.dependentPortalsSettled(record)){ready=false;break;}
+        const children=record.children.filter(child=>child.attached&&child.parent===record&&!!child.native&&!child.orphaned&&child.status!=='freed');
+        if(children.some(child=>child.status!=='retiring')){ready=false;break;}
+        records.push(record);descriptors.push({node:record.native,parent:record.attached?record.parent?.native??null:null,children:children.map(child=>child.native),opaque:record.scope==='native-owned-opaque'});for(const child of children)stack.push(child);
+      }
+      if(!ready)continue;
+      try{
+        for(const record of records)this.releaseIntegration(record);
+        if(native.requestReleaseBatch!(this.nativeScope,descriptors,[frontier.native])!==true)throw error('E_ENGINE_RELEASE','Native retirement batch was rejected');
+        this.counters.batchReleaseRequests++;this.counters.releaseFrontiers++;
+        for(const record of records){record.status='release-requested';record.attached=false;this.retiringRecords.delete(record);this.pendingReleaseRecords.add(record);this.liveRecords.delete(record);this.counters.releaseRequested++;record.defaults.clear();record.values.clear();record.applied.clear();}
+      }catch(value){this.recordError(value);this.orphanIsland(frontier,'Native retirement batch failed; session teardown is required');}
+    }
+    this.reapReleased();
   }
   releaseRetired():void {
     if(this.nativeSealed)return;
     if(!this.session.releaseAllowed())return;
-    const list=[...this.records].reverse();
+    if(this.nativeRuntime?.observationAbi===1&&this.nativeRuntime.requestReleaseBatch&&this.nativeScope!==undefined){this.releaseRetirementFrontiers();return;}
+    const list=[...this.retiringRecords];
     for(const record of list){
+      this.counters.retirementRecordsVisited++;
       if(record.status!=='retiring')continue;
       if(record.published&&!record.deletionReceipt)continue;
       if(!this.descendantsSettled(record))continue;
       if(record.orphaned){this.forgetRecord(record,false);continue;}
-      this.session.invalidateValidation();this.auditRecord(record);
-      if(record.orphaned){this.forgetRecord(record,false);continue;}
-      if(!record.native||!record.identity||!alive(this.godot,record.native,record.identity)){this.forgetRecord(record,false);continue;}
+      if(!record.native||!record.identity){this.forgetRecord(record,false);continue;}
       try{
+        this.releaseIntegration(record);
         this.detachRetiring(record);
         if(record.orphaned){this.forgetRecord(record,false);continue;}
+        if(this.nativeRuntime&&this.nativeScope!==undefined)this.nativeRuntime.requestRelease(this.nativeScope,record.native);
         nativeCall(record.native,record.wasInsideTree?'queue_free':'free');
         if(!record.wasInsideTree&&alive(this.godot,record.native,record.identity))throw error('E_ENGINE_RELEASE','Native free returned without confirming destruction');
-        this.counters.releaseRequested++;record.status='release-requested';
+        this.counters.releaseRequested++;record.status='release-requested';this.retiringRecords.delete(record);this.pendingReleaseRecords.add(record);this.liveRecords.delete(record);
         record.defaults.clear();record.values.clear();record.applied.clear();
       }catch(value){
         this.recordError(value);
@@ -764,13 +1042,22 @@ export class EngineRoot {
   }
   reapReleased():void {
     if(this.nativeSealed)return;
-    for(const record of [...this.records])if(record.status==='release-requested'&&record.native&&record.identity&&nativeReleaseState(this.godot,record.native,record.identity)==='released')this.forgetRecord(record,true);
+    if(!this.pendingReleaseRecords.size){this.retirementAuditRequired=false;this.refreshCloseResult();return;}
+    if(this.pendingReleaseRecords.size&&this.nativeRuntime?.observationAbi===1&&this.nativeScope!==undefined){
+      this.audit();if(this.nativeSealed)return;
+      if(!this.retirementAuditRequired){this.refreshCloseResult();return;}
+      this.retirementAuditRequired=false;
+    }
+    for(const record of [...this.pendingReleaseRecords]){this.counters.releaseRecordsVisited++;if(record.native&&record.identity&&nativeReleaseState(this.godot,record.native,record.identity)==='released')this.forgetRecord(record,true);}
     this.refreshCloseResult();
   }
-  hasRetirements():boolean {return [...this.records].some(record=>record.status==='retiring');}
+  hasRetirements():boolean {return this.retiringRecords.size>0;}
   private forgetRecord(record:Instance,freed:boolean):void {
     if(record.status==='freed')return;
     record.status='freed';if(freed)this.counters.freed++;
+    record.nativeRetired||=freed;
+    this.releaseInterface(record);this.releaseIntegration(record);this.liveRecords.delete(record);this.publishedRecords.delete(record);this.unpublishedRecords.delete(record);this.retiringRecords.delete(record);this.pendingReleaseRecords.delete(record);this.orphanedRecords.delete(record);
+    if(record.identity)this.nativeRecords.delete(record.identity);this.dirtyRecords.delete(record);
     if(record.native&&owners.get(record.native)===record)owners.delete(record.native);
     record.defaults.clear();record.values.clear();record.applied.clear();this.records.delete(record);
     for(const container of record.dependents){container.owner=undefined;}
@@ -842,6 +1129,7 @@ export class EngineRoot {
   physicsFrame(delta:number,token?:EngineFrameToken):void {this.automaticFrame('physics',delta,token);}
   portal(element:React.ReactNode,target:object,key:React.Key='portal'):React.ReactPortal {
     if(this.nativeSealed||this.state!=='running'||!nativeAlive(this.godot,target)||!nativeCall(target,'is_class','Node'))throw error('E_ENGINE_PORTAL','Expected a live native mount');
+    this.assertMountAccepting(target);
     const reserved=mounts.get(target);if(reserved&&reserved.root!==this)throw error('E_ENGINE_OWNERSHIP','Portal mount belongs to another root');
     if(owners.has(target))throw error('E_ENGINE_OWNERSHIP','Use a borrowed child mount, not an owned node');
     let container=this.portals.get(target);
@@ -853,11 +1141,12 @@ export class EngineRoot {
       // Native ancestry is acyclic; owned nodes cannot be reused as mounts/children.
       if(owner)this.session.registerPortalDependency(owner,container);
       this.portals.set(target,container);mounts.set(target,container);
+      if(this.nativeRuntime&&this.nativeScope!==undefined)this.nativeRuntime.watch(this.nativeScope,target);
     }
     return this.renderer.createPortal(element,container,null,key);
   }
   unmount():void {if(this.state==='running')this.render(null);}
-  requestShutdown():void {if(!this.nativeSealed&&this.state!=='disposed'){this.pendingShutdown=true;this.pendingRender=undefined;this.session.requestPump();}}
+  requestShutdown():void {if(!this.nativeSealed&&this.state!=='disposed'){this.pendingShutdown=true;this.pendingRender=undefined;this.notifyShutdown();this.session.requestPump();}}
   shutdown():void {if(this.nativeSealed)return;this.requestShutdown();this.session.pump();}
   /** Idempotent completion waits for native releases, independently of stats. */
   close():Promise<EngineCloseResult> {
@@ -868,15 +1157,20 @@ export class EngineRoot {
   }
   getCloseProgress():EngineCloseProgress {
     if(!this.nativeSealed)this.reapReleased();
-    return {status:this.closeResult?.status??(this.pendingShutdown||this.shutdownStarted?'pending':'open'),logicalDisposed:this.state==='disposed',pendingReleases:[...this.records].filter(record=>record.status==='release-requested').length};
+    return {status:this.closeResult?.status??(this.pendingShutdown||this.shutdownStarted?'pending':'open'),logicalDisposed:this.state==='disposed',pendingReleases:this.pendingReleaseRecords.size};
   }
   /** Called before/at native epoch sealing; never enters a native object. */
   sealClose():EngineCloseResult {
     this.nativeSealed=true;
+    this.notifyShutdown();
+    this.notifyLogicalDispose();
+    this.nativeScope=undefined;
     if(this.closeResult){this.session.forgetSealed(this);return this.closeResult;}
     this.pendingShutdown=true;this.pendingRender=undefined;
     this.frames.process.clear();this.frames.physics.clear();this.events.length=0;
-    const pendingReleases=[...this.records].filter(record=>record.status==='release-requested').length;
+    this.commitCallbacks.clear();
+    this.publicationCallbacks.clear();this.maintenanceCallbacks.clear();
+    const pendingReleases=this.pendingReleaseRecords.size;
     this.closeResult=Object.freeze({status:this.cleanExit?'unconfirmed':'failed',pendingReleases});
     this.resolveClose?.(this.closeResult);this.session.forgetSealed(this);
     return this.closeResult;
@@ -884,9 +1178,17 @@ export class EngineRoot {
   /** Session-owned release ledger survives logical root disposal. */
   refreshCloseResult():void {
     if(this.closeResult||this.nativeSealed||this.state!=='disposed')return;
-    const pendingReleases=[...this.records].filter(record=>record.status==='release-requested').length;
+    const pendingReleases=this.pendingReleaseRecords.size;
     if(pendingReleases)return;
-    this.closeResult=Object.freeze({status:this.cleanExit?'complete':'failed',pendingReleases:0});
+    let nativeStatus:EngineCloseResult['status']='complete';
+    if(this.nativeRuntime&&this.nativeScope!==undefined){
+      try{
+        const state=this.nativeRuntime.closeScope(this.nativeScope);
+        if(state.pending>0)nativeStatus=state.quarantined>0?'failed':'unconfirmed';
+        else this.nativeScope=undefined;
+      }catch(value){this.cleanExit=false;this.recordError(value);nativeStatus='unconfirmed';}
+    }
+    this.closeResult=Object.freeze({status:this.cleanExit?nativeStatus:'failed',pendingReleases:0});
     if(this.closeResult.status==='complete'){
       const detach=this.detachEntryCleanup;this.detachEntryCleanup=undefined;detach?.();
     }
@@ -894,20 +1196,22 @@ export class EngineRoot {
   }
   finishShutdown():void {
     if(!this.shutdownStarted||this.state==='disposed')return;
-    for(const record of this.records)if(record.status==='materialized'&&!record.published)this.markRetiring(record);
-    if([...this.records].some(record=>record.status!=='release-requested'&&record.status!=='freed'))return;
+    for(const record of [...this.unpublishedRecords])if(record.status==='materialized'&&!record.published)this.markRetiring(record);
+    if(this.records.size!==this.pendingReleaseRecords.size)return;
     for(const unsubscribe of this.automatic.splice(0))try{unsubscribe();}catch(value){this.cleanExit=false;this.recordError(value);}
     this.frames.process.clear();this.frames.physics.clear();this.events.length=0;
+    this.commitCallbacks.clear();
+    this.publicationCallbacks.clear();this.maintenanceCallbacks.clear();
     if(mounts.get(this.container.native)===this.container)mounts.delete(this.container.native);
     for(const [target,container]of this.portals){if(mounts.get(target)===container)mounts.delete(target);container.owner?.dependents.delete(container);}
-    this.portals.clear();this.state='disposed';this.session.forget(this);this.refreshCloseResult();
+    this.portals.clear();this.notifyLogicalDispose();this.state='disposed';this.session.forget(this);this.refreshCloseResult();
   }
   private installAutomaticProcessing():void {
     if(!nativeCall(this.container.native,'is_inside_tree'))throw error('E_ENGINE_AUTOPROCESS','Mount must be in SceneTree, or use autoProcess:false');
     const tree=nativeCall(this.container.native,'get_tree');
     for(const [signal,callback]of [['process_frame',()=>this.processFrame(Number(nativeCall(this.container.native,'get_process_delta_time')))],['physics_frame',()=>this.physicsFrame(Number(nativeCall(this.container.native,'get_physics_process_delta_time')))]] as const){
       const callable=this.godot.Callable.create(()=>this.session.runNativeCallback(()=>{
-        if(this.state!=='running')return;
+        if(this.nativeSealed||this.pendingShutdown||this.state!=='running')return;
         if(!alive(this.godot,this.container.native,this.container.identity)){this.requestShutdown();return;}
         callback();
       },false));

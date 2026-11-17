@@ -188,6 +188,7 @@ v8_support = validate_library_support(v8_prebuilt_libs) if quickjs_support is No
 lws_support = validate_library_support(lws_prebuilt_libs) if v8_support is not None else None
 
 jsb_defines = [
+    CompileDefines("JSB_WITH_LEGACY_REACT", 1 if env["enable_legacy_react"] else 0),
     CompileDefines("JSB_USE_TYPESCRIPT", 1 if env["use_typescript"] else 0),
     CompileDefines("JSB_WITH_QUICKJS", 1 if quickjs_support is not None else 0),
     CompileDefines("JSB_PREFER_QUICKJS_NG", 1 if quickjs_support is not None and quickjs_support[1].path == "quickjs-ng" else 0, [
@@ -628,9 +629,11 @@ generate_code([\
 
 # common parts
 env_jsb.add_source_files(module_obj, ["register_types.cpp", "jsb_project_preset.gen.cpp"])
-env_jsb.add_source_files(module_obj, "internal/*.cpp")
+env_jsb.add_source_files(module_obj, ["internal/" + name for name in sorted(os.listdir("internal"))
+    if name.endswith(".cpp") and (env["enable_legacy_react"] or name != "jsb_react_local_resources.cpp")])
 env_jsb.add_source_files(module_obj, "weaver/*.cpp")
-env_jsb.add_source_files(module_obj, "bridge/*.cpp")
+env_jsb.add_source_files(module_obj, ["bridge/" + name for name in sorted(os.listdir("bridge"))
+    if name.endswith(".cpp") and (env["enable_legacy_react"] or name != "jsb_react_bridge.cpp")])
 
 # editor functionalities
 if env.editor_build:

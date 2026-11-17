@@ -94,6 +94,7 @@ jobs:
           pnpm --filter @godot-js/playground build:frontend -- --shell-only
           pnpm --filter @godot-js/playground test:browser:projects
           node apps/playground/scripts/browser-project-isolation-test.mjs
+          node apps/playground/scripts/browser-project-blob-storage-test.mjs
           node apps/playground/scripts/browser-release-context-test.mjs
       - name: Release provenance, integrity, npm-pack consumer and failure gates
         run: |
@@ -205,6 +206,12 @@ jobs:
           pactl set-default-sink godotjs_browser
           pactl info
           pactl --format=json list sinks | node --input-type=module -e 'import {readFileSync} from "node:fs"; const sink=JSON.parse(readFileSync(0,"utf8")).find(item=>item.name==="godotjs_browser"); if(!sink||!/\b2ch\b.*\b48000Hz\b/.test(sink.sample_specification??""))throw Error("Expected the real 48 kHz stereo browser mixing sink"); console.log(JSON.stringify({name:sink.name,state:sink.state,sampleSpecification:sink.sample_specification}));'
+      - name: Verify native checkpoints and cleanup against the exact Web build
+        env:
+          BROWSER_EXECUTABLE: ${{ env.CHROMIUM }}
+        run: |
+          node scripts/test/native-web-checkpoint-probe.mjs --report "$RUNNER_TEMP/browser-engine-report.json" --out "$RUNNER_TEMP/web-native-checkpoint"
+          node scripts/test/browser-web-lifecycle.mjs --engine-report "$RUNNER_TEMP/browser-engine-report.json" --out "$RUNNER_TEMP/web-lifecycle"
       - name: Verify the independent native and production React engine gate
         env:
           PLAYWRIGHT_CHROMIUM_EXECUTABLE: ${{ env.CHROMIUM }}
@@ -245,6 +252,14 @@ jobs:
           module_navigation_2d_enabled=yes module_navigation_3d_enabled=yes
           module_godot_physics_2d_enabled=yes module_godot_physics_3d_enabled=yes
           module_ogg_enabled=yes module_vorbis_enabled=yes module_gltf_enabled=yes module_jpg_enabled=yes
+      - name: Verify shared binary resource production and native PCK loading
+        env:
+          GODOT: ${{ runner.temp }}/godot-browser-build/bin/godot.linuxbsd.editor.x86_64
+        run: |
+          node --input-type=module <<'NODE'
+          import {runBinaryResourceProbe} from './scripts/test/binary-resource-probe.mjs';
+          await runBinaryResourceProbe({godot:process.env.GODOT,chromium:process.env.CHROMIUM,out:process.env.RUNNER_TEMP+'/binary-resource-probe'});
+          NODE
       - name: Build the selected native product candidate
         env:
           GODOT: ${{ runner.temp }}/godot-browser-build/bin/godot.linuxbsd.editor.x86_64
@@ -260,6 +275,13 @@ jobs:
           --out "$RUNNER_TEMP/default-playground-site"
       - name: Prepare transparent HTTP delivery variants
         run: node apps/playground/scripts/prepare-site-delivery.mjs "$RUNNER_TEMP/default-playground-site"
+      - name: Verify the actual product remains usable when persistence is unavailable
+        env:
+          PLAYWRIGHT_CHROMIUM_EXECUTABLE: ${{ env.CHROMIUM }}
+          PLAYGROUND_BROWSER_SETTINGS_TIER: environment-override
+          PLAYGROUND_TEST_DIRECTORY: ${{ runner.temp }}/default-playground-site
+          PLAYGROUND_STORAGE_DEGRADATION_REPORT: ${{ runner.temp }}/storage-degradation.json
+        run: node apps/playground/scripts/browser-storage-degradation-test.mjs
       - name: Accept both explicit Worker presenters against the exact candidate
         env:
           PLAYWRIGHT_CHROMIUM_EXECUTABLE: ${{ env.CHROMIUM }}
@@ -330,6 +352,10 @@ jobs:
             ${{ runner.temp }}/profile-gate
             ${{ runner.temp }}/basic-text-results
             ${{ runner.temp }}/browser-engine-report.json
+            ${{ runner.temp }}/web-native-checkpoint/
+            ${{ runner.temp }}/web-lifecycle/
+            ${{ runner.temp }}/binary-resource-probe/
+            ${{ runner.temp }}/storage-degradation.json
             ${{ runner.temp }}/browser-engine-measurement.json
             ${{ runner.temp }}/browser-engine-performance.legacy.json
             ${{ runner.temp }}/browser-engine-performance.worker-direct.json

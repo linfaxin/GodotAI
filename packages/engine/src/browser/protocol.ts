@@ -1,6 +1,7 @@
 /** This protocol routes untrusted preview telemetry; it does not attest user code. */
 import type {SessionCleanupReceipt} from './engine-session.js';
 import {isSessionFacts,type SessionFacts} from '../session-facts.js';
+import type {ArtifactSet} from '../artifact-set.js';
 export const PREVIEW_PROTOCOL = 1 as const;
 export type Revision = string | number;
 export interface RunIdentity {
@@ -13,7 +14,9 @@ export interface BrowserArtifact {
   revision: Revision;
   buildKey: string;
   generation: Revision;
-  pack: Uint8Array;
+  variant?:'single-pack'|'pack-set';
+  pack?: Uint8Array;
+  artifactSet?:ArtifactSet;
   manifest: unknown;
   /** Outer receipt hash, deliberately excluded from the pack's own manifest. */
   packSha256?:string;

@@ -389,6 +389,9 @@ class jsbb_External {
 
 class jsbb_Engine {
     private _native_alive = true;
+    private _native_entry_depth = 0;
+    private _checkpoint_ticket = 0;
+    private _native_facade?: jsbb_Engine;
     private _id: EngineID;
 
     // a fake global for Environment
@@ -407,6 +410,54 @@ class jsbb_Engine {
 
     get opaque() { return this._opaque; }
     get native_alive() { return this._native_alive; }
+
+    /** Every WASM -> JS entry, including getters and JSON hooks, shares this
+     * fence. A callback reached through a native frame cannot destroy it. */
+    NativeFacade(): jsbb_Engine {
+        if (this._native_facade) return this._native_facade;
+        const methods = new Map<PropertyKey, { source: Function; wrapped: Function }>();
+        this._native_facade = new Proxy(this, { get: (target, key) => {
+            const value = Reflect.get(target, key, target);
+            if (typeof value !== "function") return value;
+            const cached = methods.get(key);
+            if (cached?.source === value) return cached.wrapped;
+            const wrapped = (...args: unknown[]) => {
+                target._native_entry_depth++;
+                try { return Reflect.apply(value, target, args); }
+                finally { target._native_entry_depth--; }
+            };
+            methods.set(key, { source: value, wrapped });
+            return wrapped;
+        } });
+        return this._native_facade;
+    }
+
+    CanDestroyCheckpoint(): boolean {
+        return this._native_alive && this._checkpoint_ticket !== 0 && this._native_entry_depth === 0;
+    }
+
+    ScheduleCheckpoint(callback: () => unknown): boolean {
+        if (!this._native_alive || typeof callback !== "function" || typeof Module === "undefined"
+            || typeof Module._jsni_native_checkpoint_enter !== "function" || typeof Module._jsni_native_checkpoint_leave !== "function") return false;
+        // The microtask runs only after the enclosing JS/WASM/native call has
+        // unwound. Never carry a native ticket across an await or Promise.
+        void Promise.resolve().then(() => {
+            if (_jsbb_.engine !== this || !this._native_alive || this._native_entry_depth || this._checkpoint_ticket) return;
+            const ticket = Module._jsni_native_checkpoint_enter!(this._opaque) >>> 0;
+            if (!ticket) throw new Error("E_NATIVE_CHECKPOINT_DENIED");
+            this._checkpoint_ticket = ticket;
+            try { callback(); }
+            finally {
+                this._checkpoint_ticket = 0;
+                Module._jsni_native_checkpoint_leave!(this._opaque, ticket);
+            }
+        }).catch(error => {
+            const host = (globalThis as any).__godotjsRuntimeHost;
+            if (typeof host?.reportDiagnostic === "function") host.reportDiagnostic({ kind: "runtime", message: String(error), stack: error?.stack });
+            else jsbb_console.error("native checkpoint failed", error);
+        });
+        return true;
+    }
 
     /** Logical Environment disposal precedes physical handle/registry release. */
     SealNative(): void { this._native_alive = false; }
@@ -1472,6 +1523,10 @@ class _jsbb_ {
     private static _sealed_native_epoch: string | undefined;
     private static _i64: BigInt64Array;
     private static _pending_worker_messages: Array<QueuedWorkerMessage> = [];
+    // A native Object must leave its source Environment before another pthread
+    // can bind it. Staging owns a fully cloned packet without publishing it.
+    private static _prepared_worker_messages = new Map<number, { engine: jsbb_Engine; epoch: string; packet: WorkerMessage; buffers: ArrayBuffer[] }>();
+    private static _next_prepared_worker_message = 1;
     // Emscripten pthreads are a transport, not a runtime role. The page may
     // relay traffic without ever creating a GodotJS environment of its own.
     private static _runtime: WorkerRuntime = { role: "host", thread: 0, parent: 0, epoch: "host" };
@@ -1571,6 +1626,10 @@ class _jsbb_ {
         // currectly, engine_id is hardcoded.
         // only one single engine is supported to new simultaneously
         this.engine = new jsbb_Engine(0, opaque);
+        if (typeof Module !== "undefined" && typeof Module._jsni_native_checkpoint_enter === "function" && typeof Module._jsni_native_checkpoint_leave === "function") {
+            Module.godotjsCheckpointAbi = 1;
+            Module.godotjsScheduleCleanupCheckpoint = (callback: () => unknown) => this.engine?.ScheduleCheckpoint(callback) ?? false;
+        }
         this._engine_runtime = this._runtime;
         // Environment construction has not installed the script's handlers yet.
         // Drain only at the explicit native update checkpoint.
@@ -1615,6 +1674,7 @@ class _jsbb_ {
 
     static SealNativeEpoch(engine_id: EngineID): void {
         if (engine_id !== 0 || !this.engine) return;
+        this._prepared_worker_messages.clear();
         // Retire captured JS wrappers even while ScriptInstances retain the
         // physical Isolate. This does not dispose another entry in a live epoch.
         if (typeof this.engine.SealNative === "function") this.engine.SealNative();
@@ -1638,7 +1698,17 @@ class _jsbb_ {
             jsbb_console.error("invalid engine id");
             return undefined;
         }
-        return this.engine;
+        return this.engine?.NativeFacade();
+    }
+
+    static CanDestroyCheckpoint(engine_id: EngineID): boolean {
+        return engine_id === 0 && (this.engine?.CanDestroyCheckpoint() ?? false);
+    }
+
+    static ScheduleCheckpoint(engine_id: EngineID, callback_sp: StackPosition): boolean {
+        if (engine_id !== 0 || !this.engine?.native_alive) return false;
+        const callback = this.engine.stack.GetValue(callback_sp);
+        return typeof callback === "function" && this.engine.ScheduleCheckpoint(callback);
     }
 
     static is_object(val: unknown): val is object {
@@ -1845,7 +1915,9 @@ class _jsbb_ {
         context: jsbb_TransferEncodeContext,
         value: unknown,
     ): unknown {
-        if (!this.is_object(value)) {
+        if (!this.is_object(value) || typeof value === "function") {
+            // A JS function is never a transferable Godot value. Let the
+            // complete clone reject it without a spurious native conversion.
             return value;
         }
 
@@ -2029,6 +2101,7 @@ class _jsbb_ {
         this._runtime = { role: name, thread, parent, epoch: `${thread}:${++this._runtime_serial}:${Math.random()}` };
         this._routes.set(thread, this._runtime);
         this._pending_worker_messages.length = 0;
+        this._prepared_worker_messages.clear();
         const host = (globalThis as any).__godotjsRuntimeHost;
         if (typeof host?.assignRole === "function") host.assignRole(name);
         if (name !== "host" && typeof host?.beginNativeEpoch === "function") host.beginNativeEpoch(this._runtime.epoch);
@@ -2082,7 +2155,7 @@ class _jsbb_ {
         }
         const destination = typeof PThread !== "undefined" ? PThread?.pthreads[target.thread] : undefined;
         if (!destination) return false;
-        destination.postMessage(delivered);
+        destination.postMessage(delivered, this.owned_message_buffers(delivered));
         return true;
     }
 
@@ -2115,16 +2188,42 @@ class _jsbb_ {
         PThread.getNewWorker = wrapped;
     }
 
-    static post_message_to_worker(pthread_id: number, data: unknown, transfer_id = 0, to_parent = false): boolean {
+    private static create_worker_message(pthread_id: number, data: unknown, transfer_id: number, to_parent: boolean): WorkerMessage | undefined {
         const runtime = this._runtime;
-        if (runtime.role === "host" || (to_parent && runtime.role !== "script-worker")) return false;
+        if (runtime.role === "host" || (to_parent && runtime.role !== "script-worker")) return;
         const target = to_parent ? runtime.parent : pthread_id;
-        const payload: WorkerMessage = {
+        return {
             __jsbMessage: true, version: 1, data, transfer_id,
             route: { source: runtime.thread, target, channel: pthread_id, epoch: runtime.epoch, direction: to_parent ? "to-parent" : "to-child" },
         };
+    }
+
+    private static owned_message_buffers(packet: WorkerMessage): ArrayBuffer[] {
+        const seen = new Set<object>(), buffers = new Set<ArrayBuffer>(), pending: unknown[] = [packet];
+        while (pending.length) {
+            const value = pending.pop();
+            if (!value || typeof value !== "object" || seen.has(value)) continue;
+            seen.add(value);
+            if (value instanceof ArrayBuffer) { buffers.add(value); continue; }
+            if (ArrayBuffer.isView(value)) {
+                // SharedArrayBuffer intentionally retains its shared semantics.
+                if (value.buffer instanceof ArrayBuffer) buffers.add(value.buffer);
+                continue;
+            }
+            if (value instanceof Map) { for (const [key, item] of value) pending.push(key, item); continue; }
+            if (value instanceof Set) { for (const item of value) pending.push(item); continue; }
+            // This is a clone owned by the transport, never the user's graph.
+            // Read only data descriptors, so publication cannot run a getter.
+            for (const descriptor of Object.values(Object.getOwnPropertyDescriptors(value))) {
+                if ("value" in descriptor) pending.push(descriptor.value);
+            }
+        }
+        return [...buffers];
+    }
+
+    private static publish_worker_message(payload: WorkerMessage, buffers: ArrayBuffer[]): boolean {
         try {
-            if (jsbb_is_pthread) globalThis.postMessage(payload);
+            if (jsbb_is_pthread) (globalThis.postMessage as (message: unknown, transfer: Transferable[]) => void)(payload, buffers);
             else if (!this.relay_worker_message(payload)) return false;
             return true;
         } catch (error) {
@@ -2133,7 +2232,14 @@ class _jsbb_ {
         }
     }
 
-    static PostMessage(
+    static post_message_to_worker(pthread_id: number, data: unknown, transfer_id = 0, to_parent = false): boolean {
+        const payload = this.create_worker_message(pthread_id, data, transfer_id, to_parent);
+        if (!payload) return false;
+        const packet = structuredClone(payload);
+        return this.publish_worker_message(packet, this.owned_message_buffers(packet));
+    }
+
+    static PrepareMessage(
         pthread_id: number,
         engine_opaque: IntPtr,
         data_sp: StackPosition,
@@ -2142,11 +2248,13 @@ class _jsbb_ {
         to_parent: boolean): number {
         const engine = this.engine;
 
-        if (!engine || engine.native_alive === false) {
-            return jsbb_PostMessageResult.Failed;
-        }
+        // engine.opaque identifies the Isolate; engine_opaque here is the
+        // Environment token used by the native transfer registry. Their
+        // ownership checks belong to that registry, not a pointer comparison.
+        if (!engine || engine.native_alive === false) return 0;
 
-        engine.stack.EnterScope();
+        const stack = engine.stack, runtime = this._runtime;
+        stack.EnterScope();
 
         try {
             const transfer_context = this.create_transfer_encode_context();
@@ -2165,14 +2273,45 @@ class _jsbb_ {
                 message
             );
 
-            // Keep the native receipt even for plain structured-clone messages.
-            // Its queue proves the destination still owns this channel and lets
-            // disposal reject late messages after pthread/slot reuse.
-            if (!this.post_message_to_worker(pthread_id, rewritten, transfer_id, to_parent)) return jsbb_PostMessageResult.Failed;
-            return jsbb_PostMessageResult.Success;
+            const payload = this.create_worker_message(pthread_id, rewritten, transfer_id, to_parent);
+            if (!payload) return 0;
+            // Clone now, while the native source binding is intact. This both
+            // rejects DataCloneError before transfer-out, removes getters and
+            // snapshots ordinary buffers before the later publication step.
+            // Godot's transfer list contains native values, not browser ports.
+            const packet = structuredClone(payload);
+            if (this.engine !== engine || !engine.native_alive || this._runtime !== runtime) return 0;
+            if (this._next_prepared_worker_message > 0xffffffff) throw new Error("E_WORKER_PREPARED_TICKET_EXHAUSTED");
+            const ticket = this._next_prepared_worker_message++;
+            this._prepared_worker_messages.set(ticket, { engine, epoch: payload.route.epoch, packet, buffers: this.owned_message_buffers(packet) });
+            return ticket;
+        } catch (error) {
+            // An import must return to C++ so its native transfer receipt and
+            // staged-packet guards can unwind; retain the original clone error.
+            stack.SetValue(jsbb_StackPos.Error, error);
+            return 0;
         } finally {
-            engine.stack.ExitScope();
+            stack.ExitScope();
         }
+    }
+
+    static PublishMessage(ticket: number): boolean {
+        const staged = this._prepared_worker_messages.get(ticket);
+        this._prepared_worker_messages.delete(ticket);
+        if (!staged || this.engine !== staged.engine || staged.engine.native_alive === false || this._runtime.epoch !== staged.epoch) return false;
+        return this.publish_worker_message(staged.packet, staged.buffers);
+    }
+
+    static DiscardMessage(ticket: number): void {
+        this._prepared_worker_messages.delete(ticket);
+    }
+
+    // Ready notifications have no native Object ownership to finalize. All
+    // Object sends use the split imports around source finalize_transfer_out.
+    static PostMessage(pthread_id: number, engine_opaque: IntPtr, data_sp: StackPosition, transfer_id: number,
+        native_transfers_stack_position: StackPosition, to_parent: boolean): number {
+        const ticket = this.PrepareMessage(pthread_id, engine_opaque, data_sp, transfer_id, native_transfers_stack_position, to_parent);
+        return ticket && this.PublishMessage(ticket) ? jsbb_PostMessageResult.Success : jsbb_PostMessageResult.Failed;
     }
 
     private static flush_pending_worker_messages(): void {
@@ -2255,6 +2394,12 @@ declare const _malloc: EmscriptenModule['_malloc'];
 declare const _free: EmscriptenModule['_free'];
 declare const PThread: undefined | EmscriptenPThread;
 declare const ENVIRONMENT_IS_PTHREAD: undefined | boolean;
+declare const Module: EmscriptenModule & {
+    _jsni_native_checkpoint_enter?: (opaque: number) => number;
+    _jsni_native_checkpoint_leave?: (opaque: number, ticket: number) => void;
+    godotjsCheckpointAbi?: number;
+    godotjsScheduleCleanupCheckpoint?: (callback: () => unknown) => boolean;
+};
 
 if (jsbb_is_pthread && typeof globalThis.addEventListener === "function") {
     globalThis.addEventListener("message", (event: MessageEvent) => {

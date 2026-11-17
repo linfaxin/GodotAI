@@ -1,5 +1,5 @@
 import type { BuildMode, RuntimeManifestV1, TargetCertification } from "@godot-js/react/contracts";
-import type { NativeInterfaceSchema } from "@godot-js/react/native-interfaces";
+import type { NativeInterfaceSchema } from "@godot-js/react/native-interface-contracts";
 
 export interface EntryConfig { module: string; export?: string; props?: Record<string, unknown>; startupAssets?: string[]; }
 export interface TemplateConfig { source: string; profile?: "template-t0" | "template-local-v1" | "template-structural-v1"; }

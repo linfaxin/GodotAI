@@ -9,6 +9,11 @@ export interface ExecutionContract {
   hostProtocolVersion:number;
   /** Supplied only by a source-bound build with the native pre-exit gate. */
   lifecycleAbi?:1;
+  /** Complete ArtifactSet validation and early mount before project settings. */
+  artifactSetAbi?:1;
+  /** Explicit resource adoption at the native Web library creation sites. */
+  hostResourceAbi?:1;
+  shutdownQueueAbi?:1;
   routerProtocolVersion?:number;
   workerBootstrap?:'embedded'|'separate';
   workerAssets?:ExecutionWorkerAsset[];
@@ -21,6 +26,9 @@ export function validateExecution(value:unknown):asserts value is ExecutionContr
   for(const key of ['wasmThreads','proxyToPthread','requiresCrossOriginIsolation'] as const)if(typeof v[key]!=='boolean')reject('Invalid '+key);
   if(!Number.isSafeInteger(v.hostProtocolVersion)||v.hostProtocolVersion<1)reject('Invalid host protocol');
   if(v.lifecycleAbi!==undefined&&v.lifecycleAbi!==1)reject('Unsupported lifecycle ABI');
+  if(v.artifactSetAbi!==undefined&&v.artifactSetAbi!==1)reject('Unsupported ArtifactSet ABI');
+  if(v.hostResourceAbi!==undefined&&v.hostResourceAbi!==1)reject('Unsupported host resource ABI');
+  if(v.shutdownQueueAbi!==undefined&&v.shutdownQueueAbi!==1)reject('Unsupported shutdown queue ABI');
   if(v.routerProtocolVersion!==undefined&&(!Number.isSafeInteger(v.routerProtocolVersion)||v.routerProtocolVersion<1))reject('Invalid router protocol');
   if(v.proxyToPthread!==(v.executionModel==='proxy-pthread')||(v.proxyToPthread&&!v.wasmThreads)||(v.wasmThreads&&!v.requiresCrossOriginIsolation))reject('Inconsistent thread model');
   if(v.workerBootstrap!==undefined&&!['embedded','separate'].includes(v.workerBootstrap))reject('Invalid worker layout');

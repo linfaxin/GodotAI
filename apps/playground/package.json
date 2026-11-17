@@ -33,7 +33,11 @@
     "dev:worker": "node scripts/serve.mjs",
     "dev:2d:worker": "PLAYGROUND_DIRECTORY=dist-2d-debug node scripts/serve.mjs",
     "dev:2d:release:worker": "PLAYGROUND_DIRECTORY=dist-2d-release node scripts/serve.mjs",
-    "test:browser:runtime-host": "node scripts/browser-runtime-host-test.mjs"
+    "test:browser:runtime-host": "node scripts/browser-runtime-host-test.mjs",
+    "test:browser:storage": "node scripts/browser-project-blob-storage-test.mjs",
+    "test:browser:storage-degradation": "node scripts/browser-storage-degradation-test.mjs",
+    "test:browser:compiler-recovery": "node scripts/browser-compiler-recovery-test.mjs",
+    "test:browser:storage-read-recovery": "node scripts/browser-storage-read-recovery-test.mjs"
   },
   "dependencies": {
     "@godot-js/react": "workspace:*",

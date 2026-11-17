@@ -25,7 +25,7 @@ test('a package-shaped SDK with hoisted React types checks and builds outside th
   await fs.writeFile(path.join(root, 'package.json'), JSON.stringify({ private: true }));
   await fs.writeFile(path.join(root, 'project.godot'), 'config_version=5\n[application]\nconfig/name="installed-package"\n');
   await fs.writeFile(path.join(root, 'godot-react.config.mjs'), 'export default {entries:{app:"src/App.tsx"}};');
-  await fs.writeFile(path.join(root, 'src/App.tsx'), 'import {Label} from "@godot-js/react/legacy";export default function App(){return <Label text="installed"/>}');
+  await fs.writeFile(path.join(root, 'src/App.tsx'), 'import {Label} from "@godot-js/react/engine-components";export default function App(){return <Label text="installed"/>}');
   await assert.rejects(fs.access(path.join(installed, 'node_modules')));
   assert.equal((await checkProject({ projectRoot: root })).ok, true);
   const result = await buildProject({ projectRoot: root });
@@ -34,6 +34,6 @@ test('a package-shaped SDK with hoisted React types checks and builds outside th
   await fs.mkdir(path.join(root, 'node_modules/@types/review-model'), { recursive: true });
   await fs.writeFile(path.join(root, 'node_modules/@types/review-model/index.d.ts'), 'interface ReviewModel { label: string }');
   await fs.writeFile(path.join(root, 'tsconfig.json'), JSON.stringify({ compilerOptions: { types: ['review-model'] }, include: ['src'] }));
-  await fs.writeFile(path.join(root, 'src/App.tsx'), 'import {Label} from "@godot-js/react/legacy";const model:ReviewModel={label:"consumer types"};export default function App(){return <Label text={model.label}/>}');
+  await fs.writeFile(path.join(root, 'src/App.tsx'), 'import {Label} from "@godot-js/react/engine-components";const model:ReviewModel={label:"consumer types"};export default function App(){return <Label text={model.label}/>}');
   assert.equal((await checkProject({ projectRoot: root })).ok, true);
 });

@@ -36,12 +36,12 @@ export default function App() {
 export function newEngineReactProject(engineProfile='full-engine-v1'):EditorProject {
  return parseProject({schemaVersion:4,runtime:'engine',engineProfile,launch:{kind:'script',module:'res://src/start.ts',export:'start'},files:{
   '/src/start.ts':`import React from "react";
-import {createRoot} from "@godot-js/react/engine";
+import {createRoot, type EngineEntryCapability, type EngineRuntimeHost} from "@godot-js/react/engine";
 import type {Node} from "godot";
 import App from "./App";
 
-export function start(ctx: {mount: Node; host?: any}) {
-  const root = createRoot(ctx.mount, {runtimeHost: ctx.host});
+export function start(ctx: {mount: Node; host?: EngineRuntimeHost; entry?: EngineEntryCapability}) {
+  const root = createRoot(ctx.mount, {entry: ctx.entry, runtimeHost: ctx.host});
   root.render(React.createElement(App));
   return () => root.shutdown();
 }

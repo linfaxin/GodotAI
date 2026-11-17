@@ -7,6 +7,7 @@ import {canonical,digest,sitePayloads} from './site-evidence.mjs';
 import {WORKER_RUNTIME_ABI} from '../../../scripts/release/engine-profiles.mjs';
 import {WORKER_CANDIDATE_ASSETS,WORKER_NATIVE_PATCH_FILES,assertWorkerBuildProof,describeWorkerCandidate,assertWorkerCandidate,runConfigurationHash,workerAcceptancePlan} from './worker-candidate.mjs';
 import {assertWorkerSessionEvidence} from './runtime-evidence.mjs';
+import {workerRuntimeBuildProof} from '../../../scripts/release/patch-web-worker-runtime.mjs';
 
 const configuration={executionBackend:'worker',presentationBackend:'direct',runtimeProtocolVersion:2,hostAbiVersion:1,audioAbiVersion:1,presentationAbiVersion:1,budgets:{maxInputEvents:1024,cleanupTimeoutMs:1000}};
 function buildProof(){
@@ -20,6 +21,14 @@ test('native ABI cannot be attached to old, snapshotted or differently patched b
  for(const change of [value=>{delete value.workerPatch;},value=>{value.status='snapshotted';},value=>{value.recipe.patches.pop();value.recipeSha256=digest(canonical(value.recipe));},value=>{value.godotSource.inputs['main/main.cpp']=digest('old');value.godotSource.snapshotHash=digest(canonical(value.godotSource.inputs));},value=>{value.workerPatch.implementation.sha256=digest('other');}]){
   const value=structuredClone(proof);change(value);assert.throws(()=>assertWorkerBuildProof(value),/E_WORKER_BUILD_PROOF/);
  }
+});
+test('worker native proof retains its own implementation and seals all later source transformations',()=>{
+ const proof=buildProof(),path='main/main.cpp',before=proof.workerPatch.files[path],after=digest('after early mount and shutdown patches');
+ proof.recipe.patches.push({path,patchId:'another-source-owner',beforeSha256:before,afterSha256:after,implementation:{path:'scripts/release/another-owner.mjs',sha256:digest('another owner')}});
+ proof.workerPatch=workerRuntimeBuildProof(proof.recipe.patches).workerPatch;proof.recipeSha256=digest(canonical(proof.recipe));proof.godotSource.inputs[path]=after;proof.godotSource.snapshotHash=digest(canonical(proof.godotSource.inputs));
+ assert.equal(proof.workerPatch.files[path],after);assert.doesNotThrow(()=>assertWorkerBuildProof(proof));
+ const broken=structuredClone(proof);broken.recipe.patches.at(-1).beforeSha256=digest('unrelated source');broken.recipeSha256=digest(canonical(broken.recipe));assert.throws(()=>assertWorkerBuildProof(broken),/broken source chain/);assert.throws(()=>workerRuntimeBuildProof(broken.recipe.patches),/broken source chain/);
+ const stale=structuredClone(proof);stale.workerPatch.files[path]=before;assert.throws(()=>assertWorkerBuildProof(stale),/E_WORKER_BUILD_PROOF_FILE/);
 });
 test('candidate binds host, worker and audio bytes without a manifest hash cycle',async t=>{
  const directory=await mkdtemp(path.join(tmpdir(),'worker-candidate-'));t.after(()=>rm(directory,{recursive:true,force:true}));

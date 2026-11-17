@@ -3,6 +3,7 @@
 #include "jsb_quickjs_catch.h"
 #include "jsb_quickjs_handle.h"
 #include "jsb_quickjs_context.h"
+#include "core/os/os.h"
 
 namespace v8
 {
@@ -234,6 +235,58 @@ namespace v8
                 isolate->internal_data_.remove_at(index);
             }
         }
+    }
+
+    int Isolate::_interrupt_callback(JSRuntime*, void* data)
+    {
+        auto* isolate = static_cast<Isolate*>(data);
+        if (isolate->execution_deadline_us_ && OS::get_singleton()->get_ticks_usec() >= isolate->execution_deadline_us_)
+            isolate->interrupted_.set(); // A cut-off job is failed, never resumable cleanup.
+        return isolate->interrupted_.is_set();
+    }
+
+    uint64_t Isolate::BeginExecutionBudget(uint64_t max_microseconds)
+    {
+        const uint64_t previous = execution_deadline_us_;
+        const uint64_t deadline = OS::get_singleton()->get_ticks_usec() + max_microseconds;
+        execution_deadline_us_ = previous ? MIN(previous, deadline) : deadline;
+        set_as_interruptible();
+        return previous;
+    }
+
+    Isolate::PendingJobResult Isolate::PumpPendingJobs(uint32_t max_jobs, uint64_t max_microseconds, uint64_t hard_job_microseconds)
+    {
+        PendingJobResult result;
+        const uint64_t started = OS::get_singleton()->get_ticks_usec();
+        while (result.executed < max_jobs && JS_IsJobPending(rt_))
+        {
+            if (result.executed && OS::get_singleton()->get_ticks_usec() - started >= max_microseconds) break;
+            JSContext* context = nullptr;
+            HandleScope handle_scope(this);
+            // Job count yields a replenishing queue. An individual synchronous
+            // job that does not return is interrupted and permanently fails
+            // this cleanup runtime; it is never resumed as successful work.
+            const uint64_t elapsed = OS::get_singleton()->get_ticks_usec() - started;
+            const uint64_t previous_deadline = BeginExecutionBudget(hard_job_microseconds > elapsed ? hard_job_microseconds - elapsed : 1);
+            const int error = JS_ExecutePendingJob(rt_, &context);
+            EndExecutionBudget(previous_deadline);
+            if (error == 0) break;
+            ++result.executed;
+            if (error < 0)
+            {
+                result.failed = true;
+                jsb::impl::TryCatch catcher(this);
+                if (catcher.has_caught())
+                {
+                    ::String message, stacktrace;
+                    catcher.get_message(&message, &stacktrace);
+                    JSB_QUICKJS_LOG(Error, "cleanup pending job failed: %s\n%s", message, stacktrace);
+                }
+            }
+            if (IsExecutionTerminating()) { result.failed = true; break; }
+        }
+        result.pending = JS_IsJobPending(rt_) != 0;
+        return result;
     }
 
     void Isolate::PerformMicrotaskCheckpoint()

@@ -14,6 +14,10 @@
 #include "jsb_amd_module_loader.h"
 #include "jsb_thread_safe_for_nodes_scope.h"
 #include "jsb_react_bridge.h"
+#include "jsb_engine_run_lease.h"
+#include "jsb_resource_scopes.h"
+#include "jsb_engine_host_operations.h"
+#include "jsb_native_world.h"
 
 #include "../internal/jsb_path_util.h"
 #include "../internal/jsb_class_util.h"
@@ -69,83 +73,49 @@ namespace jsb
         {
             std::vector<std::shared_ptr<Environment>> rval;
             lock_.lock();
-            for (void* ptr : all_runtimes_)
+            for (const auto& entry : all_runtimes_)
             {
-                //TODO check if it's not removed from `all_runtimes_` but being destructed already (consider remove it from the list immediately on destructor called)
-                Environment* env = (Environment*) ptr;
-                rval.push_back(env->shared_from_this());
+                if (auto env = entry.value.lock()) rval.push_back(std::move(env));
             }
             lock_.unlock();
             return rval;
         }
 
-        // return an Environment shared pointer with an unknown pointer if it's a valid Environment instance.
+        // The pointer is only a lookup key. Never dereference an unowned runtime.
         std::shared_ptr<Environment> access(void* p_runtime)
         {
             std::shared_ptr<Environment> rval;
             lock_.lock();
-            if (all_runtimes_.has(p_runtime))
-            {
-                //TODO check if it's not removed from `all_runtimes_` but being destructed already (consider remove it from the list immediately on destructor called)
-                Environment* env = (Environment*) p_runtime;
-                rval = env->shared_from_this();
-            }
+            if (const auto* weak = all_runtimes_.getptr(p_runtime)) rval = weak->lock();
             lock_.unlock();
             return rval;
         }
 
-        // return existing Environment on the caller thread
+        // Promote under the registry lock, then inspect immutable owner identity
+        // after unlocking. Dropping a snapshot's last strong reference can run
+        // dispose(), which removes its entry and must not reenter this lock.
         std::shared_ptr<Environment> access()
         {
-            std::shared_ptr<Environment> rval;
-            lock_.lock();
-            for (void* ptr : all_runtimes_)
+            const auto environments = get_list();
+            for (const auto& env : environments)
             {
-                //TODO check if it's not removed from `all_runtimes_` but being destructed already (consider remove it from the list immediately on destructor called)
-                Environment* env = (Environment*) ptr;
-                if (env->thread_id_ != Thread::UNASSIGNED_ID && env->is_caller_thread())
-                {
-                    rval = env->shared_from_this();
-                    break;
-                }
+                if (env->thread_id_ != Thread::UNASSIGNED_ID && env->is_caller_thread()) return env;
             }
-            lock_.unlock();
-            return rval;
+            return {};
         }
 
-        // unsafe, may be destructing
-        Environment* internal_access(void* p_runtime)
-        {
-            Environment* rval = nullptr;
-            lock_.lock();
-            if (all_runtimes_.has(p_runtime))
-            {
-                rval = (Environment*) p_runtime;
-            }
-            lock_.unlock();
-            return rval;
-        }
-
-        bool exists(void* p_runtime) const
+        void add(const std::shared_ptr<Environment>& p_runtime)
         {
             lock_.lock();
-            const bool rval = all_runtimes_.has(p_runtime);
-            lock_.unlock();
-            return rval;
-        }
-
-        void add(void* p_runtime)
-        {
-            lock_.lock();
-            jsb_check(!all_runtimes_.has(p_runtime));
-            all_runtimes_.insert(p_runtime);
+            jsb_check(!all_runtimes_.has(p_runtime.get()));
+            all_runtimes_.insert(p_runtime.get(), p_runtime);
             lock_.unlock();
         }
 
         void remove(void* p_runtime)
         {
             lock_.lock();
-            jsb_check(all_runtimes_.has(p_runtime));
+            // A constructed runtime need not have reached init()/publication.
             all_runtimes_.erase(p_runtime);
             lock_.unlock();
         }
@@ -158,8 +128,13 @@ namespace jsb
 
     private:
         BinaryMutex lock_;
-        HashSet<void*> all_runtimes_;
+        HashMap<void*, std::weak_ptr<Environment>> all_runtimes_;
     };
+
+    std::vector<std::shared_ptr<Environment>> Environment::all_environments()
+    {
+        return EnvironmentStore::get_shared().get_list();
+    }
 
     struct InstanceBindingCallbacks
     {
@@ -262,7 +237,9 @@ namespace jsb
 
     Environment::Environment(const CreateParams& p_params)
         : thread_id_(p_params.thread_id)
+        , runtime_owner_thread_(Thread::get_caller_id())
         , binding_epoch_([] { static std::atomic<uint64_t> next{0}; return ++next; }())
+        , native_world_(NativeWorld::begin())
         , object_db_(p_params.initial_object_slots)
     {
         JSB_BENCHMARK_SCOPE(JSEnvironment, Construct);
@@ -282,6 +259,11 @@ namespace jsb
         else if (p_params.type == Type::Shadow) flags_ |= EF_Shadow;
 
         isolate_ = v8::Isolate::New(create_params);
+#if JSB_WITH_V8 && !JSB_WITH_WEB
+        // Auto checkpoints run Promise jobs before a native Function::Call
+        // unwinds. Only the engine's explicit owner checkpoint may run them.
+        isolate_->SetMicrotasksPolicy(v8::MicrotasksPolicy::kExplicit);
+#endif
         isolate_->SetData(kIsolateEmbedderData, this);
         isolate_->SetPromiseRejectCallback(PromiseRejectCallback_);
 #if JSB_PRINT_GC_TIME
@@ -306,7 +288,6 @@ namespace jsb
 
                 module_loaders_.insert("godot", memnew(GodotModuleLoader));
                 module_loaders_.insert("godot-jsb", memnew(BridgeModuleLoader));
-                EnvironmentStore::get_shared().add(this);
 
                 JSB_BENCHMARK_SCOPE(JSRealm, Construct);
 
@@ -418,18 +399,41 @@ namespace jsb
         }
     }
 
-    // no JS code should be executed in the destructor.
     Environment::~Environment()
     {
-        //TODO not always safe
-        if ((flags_ & EF_PreDispose) == 0)
+        if (!runtime_released())
         {
-            JSB_LOG(Warning, "Environment is not disposed before destructing it %s", (uintptr_t) id());;
-            check_internal_state();
-            dispose();
+            // Preserve the existing native embedding fallback. Web production
+            // owners release explicitly; its fallback must never enter rt0 on
+            // a foreign realm merely because a shared snapshot was last.
+#if JSB_WITH_WEB
+            jsb_check(is_runtime_owner_thread());
+#endif
+            if ((flags_ & EF_PreDispose) == 0)
+            {
+                JSB_LOG(Warning, "Environment is not disposed before destructing it %s", (uintptr_t) id());
+                check_internal_state(); dispose();
+            }
+            release_runtime();
         }
-
         JSB_LOG(Verbose, "destructing Environment %s", (uintptr_t) id());
+    }
+
+    void Environment::release_runtime_on_owner()
+    {
+        if (runtime_released()) return;
+        jsb_check(is_runtime_owner_thread());
+        jsb_check((flags_ & EF_PostDispose) != 0);
+#if JSB_WITH_WEB
+        jsb_check(isolate_->handle_scope_depth() == 0);
+#endif
+        release_runtime();
+    }
+
+    void Environment::release_runtime()
+    {
+        if (runtime_released()) return;
+        const auto owner_lease = weak_from_this().lock();
 #if JSB_WITH_ESSENTIALS
         timer_tags_.tags.clear();
         timer_manager_.clear_all();
@@ -452,6 +456,7 @@ namespace jsb
             pair.value = nullptr;
         }
 
+        react_bridge_.reset(); engine_run_lease_.reset(); resource_scopes_.reset(); engine_host_operations_.reset();
         jsb_check(object_db_.size() == 0);
         string_name_cache_.clear();
 
@@ -462,6 +467,8 @@ namespace jsb
         isolate_ = nullptr;
 
         variant_allocator_.drain();
+        runtime_release_thread_.store(Thread::get_caller_id(), std::memory_order_relaxed);
+        runtime_released_.store(true, std::memory_order_release);
     }
 
     ReactBridge& Environment::get_react_bridge()
@@ -471,8 +478,33 @@ namespace jsb
         return *react_bridge_;
     }
 
+    EngineRunLease& Environment::get_engine_run_lease()
+    {
+        check_internal_state();
+        if (!engine_run_lease_) engine_run_lease_ = std::make_unique<EngineRunLease>(this);
+        return *engine_run_lease_;
+    }
+
+    ResourceScopes& Environment::get_resource_scopes()
+    {
+        check_internal_state();
+        if (!resource_scopes_) resource_scopes_ = std::make_unique<ResourceScopes>(this);
+        return *resource_scopes_;
+    }
+
+    EngineHostOperations& Environment::get_engine_host_operations()
+    {
+        check_internal_state();
+        if (!engine_host_operations_) engine_host_operations_ = std::make_unique<EngineHostOperations>(this);
+        return *engine_host_operations_;
+    }
+
     void Environment::init()
     {
+        // make_shared has completed enable_shared_from_this initialization.
+        // Constructor publication would expose an empty/racing weak_this, and
+        // a raw registry entry could outlive the last strong owner at teardown.
+        EnvironmentStore::get_shared().add(shared_from_this());
         jsb::DefaultModuleResolver& resolver = this->add_module_resolver<jsb::DefaultModuleResolver>()
             .add_search_path(jsb::internal::Settings::get_jsb_out_res_path()) // default path of js source (results of compiled ts, at '.godot/GodotJS' by default)
             .add_search_path("res://") // use the root directory as custom lib path by default
@@ -498,12 +530,30 @@ namespace jsb
 
     void Environment::dispose()
     {
+        if (flags_ & EF_PreDispose) return;
+        const auto disposal_lease = weak_from_this().lock();
+        {
+            // The final close and cross-thread transfer publication share this
+            // short lock. No transfer payload can be enqueued after the drain.
+            std::lock_guard<std::mutex> admission(native_transfer_admission_mutex_);
+            if (native_cleanup_phase_.load() != 2) native_cleanup_phase_.store(3, std::memory_order_release);
+        }
 #if JSB_WITH_WEB
         Worker::finish_owned(this);
 #endif
         JSB_LOG(Verbose, "disposing Environment %s", (uintptr_t) id());
 
+        // Seal the shared binding while this context is still usable. The
+        // callback only freezes facts; user cleanup ran at the pre-exit gate.
+        seal_native_cleanup();
+        native_cleanup_begin_.Reset(); native_cleanup_tick_.Reset(); native_cleanup_seal_.Reset();
+        if (native_world_) native_world_->seal_environment(binding_epoch_);
         flags_ |= EF_PreDispose;
+#if !JSB_WITH_WEB
+        // Phase closure shares the publication lock. Both message buffers are
+        // now immutable to senders; discard their RAII payloads on this owner.
+        inbox_.swap().clear(); inbox_.swap().clear();
+#endif
         // destroy context
         {
             v8::Isolate* isolate = this->isolate_;
@@ -515,6 +565,9 @@ namespace jsb
             // context. This performs no user React cleanup; launcher shutdown
             // owns that earlier lifecycle barrier.
             if (react_bridge_) react_bridge_->dispose();
+            if (engine_run_lease_) engine_run_lease_->dispose();
+            if (resource_scopes_) resource_scopes_->dispose();
+            if (engine_host_operations_) engine_host_operations_->dispose();
 
             function_refs_.clear();
             while (!function_bank_.is_empty()) function_bank_.remove_last();
@@ -541,7 +594,7 @@ namespace jsb
             symbols_[index].Reset();
         }
 
-        exec_async_calls();
+        exec_cleanup_async_calls();
         _on_gc_request();
 
         // Cleanup all objects by forcibly invoke all callbacks not invoked by v8.
@@ -552,6 +605,10 @@ namespace jsb
             free_object(pointer, FinalizationType::Default /* Force? */);
         }
 
+        // Native Variant wrappers may outlive their JS reachability. Revoke
+        // payload access, then drop this realm's own payload references without
+        // mutating borrowed/shared Array or Dictionary contents.
+        variant_allocator_.seal_payloads();
         variant_allocator_.drain();
         // A background native free can have retired its DB entry just before
         // dispose began. Reset every outstanding stable reference on this
@@ -563,7 +620,7 @@ namespace jsb
             pair.second->gc_lease.reset();
         }
         binding_records_.clear();
-        exec_async_calls();
+        exec_cleanup_async_calls();
         flags_ |= EF_PostDispose;
         EnvironmentStore::get_shared().remove(this);
 #if JSB_WITH_WEB
@@ -576,6 +633,14 @@ namespace jsb
 
     void Environment::update(uint64_t p_delta_msecs)
     {
+        if (native_cleanup_phase() != 0)
+        {
+            // The main exit gate publishes only an atomic request. This owner
+            // performs its VM callbacks; ordinary timers/messages stay stopped.
+            if (native_cleanup_phase() == 1 && has_native_cleanup()) tick_native_cleanup();
+            else exec_cleanup_async_calls();
+            return;
+        }
 #if JSB_WITH_ESSENTIALS
         const bool timers_ready = timer_manager_.tick(p_delta_msecs);
         if (timers_ready)
@@ -621,12 +686,25 @@ namespace jsb
         // quickjs delayed the free op after all HandleScope left, we need to swap the free op list manually explicitly.
         // otherwise, object may leak until next evacuation of HandleScope.
 #if JSB_WITH_QUICKJS || JSB_WITH_JAVASCRIPTCORE
+        native_cleanup_checkpoint_ = true;
         isolate_->PerformMicrotaskCheckpoint();
+        native_cleanup_checkpoint_ = false;
+#elif JSB_WITH_V8 && !JSB_WITH_WEB
+        {
+            v8::Isolate::Scope isolate_scope(isolate_); v8::HandleScope handle_scope(isolate_);
+            auto context = get_context(); v8::Context::Scope context_scope(context);
+            flags_ &= ~EF_MicrotaskCheckpoint;
+            native_cleanup_checkpoint_ = true;
+            isolate_->PerformMicrotaskCheckpoint();
+            native_cleanup_checkpoint_ = false;
+        }
 #else
         if (flags_ & EF_MicrotaskCheckpoint)
         {
             flags_ &= ~EF_MicrotaskCheckpoint;
+            native_cleanup_checkpoint_ = true;
             isolate_->PerformMicrotaskCheckpoint();
+            native_cleanup_checkpoint_ = false;
         }
 #endif
 
@@ -649,6 +727,25 @@ namespace jsb
             }
             calls.clear();
         }
+#endif
+    }
+
+    void Environment::exec_cleanup_async_calls()
+    {
+#if JSB_THREADING
+        auto& calls = async_calls_.swap();
+        for (const auto& call : calls)
+        {
+            if (call.type_ == AsyncCall::TYPE_TRANSFER_)
+            {
+                // Admission is closed. Release the payload without binding its
+                // object or dispatching user ontransfer in a cleanup-only tick.
+                native_cleanup_failed_ = true;
+                continue;
+            }
+            exec_async_call(call.type_, call.binding_, call.ticket_);
+        }
+        calls.clear();
 #endif
     }
 
@@ -680,7 +777,7 @@ namespace jsb
                     const v8::Context::Scope context_scope(context);
                     _on_worker_transfer(context, transfer_data);
                 }
-                memdelete(transfer_data);
+                // The AsyncCall owns the payload through execution or discard.
             }
             break;
         case AsyncCall::TYPE_GC_REQUEST: _on_gc_request(); break;
@@ -690,19 +787,28 @@ namespace jsb
 
     bool Environment::add_async_call(AsyncCall::Type p_type, void* p_binding, const std::shared_ptr<ObjectBindingTicket>& p_ticket)
     {
+        AsyncCall call(p_type, p_binding, p_ticket);
+        std::unique_lock<std::mutex> admission;
+        if (p_type == AsyncCall::TYPE_TRANSFER_)
+        {
+            admission = std::unique_lock<std::mutex>(native_transfer_admission_mutex_);
+            if (native_cleanup_phase() != 0) return false;
+        }
 #if JSB_THREADING
         if (Thread::get_caller_id() != thread_id_)
         {
-            async_calls_.add(AsyncCall(p_type, p_binding, p_ticket));
+            async_calls_.add(std::move(call));
             return true;
         }
 #endif
+        if (admission.owns_lock()) admission.unlock();
         exec_async_call(p_type, p_binding, p_ticket);
         return true;
     }
 
     void Environment::_on_worker_transfer(const v8::Local<v8::Context>& p_context, const TransferData* p_data)
     {
+        if (native_cleanup_phase() != 0) return;
         jsb_check(p_data->source_worker_id);
         if (!object_db_.has_object(p_data->source_worker_id))
         {
@@ -754,6 +860,7 @@ namespace jsb
 #if !JSB_WITH_WEB
     void invoke_worker_callback_from_message(Environment* p_env, const v8::Local<v8::Context>& p_context, const v8::Local<v8::Function>& p_callback, const Message* p_message)
     {
+        if (p_env->native_cleanup_phase() != 0) return;
         v8::Isolate *isolate = p_env->get_isolate();
 
         v8::Local<v8::Value> value;
@@ -814,6 +921,7 @@ namespace jsb
 
     void Environment::_on_worker_message(const v8::Local<v8::Context>& p_context, const Message& p_message)
     {
+        if (native_cleanup_phase() != 0) return;
         jsb_check(p_message.get_id());
         ObjectHandleConstPtr handle = object_db_.try_get_object(p_message.get_id());
         if (!handle)
@@ -893,10 +1001,7 @@ namespace jsb
                     ScriptInstance* new_script_instance = script->instance_create(p_object, p_pointer, false);
                     jsb_check(new_script_instance);
                     jsb_unused(new_script_instance);
-                    for (const Pair<StringName, Variant>& pair : state)
-                    {
-                        new_script_instance->set(pair.first, pair.second);
-                    }
+                    GodotJSShadowScriptInstance::restore_state(p_pointer, state);
                     const NativeObjectID new_id = try_get_object_id(p_pointer);
                     jsb_check(new_id);
                     return new_id;
@@ -949,6 +1054,12 @@ namespace jsb
     NativeObjectID Environment::bind_pointer(NativeClassID p_class_id, NativeClassType::Type p_type, void* p_pointer, const v8::Local<v8::Object>& p_object, int p_external_rc, bool p_js_owned_non_ref)
     {
         check_internal_state();
+        if (p_type == NativeClassType::GodotObject && native_world_
+            && !native_world_->permits_binding(static_cast<Object*>(p_pointer)->get_instance_id(), binding_epoch_))
+        {
+            impl::Helper::throw_error(isolate_, "E_NATIVE_REBIND: foreign or quarantined native lifetime");
+            return {};
+        }
         if (p_type == NativeClassType::GodotObject && ReactBridge::is_owned(static_cast<Object*>(p_pointer))
             && !object_db_.has_object(p_pointer))
         {
@@ -992,6 +1103,8 @@ namespace jsb
         if (ticket->godot_object) ticket->godot_id = static_cast<Object*>(p_pointer)->get_instance_id();
         binding_records_[ticket->generation] = ticket;
         handle->js_owned_non_ref_ = p_js_owned_non_ref;
+        if (p_js_owned_non_ref && ticket->godot_object && native_world_)
+            native_world_->note_creator(ticket->godot_id, binding_epoch_);
 #if JSB_DEBUG
         handle->pointer = p_pointer;
 #endif
@@ -1148,6 +1261,9 @@ namespace jsb
         const NativeClassID class_id = object_handle->class_id;
         const bool js_owned_non_ref = object_handle->js_owned_non_ref_;
         const auto ticket = object_handle->binding;
+        if (p_native_free && ticket && ticket->godot_object && native_world_
+            && !compat::ObjectDB::get_instance(ticket->godot_id))
+            native_world_->confirm_retired(ticket->godot_id);
 
         // erase from ObjectDB before clearing the ref to avoid exposing a transient state
         // with an empty `ref_` in the ObjectDB, which can race with reference callbacks.
@@ -1188,7 +1304,8 @@ namespace jsb
                 // A wrapper retained by another Environment does not own a
                 // React lifetime claimed elsewhere. Its GC may only unbind it.
                 const bool foreign_react_owner = !removed.react_owner_token && ReactBridge::protects_structure(const_cast<Object*>(godot_object));
-                if (foreign_react_owner || (!godot_object->is_ref_counted() && !js_owned_non_ref))
+                const bool native_claim_guard = ticket && native_world_ && native_world_->suppress_finalization(ticket->godot_id, binding_epoch_);
+                if (foreign_react_owner || native_claim_guard || (!godot_object->is_ref_counted() && !js_owned_non_ref))
                 {
                     finalize_type = FinalizationType::None;
                 }
@@ -1196,6 +1313,8 @@ namespace jsb
 
             //NOTE Godot will call Object::_predelete to post a notification NOTIFICATION_PREDELETE which finally call `ScriptInstance::callp`
             class_info.finalizer(this, p_pointer, finalize_type);
+            if (ticket && ticket->godot_object && native_world_ && !compat::ObjectDB::get_instance(ticket->godot_id))
+                native_world_->confirm_retired(ticket->godot_id);
         }
         else
         {
@@ -1895,6 +2014,7 @@ namespace jsb
 
     Variant Environment::_call(v8::Isolate* isolate, const v8::Local<v8::Context>& context, const v8::Local<v8::Function>& p_func, const v8::Local<v8::Value>& p_self, const Variant** p_args, int p_argcount, Callable::CallError& r_error)
     {
+        if (Environment::wrap(isolate)->native_cleanup_phase() != 0) { r_error.error = Callable::CallError::CALL_OK; return {}; }
         using LocalValue = v8::Local<v8::Value>;
         LocalValue* argv = jsb_stackalloc(LocalValue, p_argcount);
         for (int index = 0; index < p_argcount; ++index)
@@ -1945,6 +2065,7 @@ namespace jsb
 
     bool Environment::get_script_property_value(NativeObjectID p_object_id, const ScriptPropertyInfo& p_info, Variant& r_val)
     {
+        if (native_cleanup_phase() != 0) return false;
         this->check_internal_state();
         if (!this->object_db_.has_object(p_object_id))
         {
@@ -1984,6 +2105,7 @@ namespace jsb
 
     bool Environment::set_script_property_value(NativeObjectID p_object_id, const ScriptPropertyInfo& p_info, const Variant& p_val)
     {
+        if (native_cleanup_phase() != 0) return false;
         this->check_internal_state();
         if (!this->object_db_.has_object(p_object_id))
         {
@@ -2180,6 +2302,7 @@ namespace jsb
 
     Variant Environment::call_script_method(ScriptClassID p_script_class_id, NativeObjectID p_object_id, const StringName& p_method, const Variant** p_argv, int p_argc, Callable::CallError& r_error)
     {
+        if (native_cleanup_phase() != 0) { r_error.error = Callable::CallError::CALL_OK; return {}; }
         // static calls are not supported
         if (!p_object_id)
         {
@@ -2323,6 +2446,7 @@ namespace jsb
 
     Variant Environment::call_function(void* p_pointer, ObjectCacheID p_func_id, const Variant** p_args, int p_argcount, Callable::CallError& r_error)
     {
+        if (native_cleanup_phase() != 0) { r_error.error = Callable::CallError::CALL_OK; return {}; }
         this->check_internal_state();
         if (!function_bank_.is_valid_index(p_func_id))
         {
@@ -2362,15 +2486,16 @@ namespace jsb
 
     bool Environment::prepare_transfer_out(NativeObjectID p_worker_handle_id, int transfer_index, const Variant& p_variant, TransferData& r_transfer_data)
     {
+        if (native_cleanup_phase() != 0) { impl::Helper::throw_error(isolate_, "E_NATIVE_TRANSFER: native cleanup admission is closed"); return false; }
         Object* object = p_variant.get_type() == Variant::OBJECT ? p_variant.get_validated_object() : nullptr;
         if (p_variant.get_type() == Variant::OBJECT && !object)
         {
             impl::Helper::throw_error(isolate_, "E_NATIVE_TRANSFER: cannot transfer an invalid Object");
             return false;
         }
-        if (object && ReactBridge::protects_structure(object))
+        if (object && (ReactBridge::protects_structure(object) || (native_world_ && native_world_->suppress_finalization(object->get_instance_id(), binding_epoch_))))
         {
-            impl::Helper::throw_error(isolate_, "E_NATIVE_TRANSFER: a React-owned Node cannot leave its root environment");
+            impl::Helper::throw_error(isolate_, "E_NATIVE_TRANSFER: a claimed/owned Node cannot leave its owner environment");
             return false;
         }
         r_transfer_data.source_worker_id = p_worker_handle_id;
@@ -2395,7 +2520,37 @@ namespace jsb
         return true;
     }
 
-    void Environment::finalize_transfer_out(const TransferData& p_transfer_data)
+    bool Environment::validate_transfer_out(const TransferData& p_data, v8::Global<v8::Object>& p_pin)
+    {
+        if (!is_caller_thread()) return false;
+        v8::Isolate::Scope isolate_scope(isolate_);
+        if (native_cleanup_phase() != 0 || (flags_ & EF_PreDispose))
+        {
+            impl::Helper::throw_error(isolate_, "E_NATIVE_TRANSFER: source epoch is closed");
+            return false;
+        }
+        if (p_data.variant.get_type() != Variant::OBJECT) return true;
+        Object* object = p_data.variant.get_validated_object();
+        if (!object || ReactBridge::protects_structure(object) ||
+            (native_world_ && native_world_->suppress_finalization(object->get_instance_id(), binding_epoch_)))
+        {
+            impl::Helper::throw_error(isolate_, "E_NATIVE_TRANSFER: source Object is invalid or claimed by an owner");
+            return false;
+        }
+        v8::HandleScope handle_scope(isolate_);
+        v8::Local<v8::Object> wrapper;
+        if (!try_get_object(object, wrapper) || !verify_object(object, wrapper))
+        {
+            impl::Helper::throw_error(isolate_, "E_NATIVE_TRANSFER: source binding changed during serialization");
+            return false;
+        }
+        // Keep every source wrapper alive until the entire publication ends.
+        // Resetting a binding during commit cannot collect its JS property graph.
+        p_pin.Reset(isolate_, wrapper);
+        return true;
+    }
+
+    bool Environment::finalize_transfer_out(const TransferData& p_transfer_data)
     {
         const Variant& variant = p_transfer_data.variant;
 
@@ -2405,25 +2560,36 @@ namespace jsb
             if (!obj)
             {
                 impl::Helper::throw_error(isolate_, "E_NATIVE_TRANSFER: transferred Object is no longer valid");
-                return;
+                return false;
             }
-            if (ReactBridge::protects_structure(obj))
+            if (ReactBridge::protects_structure(obj) || (native_world_ && native_world_->suppress_finalization(obj->get_instance_id(), binding_epoch_)))
             {
-                impl::Helper::throw_error(isolate_, "E_NATIVE_TRANSFER: a React-owned Node cannot be transferred");
-                return;
+                impl::Helper::throw_error(isolate_, "E_NATIVE_TRANSFER: a claimed/owned Node cannot be transferred");
+                return false;
             }
+            // A duplicate/stale finalize cannot release another binding's reference.
+            if (!object_db_.has_object(obj)) return true;
             obj->set_script_instance(nullptr);
             free_object(obj, FinalizationType::None);
+            // TransferData::variant is the RAII in-flight owner. Release the
+            // removed source wrapper now, including when delivery is cancelled.
+            if (obj->is_ref_counted())
+            {
+                const bool dead = static_cast<RefCounted*>(obj)->unreference();
+                jsb_check(!dead); // the transport Variant still owns a reference
+            }
         }
 
         // For now, we don't do anything special with variants since Godot's variant types are thread safe and use
         // copy-on-write semantics. Technically, it may be advantageous for us to (in future?) clear the variant in the
         // source environment since Godot has optimizations in place that will skip reallocation of the underlying data
         // upon mutation if there's a single reference to that data.
+        return true;
     }
 
     void Environment::transfer_in_bind(const v8::Local<v8::Context>& p_context, const TransferData& p_data)
     {
+        if (native_cleanup_phase() != 0) return;
         if (p_data.variant.get_type() != Variant::Type::OBJECT)
         {
             return;
@@ -2438,9 +2604,9 @@ namespace jsb
             return;
         }
 
-        if (ReactBridge::protects_structure(instance))
+        if (ReactBridge::protects_structure(instance) || (native_world_ && native_world_->suppress_finalization(instance->get_instance_id(), binding_epoch_)))
         {
-            impl::Helper::throw_error(isolate_, "E_NATIVE_TRANSFER: another environment cannot bind a React-owned Node");
+            impl::Helper::throw_error(isolate_, "E_NATIVE_TRANSFER: another environment cannot bind a claimed/owned Node");
             return;
         }
 
@@ -2476,25 +2642,12 @@ namespace jsb
         {
             v8::Local<v8::Object> obj;
             jsb_check(TypeConvert::gd_obj_to_js(isolate_, p_context, instance, obj));
-
-            if (instance->is_ref_counted())
-            {
-                RefCounted* reference = static_cast<RefCounted*>(instance);
-
-                if (reference->unreference())
-                {
-                    // Uh, we really shouldn't end up here. This can only occur if another thread is doing something it
-                    // really shouldn't be doing. I guess we don't want to be responsible for a leak, but this is bad.
-                    memdelete(reference);
-                    JSB_LOG(Error, "transferred object unexpectedly freed: %d", (uint64_t) object_id);
-                    return;
-                }
-            }
         }
     }
 
     void Environment::transfer_in_apply_state(const TransferData& p_data)
     {
+        if (native_cleanup_phase() != 0) return;
         if (p_data.variant.get_type() != Variant::Type::OBJECT)
         {
             return;
@@ -2508,9 +2661,9 @@ namespace jsb
             JSB_LOG(Error, "transferred object not found while applying state: %d", (uint64_t) object_id);
             return;
         }
-        if (ReactBridge::protects_structure(instance))
+        if (ReactBridge::protects_structure(instance) || (native_world_ && native_world_->suppress_finalization(instance->get_instance_id(), binding_epoch_)))
         {
-            impl::Helper::throw_error(isolate_, "E_NATIVE_TRANSFER: another environment cannot apply state to a React-owned Node");
+            impl::Helper::throw_error(isolate_, "E_NATIVE_TRANSFER: another environment cannot apply state to a claimed/owned Node");
             return;
         }
 
@@ -2533,6 +2686,7 @@ namespace jsb
 
             script_instance = script->instance_create(instance);
         }
+        if (!script_instance) return;
 
         for (const Pair<StringName, Variant>& pair : p_data.state)
         {
@@ -2550,7 +2704,9 @@ namespace jsb
                 memdelete(transfer_data);
                 return;
             }
-            p_from->finalize_transfer_out(*transfer_data);
+            v8::Global<v8::Object> pin;
+            if (!p_from->validate_transfer_out(*transfer_data, pin) || !p_from->finalize_transfer_out(*transfer_data))
+            { memdelete(transfer_data); return; }
             p_to->add_async_call(AsyncCall::TYPE_TRANSFER_, transfer_data);
         }
         else

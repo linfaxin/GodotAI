@@ -8,6 +8,7 @@
 #include "scene/main/node.h"
 #include "core/object/callable_method_pointer.h"
 #include <atomic>
+#if JSB_WITH_LEGACY_REACT
 
 namespace jsb::tests
 {
@@ -442,4 +443,5 @@ namespace jsb::tests
     }
 }
 
+#endif // JSB_WITH_LEGACY_REACT
 #endif

@@ -6,7 +6,10 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
-    "./engine-modules": {"types":"./dist/contracts/engine-modules.d.ts","default":"./engine-modules.cjs"},
+    "./engine-modules": {
+      "types": "./dist/contracts/engine-modules.d.ts",
+      "default": "./engine-modules.cjs"
+    },
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
@@ -27,6 +30,10 @@
       "types": "./dist/engine.d.ts",
       "default": "./dist/engine.js"
     },
+    "./engine-components": {
+      "types": "./dist/engine-components.d.ts",
+      "default": "./dist/engine-components.js"
+    },
     "./scheduler": {
       "types": "./dist/scheduler.d.ts",
       "default": "./dist/scheduler.js"
@@ -46,6 +53,14 @@
     "./legacy": {
       "types": "./dist/legacy.d.ts",
       "default": "./dist/legacy.js"
+    },
+    "./native-interface-contracts": {
+      "types": "./dist/native-interface-contracts.d.ts",
+      "default": "./dist/native-interface-contracts.js"
+    },
+    "./engine-native-interfaces": {
+      "types": "./dist/engine-native-interfaces.d.ts",
+      "default": "./dist/engine-native-interfaces.js"
     }
   },
   "files": [

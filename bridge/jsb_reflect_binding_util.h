@@ -46,6 +46,7 @@ namespace jsb
 
         static void _to_array_buffer(const v8::FunctionCallbackInfo<v8::Value>& info)
         {
+            if (!Environment::allow_variant_access(info.GetIsolate())) return;
             v8::Isolate* isolate = info.GetIsolate();
             const v8::Local<v8::Context> context = isolate->GetCurrentContext();
             const v8::Local<v8::Object> self = info.This();
@@ -133,6 +134,7 @@ namespace jsb
         template<bool IsInstanceCallT>
         static void call(const v8::FunctionCallbackInfo<v8::Value>& info)
         {
+            if (!Environment::allow_variant_access(info.GetIsolate())) return;
             const Variant::PTRBuiltInMethod func = (const Variant::PTRBuiltInMethod) info.Data().As<v8::External>()->Value();
             if constexpr (IsInstanceCallT) func(TVariantOpaquePointer<OwnerT>::from(info), nullptr, nullptr, 0);
             else func(nullptr, nullptr, nullptr, 0);
@@ -148,6 +150,7 @@ namespace jsb
         template<bool IsInstanceCallT>
         static void call(const v8::FunctionCallbackInfo<v8::Value>& info)
         {
+            if (!Environment::allow_variant_access(info.GetIsolate())) return;
             v8::Isolate* isolate = info.GetIsolate();
             real_t loc_0;
             if (!StaticBindingUtil<real_t>::get(isolate, isolate->GetCurrentContext(), info[0], loc_0))
@@ -171,6 +174,7 @@ namespace jsb
         template<bool IsInstanceCallT>
         static void call(const v8::FunctionCallbackInfo<v8::Value>& info)
         {
+            if (!Environment::allow_variant_access(info.GetIsolate())) return;
             v8::Isolate* isolate = info.GetIsolate();
             const Variant::PTRBuiltInMethod func = (const Variant::PTRBuiltInMethod) info.Data().As<v8::External>()->Value();
             GDTransitionNumber<real_t> value = 0;
@@ -189,6 +193,7 @@ namespace jsb
         template<bool IsInstanceCallT>
         static void call(const v8::FunctionCallbackInfo<v8::Value>& info)
         {
+            if (!Environment::allow_variant_access(info.GetIsolate())) return;
             v8::Isolate* isolate = info.GetIsolate();
             const Variant::PTRBuiltInMethod func = (const Variant::PTRBuiltInMethod) info.Data().As<v8::External>()->Value();
             GDTransitionNumber<int32_t> value = 0;
@@ -207,6 +212,7 @@ namespace jsb
         template<bool IsInstanceCallT>
         static void call(const v8::FunctionCallbackInfo<v8::Value>& info)
         {
+            if (!Environment::allow_variant_access(info.GetIsolate())) return;
             v8::Isolate* isolate = info.GetIsolate();
             const Variant::PTRBuiltInMethod func = (const Variant::PTRBuiltInMethod) info.Data().As<v8::External>()->Value();
             bool value = false;
@@ -225,6 +231,7 @@ namespace jsb
         template<bool IsInstanceCallT>
         static void call(const v8::FunctionCallbackInfo<v8::Value>& info)
         {
+            if (!Environment::allow_variant_access(info.GetIsolate())) return;
             v8::Isolate* isolate = info.GetIsolate();
             real_t loc_0;
             if (!StaticBindingUtil<real_t>::get(isolate, isolate->GetCurrentContext(), info[0], loc_0))
@@ -258,6 +265,7 @@ namespace jsb
         // approx. 30% faster than plain reflection version of _getter/_setter
         static void _getter(const v8::FunctionCallbackInfo<v8::Value>& info)
         {
+            if (!Environment::allow_variant_access(info.GetIsolate())) return;
             v8::Isolate* isolate = info.GetIsolate();
             const Variant::PTRGetter getter_func = (const Variant::PTRGetter) info.Data().As<v8::External>()->Value();
 
@@ -268,6 +276,7 @@ namespace jsb
 
         static void _setter(const v8::FunctionCallbackInfo<v8::Value>& info)
         {
+            if (!Environment::allow_variant_access(info.GetIsolate())) return;
             v8::Isolate* isolate = info.GetIsolate();
             const v8::Local<v8::Context> context = isolate->GetCurrentContext();
             const Variant::PTRSetter setter_func = (const Variant::PTRSetter) info.Data().As<v8::External>()->Value();
@@ -289,6 +298,7 @@ namespace jsb
 
         static void _getter(const v8::FunctionCallbackInfo<v8::Value>& info)
         {
+            if (!Environment::allow_variant_access(info.GetIsolate())) return;
             v8::Isolate* isolate = info.GetIsolate();
             const Variant::PTRGetter getter_func = (const Variant::PTRGetter) info.Data().As<v8::External>()->Value();
 
@@ -299,6 +309,7 @@ namespace jsb
 
         static void _setter(const v8::FunctionCallbackInfo<v8::Value>& info)
         {
+            if (!Environment::allow_variant_access(info.GetIsolate())) return;
             GDTransitionNumber<int32_t> value;
             if (!StaticBindingUtil<GDTransitionNumber<int32_t>>::get(info[0], value))
             {
@@ -347,6 +358,7 @@ namespace jsb
 
         static void constructor(const v8::FunctionCallbackInfo<v8::Value>& info)
         {
+            if (!Environment::allow_variant_access(info.GetIsolate())) return;
             v8::Isolate* isolate = info.GetIsolate();
             if (!info.IsConstructCall())
             {
@@ -416,6 +428,7 @@ namespace jsb
 
         static void constructor(const v8::FunctionCallbackInfo<v8::Value>& info)
         {
+            if (!Environment::allow_variant_access(info.GetIsolate())) return;
             v8::Isolate* isolate = info.GetIsolate();
             if (!info.IsConstructCall())
             {
@@ -482,6 +495,7 @@ namespace jsb
 
         static void constructor(const v8::FunctionCallbackInfo<v8::Value>& info)
         {
+            if (!Environment::allow_variant_access(info.GetIsolate())) return;
             v8::Isolate* isolate = info.GetIsolate();
             if (!info.IsConstructCall())
             {
@@ -554,6 +568,7 @@ namespace jsb
 
         static void constructor(const v8::FunctionCallbackInfo<v8::Value>& info)
         {
+            if (!Environment::allow_variant_access(info.GetIsolate())) return;
             v8::Isolate* isolate = info.GetIsolate();
             if (!info.IsConstructCall())
             {
@@ -626,6 +641,7 @@ namespace jsb
 
         static void constructor(const v8::FunctionCallbackInfo<v8::Value>& info)
         {
+            if (!Environment::allow_variant_access(info.GetIsolate())) return;
             v8::Isolate* isolate = info.GetIsolate();
             if (!info.IsConstructCall())
             {
@@ -704,6 +720,7 @@ namespace jsb
 
         static void constructor(const v8::FunctionCallbackInfo<v8::Value>& info)
         {
+            if (!Environment::allow_variant_access(info.GetIsolate())) return;
             v8::Isolate* isolate = info.GetIsolate();
             if (!info.IsConstructCall())
             {
@@ -782,6 +799,7 @@ namespace jsb
 
         static void constructor(const v8::FunctionCallbackInfo<v8::Value>& info)
         {
+            if (!Environment::allow_variant_access(info.GetIsolate())) return;
             v8::Isolate* isolate = info.GetIsolate();
             if (!info.IsConstructCall())
             {
@@ -878,6 +896,7 @@ namespace jsb
 
         static void constructor(const v8::FunctionCallbackInfo<v8::Value>& info)
         {
+            if (!Environment::allow_variant_access(info.GetIsolate())) return;
             v8::Isolate* isolate = info.GetIsolate();
             if (!info.IsConstructCall())
             {

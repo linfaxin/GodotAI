@@ -85,7 +85,7 @@
             for(const char* field:{"position","type","owner","link_entry_position","link_exit_position"}){
                 if(!input.has(field))continue;const Variant item=input[field];
                 if(String(field)=="type"){if(item.get_type()==Variant::INT&&(int64_t(item)==0||int64_t(item)==1))output[field]=item;}
-                else if(String(field)=="owner"){Object* object=item.get_type()==Variant::OBJECT?static_cast<Object*>(item):nullptr;if(object){const NativeObjectID id=environment->try_get_object_id(object);if(root.nodes.has(*id))output[field]=item;else output[field]=Variant();}}
+                else if(String(field)=="owner"){Object* object=item.get_type()==Variant::OBJECT?item.get_validated_object():nullptr;if(object){const NativeObjectID id=environment->try_get_object_id(object);if(root.nodes.has(*id))output[field]=item;else output[field]=Variant();}}
                 else if(item.get_type()==Variant::VECTOR2||item.get_type()==Variant::VECTOR3){const String key=String(field)=="link_entry_position"?"linkEntryPosition":String(field)=="link_exit_position"?"linkExitPosition":"position";output[key]=item;}
             }return output;
         }

@@ -1,5 +1,5 @@
 import ts from 'typescript';
-import {type SourceInput, type SourceSnapshot} from './build-plan.js';
+import {sourceFileText,type SourceInput, type SourceSnapshot} from './build-plan.js';
 import {canonicalPath} from './paths.js';
 import {moduleCandidates, projectModulePath, projectScript} from './project-modules.js';
 import {engineCheckOptions, DEFAULT_COMPILER_POLICY, type CompilerPolicy} from './compiler-policy.js';
@@ -20,6 +20,8 @@ export interface ProjectTypeEnvironment {
   readonly files: Readonly<Record<string, string>>;
   readonly userFiles: Readonly<Record<string, string>>;
   readonly options: Readonly<ts.CompilerOptions>;
+  readonly moduleDeclarations:Readonly<Record<string,string>>;
+  resolveModule(name:string,from:string):ts.ResolvedModule|undefined;
   createLanguageService(): ts.LanguageService;
 }
 
@@ -39,7 +41,7 @@ export function sourceTextFiles(input: SourceInput): Record<string, string> {
 /** Type checking never needs to expand binary attachments at the JSON boundary. */
 export function snapshotTextFiles(snapshot: SourceSnapshot): Record<string, string> {
   return Object.fromEntries(snapshot.files.filter(file => file.encoding === 'utf8')
-    .map(file => [file.path, new TextDecoder('utf-8', {fatal: true}).decode(file.bytes)]));
+    .map(file => [file.path,sourceFileText(file)]));
 }
 
 /** Immutable virtual type view shared by CLI checks and the editor LS. There
@@ -66,7 +68,7 @@ export function createProjectTypeEnvironment(input: ProjectTypeEnvironmentOption
     const path = routes[name] ?? (base ? moduleCandidates(base).find(candidate => Object.hasOwn(files, candidate)) : undefined);
     return path && Object.hasOwn(files, path) ? {resolvedFileName: path, isExternalLibraryImport: !Object.hasOwn(user, path)} : undefined;
   };
-  return Object.freeze({files, userFiles: Object.freeze(user), options: Object.freeze(options), createLanguageService() {
+  return Object.freeze({files, userFiles: Object.freeze(user), options: Object.freeze(options),moduleDeclarations:Object.freeze(routes),resolveModule:resolve, createLanguageService() {
     const host: ts.LanguageServiceHost = {
       getScriptFileNames: () => [...roots], getScriptVersion: () => '1',
       getScriptSnapshot: name => Object.hasOwn(files, name) ? ts.ScriptSnapshot.fromString(files[name]!) : undefined,
@@ -77,6 +79,40 @@ export function createProjectTypeEnvironment(input: ProjectTypeEnvironmentOption
     };
     return ts.createLanguageService(host);
   }});
+}
+
+/** One persistent editor service. Build snapshots remain immutable, and each
+ * synchronous service operation is bound to the environment supplied to use(). */
+export class ProjectLanguageService {
+ private current?:ProjectTypeEnvironment;
+ private readonly versions=new Map<string,{text:string;version:number;snapshot:ts.IScriptSnapshot}>();
+ private revision=0;
+ private resolutionEpoch=0;
+ private structure='';
+ private instance?:ts.LanguageService;
+ use(environment:ProjectTypeEnvironment):ts.LanguageService{
+  const structure=JSON.stringify([Object.keys(environment.files).sort(),environment.moduleDeclarations,environment.options]);
+  if(structure!==this.structure){this.structure=structure;this.resolutionEpoch++;}
+  for(const [name,text]of Object.entries(environment.files)){
+   const previous=this.versions.get(name);if(!previous||previous.text!==text)this.versions.set(name,{text,version:(previous?.version??0)+1,snapshot:ts.ScriptSnapshot.fromString(text)});
+  }
+  for(const name of this.versions.keys())if(!Object.hasOwn(environment.files,name))this.versions.delete(name);
+  this.current=environment;this.revision++;
+  if(!this.instance){
+   const host:ts.LanguageServiceHost={
+    getProjectVersion:()=>String(this.revision),
+    getScriptFileNames:()=>Object.keys(this.current!.files).filter(path=>Object.hasOwn(this.current!.userFiles,path)?projectScript.test(path):path.startsWith('/godot/')||path.startsWith('/godot-jsb/')||path.startsWith('/godot.annotations/')),
+    getScriptVersion:name=>`${this.versions.get(name)?.version??0}:${this.resolutionEpoch}`,
+    getScriptSnapshot:name=>this.versions.get(name)?.snapshot,
+    getCompilationSettings:()=>({...this.current!.options}),getCurrentDirectory:()=>'/','getDefaultLibFileName':()=>'/lib/lib.es2022.d.ts',
+    fileExists:name=>Object.hasOwn(this.current!.files,name),readFile:name=>this.current!.files[name],readDirectory:()=>[],
+    resolveModuleNames:(names,from)=>names.map(name=>this.current!.resolveModule(name,from)),
+   };
+   this.instance=ts.createLanguageService(host);
+  }
+  return this.instance;
+ }
+ dispose():void{this.instance?.dispose();this.instance=undefined;this.current=undefined;this.versions.clear();this.structure='';}
 }
 
 export function checkProjectTypes(environment: ProjectTypeEnvironment, service?: ts.LanguageService): CompilerDiagnostic[] {

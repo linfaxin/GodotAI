@@ -25,7 +25,8 @@ test('new React projects export ordinary Schema4 script startup while old compon
   assert.deepEqual(request,{runtime:'engine',launch:{kind:'script',module:'res://src/start.ts',export:'start'}});
   assert.equal(project.entry,'/src/start.ts');assert.equal(project.selected,'/src/App.tsx');assert.equal(project.mainScene,undefined);
   assert.equal(document.entry,undefined);assert.equal(document.mainScene,undefined);assert.equal(document.editor.selected,'/src/App.tsx');
-  assert.match(project.files[project.entry],/createRoot\(ctx.mount, \{runtimeHost: ctx.host\}\)/);
+  assert.match(project.files[project.entry],/createRoot\(ctx.mount, \{entry: ctx.entry, runtimeHost: ctx.host\}\)/);
+  assert.match(project.files[project.entry],/entry\?: EngineEntryCapability/);
   assert.match(project.files[project.entry],/return \(\) => root.shutdown\(\)/);
   assert.equal(projectRuntimeDependencies(project.files).react,true);assert.equal(projectRuntimeDependencies(project.files).demo,false);
   assert.deepEqual(projectCompileRequest(parseProject(JSON.parse(JSON.stringify(document)))),request);

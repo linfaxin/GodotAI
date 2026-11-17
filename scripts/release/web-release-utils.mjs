@@ -142,7 +142,7 @@ export async function inspectRelease(directory, { requireCertified = false } = {
     if (descriptor.target?.sourceCommit !== attestation.source.commit || descriptor.target?.sourceDiffHash !== attestation.source.snapshotHash || descriptor.target?.buildFlags?.godot_build_recipe_sha256 !== attestation.recipeSha256) fail('E_RELEASE_SOURCE', 'Runtime target does not match the actual engine source tuple');
     const actualExecution=executionFromReport(attestation);
     const declaredExecution=descriptor.execution??legacyExecution();
-    for(const key of ['executionModel','wasmThreads','proxyToPthread','requiresCrossOriginIsolation','hostProtocolVersion','lifecycleAbi'])if(actualExecution[key]!==declaredExecution[key])fail('E_RELEASE_EXECUTION','Execution differs from the source-bound recipe: '+key);
+    for(const key of ['executionModel','wasmThreads','proxyToPthread','requiresCrossOriginIsolation','hostProtocolVersion','lifecycleAbi','artifactSetAbi','hostResourceAbi','shutdownQueueAbi'])if(actualExecution[key]!==declaredExecution[key])fail('E_RELEASE_EXECUTION','Execution differs from the source-bound recipe: '+key);
   }
   const releaseExecution=descriptor.execution??legacyExecution();
   assertExecutionAssets(releaseExecution,descriptor.files);

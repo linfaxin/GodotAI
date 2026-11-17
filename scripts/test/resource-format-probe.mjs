@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-/** Opt-in, bounded R0 resource experiment. This does not register a production
- * converter or change ImageTexture into CompressedTexture2D in project builds. */
+/** Resource probes for legacy Base64, the bounded CTEX format and explicit
+ * production binary producers. Godot Web/GPU acceptance remains separate. */
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {createReadStream} from 'node:fs';
@@ -119,9 +119,10 @@ export function start(ctx:any){
 }
 
 export async function runResourceFormatProbe({mode='all',out,godot,chromium}={}){
- if(!['all','browser','ctex'].includes(mode))throw Error('Expected --mode all, browser or ctex');
+ if(!['all','browser','ctex','binary'].includes(mode))throw Error('Expected --mode all, browser, ctex or binary');
  const directory=path.resolve(out??path.join(repository,'work/resource-format-probe'));await mkdir(directory,{recursive:true});
  const png=whitePng();await writeFile(path.join(directory,'white-2048.png'),png);
+ if(mode==='binary'){const {runBinaryResourceProbe}=await import('./binary-resource-probe.mjs');return runBinaryResourceProbe({out:directory,godot,chromium,png});}
  const report={schemaVersion:1,kind:'godotjs-manual-resource-format-probe',status:'failed',mode,dimension,
   source:{bytes:png.byteLength,sha256:hash(png)},productionConverterChanged:false,checks:{},
   limitations:['One opaque-white 2048x2048 RGBA PNG; no JPEG, transparency, color-profile, mipmap or malformed CTEX matrix.',
@@ -148,7 +149,7 @@ if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.ur
  try{
   const args=options(process.argv.slice(2),['--help']);
   for(const key of Object.keys(args))if(!['mode','out','godot','chromium','help'].includes(key))throw Error('Unknown option --'+key);
-  if(args.help)console.log('node scripts/test/resource-format-probe.mjs [--mode all|browser|ctex] [--out work/resource-format-probe] [--godot /path/to/godotjs-4.6.1] [--chromium /path/to/chromium]\nRequires built project-tools and installed Playground esbuild/Playwright dependencies. This is a manual probe, not a production converter.');
+  if(args.help)console.log('node scripts/test/resource-format-probe.mjs [--mode all|browser|ctex|binary] [--out work/resource-format-probe] [--godot /path/to/godotjs-4.6.1] [--chromium /path/to/chromium]\nRequires built project-tools and installed Playground esbuild/Playwright dependencies. Binary mode checks production producers and reopened persistent cache; real Web/GPU rendering is a separate product test.');
   else console.log(JSON.stringify(await runResourceFormatProbe(args),null,2));
  }catch(error){console.error(error?.stack??error);process.exitCode=1;}
 }

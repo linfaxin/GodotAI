@@ -51,6 +51,8 @@ test('full engine release seals executable, native API, generated types and runt
   const asset=manifest.sdk.runtimeModules[specifier];
   assert.equal(outputs.get(asset.path).toString(),`module.exports=require('res://.playground/vendor.js').${key};\n`);
  }
+ for(const specifier of ['@godot-js/react/legacy','@godot-js/react/godot','@godot-js/react/native-interfaces','@godot-js/react/ui','@godot-js/react/testing']){assert.equal(manifest.sdk.runtimeModules[specifier],undefined);assert.equal(manifest.sdk.moduleContract[specifier],undefined);}
+ assert.equal(manifest.sdk.moduleExports['@godot-js/react/engine-components'],'engineComponents');
  assert.equal(manifest.sdk.runtimeModules.godot,undefined,'Native modules remain engine resolved');
  assert.equal(manifest.sdk.runtimeModules['godot-jsb'],undefined);
  assert.equal(assembleFullEngineRelease(input).manifest.id,id,'Same inputs reproduce identity');

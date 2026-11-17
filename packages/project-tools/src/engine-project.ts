@@ -10,6 +10,7 @@ import {moduleRequireOffsets} from './script-bindings.js';
 import {ENGINE_MODULE_ROOT,projectScript,projectDeclaration,moduleCandidates,projectModulePath,emittedModulePath} from './project-modules.js';
 import {adoptBytes,byteMap,captureBytes,retainBytes} from './owned-bytes.js';
 import {engineEmitOptions} from './compiler-policy.js';
+import {ProjectBuildCache,cachedTextBytes,getCachedEmit,putCachedEmit,type CachedEmit} from './build-cache.js';
 
 export interface EngineProjectDiagnostic {
  file?:string;line:number;column:number;message:string;code?:string|number;category:'error'|'warning';
@@ -26,6 +27,8 @@ export interface EngineProjectOptions {
  /** Optional emitted CommonJS by source path; native namespace imports are safely re-emitted. */
  generatedJs?:Readonly<Record<string,string>>;
  maxBytes?:number;maxFiles?:number;
+ /** Execution-only cache. Never included in compiler or artifact identity. */
+ cache?:ProjectBuildCache;
 }
 export interface EngineProjectManifest {
  schemaVersion:1;runtime:string;entry?:string;mainScene?:string;
@@ -196,7 +199,7 @@ export function prepareEngineProject(options:EngineProjectOptions):PreparedEngin
   const path=resourcePath(input),collision=casePaths.get(path.toLowerCase());
   if(collision)fail('E_ENGINE_PATH_COLLISION',`Project paths collide: ${collision} and ${input}`,input);
   casePaths.set(path.toLowerCase(),path);
-  if(typeof value==='string'){textFiles.set(path,value);files.set(path,adoptBytes(encoder.encode(value)));}
+  if(typeof value==='string'){textFiles.set(path,value);files.set(path,cachedTextBytes(options.cache,value));}
   else if(value instanceof Uint8Array||Array.isArray(value)&&value.every(byte=>Number.isInteger(byte)&&byte>=0&&byte<=255)){
    const bytes=value instanceof Uint8Array?retainBytes(value):captureBytes(value);files.set(path,bytes);
    if(path==='res://project.godot'){
@@ -207,7 +210,7 @@ export function prepareEngineProject(options:EngineProjectOptions):PreparedEngin
   else fail('E_ENGINE_BYTES',`Expected text or byte values 0–255: ${input}`,input);
  }
  const put=(path:string,value:string|Uint8Array,replace=false)=>{
-  const bytes=typeof value==='string'?adoptBytes(encoder.encode(value)):retainBytes(value);
+  const bytes=typeof value==='string'?cachedTextBytes(options.cache,value):retainBytes(value);
   const collision=casePaths.get(path.toLowerCase());
   if(collision&&collision!==path)fail('E_ENGINE_PATH_COLLISION',`Generated path collides with ${collision}: ${path}`,path);
   const existing=files.get(path);
@@ -294,9 +297,9 @@ export function prepareEngineProject(options:EngineProjectOptions):PreparedEngin
    // .mts/.mjs force ESM in TypeScript even with module:CommonJS. The native
    // loader expects CommonJS; keep the real source URI in the rewritten map.
    const transpileName=path.replace(/\.mts$/i,'.ts').replace(/\.mjs$/i,'.js');
-   let rewriteImports=false;
+   let rewriteImports=false,nativeReferenced=false;
    const rewritten=()=>{rewriteImports=true;};
-   const referencesNative=()=>{put(nativeNamespace,nativeModuleSource());runtimePaths.godot=nativeNamespace;rewritten();};
+   const referencesNative=()=>{nativeReferenced=true;put(nativeNamespace,nativeModuleSource());runtimePaths.godot=nativeNamespace;rewritten();};
    const resolveImport=(specifier:string)=>{
     if(specifier==='godot')return nativeNamespace;
     if(runtimePaths[specifier])return runtimePaths[specifier];
@@ -304,11 +307,29 @@ export function prepareEngineProject(options:EngineProjectOptions):PreparedEngin
     const resolved=moduleCandidates(base).find(candidate=>moduleOutputs.has(candidate));
     return resolved?moduleOutputs.get(resolved):undefined;
    };
-   const result=ts.transpileModule(source,{fileName:transpileName,reportDiagnostics:true,transformers:{before:[runtimeImportTransformer(resolveImport,(specifier)=>{if(specifier==='godot')referencesNative();else rewritten();}),nativeImportTransformer(rewritten)]},compilerOptions:engineEmitOptions()});
-   for(const item of result.diagnostics??[]){
-    const point=item.file&&item.start!==undefined?item.file.getLineAndCharacterOfPosition(item.start):undefined;
-    diagnostics.push({file:path,line:point?point.line+1:0,column:point?point.character+1:0,code:item.code,category:item.category===ts.DiagnosticCategory.Error?'error':'warning',message:ts.flattenDiagnosticMessageText(item.messageText,'\n')});
-   }
+   // Include positive and negative resolution results. Adding a formerly
+   // missing candidate, renaming it, or changing a runtime route invalidates
+   // this emit even when the importing source itself did not change.
+   const candidates=new Set<string>();
+   const syntax=ts.createSourceFile(transpileName,source,ts.ScriptTarget.ES2022,true,/\.tsx$/i.test(path)?ts.ScriptKind.TSX:undefined);
+   const imports=(node:ts.Node)=>{
+    if((ts.isImportDeclaration(node)||ts.isExportDeclaration(node))&&node.moduleSpecifier&&ts.isStringLiteralLike(node.moduleSpecifier))candidates.add(node.moduleSpecifier.text);
+    else if(ts.isImportEqualsDeclaration(node)&&ts.isExternalModuleReference(node.moduleReference)&&node.moduleReference.expression&&ts.isStringLiteralLike(node.moduleReference.expression))candidates.add(node.moduleReference.expression.text);
+    else if(ts.isCallExpression(node)&&node.arguments.length===1&&ts.isStringLiteralLike(node.arguments[0])&&(node.expression.kind===ts.SyntaxKind.ImportKeyword||ts.isIdentifier(node.expression)&&node.expression.text==='require'))candidates.add(node.arguments[0].text);
+    ts.forEachChild(node,imports);
+   };imports(syntax);
+   const emitKey=JSON.stringify(['godotjs-emit/2',ts.version,path,source,engineEmitOptions(),[...candidates].sort().map(name=>[name,resolveImport(name)??null])]);
+   let result=getCachedEmit(options.cache,emitKey);
+   if(!result){
+    const emitted=ts.transpileModule(source,{fileName:transpileName,reportDiagnostics:true,transformers:{before:[runtimeImportTransformer(resolveImport,(specifier)=>{if(specifier==='godot')referencesNative();else rewritten();}),nativeImportTransformer(rewritten)]},compilerOptions:engineEmitOptions()});
+    const emittedDiagnostics:EngineProjectDiagnostic[]=(emitted.diagnostics??[]).map(item=>{
+     const point=item.file&&item.start!==undefined?item.file.getLineAndCharacterOfPosition(item.start):undefined;
+     return {file:path,line:point?point.line+1:0,column:point?point.character+1:0,code:item.code,category:item.category===ts.DiagnosticCategory.Error?'error':'warning',message:ts.flattenDiagnosticMessageText(item.messageText,'\n')};
+    });
+    result={outputText:emitted.outputText,sourceMapText:emitted.sourceMapText,diagnostics:emittedDiagnostics,rewritten:rewriteImports,nativeReferenced};
+    putCachedEmit(options.cache,emitKey,result);
+   }else{rewriteImports=result.rewritten;if(result.nativeReferenced)referencesNative();}
+   diagnostics.push(...result.diagnostics.map(item=>({...item})));
    const useSupplied=supplied.has(path)&&!rewriteImports&&!/\.(?:mts|mjs)$/i.test(path);
    let javascript=useSupplied?supplied.get(path)!:result.outputText;
    // Externally supplied JavaScript can carry an inline map. Preserve that

@@ -3,6 +3,8 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { basename, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { prepareNativeEngine } from "./prepare-native-engine.mjs";
+import {captureNativeModuleInputs,nativeBuildSourceHash,captureNativeDependencies,nativeDependencyManifestHash,captureNativeToolchain,nativeToolchainHash} from "./native-build-inputs.mjs";
 
 const moduleRoot = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 const args = process.argv.slice(2);
@@ -36,7 +38,7 @@ const destinationModule = join(destination, "modules/GodotJS");
 // The SDK may contain per-directory symlinks to the working module. Do not compile
 // through them: SCons would write object files into the developer's checkout.
 rmSync(destinationModule, { recursive: true, force: true });
-const excluded = new Set([".git", "node_modules", ".godot", "__pycache__"]);
+const excluded = new Set([".git", "node_modules", ".godot", "__pycache__", "work", ".browser-engine"]);
 const copyFilter = (source: string) => !excluded.has(basename(source)) && !/\.(?:o|os|obj|pdb|ilk)$/.test(source);
 cpSync(moduleRoot, destinationModule, {
     recursive: true,
@@ -68,7 +70,6 @@ function sourceFiles(directory: string): string[] {
     }
     return result;
 }
-const nativeRoots = ["bridge", "compat", "impl", "internal", "weaver", "weaver-editor", "tests", "quickjs", "quickjs-ng"];
 function scopedFontconfig() {
     const version = readFileSync(join(destination, "version.py"), "utf8");
     for (const [field, expected] of [["major", "4"], ["minor", "6"], ["patch", "1"]]) {
@@ -110,26 +111,31 @@ function scopedFontconfig() {
     writeFileSync(statePath, JSON.stringify(result, null, 2) + "\n");
     return result;
 }
+const nativeIntegration = await prepareNativeEngine(destination);
 const godotBuildRecipe = scopedFontconfig();
 const godotBuildRecipeSha256 = createHash("sha256").update(JSON.stringify(godotBuildRecipe)).digest("hex");
-const inputPaths = ["SCsub", "config.py", "register_types.cpp", "register_types.h", "jsb.config.h", "jsb.h"]
-    .map(path => join(destinationModule, path))
-    .filter(existsSync);
-for (const root of nativeRoots) {
-    const directory = join(destinationModule, root);
-    if (existsSync(directory)) inputPaths.push(...sourceFiles(directory).filter(path => /\.(?:h|hpp|cpp|c|py)$/.test(path)));
-}
-const hashes = Object.fromEntries(inputPaths.sort().map(path => [
-    relative(destinationModule, path), createHash("sha256").update(readFileSync(path)).digest("hex"),
-]));
-const sourceSnapshotHash = createHash("sha256").update(JSON.stringify(hashes)).digest("hex");
+const scons = option("--scons", "scons")!;
+// Pin the selected drivers instead of reporting a guessed default while SCons
+// chooses a different compiler from its environment or platform configuration.
+const cc=option("--cc",process.env.CC??"gcc")!,cxx=option("--cxx",process.env.CXX??"g++")!,link=option("--link",cxx)!;
+const toolchainOptions={scons,cc,cxx,link,ar:"ar",python:option("--python","python3")!};
+const dependencyOptions={engine,platform:"linuxbsd",arch:"x86_64"};
+const dependencyManifest=captureNativeDependencies(destinationModule,dependencyOptions);
+const dependencyManifestSha256=nativeDependencyManifestHash(dependencyManifest);
+const toolchain=captureNativeToolchain(toolchainOptions),toolchainSha256=nativeToolchainHash(toolchain);
+const useLlvm=basename(cxx).includes("clang++");
+if(/clang/i.test(toolchain.tools.cxx.version)!==useLlvm)throw new Error("This scoped producer requires a directly selected GNU C++ driver or a clang++ executable; compiler launcher commands are not certified");
+const inputEnvironment={dependencyManifestSha256,toolchainSha256};
+const hashes=captureNativeModuleInputs(destinationModule);
+const sourceSnapshotHash=nativeBuildSourceHash(hashes,nativeIntegration,godotBuildRecipeSha256,inputEnvironment);
 const git = spawnSync("git", ["rev-parse", "HEAD"], { cwd: moduleRoot, encoding: "utf8" });
 const flags = [
     "platform=linuxbsd", "target=editor", "arch=x86_64", "optimize=none", "debug_symbols=no", "lto=none", "tests=yes",
+    `use_llvm=${useLlvm?"yes":"no"}`,"linker=default",`CC=${cc}`,`CXX=${cxx}`,`LINK=${link}`,"c_compiler_launcher=","cpp_compiler_launcher=",
     "skip_js_runtime=yes", "modules_enabled_by_default=no", "module_GodotJS_enabled=yes", "module_gdscript_enabled=yes",
     "module_regex_enabled=yes", "module_freetype_enabled=yes", "module_text_server_fb_enabled=yes", "module_svg_enabled=yes",
     "module_multiplayer_enabled=yes", "module_enet_enabled=yes", "module_godot_physics_2d_enabled=yes", "module_godot_physics_3d_enabled=yes",
-    "vulkan=no", "opengl3=no", "x11=no", "wayland=no", "alsa=no", "pulseaudio=no", "dbus=no", "speechd=no", "accesskit=no", "fontconfig=yes", "use_sowrap=yes", "use_static_cpp=yes",
+    "vulkan=no", "opengl3=no", "x11=no", "wayland=no", "alsa=no", "pulseaudio=no", "dbus=no", "speechd=no", "udev=no", "sdl=no", "accesskit=no", "fontconfig=yes", "use_sowrap=yes", "use_static_cpp=yes",
     `use_quickjs_ng=${engine === "qjs" ? "yes" : "no"}`,
     `-j${option("--jobs", "4")}`,
 ];
@@ -137,25 +143,29 @@ const reportPath = join(destination, "react-native-build.json");
 const report: Record<string, unknown> = {
     schemaVersion: 1, status: "snapshotted", sourceCommit: git.stdout.trim(), sourceSnapshotHash,
     sourceModule: moduleRoot, snapshotModule: destinationModule, godotSource: sourceRoot,
-    engine, flags, inputs: hashes, godotBuildRecipe, godotBuildRecipeSha256,
+    engine, flags, inputs: hashes, godotBuildRecipe, godotBuildRecipeSha256, nativeIntegration,
+    nativeInputSchemaVersion:3,dependencyManifest,dependencyManifestSha256,toolchain,toolchainSha256,
 };
 writeFileSync(reportPath, JSON.stringify(report, null, 2) + "\n");
 if (args.includes("--sync-only")) {
     console.log(JSON.stringify({ status: report.status, sourceSnapshotHash, reportPath }));
 } else {
-    const scons = option("--scons", "scons")!;
     const result = spawnSync(scons, flags, { cwd: destination, stdio: "inherit", shell: false });
-    const binary = join(destination, "bin/godot.linuxbsd.editor.x86_64");
+    const binary = join(destination, "bin/godot.linuxbsd.editor.x86_64"+(useLlvm?".llvm":""));
     report.status = result.status === 0 ? "built" : "failed";
     report.exitCode = result.status;
     report.error = result.error?.message;
     if (result.status === 0) {
-        if (!existsSync(binary)) throw new Error("SCons succeeded without producing a Godot binary");
-        report.binary = binary;
-        report.binaryBytes = statSync(binary).size;
-        report.binarySha256 = createHash("sha256").update(readFileSync(binary)).digest("hex");
+        try {
+            const finalEnvironment={dependencyManifestSha256:nativeDependencyManifestHash(captureNativeDependencies(destinationModule,dependencyOptions)),toolchainSha256:nativeToolchainHash(captureNativeToolchain(toolchainOptions))};
+            if(nativeBuildSourceHash(captureNativeModuleInputs(destinationModule),nativeIntegration,godotBuildRecipeSha256,finalEnvironment)!==sourceSnapshotHash)throw new Error("Native source, dependency or toolchain inputs changed while SCons was building");
+            if (!existsSync(binary)) throw new Error("SCons succeeded without producing a Godot binary");
+            report.binary = binary;
+            report.binaryBytes = statSync(binary).size;
+            report.binarySha256 = createHash("sha256").update(readFileSync(binary)).digest("hex");
+        } catch(error) {report.status="failed";report.exitCode=1;report.error=error instanceof Error?error.message:String(error);}
     }
     writeFileSync(reportPath, JSON.stringify(report, null, 2) + "\n");
-    if (result.status !== 0) process.exit(result.status ?? 1);
+    if (report.status !== "built") process.exit(Number(report.exitCode)||1);
     console.log(JSON.stringify({ status: report.status, binary, sourceSnapshotHash, reportPath }));
 }

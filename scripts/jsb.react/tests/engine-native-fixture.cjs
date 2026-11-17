@@ -29,6 +29,7 @@ module.exports=function engineFixture(){
     is_connected(name,callback){return !!this.signals.get(name)?.has(callback);}
     disconnect(name,callback){this.signals.get(name)?.delete(callback);calls.push(['disconnect',this,name]);}
     emit_signal(name,...args){const nested=emitting.has(this);emitting.add(this);try{for(const callback of [...(this.signals.get(name)??[])])callback(...args);}finally{if(!nested)emitting.delete(this);}if(autoPump)for(const root of roots)root.pump();}
+    is_queued_for_deletion(){return pending.includes(this);}
     queue_free(){calls.push(['queue_free',this]);pending.push(this);}
     free(){if(emitting.has(this))throw Error("Object is locked and can't be freed");if(!this.alive)throw Error('double free');calls.push(['free',this]);for(const child of [...this.children])child.free();if(this.parent)this.parent.remove_child(this);this.alive=false;objects.delete(this);this.signals.clear();}
   }

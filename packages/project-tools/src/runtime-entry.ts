@@ -1,7 +1,43 @@
+import {RUNTIME_BINDING_FACTORY_SOURCE} from '@godot-js/engine/runtime-binding-source';
+
+/** The same pure runtime core is embedded as CommonJS startup code on native
+ * hosts. Browser hosts have already installed their own transport binding. */
+export function runtimeBindingBootstrap():string {
+ return `const ensureRuntimeBinding = () => {
+ const installed = (globalThis as any).__godotjsRuntimeHost;
+ if (installed) return installed;
+ let native: any;
+ try { native = require('godot-jsb').internal.native_runtime; } catch (_) { return undefined; }
+ if (native?.abi !== 1 || typeof native.setCleanupHandlers !== 'function') return undefined;
+ if (typeof native.environmentId !== 'string' || !native.environmentId || typeof native.worldId !== 'string' || !native.worldId) throw Error('E_NATIVE_RUNTIME_IDENTITY: Native world and environment identities are required');
+ const epoch = 'native:' + String(native.environmentId), world = String(native.worldId);
+ const createBinding = ${RUNTIME_BINDING_FACTORY_SOURCE};
+ const nativeError = console.error.bind(console);
+ const binding = createBinding({sessionId:'native:' + world + ':' + epoch,role:'engine',
+  onDiagnostic(value: any) { nativeError('[godotjs][runtime] ' + value.message + (value.stack ? '\\n' + value.stack : '')); }
+ });
+ binding.beginNativeEpoch(epoch);
+ (globalThis as any).__godotjsRuntimeHost = binding;
+ try {
+  native.setCleanupHandlers(() => binding.beginClose('native-quit'), () => {
+   void binding.drainClose();
+   const progress = binding.closeProgress();
+   // A fatal is a run failure even when every cleanup completed successfully.
+   return binding.failure ? {...progress,status:'failed'} : progress;
+  }, () => binding.endNativeEpoch(epoch));
+ } catch (error) {
+  if ((globalThis as any).__godotjsRuntimeHost === binding) delete (globalThis as any).__godotjsRuntimeHost;
+  binding.settle(); throw error;
+ }
+ return binding;
+};\n`;
+}
+
 /** Generated ordinary script entry. Framework-neutral and free of host imports. */
 export function scriptBootstrap(module:string,exportName:string):string {
  return `const intrinsicStackGetter = Object.getOwnPropertyDescriptor(new Error(), 'stack')?.get;
 const G = require('godot');
+${runtimeBindingBootstrap()}
 export default class ProjectScriptBootstrap extends G.Node {
  private cleanup: any; private cleanupCalled = false; private closed = false;
  private entry: any; private host: any; private managed = false;
@@ -31,7 +67,7 @@ export default class ProjectScriptBootstrap extends G.Node {
   } catch (error) { this.report(error, true); }
  }
  _ready() {
-  const binding = (globalThis as any).__godotjsRuntimeHost;
+  const binding = ensureRuntimeBinding();
   const admission = typeof binding?.closeProgress === 'function' ? binding.closeProgress() : undefined;
   if (admission && (admission.closing || admission.accepting === false)) { this.closed = true; return; }
   this.entry = typeof binding?.openEntry === 'function' ? binding.openEntry() : undefined;
@@ -52,7 +88,7 @@ export default class ProjectScriptBootstrap extends G.Node {
   try {
    const start = require(${JSON.stringify(module)})[${JSON.stringify(exportName)}];
    if (typeof start !== 'function') throw Error('Script entry must export a start function');
-   const result = start({mount:this,godot:G,host:this.host,lifetime:this.entry?.lifetime});
+   const result = start({mount:this,godot:G,host:this.host,lifetime:this.entry?.lifetime,entry:this.entry?.capability});
    if (result && typeof result.then === 'function') void Promise.resolve(result).then(accept).catch((error: any) => failed(error));
    else accept(result);
   } catch (error) { failed(error, true); }

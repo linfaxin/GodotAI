@@ -10,25 +10,25 @@ const runtimeHostSource=ts.transpileModule(await readFile(new URL('../../../../p
 // Browser-like asynchronous postMessage delivery across independent JS realms.
 // The host intentionally has no bridge engine or native callbacks.
 function network() {
-  const pending=[],workers=new Map(),realms=new Map(),received=[],nativeTransfers=[],progress=[];
+  const pending=[],workers=new Map(),realms=new Map(),received=[],nativeTransfers=[],progress=[],bufferTransfers=[];
   const quiet={log(){},warn(){},error(){},assert:console.assert};
   const PThread={pthreads:{},unusedWorkers:[],getNewWorker(){return this.unusedWorkers.shift();}};
-  const host=createContext({console:quiet,PThread,ENVIRONMENT_IS_PTHREAD:false});
+  const host=createContext({console:quiet,PThread,ENVIRONMENT_IS_PTHREAD:false,structuredClone,ArrayBuffer,SharedArrayBuffer,Map,Set});
   runInContext(source,host);
   function realm(id,role,parent=0) {
     const outboundListeners=[],inboundListeners=[];
-    const worker={pthread_ptr:id,addEventListener(name,callback){if(name==='message')outboundListeners.push(callback);},postMessage(data){const snapshot=structuredClone(data);pending.push(()=>inboundListeners.forEach(callback=>callback({data:snapshot,stopImmediatePropagation(){}})));}};
+    const worker={pthread_ptr:id,addEventListener(name,callback){if(name==='message')outboundListeners.push(callback);},postMessage(data,transfer=[]){bufferTransfers.push({hop:'host-child',bytes:transfer.map(value=>value.byteLength)});const snapshot=structuredClone(data,{transfer});pending.push(()=>inboundListeners.forEach(callback=>callback({data:snapshot,stopImmediatePropagation(){}})));}};
     PThread.pthreads[id]=worker;workers.set(id,worker);
-    const context=createContext({console:quiet,ENVIRONMENT_IS_PTHREAD:true,
+    const context=createContext({console:quiet,ENVIRONMENT_IS_PTHREAD:true,structuredClone,ArrayBuffer,SharedArrayBuffer,Map,Set,
       addEventListener(name,callback){if(name==='message')inboundListeners.push(callback);},
-      postMessage(data){const snapshot=structuredClone(data);pending.push(()=>outboundListeners.forEach(callback=>callback({data:snapshot,stopImmediatePropagation(){}})));},
+      postMessage(data,transfer=[]){bufferTransfers.push({hop:'pthread-host',bytes:transfer.map(value=>value.byteLength)});const snapshot=structuredClone(data,{transfer});pending.push(()=>outboundListeners.forEach(callback=>callback({data:snapshot,stopImmediatePropagation(){}})));},
       __godotjsRuntimeHost:{assignRole(value){progress.push(['role',id,value]);},markProgress(){progress.push(['frame',id]);}},
     });
     runInContext(source,context);host._jsbb_.install_pthread_worker_listener_hook();
     const values=new Map();let index=8;
     const stack={EnterScope(){},ExitScope(){},GetValue(position){return values.get(position);},Push(value){const position=index++;values.set(position,value);return position;}};
     context._jsbb_.ConfigureThread(role==='engine'?1:2,id,parent);
-    context._jsbb_.engine={stack,Release(){}};
+    context._jsbb_.engine={stack,opaque:id*100,native_alive:true,Release(){}};
     context._jsbb_.interop={
       worker_get_or_add_native_transfer(channel,env,transfer,position){nativeTransfers.push({source:id,channel,env,transfer,value:values.get(position)});return nativeTransfers.length-1;},
       on_worker_message(sender,position,transfer){received.push({target:id,kind:'parent-message',sender,transfer,data:values.get(position)});},
@@ -38,8 +38,16 @@ function network() {
     realms.set(id,entry);return entry;
   }
   function drain(){let turns=0;while(pending.length){assert(++turns<1000,'network did not settle');pending.shift()();}for(const entry of realms.values())entry.context._jsbb_.FlushPendingWorkerMessages();}
-  return {host,realm,drain,received,nativeTransfers,progress,pending,workers};
+  return {host,realm,drain,received,nativeTransfers,progress,pending,workers,bufferTransfers};
 }
+
+test('binary packets transfer their owned clone at both hops without detaching the caller buffer',()=>{
+ const n=network(),engine=n.realm(41,'engine');n.realm(42,'script-worker',41);n.drain();
+ const value=runInContext('(()=>{const buffer=new ArrayBuffer(4096);return {buffer,bytes:new Uint8Array(buffer)};})()',engine.context),buffer=value.buffer;value.bytes[0]=27;
+ assert.equal(engine.send(42,value,91),0);assert.equal(buffer.byteLength,4096);value.bytes[0]=99;n.drain();
+ assert.equal(n.received[0].data.bytes[0],27);assert.equal(n.received[0].data.buffer,n.received[0].data.bytes.buffer);
+ assert.deepEqual(n.bufferTransfers.filter(hop=>hop.bytes.length).map(hop=>({hop:hop.hop,bytes:Array.from(hop.bytes)})),[{hop:'pthread-host',bytes:[4096]},{hop:'host-child',bytes:[4096]}]);
+});
 
 test('pthread engine sends to child and receives ready, plain replies and Variant receipts without a page engine',()=>{
   const n=network(),engine=n.realm(41,'engine'),child=n.realm(42,'script-worker',41);n.drain();

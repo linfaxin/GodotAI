@@ -20,8 +20,8 @@ export async function start(controller:any,module:any) {
   r.resolveScene();await until(()=>!s.loading);
   for(const item of [visible,layer,hud])ensure(item.read("visible")===true,"Suspense failed to restore visibility");
   ensure(hidden.read("visible")===false,"Suspense lost an initial visibility baseline");
-  r.changeInitial("after");await until(()=>controller.root.options.mode!=="development"||controller.root.getDiagnostics().length>0);
+  r.changeInitial("after");await until(()=>controller.mode!=="development"||controller.services.getDiagnostics().length>0);
   ensure(controller.root.getErrors().length===0,"runtime reported unexpected errors");
   return {refRebound:true,readyCleanupLive:true,suspenseDescendantsHidden:true,visibilityRestored:true,
-    developmentDiagnostic:controller.root.options.mode==="development"?controller.root.getDiagnostics().length>0:"production-silent"};
+    developmentDiagnostic:controller.mode==="development"?controller.services.getDiagnostics().length>0:"production-silent"};
 }

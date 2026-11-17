@@ -2,6 +2,8 @@ import {promises as fs} from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {createHash} from 'node:crypto';
+import {createRequire} from 'node:module';
+import ts from 'typescript';
 import {catalog} from '../src/catalog.ts';
 import {buildFrontend} from './build-frontend.mjs';
 import {buildDemoRuntime} from './build-demo-runtime.mjs';
@@ -17,8 +19,27 @@ const repository=path.resolve(app,'../..');
 export async function createTypeSnapshot({engineFiles}={}){
  const types={};
  async function collect(directory,prefix,filter){for(const entry of (await fs.readdir(directory,{withFileTypes:true})).sort((a,b)=>a.name<b.name?-1:a.name>b.name?1:0)){const p=path.join(directory,entry.name),key=`${prefix}/${entry.name}`;if(entry.isDirectory())await collect(p,key,filter);else if(filter(entry.name))types[key]=await fs.readFile(p,'utf8');}}
- await collect(path.resolve(app,'../../scripts/jsb.react/dist'),'/sdk',name=>name.endsWith('.d.ts'));
- if(engineFiles)await collect(path.resolve(app,'../../scripts/jsb.react/dist'),'/engine-sdk',name=>name.endsWith('.d.ts'));
+ // Public routes advertise only modules produced by this engine vendor. Keep
+ // their relative declaration dependencies without exposing legacy entrypoints.
+ const sdkRoot=path.resolve(app,'../../scripts/jsb.react/dist'),available={};
+ async function sdkDeclarations(directory,prefix){for(const entry of (await fs.readdir(directory,{withFileTypes:true})).sort((a,b)=>a.name.localeCompare(b.name))){const filename=path.join(directory,entry.name),relative=prefix+entry.name;if(entry.isDirectory())await sdkDeclarations(filename,relative+'/');else if(entry.name.endsWith('.d.ts'))available[relative]=await fs.readFile(filename,'utf8');}}
+ await sdkDeclarations(sdkRoot,'');
+ const {ENGINE_SDK_MODULES}=createRequire(path.join(sdkRoot,'../package.json'))('@godot-js/react/engine-modules');
+ const visit=(virtualPath)=>{
+  if(Object.hasOwn(types,virtualPath))return;
+  const match=/^\/(sdk|engine-sdk)\/(.*)$/.exec(virtualPath);if(!match||typeof available[match[2]]!=='string')throw Error('Missing SDK declaration '+virtualPath);
+  const source=available[match[2]];types[virtualPath]=source;
+  const parsed=ts.preProcessFile(source,true,true);
+  for(const dependency of [...parsed.importedFiles,...parsed.referencedFiles]){
+   if(!dependency.fileName.startsWith('.'))continue;
+   const base=path.posix.normalize(path.posix.join(path.posix.dirname(virtualPath),dependency.fileName)).replace(/\.(?:mjs|cjs|js)$/i,'');
+   const candidate=[base,base+'.d.ts',base+'/index.d.ts'].find(name=>{const key=/^\/(?:sdk|engine-sdk)\/(.*)$/.exec(name)?.[1];return key&&Object.hasOwn(available,key);});
+   if(!candidate)throw Error('Missing SDK declaration dependency '+dependency.fileName+' from '+virtualPath);visit(candidate);
+  }
+ };
+ for(const entry of Object.values(ENGINE_SDK_MODULES))if(entry.scope==='engine'||entry.scope==='shared'){
+  if(entry.declaration.startsWith('/sdk/')||entry.declaration.startsWith('/engine-sdk/'))visit(entry.declaration);
+ }
  await collect(path.dirname(fileURLToPath(import.meta.resolve('@types/react/package.json'))),'/react',name=>name.endsWith('.d.ts'));
  await collect(path.dirname(fileURLToPath(import.meta.resolve('typescript/lib/typescript.js'))),'/lib',name=>/^lib\..*\.d\.ts$/.test(name));
  if(engineFiles){

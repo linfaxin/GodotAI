@@ -39,8 +39,6 @@ jobs:
   worker:
     runs-on: ubuntu-24.04
     timeout-minutes: 180
-    env:
-      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/playwright-browsers
     steps:
       - uses: actions/checkout@v4
         with:
@@ -57,6 +55,8 @@ jobs:
       - uses: mymindstorm/setup-emsdk@v14
         with:
           version: '4.0.11'
+      - name: Select a job-local browser cache
+        run: echo "PLAYWRIGHT_BROWSERS_PATH=$RUNNER_TEMP/playwright-browsers" >> "$GITHUB_ENV"
       - uses: pnpm/action-setup@v4
         with:
           version: '10.11.0'
@@ -115,6 +115,15 @@ jobs:
           --build-dir "$RUNNER_TEMP/godot-browser-worker"
           --out "$RUNNER_TEMP/worker-engine-report.json"
           --profile full-engine-v1 --execution-model proxy-pthread --jobs 4
+      - name: Verify native checkpoints and cleanup against the exact pthread build
+        env:
+          BROWSER_EXECUTABLE: ${{ env.PLAYWRIGHT_CHROMIUM_EXECUTABLE }}
+        run: |
+          node scripts/test/native-web-checkpoint-probe.mjs --report "$RUNNER_TEMP/worker-engine-report.json" --out "$RUNNER_TEMP/worker-native-checkpoint"
+          node scripts/test/native-web-checkpoint-probe.mjs --report "$RUNNER_TEMP/worker-engine-report.json" --out "$RUNNER_TEMP/worker-child-lifetime" --child-barrier --cleanup-jobs 18000000
+          node scripts/test/browser-web-lifecycle.mjs --engine-report "$RUNNER_TEMP/worker-engine-report.json" --out "$RUNNER_TEMP/worker-lifecycle"
+          node scripts/test/web-worker-transfer-probe.mjs --report "$RUNNER_TEMP/worker-engine-report.json" --out "$RUNNER_TEMP/worker-native-transfers"
+          node scripts/test/web-threaded-shadow-probe.mjs --report "$RUNNER_TEMP/worker-engine-report.json" --out "$RUNNER_TEMP/worker-threaded-resources"
       - name: Install the exact Godot 4.6.1 resource importer and exporter
         run: |
           mkdir -p "$RUNNER_TEMP/godot-resource-tool"
@@ -188,6 +197,11 @@ jobs:
           if-no-files-found: warn
           path: |
             ${{ runner.temp }}/worker-engine-report.json*
+            ${{ runner.temp }}/worker-native-checkpoint/
+            ${{ runner.temp }}/worker-child-lifetime/
+            ${{ runner.temp }}/worker-lifecycle/
+            ${{ runner.temp }}/worker-native-transfers/
+            ${{ runner.temp }}/worker-threaded-resources/
             ${{ runner.temp }}/worker-runtime/worker-integration.json
             ${{ runner.temp }}/worker-runtime/runtime.log
             ${{ runner.temp }}/worker-runtime/environment/
@@ -209,12 +223,12 @@ jobs:
     if: inputs.browser == '' || inputs.browser == 'chromium'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
-    env:
-      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/playwright-browsers
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+      - name: Select a job-local browser cache
+        run: echo "PLAYWRIGHT_BROWSERS_PATH=$RUNNER_TEMP/playwright-browsers" >> "$GITHUB_ENV"
       - uses: pnpm/action-setup@v4
         with:
           version: '10.11.0'

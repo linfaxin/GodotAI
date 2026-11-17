@@ -136,17 +136,34 @@
     "./browser/dedicated/worker-xr": {
       "types": "./dist/browser/dedicated/worker-xr.d.ts",
       "import": "./dist/browser/dedicated/worker-xr.js"
+    },
+    "./artifact-set": {
+      "types": "./dist/artifact-set.d.ts",
+      "import": "./dist/artifact-set.js"
+    },
+    "./pck-index": {
+      "types": "./dist/pck-index.d.ts",
+      "import": "./dist/pck-index.js"
+    },
+    "./browser/pthread/preview-host": {
+      "types": "./dist/browser/pthread/preview-host.d.ts",
+      "import": "./dist/browser/pthread/preview-host.js"
+    },
+    "./runtime-binding-source": {
+      "types": "./dist/runtime-binding-source.d.ts",
+      "import": "./dist/runtime-binding-source.js"
     }
   },
   "files": [
     "dist"
   ],
   "scripts": {
-    "build": "node scripts/snapshot-runtime.mjs && tsc -p tsconfig.json",
+    "build": "node scripts/build-runtime-binding-source.mjs && node scripts/build-runtime-bootstrap.mjs && node scripts/snapshot-runtime.mjs && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "pnpm build && node --test test/*.test.mjs"
   },
   "devDependencies": {
-    "typescript": "6.0.3"
+    "typescript": "6.0.3",
+    "esbuild": "0.25.12"
   }
 }

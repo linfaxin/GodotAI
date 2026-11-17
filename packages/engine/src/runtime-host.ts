@@ -23,12 +23,20 @@ export interface EntryLifetime {
 export interface RuntimeCleanupParticipant {
  beginClose():void;tick():void;seal():void;close():void|PromiseLike<void>;
 }
+/** A local, identity-checked entry handle. It is never sent over a transport. */
+export interface RuntimeEntryCapability {
+ readonly apiVersion:1;readonly entryId:string;readonly epoch:string;
+ readonly host:RuntimeHost;readonly lifetime:EntryLifetime;
+ assertActive(host?:RuntimeHost):void;
+ attachCleanup(participant:RuntimeCleanupParticipant):()=>void;
+}
 export interface RuntimeCloseProgress {
  status:'pending'|'complete'|'failed'|'unconfirmed';closing:boolean;accepting:boolean;canNativeCleanup:boolean;
  pendingStartup:number;pendingCleanups:number;entries:EntrySummary[];
 }
 export interface RuntimeEntryScope {
  readonly entryId:string;readonly host:RuntimeHost;readonly lifetime:EntryLifetime;
+ readonly capability:RuntimeEntryCapability;
  ready(hasCleanup?:boolean):void;close():void;canCleanup():boolean;cleanupComplete():void;cleanupUnconfirmed():void;
  finishStartup(cleanup?:RuntimeCleanup):void;
  onNativeSeal(callback:()=>void):()=>void;onCleanupTick(callback:()=>void):()=>void;
@@ -52,6 +60,7 @@ export interface RuntimeBinding extends RuntimeHost {
  beginClose(reason?:string):void;drainClose():Promise<RuntimeCloseProgress>;closeProgress():RuntimeCloseProgress;
  attachEntryCleanup(host:RuntimeHost,participant:RuntimeCleanupParticipant):boolean;
  detachEntryCleanup(host:RuntimeHost,participant:RuntimeCleanupParticipant):boolean;
+ isEntryCapability(value:unknown,host?:RuntimeHost):value is RuntimeEntryCapability;
 }
 
 /** pthread bootstrap serializes this exact function. All runtime helpers must
@@ -72,7 +81,7 @@ export function createRuntimeBinding(options:RuntimeBindingOptions):RuntimeBindi
   cleanups:Cleanup[];running?:Cleanup;cancelCallbacks:Set<()=>void>;sealCallbacks:Set<()=>void>;tickCallbacks:Set<()=>void>};
  let entries=new Map<string,Entry>();
  type Participant={entry:Entry;cleanup:Cleanup;retire:()=>void};
- const hostEntries=new WeakMap<object,Entry>(),participantEntries=new WeakMap<object,Participant>();
+ const hostEntries=new WeakMap<object,Entry>(),participantEntries=new WeakMap<object,Participant>(),capabilityEntries=new WeakMap<object,Entry>();
  let closing=false,closeScheduled=false,closePumping=false,closeRepeat=false;
  let binding:{handler:ProjectCommandHandler;entry?:Entry}|undefined,legacyDrop:(()=>void)|undefined,commandEntry:Entry|undefined;
  type QueuedCommand={data:ProjectData;bytes:number;receipt?:()=>void;entry?:Entry};
@@ -246,7 +255,7 @@ export function createRuntimeBinding(options:RuntimeBindingOptions):RuntimeBindi
   bindLegacyProjectCommand(callback){legacyDrop?.();legacyDrop=undefined;if(callback!==null){if(typeof callback!=='function')fail('E_RUNTIME_COMMAND_HANDLER');legacyDrop=bind(data=>callback(encode(data)));}},
   receiveProjectCommand(value,receipt){if(role!=='engine'||!active(commandEntry)){ack(receipt);return false;}const observedGeneration=generation,entry=commandEntry,owned=snapshot(value);if(!owned||generation!==observedGeneration||commandEntry!==entry||!active(entry)||queue.length>=maxCommands||queuedBytes+owned.bytes>maxBytes){ack(receipt);return false;}queue.push({...owned,receipt,entry});queuedBytes+=owned.bytes;requestPump();return true;},
   openEntry(){
-   if(role!=='engine')fail('E_RUNTIME_ROLE');if(!active())fail('E_RUNTIME_CLOSING');if(entries.size>=maxEntries){overflow=true;fail('E_RUNTIME_ENTRY_BUDGET');}
+   if(role==='host')fail('E_RUNTIME_ROLE');if(!active())fail('E_RUNTIME_CLOSING');if(entries.size>=maxEntries){overflow=true;fail('E_RUNTIME_ENTRY_BUDGET');}
    const entry:Entry={summary:{entryId:String(++serial),state:'starting',cleanup:'pending'},generation,closed:false,startupPending:true,legacyCleanup:false,
     cleanups:[],cancelCallbacks:new Set(),sealCallbacks:new Set(),tickCallbacks:new Set()};entries.set(entry.summary.entryId,entry);
    if(!binding){commandEntry=entry;claimQueue(entry);}
@@ -262,8 +271,21 @@ export function createRuntimeBinding(options:RuntimeBindingOptions):RuntimeBindi
      const slot=()=>callback();entry.cancelCallbacks.add(slot);return ()=>{if(!entry.closed)entry.cancelCallbacks.delete(slot);};},
     defer:(callback:RuntimeCleanup)=>registerCleanup(callback),
    });
+   const scopedHost=publicHost(entry);
+   const capability:RuntimeEntryCapability=Object.freeze({apiVersion:1 as const,entryId:entry.summary.entryId,epoch,host:scopedHost,lifetime,
+    assertActive(this:RuntimeEntryCapability,expectedHost?:RuntimeHost){
+     if(capabilityEntries.get(this)!==entry||(expectedHost!==undefined&&expectedHost!==scopedHost))return fail('E_RUNTIME_ENTRY');
+     if(!active(entry))return fail('E_RUNTIME_CLOSING');
+    },
+    attachCleanup(this:RuntimeEntryCapability,participant:RuntimeCleanupParticipant){
+     capability.assertActive.call(this,scopedHost);
+     if(!runtime.attachEntryCleanup(scopedHost,participant))return fail('E_RUNTIME_ENTRY');
+     let attached=true;return ()=>{if(attached){attached=false;runtime.detachEntryCleanup(scopedHost,participant);}};
+    },
+   });
+   capabilityEntries.set(capability,entry);
    return {
-    entryId:entry.summary.entryId,host:publicHost(entry),lifetime,
+    entryId:entry.summary.entryId,host:scopedHost,lifetime,capability,
     ready(hasCleanup=false){if(!entryAlive(entry))return;entry.startupPending=false;if(!entry.closed)entry.summary.state='ready';entry.legacyCleanup=hasCleanup&&!entry.cleanups.some(item=>item.active);refreshCleanup(entry);},
     finishStartup(cleanup){if(!entryAlive(entry))return;if(!entry.startupPending)return fail('E_RUNTIME_STARTUP_SETTLED');
      if(cleanup!==undefined&&typeof cleanup!=='function')return fail('E_RUNTIME_CLEANUP');entry.startupPending=false;entry.legacyCleanup=false;
@@ -286,6 +308,10 @@ export function createRuntimeBinding(options:RuntimeBindingOptions):RuntimeBindi
   beginClose(){if(phase==='settled'||!epochAlive)return;closing=true;runtime.drain();for(const entry of entries.values())closeEntry(entry);requestClose();},
   async drainClose(){runClosePass();await Promise.resolve();runClosePass();return closeProgress();},
   closeProgress,
+  isEntryCapability(value:unknown,expectedHost?:RuntimeHost):value is RuntimeEntryCapability{
+   if(!value||typeof value!=='object')return false;
+   const entry=capabilityEntries.get(value);return !!entry&&active(entry)&&(expectedHost===undefined||hostEntries.get(expectedHost)===entry);
+  },
   attachEntryCleanup(host,participant){
    const entry=hostEntries.get(host);if(!entry||!active(entry)||!participant||typeof participant!=='object')return false;
    const previous=participantEntries.get(participant);if(previous)return previous.entry===entry;

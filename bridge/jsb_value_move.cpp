@@ -12,9 +12,20 @@ namespace jsb
         value_.Reset(env_->get_isolate(), p_value);
     }
 
+    JSValueMove& JSValueMove::operator=(JSValueMove&& p_other) noexcept
+    {
+        if (this != &p_other)
+        {
+            // A Global must be reset before its last Environment owner drops.
+            value_.Reset(); env_ = std::move(p_other.env_); value_ = std::move(p_other.value_);
+        }
+        return *this;
+    }
+
     bool JSValueMove::is_valid() const
     {
-        return env_ && !value_.IsEmpty();
+        return env_ && env_->is_caller_thread() && !env_->runtime_released()
+            && env_->native_cleanup_phase() == 0 && !value_.IsEmpty();
     }
 
     Variant JSValueMove::to_variant() const

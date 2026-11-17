@@ -6,7 +6,7 @@ and CI use Node.js 24 or later.
 
 Full-engine Web projects use the shared `prepareEngineProject({files, runtime, ...})` API from `@godot-js/react-build/core`. It returns project bytes, a manifest and diagnostics for the browser PCK adapter or Node tooling. Native main scenes, autoloads, UID metadata and imported resource caches are preserved; the browser does not run Godot editor importers.
 
-The commands and managed-entry policies documented below describe the legacy React CLI pipeline. Its unmanaged-main-scene and business-autoload restrictions do not apply to full-engine projects prepared through the shared core API. Runtime component imports must use `@godot-js/react/legacy` explicitly. The default `@godot-js/react` and `/engine` entries belong to the engine renderer and are rejected by this CLI with `E_LEGACY_ENTRY`, including runtime imports in bundled dependencies. Type-only imports remain available. Frozen aliases in old artifacts remain readable.
+The commands and managed-entry policies documented below describe the legacy React CLI pipeline. Its unmanaged-main-scene and business-autoload restrictions do not apply to full-engine projects prepared through the shared core API. Runtime component imports must use `@godot-js/react/engine-components` explicitly. The default `@godot-js/react` and `/engine` entries belong to the engine renderer and are rejected by this CLI with `E_LEGACY_ENTRY`, including runtime imports in bundled dependencies. Type-only imports remain available. Frozen aliases in old artifacts remain readable.
 
 `@godot-js/react-build` compiles ordinary React TSX components into a single canonical React runtime, application modules, genuine entry/native interface scripts, resource hubs and a sealed manifest. Godot editor/export integration consumes the manifest. Application modules never receive fake `.ts` files.
 
@@ -36,6 +36,8 @@ godot-react preview --project path/to/project --entry app --verify
 godot-react doctor --project path/to/project
 godot-react export --project path/to/project --entry app --output build/app.pck
 ```
+
+The default compiler uses the direct engine renderer and an explicit entry capability. Import raw native construction from `@godot-js/react` or `/engine`, and typed host components from `@godot-js/react/engine-components`. NativeInterface helpers use `/engine-native-interfaces`. A generation cannot mix in the retained NativePort runtime; existing generations must be rebuilt before preview/watch reuse. The generated launcher uses the neutral native run lease and waits for root cleanup before releasing publication fences.
 
 `setup` enables `godotjs/react/enabled`, selects the first configured generated React entry as the main scene, generates template declarations and installs the template alias in `tsconfig.json` (JSONC is rewritten as JSON). Business autoloads and unmanaged main scenes fail the normal build/doctor policy. `watch --skip-initial` resumes observation after a synchronous editor build.
 

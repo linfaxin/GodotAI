@@ -5,20 +5,15 @@ import {build} from 'esbuild';
 import {createHash} from 'node:crypto';
 import {createRequire} from 'node:module';
 import {packProject} from '@godot-js/react-browser/pck';
+import {readPckIndex} from '@godot-js/engine/pck-index';
 import {DEMO_API_VERSION,assertResourceManifest} from './profile-resources.mjs';
 const app=fileURLToPath(new URL('../',import.meta.url));
 const sha=bytes=>createHash('sha256').update(bytes).digest('hex');
 export function unpackResources(bytes){
- const view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
- if(view.getUint32(0,true)!==0x43504447||view.getUint32(4,true)!==3)throw Error('Expected Godot PCK v3');
- const base=Number(view.getBigUint64(24,true));let cursor=Number(view.getBigUint64(32,true)),count=view.getUint32(cursor,true);cursor+=4;
- const files=new Map();
- for(let index=0;index<count;index++){
-  const length=view.getUint32(cursor,true);cursor+=4;
-  const name=new TextDecoder().decode(bytes.subarray(cursor,cursor+length)).replace(/\0.*$/s,'');cursor+=length;
-  const offset=base+Number(view.getBigUint64(cursor,true)),size=Number(view.getBigUint64(cursor+8,true));cursor+=36;
-  if(offset<0||size<0||offset+size>bytes.length)throw Error('Invalid PCK entry');
-  if(/^(?:assets\/|shaders\/|\.godot\/(?:imported|exported)\/)/.test(name)||name==='.godot/uid_cache.bin')files.set('res://'+name,bytes.slice(offset,offset+size));
+ const index=readPckIndex(bytes),files=new Map();
+ for(const entry of index.entries){
+  const name=entry.path.slice(6);
+  if(/^(?:assets\/|shaders\/|\.godot\/(?:imported|exported)\/)/.test(name)||name==='.godot/uid_cache.bin')files.set(entry.path,bytes.slice(entry.offset,entry.offset+entry.bytes));
  }
  return files;
 }

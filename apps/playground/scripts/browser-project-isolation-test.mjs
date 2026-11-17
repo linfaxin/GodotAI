@@ -1,3 +1,4 @@
+import {readStorageSnapshot} from './project-storage-browser-helpers.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import {createStaticServer} from './serve.mjs';
@@ -19,7 +20,7 @@ async function mark(page,marker){
  await page.locator('#source .monaco-editor').click({position:{x:180,y:80}});await page.keyboard.press('ControlOrMeta+End');await page.keyboard.insertText('\n// '+marker+'\n');
  await page.waitForFunction(marker=>{const p=window.__playgroundWorkbench.inspect().project;return p.files[p.entry].includes(marker)&&document.querySelector('#saved').textContent==='已自动保存';},marker);
 }
-async function readCurrent(page,name){return page.evaluate(name=>new Promise((resolve,reject)=>{const request=indexedDB.open(name,1);request.onsuccess=()=>{const db=request.result,read=db.transaction('projects').objectStore('projects').get('current');read.onsuccess=()=>{db.close();resolve(read.result);};read.onerror=()=>reject(read.error);};request.onerror=()=>reject(request.error);}),name);}
+const readCurrent=(page,name)=>readStorageSnapshot(page,name);
 async function importRaw(page,document){await page.locator('#import').setInputFiles({name:'project.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(document))});}
 async function exportedOriginal(page){const pending=page.waitForEvent('download');await page.locator('#unsupported-project button').filter({hasText:'导出原始项目'}).click();const result=await pending;return JSON.parse(await fs.readFile(await result.path(),'utf8'));}
 try{

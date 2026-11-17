@@ -17,7 +17,8 @@ const sdk=path.join(repo,'scripts/jsb.react');
 const sdkRequire=createRequire(path.join(sdk,'package.json'));
 export const FULL_ENGINE_PROFILE='full-engine-v1';
 const {ENGINE_SDK_MODULES}=sdkRequire('@godot-js/react/engine-modules');
-export const FULL_ENGINE_MODULE_EXPORTS=Object.freeze(Object.fromEntries(Object.entries(ENGINE_SDK_MODULES).filter(([,entry])=>entry.scope==='engine'||entry.scope==='shared').map(([name,entry])=>[name,entry.exportName])));
+export const FULL_ENGINE_MODULE_CONTRACT=Object.freeze(Object.fromEntries(Object.entries(ENGINE_SDK_MODULES).filter(([,entry])=>entry.scope==='engine'||entry.scope==='shared')));
+export const FULL_ENGINE_MODULE_EXPORTS=Object.freeze(Object.fromEntries(Object.entries(FULL_ENGINE_MODULE_CONTRACT).map(([name,entry])=>[name,entry.exportName])));
 export const sha256=value=>createHash('sha256').update(value).digest('hex');
 export function canonical(value){
  if(Array.isArray(value))return '['+value.map(canonical).join(',')+']';
@@ -57,7 +58,7 @@ function validateBindingAudit(ir,capture){
 export async function buildEngineVendor({mode='production',includeLegacy=false}={}){
  if(!['production','development'].includes(mode))throw Error('E_FULL_ENGINE_SDK_MODE: '+mode);
  const {build}=await import('esbuild');
- const members={engineModules:sdkRequire.resolve('@godot-js/react/engine-modules'),React:sdkRequire.resolve('react'),jsxRuntime:sdkRequire.resolve('react/jsx-runtime'),jsxDevRuntime:sdkRequire.resolve('react/jsx-dev-runtime'),engineReact:sdkRequire.resolve('./dist/engine.js'),scheduler:sdkRequire.resolve('./dist/scheduler.js'),contracts:sdkRequire.resolve('./dist/contracts/index.js')};
+ const members={engineModules:sdkRequire.resolve('@godot-js/react/engine-modules'),React:sdkRequire.resolve('react'),jsxRuntime:sdkRequire.resolve('react/jsx-runtime'),jsxDevRuntime:sdkRequire.resolve('react/jsx-dev-runtime'),engineReact:sdkRequire.resolve('./dist/engine.js'),engineComponents:sdkRequire.resolve('./dist/engine-components.js'),scheduler:sdkRequire.resolve('./dist/scheduler.js'),contracts:sdkRequire.resolve('./dist/contracts/index.js'),nativeInterfaceContracts:sdkRequire.resolve('./dist/native-interface-contracts.js'),engineNativeInterfaces:sdkRequire.resolve('./dist/engine-native-interfaces.js')};
  if(includeLegacy)Object.assign(members,{legacy:sdkRequire.resolve('./dist/legacy.js'),godot:sdkRequire.resolve('./dist/godot.js'),schema:sdkRequire.resolve('./dist/schema/index.js'),nativeInterfaces:sdkRequire.resolve('./dist/native-interfaces.js'),ui:sdkRequire.resolve('./dist/ui.js'),testing:sdkRequire.resolve('./dist/testing.js')});
  const result=await build({stdin:{contents:Object.entries(members).map(([key,filename])=>`exports.${key}=require(${JSON.stringify(filename)});`).join('\n')+'\nexports.engine=exports.engineReact;\n',resolveDir:sdk,sourcefile:'full-engine-vendor.js'},bundle:true,write:false,platform:'neutral',format:'cjs',target:'es2022',define:{'process.env.NODE_ENV':JSON.stringify(mode)},external:['godot','godot-jsb'],inject:[path.join(sdk,'dist/internal/performance.mjs')]});
  return result.outputFiles[0].contents;
@@ -91,7 +92,7 @@ function validateGeneratedProfile({ir,capture,irBytes,declarations,namingVersion
  for(const required of ['/godot/index.d.ts','/godot-jsb/index.d.ts','/godot.annotations/index.d.ts'])if(!declarations.files[required])throw Error('E_FULL_ENGINE_DECLARATIONS: Missing '+required);
  for(const [name,source]of Object.entries(declarations.files))if(snapshotTypes[name]!==source)throw Error('E_FULL_ENGINE_DECLARATIONS: Type snapshot differs from generated '+name);
  if(!snapshotTypes['/engine-sdk/engine.d.ts'])throw Error('E_FULL_ENGINE_DECLARATIONS: Full renderer declarations are required');
- for(const [specifier,entry]of Object.entries(ENGINE_SDK_MODULES))if(typeof snapshotTypes[entry.declaration]!=='string')throw Error('E_FULL_ENGINE_DECLARATIONS: Missing SDK declaration for '+specifier);
+ for(const [specifier,entry]of Object.entries(FULL_ENGINE_MODULE_CONTRACT))if(typeof snapshotTypes[entry.declaration]!=='string')throw Error('E_FULL_ENGINE_DECLARATIONS: Missing SDK declaration for '+specifier);
 }
 
 /** Both naming snapshots are captured from the same production engine bytes. */
@@ -137,7 +138,7 @@ export function assembleFullEngineRelease({engine,ir,capture,irBytes,declaration
  const verifiedAsset=item=>({url:item.path,sha256:item.sha256,...(item.encoding?{encoding:item.encoding,decodedSha256:item.decodedSha256,decodedBytes:item.decodedBytes}:{})});
  const engineId=createEngineIdentity(nativeEngineIdentityInputs({engine,execution,modules:ir.modules,api:{bindingVersion:ir.bindingVersion,namingVersion,codegenVersion,namingProfiles:apiProfiles}}));
  const sdkTypesHash=sha256(canonical(sdkTypes(profiles.snake)));
- const sdkIdentity={identityVersion:2,version:sdkVersion,typesHash:sdkTypesHash,vendor:vendorAsset,vendors:{production:vendorAsset,development:developmentVendorAsset},moduleExports:FULL_ENGINE_MODULE_EXPORTS,moduleContract:ENGINE_SDK_MODULES,runtimeModules};
+ const sdkIdentity={identityVersion:2,version:sdkVersion,typesHash:sdkTypesHash,vendor:vendorAsset,vendors:{production:vendorAsset,development:developmentVendorAsset},moduleExports:FULL_ENGINE_MODULE_EXPORTS,moduleContract:FULL_ENGINE_MODULE_CONTRACT,runtimeModules};
  const extensionId=createExtensionIdentity(nativeExtensionIdentityInputs({sdk:sdkIdentity,api:{bindingVersion:ir.bindingVersion}}));
  const manifest={schemaVersion:2,artifactReceiptVersion:2,engineId,extensionId,execution,...(runtimeAbi?{runtimeAbi:{...runtimeAbi}}:{}),runtimeProfile,profile:runtimeProfile,runtimeFamily:definition.runtimeFamily,capabilities:{audio:definition.audio,dimensions:runtimeProfile==='engine-2d-v1'?2:3},
   engine:{...engine,version:ir.engineVersion,modules:ir.modules},modules:ir.modules,

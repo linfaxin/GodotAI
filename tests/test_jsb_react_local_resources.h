@@ -1,6 +1,9 @@
 #ifndef GODOTJS_TESTS_REACT_LOCAL_RESOURCES_H
 #define GODOTJS_TESTS_REACT_LOCAL_RESOURCES_H
 
+#include "../jsb.gen.h"
+#if JSB_WITH_LEGACY_REACT
+
 #include "../internal/jsb_react_local_resources.h"
 #include "../compat/jsb_engine_version_comparison.h"
 #if GODOT_4_7_OR_NEWER
@@ -164,4 +167,5 @@ namespace jsb::tests
     }
 }
 
+#endif // JSB_WITH_LEGACY_REACT
 #endif

@@ -36,3 +36,10 @@ test('helper declaration edits leave both engine snapshots and their release ide
  await assert.rejects(writeTypeSnapshot(dist),/Full engine camel type inputs changed/);
  assert.deepEqual(await Promise.all(['types.json','types.camel.json'].map(name=>fs.readFile(path.join(dist,name),'utf8'))),before);
 });
+
+test('engine type snapshot exposes the engine module closure without standalone legacy entries',async()=>{
+ const files=JSON.parse(await createTypeSnapshot());
+ assert.equal(typeof files['/engine-sdk/engine.d.ts'],'string');
+ assert.equal(typeof files['/engine-sdk/engine-components.d.ts'],'string');
+ for(const path of ['/sdk/index.d.ts','/sdk/legacy.d.ts','/sdk/godot.d.ts','/sdk/ui.d.ts','/sdk/testing.d.ts'])assert.equal(files[path],undefined,path);
+});

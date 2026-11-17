@@ -26,6 +26,10 @@ jobs:
           pnpm build:engine-js
         shell: bash
 
+      - name: Build the packages consumed by the native architecture probes
+        if: inputs.version == '4.6.1' && (matrix.runtime == 'host-v8' || matrix.runtime == 'host-qjs')
+        run: pnpm build:packages
+
       - name: ⏬ Download host-v8 artifact
         if: matrix.runtime == 'host-v8' || matrix.runtime == 'web-browser' || matrix.runtime == 'web-qjs'
         uses: actions/download-artifact@v8
@@ -130,3 +134,28 @@ jobs:
             host-jsc) GODOT_BIN="${GITHUB_WORKSPACE}/tests/bin/godot-host-jsc" ;;
           esac
           GODOT="$GODOT_BIN" pnpm test -- --runtimes ${{ matrix.runtime }} --skip-builds
+
+      - name: Verify the matching QJS/V8 native architecture
+        if: inputs.version == '4.6.1' && (matrix.runtime == 'host-v8' || matrix.runtime == 'host-qjs')
+        shell: bash
+        run: |
+          set -euo pipefail
+          GODOT_BIN="$GITHUB_WORKSPACE/tests/bin/godot-${{ matrix.runtime }}"
+          PROBE_OUT="$RUNNER_TEMP/native-architecture/${{ matrix.runtime }}"
+          node scripts/test/native-cleanup-probe.mjs --godot "$GODOT_BIN" --out "$PROBE_OUT/cleanup"
+          node scripts/test/native-fatal-probe.mjs --godot "$GODOT_BIN" --out "$PROBE_OUT/fatal"
+          node scripts/test/native-retirement-probe.mjs --godot "$GODOT_BIN" --out "$PROBE_OUT/retirement"
+          node scripts/test/engine-entry-native.mjs --godot "$GODOT_BIN" --out "$PROBE_OUT/entry" --require-no-legacy
+          node scripts/test/engine-template-native.mjs --godot "$GODOT_BIN" --out "$PROBE_OUT/template"
+          node scripts/test/engine-native-interface-probe.mjs --godot "$GODOT_BIN" --out "$PROBE_OUT/native-interface"
+          node scripts/test/engine-native-interface-probe.mjs --godot "$GODOT_BIN" --out "$PROBE_OUT/native-interface-typed" --typed
+          node scripts/test/engine-host-operations-probe.mjs --godot "$GODOT_BIN" --out "$PROBE_OUT/host-operations" --audio --signals
+          node scripts/test/artifact-set-native.mjs --godot "$GODOT_BIN" --out "$PROBE_OUT/artifact-set"
+
+      - name: Retain native architecture reports and logs
+        if: always() && inputs.version == '4.6.1' && (matrix.runtime == 'host-v8' || matrix.runtime == 'host-qjs')
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-architecture-${{ matrix.runtime }}-${{ inputs.version }}
+          path: ${{ runner.temp }}/native-architecture/${{ matrix.runtime }}/
+          if-no-files-found: warn

@@ -13,23 +13,30 @@ namespace v8
         return isolate;
     }
 
-    Isolate::Isolate() : ref_count_(1), disposed_(false), handle_scope_(nullptr)
+    Isolate::Isolate() : ref_count_(1), disposed_(false), owner_thread_(Thread::get_caller_id()), handle_scope_(nullptr)
     {
         rt_ = jsbi_NewEngine(this);
     }
 
     Isolate::~Isolate()
     {
-        jsb_check(!rt_);
+        jsb_check(runtime_released_.load(std::memory_order_acquire));
     }
 
     void Isolate::_release()
     {
-        JSB_WEB_LOG(VeryVerbose, "release web runtime");
+        // All realm work finished in owner Dispose(). Late Global holders only
+        // keep this C++ tombstone, which can be deleted on their final thread.
+        jsb_check(runtime_released_.load(std::memory_order_acquire));
+        memdelete(this);
+    }
 
-        // cleanup
-        jsb_check(!handle_scope_);
-
+    void Isolate::Dispose()
+    {
+        if (is_disposed()) return;
+        jsb_check(is_owner_thread());
+        jsb_check(handle_scope_depth_ == 0);
+        if (disposed_.exchange(true, std::memory_order_acq_rel)) return;
         // Browser GC cannot be forced before shutdown. Release outstanding
         // native value storage while its Environment is still alive. Object
         // weak callbacks are deliberately skipped: Environment::dispose has
@@ -48,18 +55,10 @@ namespace v8
             }
         }
 
-        // dispose the runtime
-        jsbi_FreeEngine(rt_);
-        rt_ = {};
-
-        memdelete(this);
-    }
-
-    void Isolate::Dispose()
-    {
-        jsb_check(!disposed_);
-        disposed_ = true;
-        _remove_reference();
+        jsbi_FreeEngine(rt_); // rt0 belongs to this exact owner realm.
+        rt_ = -1;
+        runtime_released_.store(true, std::memory_order_release);
+        _remove_reference(); // Drop the owner's base ref after all JS work.
     }
 
     void Isolate::SetData(int index, void* data)

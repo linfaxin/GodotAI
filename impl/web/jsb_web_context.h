@@ -53,15 +53,16 @@ namespace v8
         void Reset()
         {
             if (!isolate_) return;
-            isolate_ = nullptr;
+            Isolate* retained = isolate_; isolate_ = nullptr;
+            jsb::impl::Broker::release(retained);
         }
 
         void Reset(Isolate* isolate, Local<Context> value)
         {
             Reset();
 
-            jsb_check(isolate);
-            isolate_ = isolate;
+            if (!isolate || value.IsEmpty() || jsb::impl::Broker::is_closed(isolate)) return;
+            jsb::impl::Broker::retain(isolate); isolate_ = isolate;
         }
 
         void Reset(Isolate* isolate, const Global& value)
@@ -70,11 +71,12 @@ namespace v8
         }
 
         // Return true if no value held by this handle
-        bool IsEmpty() const { return !isolate_; }
+        bool IsEmpty() const { return !isolate_ || jsb::impl::Broker::is_closed(isolate_); }
 
         Local<Context> Get(Isolate* isolate) const
         {
-            jsb_check(isolate_ == isolate && isolate_);
+            if (!isolate_ || jsb::impl::Broker::is_closed(isolate_)) return {};
+            jsb_check(isolate_ == isolate && jsb::impl::Broker::is_owner(isolate_));
             return Local<Context>(Data(isolate_, 0));
         }
 
