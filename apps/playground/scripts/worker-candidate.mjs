@@ -18,8 +18,9 @@ export function assertWorkerBuildProof(report){
  const files=Object.keys(proof.files??{});
  if(files.length!==WORKER_NATIVE_PATCH_FILES.length||WORKER_NATIVE_PATCH_FILES.some(name=>!files.includes(name)))throw Error('E_WORKER_BUILD_PROOF_FILES');
  for(const name of WORKER_NATIVE_PATCH_FILES){
-  const receipt=report.recipe?.patches?.filter(item=>item.patchId===proof.patchId&&item.path===name);
-  if(receipt?.length!==1||!hash.test(proof.files[name])||receipt[0].afterSha256!==proof.files[name]||report.godotSource?.inputs?.[name]!==proof.files[name]||canonical(receipt[0].implementation)!==canonical(proof.implementation)||!hash.test(receipt[0].beforeSha256))throw Error('E_WORKER_BUILD_PROOF_FILE: '+name);
+  const edges=report.recipe?.patches?.filter(item=>item.path===name)??[],receipt=edges.filter(item=>item.patchId===proof.patchId);
+  if(receipt.length!==1||!hash.test(proof.files[name])||edges.at(-1)?.afterSha256!==proof.files[name]||report.godotSource?.inputs?.[name]!==proof.files[name]||canonical(receipt[0].implementation)!==canonical(proof.implementation))throw Error('E_WORKER_BUILD_PROOF_FILE: '+name);
+  let previous;for(const edge of edges){if(!hash.test(edge.beforeSha256)||!hash.test(edge.afterSha256)||previous&&previous!==edge.beforeSha256)throw Error('E_WORKER_BUILD_PROOF_FILE: broken source chain '+name);previous=edge.afterSha256;}
  }
  if(digest(canonical(report.godotSource?.inputs))!==report.godotSource?.snapshotHash)throw Error('E_WORKER_BUILD_PROOF_SOURCE');
  if(report.runtimeAbi.lifecycle===1||report.execution?.lifecycleAbi===1)executionFromReport(report);

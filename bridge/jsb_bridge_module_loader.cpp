@@ -4,6 +4,10 @@
 #include "jsb_callable.h"
 #include "jsb_object_bindings.h"
 #include "jsb_react_bridge.h"
+#include "jsb_engine_run_lease.h"
+#include "jsb_resource_scopes.h"
+#include "jsb_engine_host_operations.h"
+#include "jsb_native_world.h"
 #include "jsb_engine_api.h"
 #include "core/io/json.h"
 
@@ -15,6 +19,7 @@ namespace jsb
         // binding guards, and read stored state after native normalization.
         void _try_set_property(const v8::FunctionCallbackInfo<v8::Value>& info)
         {
+            NativeInteropScope native_interop;
             v8::Isolate* isolate = info.GetIsolate();
             const auto context = isolate->GetCurrentContext();
             Environment* env = Environment::wrap(context);
@@ -654,7 +659,13 @@ namespace jsb
                 v8::Local<v8::Object> internal_obj = v8::Object::New(isolate);
 
                 jsb_obj->Set(context, impl::Helper::new_string_ascii(isolate, "internal"), internal_obj).Check();
+#if JSB_WITH_LEGACY_REACT
                 p_env->get_react_bridge().install(context, internal_obj);
+#endif
+                NativeWorld::install(p_env, context, internal_obj);
+                p_env->get_engine_run_lease().install(context, internal_obj);
+                p_env->get_resource_scopes().install(context, internal_obj);
+                p_env->get_engine_host_operations().install(context, internal_obj);
                 internal_obj->Set(context, impl::Helper::new_string_ascii(isolate, "get_engine_api"), JSB_NEW_FUNCTION(context, _get_engine_api, {})).Check();
                 internal_obj->Set(context, impl::Helper::new_string_ascii(isolate, "try_set_property"), JSB_NEW_FUNCTION(context, _try_set_property, {})).Check();
 

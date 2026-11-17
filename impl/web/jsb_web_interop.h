@@ -71,6 +71,9 @@ JSBROWSER_API void jsbi_FreeEngine(jsb::impl::JSRuntime engine_id);
 // Retire execution observation without releasing retained native handles.
 JSBROWSER_API void jsbi_SealNativeEpoch(jsb::impl::JSRuntime engine_id);
 JSBROWSER_API void jsbi_FlushPendingWorkerMessages();
+// The JS shim also verifies all C++->JS entry frames have unwound.
+JSBROWSER_API bool jsbi_CanDestroyCheckpoint(jsb::impl::JSRuntime engine_id);
+JSBROWSER_API bool jsbi_ScheduleCheckpoint(jsb::impl::JSRuntime engine_id, jsb::impl::StackPosition callback_sp);
 JSBROWSER_API void jsbi_log(const char* ptr);
 JSBROWSER_API void jsbi_error(const char* ptr);
 JSBROWSER_API void jsbi_free(void* ptr);
@@ -192,5 +195,10 @@ JSBROWSER_API jsb::impl::StackPosition jsbi_SetAsArray(jsb::impl::JSRuntime engi
 JSBROWSER_API jsb::impl::ResultValue jsbi_SetAdd(jsb::impl::JSRuntime engine_id, jsb::impl::StackPosition set_sp, jsb::impl::StackPosition value_sp);
 
 JSBROWSER_API int jsbi_PostMessage(uintptr_t pthread_id, jsb::impl::JSRuntime engine_id, jsb::impl::StackPosition data_sp, uint32_t native_message_id, jsb::impl::StackPosition transfer_sp, bool to_parent);
+// Prepare owns a complete clone but never publishes. Finalize native source
+// bindings before Publish; both Publish and Discard consume the realm ticket.
+JSBROWSER_API uint32_t jsbi_PrepareMessage(uintptr_t pthread_id, jsb::impl::JSRuntime engine_id, jsb::impl::StackPosition data_sp, uint32_t native_message_id, jsb::impl::StackPosition transfer_sp, bool to_parent);
+JSBROWSER_API bool jsbi_PublishMessage(uint32_t ticket);
+JSBROWSER_API void jsbi_DiscardMessage(uint32_t ticket);
 
 #endif

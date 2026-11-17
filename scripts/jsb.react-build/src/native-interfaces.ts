@@ -1,10 +1,12 @@
 import {
   validateNativeInterfaceSchema, nativeInterfaceSchemaHash,
   type NativeInterfaceSchema, type NativeRpcCodec,
-} from "@godot-js/react/native-interfaces";
+} from "@godot-js/react/native-interface-contracts";
 
-export type { NativeInterfaceSchema, NativeRpcSchema } from "@godot-js/react/native-interfaces";
+export type { NativeInterfaceSchema, NativeRpcSchema } from "@godot-js/react/native-interface-contracts";
 export interface NativeInterfaceGenerationOptions {
+  /** Direct engine renderer; legacy generated stubs retain their canonical runtime. */
+  renderer?: "engine" | "legacy";
   readonly profile: string;
   readonly generatedDir?: string;
   /** Required by publication: a cached NativeScript must never import an older runtime generation. */
@@ -28,8 +30,9 @@ export function generateNativeInterface(input: NativeInterfaceSchema | unknown, 
   if (!options || !/^[a-z][a-z0-9_-]{0,63}$/.test(options.profile)) throw new TypeError("E_NATIVE_INTERFACE: Invalid profile id");
   const generatedDir = options.generatedDir ?? "generated/react";
   if (!/^[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/.test(generatedDir) || generatedDir === "src") throw new TypeError("E_NATIVE_INTERFACE: Invalid dedicated generatedDir");
-  const runtimeModule = options.runtimeModule ?? "@godot-js/react/native-interfaces";
-  if (runtimeModule !== "@godot-js/react/native-interfaces") throw new TypeError("E_NATIVE_INTERFACE: Native stubs require the canonical singleton runtime");
+  const canonicalRuntime = options.renderer === "legacy" ? "@godot-js/react/native-interfaces" : "@godot-js/react/engine-native-interfaces";
+  const runtimeModule = options.runtimeModule ?? canonicalRuntime;
+  if (runtimeModule !== canonicalRuntime) throw new TypeError("E_NATIVE_INTERFACE: Native stubs require the canonical singleton runtime");
   const schemaHash = nativeInterfaceSchemaHash(schema);
   // A profile is an endpoint identity in addition to the schema identity. Sharing
   // a class across profiles would bake the wrong profile into its dispatch stub.

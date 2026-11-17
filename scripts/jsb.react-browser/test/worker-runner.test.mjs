@@ -4,6 +4,7 @@ import {WorkerPreviewRunner} from '../dist/worker-runner.js';
 import {WORKER_PROTOCOL} from '../dist/worker-protocol.js';
 import {boundedWorkerCleanup,isWorkerEngineOutcome,isWorkerHostCleanupOutcome} from '../dist/worker-session.js';
 import {createSessionFacts} from '@godot-js/engine/session-facts';
+import {createArtifactSet} from '@godot-js/project-tools/artifact-set';
 
 const asset=name=>({url:`http://preview.test/${name}`,sha256:'a'.repeat(64)});
 const release={releaseId:'worker-test',profile:'core-ui-v1',engineJs:asset('godot.js'),engineWasm:asset('godot.wasm'),
@@ -54,6 +55,18 @@ function fixture({pauseAt,frameLoad=true,connect=true,heartbeat=true,stopReply=c
  return {runner,document,frames,hosts,events,messages,get host(){return hosts.at(-1);},
   async cleanup(){intervals.forEach(clearInterval);await runner.dispose();hosts.forEach(host=>host.port.close());}};
 }
+
+test('Worker runner captures and transfers only the independently verified pack set',async()=>{
+ const descriptor={...release,artifactReceiptVersion:2,execution:{schemaVersion:1,executionModel:'window',wasmThreads:false,proxyToPthread:false,requiresCrossOriginIsolation:false,hostProtocolVersion:1,artifactSetAbi:1}};
+ const artifactSet=await createArtifactSet(new Map([['res://project.godot',new TextEncoder().encode('config_version=5\n')],['res://data.bin',new Uint8Array([1,2,3])]]),{target:{engineReleaseId:descriptor.releaseId}});
+ const f=fixture({release:descriptor});
+ try{
+  await f.runner.run({variant:'pack-set',artifactSet,revision:1,generation:42,buildKey:'pack-set-input',manifest:{generation:42}});
+  const sent=f.messages.find(message=>message.type==='run').artifact;
+  assert.equal(sent.variant,'pack-set');assert.equal(sent.pack,undefined);assert.equal(sent.artifactId,artifactSet.manifest.artifactSetId);assert.equal(sent.artifactSet.packs.size,2);
+  assert(artifactSet.packs.values().next().value.byteLength>0);
+ }finally{await f.cleanup();}
+});
 
 for(const {name,budgets,texts,expected}of [
  {name:'higher configured count and byte limits',budgets:{maxLogMessages:1500,maxLogBytes:1000000},texts:Array(1501).fill('x'.repeat(256)),expected:Array(1500).fill('x'.repeat(256))},

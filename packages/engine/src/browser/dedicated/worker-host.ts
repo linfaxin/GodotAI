@@ -1,5 +1,5 @@
 import { factsFromRuntimeSummary, isRuntimeSummary, sessionExitReason, type RuntimeSummary } from '../../session-facts.js';
-import { isPreviewDiagnostic, isProjectData, previewDiagnostic, type PreviewDiagnostic } from '../protocol.js';
+import { isPreviewDiagnostic, isProjectData, previewDiagnostic, type PreviewDiagnostic,type BrowserArtifact } from '../protocol.js';
 import { WORKER_PROTOCOL, isWorkerEnvelope, prepareWorkerRunConfiguration, sameWorkerRun, type WorkerRunIdentity, type WorkerRunConfiguration } from './worker-protocol.js';
 import { WorkerSessionLease, WorkerExitLedger, WorkerHeartbeat, boundedWorkerCleanup, type WorkerEngineOutcome } from './worker-session.js';
 import { fetchVerifiedAsset, loadVerifiedRuntimeWorker, type VerifiedRelease } from '../verified-loader.js';
@@ -9,11 +9,13 @@ import { WorkerAudioHost } from './worker-audio-host.js';
 import { createWorkerBrowserHost } from './worker-browser.js';
 import { createWorkerXRHost } from './worker-xr-host.js';
 import { WorkerProjectCommandCredits,workerProjectCommandBytes } from './worker-project-channel.js';
+import {assertArtifactSet,artifactSetTransfers} from '../../artifact-set.js';
+import {assertArtifactSetTarget} from '../artifact-input.js';
 
 export interface WorkerPreviewHostOptions {
   canvas: HTMLCanvasElement;
   /** App policy may verify a mirrored release before any runtime resource loads. */
-  verifyRelease?(release: VerifiedRelease, manifest: unknown, signal: AbortSignal): Promise<void>;
+    verifyRelease?(release: VerifiedRelease, manifest: unknown, signal: AbortSignal,artifact?:BrowserArtifact): Promise<void>;
   onSnapshot?(snapshot: Readonly<Record<string, unknown>>): void;
 }
 
@@ -207,10 +209,13 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
       managedClose=release.runtimeAbi?.lifecycle===1||release.execution?.lifecycleAbi===1;
       if (!release.runtimeAbi || !release.runtimeWorker || !release.runtimeAudioWorklet) throw Error('E_WORKER_RELEASE_ABI');
       if (release.runtimeAbi.host !== configuration.hostAbiVersion || release.runtimeAbi.audio !== configuration.audioAbiVersion || release.runtimeAbi.presentation !== configuration.presentationAbiVersion) throw Error('E_WORKER_RELEASE_ABI');
-      if (!(message.artifact?.pack instanceof Uint8Array) || !message.artifact.pack.byteLength || message.artifact.pack.byteLength > 64 * 1024 * 1024) throw Error('E_ARTIFACT_PACK');
+      if (!message.artifact?.artifactSet&&(!(message.artifact?.pack instanceof Uint8Array) || !message.artifact.pack.byteLength || message.artifact.pack.byteLength > 64 * 1024 * 1024)) throw Error('E_ARTIFACT_PACK');
+      const artifactSet=message.artifact?.artifactSet?await assertArtifactSet(message.artifact.artifactSet):undefined;
+      if(artifactSet)assertArtifactSetTarget(artifactSet,release);
+      lease.assertActive();
       stopTimeoutMs = Number.isFinite(message.stopTimeoutMs) ? Math.max(1, Math.min(10000, message.stopTimeoutMs)) : 2500;
       cleanupTimeoutMs = Number.isFinite(message.cleanupTimeoutMs) ? Math.max(1, Math.min(configuration.budgets.cleanupTimeoutMs, message.cleanupTimeoutMs)) : Math.max(1, configuration.budgets.cleanupTimeoutMs);
-      if (options.verifyRelease) { await options.verifyRelease(release, message.artifact.manifest, loaderAbort.signal); lease.assertActive(); }
+      if (options.verifyRelease) { await options.verifyRelease(release, message.artifact.manifest, loaderAbort.signal,message.artifact); lease.assertActive(); }
       const worklet = await fetchVerifiedAsset(release.runtimeAudioWorklet, { signal: loaderAbort.signal, maxBytes: release.maxAssetBytes, cachePolicy: release.cachePolicy }); lease.assertActive();
       workletUrl = URL.createObjectURL(new Blob([worklet.slice().buffer], { type: 'text/javascript' }));
       runtime = await lease.retain(loadVerifiedRuntimeWorker(release.runtimeWorker, { signal: loaderAbort.signal, maxBytes: release.maxAssetBytes, allowedOrigins: release.allowedOrigins, cachePolicy: release.cachePolicy }), resource => resource.dispose()); lease.assertActive();
@@ -298,11 +303,11 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
       observer = new ResizeObserver(resize); observer.observe(options.canvas);
       if(options.canvas.parentElement)observer.observe(options.canvas.parentElement);
       lease.assertActive();
-      const pack: Uint8Array = message.artifact.pack;
+      const pack: Uint8Array = artifactSet?artifactSet.packs.get(artifactSet.manifest.bootstrap.sha256)!:message.artifact.pack;
       runtime.worker.postMessage({ ...identity, protocolVersion: WORKER_PROTOCOL, type: 'worker-connect', configuration, release,
-        documentUrl: globalThis.location?.href, pack, canvas: presentation.offscreen, geometry: initial, controlPort: channels[0].port2, dataPort: channels[1].port2,
+        documentUrl: globalThis.location?.href, pack,...(artifactSet?{artifactSet}:{}), canvas: presentation.offscreen, geometry: initial, controlPort: channels[0].port2, dataPort: channels[1].port2,
         audioCommandPort: channels[2].port2, audioPcmPort: channels[3].port2, browserPort: channels[4].port2, xrPort: channels[5].port2 },
-      [pack.buffer as ArrayBuffer, presentation.offscreen, ...channels.map(channel => channel.port2)]);
+      [...(artifactSet?artifactSetTransfers(artifactSet):[pack.buffer as ArrayBuffer]), presentation.offscreen, ...channels.map(channel => channel.port2)]);
       for (const channel of channels) ownedPorts.delete(channel.port2);
       workerState = 'booting'; visibility(); publish();
     } catch (error) { if (lease.active) { diagnostic = previewDiagnostic(error); void finalize({ kind: 'startup-failed', detail: diagnostic.message }); } }

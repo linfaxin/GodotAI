@@ -15,6 +15,12 @@ import {patchShaderUtf8} from '../../../scripts/release/patch-web-shader-utf8.mj
 async function fixture(root){
  const sources={
   SConstruct:'# source-only fixture',
+  'platform/web/js/libs/library_godot_runtime.js':await readFile(new URL('../../../scripts/jsb.react-browser/test/fixtures/godot-4.6.1-runtime.js',import.meta.url),'utf8'),
+  'platform/web/js/libs/library_godot_display.js':await readFile(new URL('../../../scripts/jsb.react-browser/test/fixtures/godot-4.6.1-display.js',import.meta.url),'utf8'),
+  'modules/websocket/library_godot_websocket.js':await readFile(new URL('../../../scripts/jsb.react-browser/test/fixtures/godot-4.6.1-websocket.js',import.meta.url),'utf8'),
+  'scene/main/node.h':await readFile(new URL('../../../scripts/jsb.react-browser/test/fixtures/godot-4.6.1-node.h',import.meta.url),'utf8'),
+  'scene/main/node.cpp':await readFile(new URL('../../../scripts/jsb.react-browser/test/fixtures/godot-4.6.1-node.cpp',import.meta.url),'utf8'),
+  'core/object/object.cpp':await readFile(new URL('../../../scripts/jsb.react-browser/test/fixtures/godot-4.6.1-object.cpp',import.meta.url),'utf8'),
   'platform/web/detect.py':await readFile(new URL('./fixtures/godot-4.6.1-web-detect.py',import.meta.url),'utf8'),
   'platform/web/js/patches/patch_em_gl.js':await readFile(new URL('./fixtures/godot-4.6.1-patch-em-gl.js',import.meta.url),'utf8'),
   'core/object/worker_thread_pool.cpp':THREADLESS_GROUP_WAIT_ORIGINAL,
@@ -31,7 +37,7 @@ async function fixture(root){
   'servers/rendering/renderer_rd/shaders/scene_forward_aa_inc.glsl':'#ifdef ALPHA_HASH_USED\nhalf compute_alpha_hash_threshold(vec3 pos, float scale) { return half(0.5); }\n#endif // ALPHA_HASH_USED\n',
   'drivers/gles3/storage/texture_storage.cpp':'void TextureStorage::_create_render_target_backbuffer(RenderTarget *rt) {\nint count = MAX(1, Image::get_image_required_mipmaps(width, height, format) - 4);\n\tif (rt->size.x > 40 && rt->size.y > 40) { allocate(); }\n}\nvoid TextureStorage::_clear_render_target(RenderTarget *rt) {}',
   'scene/main/viewport.cpp':'tooltip_owner->add_child(gui.tooltip_popup);',
-  'platform/web/js/libs/library_godot_os.js':'navigator.serviceWorker.getRegistration().then(GodotPWA.updateState.bind(null, cb));',
+  'platform/web/js/libs/library_godot_os.js':await readFile(new URL('../../../scripts/jsb.react-browser/test/fixtures/godot-4.6.1-os.js',import.meta.url),'utf8'),
   'platform/web/js/libs/library_godot_audio.js':await readFile(new URL('../../../scripts/jsb.react-browser/test/fixtures/godot-4.6.1-audio.js',import.meta.url),'utf8'),
   'platform/web/js/libs/library_godot_input.js':await readFile(new URL('../../../scripts/jsb.react-browser/test/fixtures/godot-4.6.1-input.js',import.meta.url),'utf8'),
   'modules/webrtc/library_godot_webrtc.js':await readFile(new URL('../../../scripts/jsb.react-browser/test/fixtures/godot-4.6.1-webrtc.js',import.meta.url),'utf8'),
@@ -52,7 +58,9 @@ test('local patch CLI and the actual CI snapshot builder produce identical engin
  const out=join(root,'report.json');
  await buildBrowserEngine({'godot-source':source,'build-dir':built,out,'snapshot-only':true,scons:process.execPath,emcc:process.execPath});
  const report=JSON.parse(await readFile(out,'utf8'));
- assert.equal(report.status,'snapshotted');assert.equal(report.recipe.patches.length,21);
+ assert.equal(report.status,'snapshotted');assert.equal(report.recipe.patches.length,35);
+ for(const id of ['godotjs-artifact-set-early-mount-v1','godotjs-host-resource-owner-v1','godotjs-native-observer-v1'])assert(report.recipe.patches.some(record=>record.patchId===id));
+ assert.equal(report.execution.artifactSetAbi,1);assert.equal(report.execution.hostResourceAbi,1);assert.equal(report.nativeObserverPatch.abi,1);assert.equal(report.execution.shutdownQueueAbi,1);
  assert.deepEqual(report.runtimeAbi,{protocolVersion:2,host:1,audio:1,presentation:1,lifecycle:1});
  assert.equal(report.execution.lifecycleAbi,1);assert.equal(report.lifecyclePatch.abi,1);
  assert.equal(Object.keys(report.workerPatch.files).length,10);
@@ -148,7 +156,7 @@ test('proxy-pthread snapshots retain the native pthread patch set without the De
  const out=join(root,'report.json');
  await buildBrowserEngine({'godot-source':source,'build-dir':built,out,'execution-model':'proxy-pthread','snapshot-only':true,scons:process.execPath,emcc:process.execPath});
  const report=JSON.parse(await readFile(out,'utf8'));
- assert.equal(report.execution.executionModel,'proxy-pthread');assert.equal(report.recipe.patches.length,13);
+ assert.equal(report.execution.executionModel,'proxy-pthread');assert.equal(report.recipe.patches.length,27);
  assert.equal(report.execution.lifecycleAbi,1);assert.equal(report.lifecyclePatch.abi,1);
  assert.equal(report.runtimeAbi,undefined);assert.equal(report.workerPatch,undefined);
  assert(report.recipe.args.includes('threads=yes'));assert(report.recipe.args.includes('proxy_to_pthread=yes'));

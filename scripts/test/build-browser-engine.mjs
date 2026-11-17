@@ -11,6 +11,10 @@ import { applyWebEnginePatches } from '../release/patch-web-engine.mjs';
 import {getEngineProfile,engineExecution,engineBuildArgs,validateEngineProfile,validateEngineExecution} from '../release/engine-profiles.mjs';
 import {workerRuntimeBuildProof} from '../release/patch-web-worker-runtime.mjs';
 import {webLifecycleBuildProof} from '../release/patch-web-lifecycle.mjs';
+import {artifactSetMountBuildProof} from '../release/patch-artifact-set-mount.mjs';
+import {nativeObserverBuildProof} from '../release/patch-native-observer.mjs';
+import {hostResourceBuildProof} from '../release/patch-web-resource-owner.mjs';
+import {managedShutdownBuildProof} from '../release/patch-managed-shutdown-queue.mjs';
 
 const moduleRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const excluded = new Set(['.git', 'node_modules', '.godot', '__pycache__', 'bin', 'obj', 'out', 'dist', 'dist-conformance', 'dist-2d-debug', 'dist-2d-release', 'dist-full-release', 'work', '.browser-engine']);
@@ -137,7 +141,8 @@ export async function buildBrowserEngine(configuration) {
   if (!existsSync(resolve(destinationModule, 'impl/web/js/jsbb.impl.js'))) fail('E_BROWSER_BRIDGE', 'Build @godot-js/web-bridge first; generated impl/web/js/jsbb.impl.js is a required snapshotted build input');
   const patches = await applyWebEnginePatches(destination, { python: configuration.python ?? 'python3', executionModel: execution.executionModel });
   const lifecycleProof=webLifecycleBuildProof(patches);
-  execution={...execution,lifecycleAbi:lifecycleProof.lifecycleAbi};
+  const artifactSetProof={...artifactSetMountBuildProof(patches),...nativeObserverBuildProof(patches),...hostResourceBuildProof(patches),...managedShutdownBuildProof(patches)};
+  execution={...execution,lifecycleAbi:lifecycleProof.lifecycleAbi,artifactSetAbi:artifactSetProof.artifactSetAbi,hostResourceAbi:artifactSetProof.hostResourceAbi,shutdownQueueAbi:artifactSetProof.shutdownQueueAbi};
   // Capture SCons' final environment after target/platform/module resolution.
   // This hook is part of the attested SConstruct bytes and never touches upstream.
   const featureEvidencePath='bin/godotjs-web-build-features.json';
@@ -157,7 +162,7 @@ export async function buildBrowserEngine(configuration) {
   const environment=Object.fromEntries(['EMCC_CORES','BINARYEN_CORES'].filter(name=>process.env[name]!==undefined).map(name=>[name,process.env[name]]));
   const toolchains = { environment, node:process.version, ...(process.env.EMSDK_NODE?{emsdkNode:await toolVersion(process.env.EMSDK_NODE,['--version'])}:{}), emscripten: await toolVersion(configuration.emcc ?? 'emcc', ['--version']), scons: await toolVersion(scons, ['--version']), python: await toolVersion(configuration.python ?? 'python3', ['--version']) };
   const recipe = { command: scons, args, environment, cwd: 'independent-build-tree', builderSha256: builder.sha256, patches, generatedNativeInputs: nativeBundles.map(name => `scripts/out/${name}`), featureCapture:{path:featureEvidencePath,hookSha256:digest(hook)} };
-  const report = { schemaVersion: 1, kind: 'godot-js-browser-engine-build', runtimeProfile, execution, requestedArgs:[...args], status: 'snapshotted', source, godotSource, builder, toolchains, recipe, recipeSha256: digest(canonical(recipe)), engineTarget: target, pckVersion: 3, ...lifecycleProof, ...(execution.executionModel==='window'?workerRuntimeBuildProof(patches):{}) };
+  const report = { schemaVersion: 1, kind: 'godot-js-browser-engine-build', runtimeProfile, execution, requestedArgs:[...args], status: 'snapshotted', source, godotSource, builder, toolchains, recipe, recipeSha256: digest(canonical(recipe)), engineTarget: target, pckVersion: 3, ...lifecycleProof, ...artifactSetProof, ...(execution.executionModel==='window'?workerRuntimeBuildProof(patches):{}) };
   await writeJson(reportFile, report);
   if (configuration['snapshot-only']) return { status: report.status, report: reportFile };
   try {

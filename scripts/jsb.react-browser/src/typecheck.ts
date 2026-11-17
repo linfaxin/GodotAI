@@ -173,27 +173,32 @@ export function createTypeSession(ts: TypeScriptRuntime, input: TypecheckInput) 
       if (!symbol || !checker.getExportsOfModule(symbol).some(item => item.name === name)) custom('E_ENTRY_EXPORT', `Missing ${name} export in ${file}`, file, 0, id);
     }
     // Identity is the canonical SDK declaration package, never the spelling of an import.
-    const sdkComponents = program.getSourceFile(sdkRoot + '/dist/components.d.ts');
-    const sdkSymbol = sdkComponents && checker.getSymbolAtLocation(sdkComponents);
     const hostSymbols = new Map<TS.Symbol, string>();
     const hostDeclarations = new Map<TS.Declaration, string>();
-    if (sdkSymbol) for (const symbol of checker.getExportsOfModule(sdkSymbol)) {
-      const type = checker.getTypeOfSymbolAtLocation(symbol, symbol.valueDeclaration ?? sdkComponents!);
-      const signatures = type.getCallSignatures();
-      // Public host exports use ForwardRefExoticComponent; props/type helpers are not hosts.
-      if (signatures.length && symbol.declarations?.some(declaration => ts.isVariableDeclaration(declaration))) {
-        hostSymbols.set(symbol, symbol.name);
-        for (const declaration of symbol.declarations ?? []) hostDeclarations.set(declaration, symbol.name);
-      }
-    }
-    if (sdkSymbol) {
-      const facade = checker.getExportsOfModule(sdkSymbol).find(symbol => symbol.name === 'G');
-      if (facade) {
-        const names = new Set(hostSymbols.values());
-        for (const symbol of checker.getTypeOfSymbolAtLocation(facade, facade.valueDeclaration ?? sdkComponents!).getProperties()) {
-          if (!names.has(symbol.name)) continue;
+    // Both facades can be present in a historical declaration snapshot. Match
+    // their actual exported symbols rather than allowing an import spelling to
+    // bypass the selected capability profile.
+    for (const filename of ['engine-components.d.ts', 'components.d.ts']) {
+      const sdkComponents = program.getSourceFile(sdkRoot + '/dist/' + filename);
+      const sdkSymbol = sdkComponents && checker.getSymbolAtLocation(sdkComponents);
+      if (sdkSymbol) for (const symbol of checker.getExportsOfModule(sdkSymbol)) {
+        const type = checker.getTypeOfSymbolAtLocation(symbol, symbol.valueDeclaration ?? sdkComponents!);
+        const signatures = type.getCallSignatures();
+        // Host values are callable exports; props/type helpers are not hosts.
+        if (signatures.length && symbol.declarations?.some(declaration => ts.isVariableDeclaration(declaration))) {
           hostSymbols.set(symbol, symbol.name);
           for (const declaration of symbol.declarations ?? []) hostDeclarations.set(declaration, symbol.name);
+        }
+      }
+      if (sdkSymbol) {
+        const facade = checker.getExportsOfModule(sdkSymbol).find(symbol => symbol.name === 'G');
+        if (facade) {
+          const names = new Set(hostSymbols.values());
+          for (const symbol of checker.getTypeOfSymbolAtLocation(facade, facade.valueDeclaration ?? sdkComponents!).getProperties()) {
+            if (!names.has(symbol.name)) continue;
+            hostSymbols.set(symbol, symbol.name);
+            for (const declaration of symbol.declarations ?? []) hostDeclarations.set(declaration, symbol.name);
+          }
         }
       }
     }

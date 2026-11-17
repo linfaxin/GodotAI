@@ -7,13 +7,16 @@ import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
 import ts from 'typescript';
 import {build} from 'esbuild';
-import {createCompilerEnvironment, compileBuildPlan, compileProject} from '../dist/compiler.js';
+import {createCompilerEnvironment, compileBuildPlan, compileProject,compileResultMetadata,ProjectBuildCache} from '../dist/compiler.js';
 import {createProjectTypeEnvironment, checkProjectTypes} from '../dist/type-environment.js';
 import {engineCheckOptions, engineEmitOptions} from '../dist/compiler-policy.js';
-import {createSourceSnapshot, createBuildPlan, adaptLegacyLaunch} from '../dist/build-plan.js';
+import {createSourceSnapshot, createBuildPlan, adaptLegacyLaunch, prepareBuildPlan} from '../dist/build-plan.js';
 import {prepareNodeProject, checkNodeProject, compileNodeProject} from '../dist/node/compiler.js';
-import {hashJson} from '../dist/hash.js';
-import {createExtensionIdentity, nativeExtensionIdentityInputs} from '@godot-js/engine/identities';
+import {hashJson,hashBytes} from '../dist/hash.js';
+import {createBrowserResourceConverters,createResourceExecutionCache,encodeRgbaPng,BINARY_RESOURCE_TARGET_ABI} from '../dist/resource-converters.js';
+import {assessStoredImportReceipt} from '../dist/import-receipts.js';
+import {readPckIndex} from '@godot-js/engine/pck-index';
+import {createExtensionIdentity, nativeExtensionIdentityInputs,createEngineIdentity,nativeEngineIdentityInputs} from '@godot-js/engine/identities';
 import {nativeReleaseFixture, sealRelease} from '../../engine/test/fixtures/native-release.mjs';
 
 const encoder = new TextEncoder(), decoder = new TextDecoder();
@@ -94,9 +97,19 @@ test('artifact facade preserves legacy class/component launch metadata for an in
   await assert.rejects(compileBuildPlan(component), /adapter/);
 });
 
-async function localRelease(t) {
+async function localRelease(t,{artifactSetAbi,historicalSdk}={}) {
   const fixture = await nativeReleaseFixture();
-  const types = {...fixture.types, ...await standardLibraries()};
+  if(artifactSetAbi){fixture.manifest.execution.artifactSetAbi=artifactSetAbi;fixture.manifest.engineId=await createEngineIdentity(nativeEngineIdentityInputs(fixture.manifest));}
+  let suppliedTypes=fixture.types;
+  if(historicalSdk){
+   const {createTypeSnapshot}=await import('../../../apps/playground/scripts/build-shell.mjs');
+   const {buildEngineVendor,FULL_ENGINE_MODULE_CONTRACT,FULL_ENGINE_MODULE_EXPORTS,runtimeModuleSource}=await import('../../../apps/playground/scripts/full-engine-release.mjs');
+   suppliedTypes=JSON.parse(await createTypeSnapshot({engineFiles:{...fixture.engineTypes,'/godot-jsb/index.d.ts':'export {};','/godot.annotations/index.d.ts':'export {};'}}));
+   fixture.manifest.sdk.moduleContract=FULL_ENGINE_MODULE_CONTRACT;fixture.manifest.sdk.moduleExports=FULL_ENGINE_MODULE_EXPORTS;
+   fixture.manifest.sdk.runtimeModules=Object.fromEntries(Object.entries(FULL_ENGINE_MODULE_EXPORTS).map(([name,member],index)=>[name,fixture.asset('runtime-'+index+'.js',runtimeModuleSource(member))]));
+   const production=await buildEngineVendor({mode:'production'});fixture.manifest.sdk.vendor=fixture.asset('.playground/vendor.js',production);fixture.manifest.sdk.vendors={production:fixture.manifest.sdk.vendor,development:fixture.manifest.sdk.vendor};
+  }
+  const types = {...suppliedTypes, ...await standardLibraries()};
   fixture.manifest.api.typeSnapshot = fixture.asset('types.json', JSON.stringify(types));
   fixture.manifest.api.namingProfiles.snake.typeSnapshot = fixture.manifest.api.typeSnapshot;
   fixture.manifest.sdk.typesHash = await hashJson(Object.fromEntries(Object.entries(types).filter(([name]) => name !== '/godot/index.d.ts')));
@@ -148,12 +161,15 @@ test('Node directory adapter retains source resources/import cache and supports 
   const files = {...source(), '/project.godot': '[application]\nrun/main_scene="res://main.tscn"\n',
     '/main.tscn': '[gd_scene format=3]\n[node name="Main" type="Node"]\n',
     '/asset.bin': Uint8Array.of(0, 128, 255), '/.godot/imported/keep.bin': Uint8Array.of(4, 5), '/.godot/editor/ignored.bin': Uint8Array.of(8)};
+  files['/start.ts']='\ufeff'+files['/start.ts'];
   for (const [name, value] of Object.entries(files)) { const filename = path.join(project, name.slice(1)); await mkdir(path.dirname(filename), {recursive: true}); await writeFile(filename, value); }
   const output = path.join(project, 'build', 'game.pck'), options = {project, release: fixture.release, output};
   const scene = await compileNodeProject(options);
   assert.equal(scene.manifest.mainScene, 'res://main.tscn'); assert(scene.index['res://asset.bin']); assert(scene.index['res://.godot/imported/keep.bin']);
   assert.equal(scene.index['res://.godot/editor/ignored.bin'], undefined);
-  assert.equal((await compileNodeProject(options)).artifactId, scene.artifactId, 'own output is not read into the next snapshot');
+  const original=scene.index['res://start.ts'];assert.deepEqual(scene.pack.subarray(original.offset,original.offset+original.size),encoder.encode(files['/start.ts']),'directory source bytes, including a UTF-8 BOM, must be preserved');
+  await writeFile(output+'.00000000-0000-4000-8000-000000000000.tmp',Uint8Array.of(9,8,7));
+  assert.equal((await compileNodeProject(options)).artifactId, scene.artifactId, 'own output and interrupted output candidates are not read into the next snapshot');
   const script = await compileNodeProject({...options, launch: {kind: 'script', module: '/start.ts'}});
   assert.match(readPacked(script, 'res://.playground/engine-bootstrap.ts'), /Script entry must export a start function/);
   assert.notEqual(script.buildKey, scene.buildKey);
@@ -162,4 +178,82 @@ test('Node directory adapter retains source resources/import cache and supports 
 test('neutral compiler dependency graph has no application, React runtime, filesystem or browser host imports', async () => {
   const result = await build({entryPoints: [fileURLToPath(new URL('../dist/compiler.js', import.meta.url))], bundle: true, write: false, metafile: true, platform: 'neutral', format: 'esm', external: ['typescript', 'spark-md5']});
   assert(!Object.keys(result.metafile.inputs).some(name => /apps\/playground|scripts\/jsb\.react|verified-loader|runner|node:/.test(name)));
+});
+
+
+test('Node output admission leaves the published root intact for cancelled and superseded builds',async t=>{
+ const fixture=await localRelease(t),output=path.join(fixture.directory,'published.pck'),options={project:fixture.project,release:fixture.release,output};
+ const original=await compileNodeProject(options);
+ let entered,release;const started=new Promise(resolve=>entered=resolve),blocked=new Promise(resolve=>release=resolve);
+ const slow=compileNodeProject({...options,preparePlan:async(plan,preparation)=>{entered();await blocked;return prepareBuildPlan(plan,preparation);}});
+ await started;
+ const latest=await compileNodeProject(options);release();
+ await assert.rejects(slow,error=>error.code==='E_BUILD_SUPERSEDED');
+ assert.deepEqual(new Uint8Array(await readFile(output)),latest.pack);
+ const controller=new AbortController();
+ await assert.rejects(compileNodeProject({...options,signal:controller.signal,preparePlan:async(plan,preparation)=>{const prepared=await prepareBuildPlan(plan,preparation);controller.abort(Error('cancelled before output'));return prepared;}}),/cancelled before output/);
+ assert.deepEqual(new Uint8Array(await readFile(output)),original.pack);
+});
+
+
+test('Node ArtifactSet output is a real alternative and its output directory is excluded from source revisions',async t=>{
+ const fixture=await localRelease(t,{artifactSetAbi:1}),project=path.join(fixture.directory,'source-directory');await mkdir(project);
+ await writeFile(path.join(project,'start.ts'),'export function start(){}');await writeFile(path.join(project,'resource.bin'),Uint8Array.of(3,2,1));
+ const artifactSetDirectory=path.join(project,'artifacts'),options={project,release:fixture.release,launch:{kind:'script',module:'/start.ts'},artifactSetDirectory};
+ const first=await compileNodeProject(options);assert.equal(first.variant,'pack-set');assert.equal(first.pack,undefined);
+ const manifest=JSON.parse(await readFile(path.join(artifactSetDirectory,'artifact-set.json'),'utf8'));assert.equal(manifest.artifactSetId,first.artifactId);
+ for(const descriptor of [manifest.bootstrap,...manifest.resources])assert.deepEqual(new Uint8Array(await readFile(path.join(artifactSetDirectory,descriptor.path))),first.artifactSet.packs.get(descriptor.sha256));
+ const warm=await compileNodeProject(options);assert.equal(warm.artifactId,first.artifactId,'exported artifact directory must never become project input');
+ await writeFile(path.join(project,'start.ts'),'export function start(){return 1}');
+ const edited=await compileNodeProject(options);assert.notEqual(edited.artifactId,first.artifactId);assert.deepEqual(edited.artifactSet.manifest.resources,first.artifactSet.manifest.resources);
+});
+
+test('single and set builds preserve independent source/import evidence across Node, browser, cache and editor persistence',async t=>{
+ const fixture=await localRelease(t,{artifactSetAbi:1}),cache=new ProjectBuildCache(),resourceCache=createResourceExecutionCache();
+ const png=encodeRgbaPng({width:1,height:1,rgba:Uint8Array.of(255,0,0,255)}),document={schemaVersion:4,runtime:'engine',engineProfile:fixture.manifest.runtimeProfile,launch:{kind:'script',module:'/start.ts'},files:{'/start.ts':'\ufeffexport function start(){}','/pixel.png':[...png]},resourceImports:[{resource:'res://pixel.png',converter:'godotjs/png-ctex'}]};
+ await writeFile(fixture.project,JSON.stringify(document));
+ const artifactSetDirectory=path.join(fixture.directory,'evidence-set'),options={project:fixture.project,release:fixture.release,artifactSetDirectory,cache,resourceCache};
+ const cold=await compileNodeProject(options),before=cache.metrics,warm=await compileNodeProject(options);
+ assert.equal(cold.variant,'pack-set');assert.equal(cold.sourceHash,cold.plan.snapshot.sourceHash);assert.equal(cold.importReceipts.length,1);
+ assert.equal(cold.importReceipts[0].converter.output.extension,'ctex');assert.deepEqual(cold.importReceipts,warm.importReceipts);assert.equal(cold.buildKey,warm.buildKey);assert.equal(cold.artifactId,warm.artifactId);assert.equal(cache.metrics.packBytesWritten,before.packBytesWritten);
+ const metadata=compileResultMetadata(cold);assert.deepEqual(metadata,compileResultMetadata(warm));assert.equal(metadata.sourceHash,cold.sourceHash);assert(!Object.hasOwn(metadata,'packSha256'));assert(!Object.hasOwn(metadata,'artifactReceipt'));
+ assert.deepEqual(compileResultMetadata({...cold,manifest:{...cold.manifest,artifactReceipt:{imports:[]},packSha256:'stale-single',artifactSetId:'stale-set'}}),metadata);
+ const sidecar=JSON.parse(await readFile(path.join(artifactSetDirectory,'application.pck.manifest.json'),'utf8'));
+ for(const key of ['sourceHash','buildKey','artifactId','artifactSetId','importReceipts','outputOverlay'])assert.deepEqual(sidecar[key],metadata[key]);
+ assert(!Object.hasOwn(sidecar,'packSha256'));assert(!Object.hasOwn(sidecar,'artifactReceipt'));
+ const request=await prepareNodeProject(options),{compileEngineProject}=await import('../../../apps/playground/src/engine-project.ts');
+ let browser;
+ try{browser=await compileEngineProject({runtime:'engine',launch:document.launch,files:document.files,resourceImports:document.resourceImports,resourceConverters:createBrowserResourceConverters(undefined,{cache:resourceCache}),resourceTarget:{resourceAbi:BINARY_RESOURCE_TARGET_ABI,features:{engineId:fixture.manifest.engineId}},compilerEnvironment:request.environment,artifactSet:true,buildCache:cache,identityInputs:{engineProfile:fixture.manifest.runtimeProfile,engineId:fixture.manifest.engineId,bindingVersion:fixture.manifest.api.bindingVersion,typescriptVersion:ts.version}});}finally{request.releaseSnapshot();}
+ assert.deepEqual(compileResultMetadata(browser),metadata);assert.deepEqual(browser.artifactSet.manifest,cold.artifactSet.manifest);
+ const actual=new Map();for(const bytes of browser.artifactSet.packs.values())for(const entry of readPckIndex(bytes).entries)actual.set(entry.path,bytes.slice(entry.offset,entry.offset+entry.bytes));
+ assert.deepEqual(actual.get('res://start.ts'),encoder.encode(document.files['/start.ts']));
+ for(const output of metadata.outputOverlay)if(output.outputHash)assert.equal(await hashBytes(actual.get(output.path)),output.outputHash,output.path);
+ for(const receipt of metadata.importReceipts){assert.equal((await assessStoredImportReceipt(receipt,actual)).status,'unverified','hash matches do not invent trusted producer attestation');for(const item of [...receipt.sources,...receipt.outputs])assert.equal(await hashBytes(actual.get(item.path)),item.sha256,item.path);}
+ const broken=new Map(actual),output=cold.importReceipts[0].outputs[0].path;broken.set(output,Uint8Array.of(0));assert.equal((await assessStoredImportReceipt(cold.importReceipts[0],actual,broken)).status,'stale');
+ const single=await compileNodeProject({...options,artifactSetDirectory:undefined,output:path.join(fixture.directory,'evidence-single.pck')});assert.deepEqual(single.importReceipts,cold.importReceipts);assert.equal(single.sourceHash,cold.sourceHash);assert.deepEqual(single.receipt.imports,single.importReceipts);
+ assert(!Object.hasOwn(compileResultMetadata({...single,manifest:{...single.manifest,artifactSetId:'stale-set'}}),'artifactSetId'));
+ const {parseProject,exportProject,projectCompileRequest}=await import('../../../apps/playground/src/project-model.ts'),{applyCompiledImportReceipts}=await import('../../../apps/playground/src/compiled-project-metadata.ts');
+ const editor=parseProject(document),original=exportProject(editor,'original'),sources=structuredClone(editor.files);
+ assert(applyCompiledImportReceipts(editor,metadata));assert.deepEqual(projectCompileRequest(editor).importReceipts,cold.importReceipts);assert.deepEqual(exportProject(editor).importReceipts,cold.importReceipts);assert.deepEqual(editor.files,sources);assert.deepEqual(exportProject(editor,'original'),original);assert(!applyCompiledImportReceipts(editor,metadata));
+ const persisted=exportProject(editor);assert.throws(()=>applyCompiledImportReceipts(editor,{importReceipts:[...cold.importReceipts,...cold.importReceipts]}),/Duplicate/);assert.throws(()=>applyCompiledImportReceipts(editor,{importReceipts:[{...cold.importReceipts[0],schemaVersion:9}]}),/receipt/i);assert.deepEqual(exportProject(editor),persisted);
+ const compatibility=parseProject(document);assert(applyCompiledImportReceipts(compatibility,{artifactReceipt:single.receipt}));assert.deepEqual(projectCompileRequest(compatibility).importReceipts,cold.importReceipts);
+ const precedence=parseProject(document);assert(!applyCompiledImportReceipts(precedence,{importReceipts:[],artifactReceipt:single.receipt}));assert.equal(projectCompileRequest(precedence).importReceipts,undefined);
+});
+
+
+test('historical component sources keep their intent through current engine facade routes without changing Schema 4 semantics',async t=>{
+ const fixture=await localRelease(t,{historicalSdk:true}),startupAdapter=fileURLToPath(new URL('../../../scripts/jsb.react-build/dist/core/index.js',import.meta.url)),options={project:fixture.project,release:fixture.release,startupAdapter};
+ const original='import * as React from "react";import {Label} from "@godot-js/react";export default function App(){return <Label text="historical"/>}';
+ const document={schemaVersion:3,runtime:'react',engineProfile:fixture.manifest.runtimeProfile,entry:'/App.tsx',files:{'/App.tsx':original}};await writeFile(fixture.project,JSON.stringify(document));
+ const request=await prepareNodeProject(options);assert.equal(request.environment.identity.target.compatibilityAdapter,'godotjs-historical-react-modules/1');
+ const node=await compileProject(request);assert.match(readPacked(node,'res://.godot/GodotJS/node_modules/@godot-js/react/index.js'),/engineComponents/);assert.match(readPacked(node,'res://.godot/GodotJS/node_modules/@godot-js/react/engine/index.js'),/engineReact/);assert.equal(readPacked(node,'res://App.tsx'),original);
+ const {compileEngineProject}=await import('../../../apps/playground/src/engine-project.ts');
+ const browser=await compileEngineProject({runtime:'react',entry:'/App.tsx',files:document.files,compilerEnvironment:request.environment,identityInputs:{engineProfile:fixture.manifest.runtimeProfile,engineId:fixture.manifest.engineId,extensionId:fixture.manifest.extensionId,bindingVersion:fixture.manifest.api.bindingVersion,typescriptVersion:ts.version}});
+ assert.equal(browser.buildKey,node.buildKey);assert.equal(browser.artifactId,node.artifactId);assert.deepEqual(browser.pack,node.pack);
+ await writeFile(fixture.project,JSON.stringify({schemaVersion:4,runtime:'engine',engineProfile:fixture.manifest.runtimeProfile,launch:{kind:'script',module:'/App.tsx',export:'default'},files:document.files}));
+ const modern=await checkNodeProject(options);assert.equal(modern.ok,false);assert(modern.diagnostics.some(item=>item.code===2305&&/Label/.test(item.message)));
+ await writeFile(fixture.project,JSON.stringify(document));assert.equal((await compileNodeProject(options)).artifactId,node.artifactId,'switching checking modes cannot poison the shared language service/module cache');
+ const denied={...document,files:{'/App.tsx':original.replace('@godot-js/react','@godot-js/react/legacy')}};await writeFile(fixture.project,JSON.stringify(denied));
+ await assert.rejects(checkNodeProject(options),error=>error.code==='E_HISTORICAL_REACT_IMPORT');
+ assert.deepEqual(JSON.parse(await readFile(fixture.project,'utf8')),denied,'the adapter never rewrites historical source documents');
 });

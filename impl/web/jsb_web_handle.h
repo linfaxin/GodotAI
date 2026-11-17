@@ -194,33 +194,30 @@ namespace v8
         void Reset()
         {
             if (!isolate_) return;
-
-            if (weak_type_ == WeakType::kStrong)
+            Isolate* retained = isolate_;
+            if (!jsb::impl::Broker::is_closed(retained))
             {
-                jsb_check(is_alive());
+                jsb_check(jsb::impl::Broker::is_owner(retained));
+                if (weak_type_ == WeakType::kStrong) jsb_check(is_alive());
+                else if (weak_type_ == WeakType::kWeakCallback)
+                    jsb::impl::Broker::CancelWeakCallback(retained, weak_callback_id_);
+                jsbi_handle_Reset(jsb::impl::Broker::get_engine(retained), value_);
             }
-            else if (weak_type_ == WeakType::kWeakCallback)
-            {
-                jsb::impl::Broker::CancelWeakCallback(isolate_, weak_callback_id_);
-            }
-            // Remove also dead and callback-free weak handles. Removal is
-            // idempotent if a preceding IsValid already discarded the entry.
-            jsbi_handle_Reset(jsb::impl::Broker::get_engine(isolate_), value_);
+            // After owner Dispose, no current realm or native JS handle may be
+            // touched. The retained Isolate is now only a C++ tombstone.
             _clear();
+            jsb::impl::Broker::release(retained);
         }
 
         void Reset(Isolate* isolate, Local<T> value)
         {
             Reset();
-
-            jsb_check(isolate);
+            if (!isolate || value.IsEmpty() || jsb::impl::Broker::is_closed(isolate)) return;
+            jsb_check(jsb::impl::Broker::is_owner(isolate));
+            jsb::impl::Broker::retain(isolate);
             isolate_ = isolate;
-
-            if (!value.IsEmpty())
-            {
-                value_ = jsbi_handle_New(jsb::impl::Broker::get_engine(isolate_), value.data_.stack_pos_);
-                weak_type_ = WeakType::kStrong;
-            }
+            value_ = jsbi_handle_New(jsb::impl::Broker::get_engine(isolate), value.data_.stack_pos_);
+            weak_type_ = WeakType::kStrong;
         }
 
         void Reset(Isolate* isolate, const Global& value)
@@ -230,6 +227,7 @@ namespace v8
 
         void ClearWeak()
         {
+            if (!isolate_ || jsb::impl::Broker::is_closed(isolate_)) return;
             jsb_check(isolate_ && weak_type_ != WeakType::kStrong && is_alive());
 
             if (weak_type_ == WeakType::kWeakCallback)
@@ -245,6 +243,7 @@ namespace v8
         // ClearWeak() before SetWeak() if SetWeak(parameter) called priorly
         void SetWeak()
         {
+            if (!isolate_ || jsb::impl::Broker::is_closed(isolate_)) return;
             jsb_check(isolate_ && weak_type_ == WeakType::kStrong && is_alive());
 
             weak_type_ = WeakType::kWeak;
@@ -254,6 +253,7 @@ namespace v8
         template<typename S>
         void SetWeak(S* parameter, typename WeakCallbackInfo<S>::Callback callback, v8::WeakCallbackType type)
         {
+            if (!isolate_ || jsb::impl::Broker::is_closed(isolate_)) return;
             jsb_check(isolate_ && weak_type_ == WeakType::kStrong && is_alive());
 
             weak_callback_id_ = jsb::impl::Broker::SetWeakCallback(isolate_, value_, parameter, (void*) callback);
@@ -266,13 +266,19 @@ namespace v8
 
         Local<T> Get(Isolate* isolate) const
         {
-            jsb_check(isolate_ == isolate && isolate_ && is_alive());
+            if (!isolate_ || jsb::impl::Broker::is_closed(isolate_)) return {};
+            jsb_check(jsb::impl::Broker::is_owner(isolate_));
+            jsb_check(isolate_ == isolate && is_alive());
             return Local<T>(Data(isolate_, jsbi_handle_PushStack(jsb::impl::Broker::get_engine(isolate_), value_)));
         }
 
         template <typename S>
         bool operator==(const Global<S>& other) const
         {
+            if (!isolate_ || jsb::impl::Broker::is_closed(isolate_))
+                return !other.isolate_ || jsb::impl::Broker::is_closed(other.isolate_);
+            if (isolate_ != other.isolate_) return false;
+            jsb_check(jsb::impl::Broker::is_owner(isolate_));
             const jsb::impl::JSRuntime engine = jsb::impl::Broker::get_engine(isolate_);
             return jsbi_handle_eq(engine, value_, other.value_);
         }
@@ -296,7 +302,12 @@ namespace v8
         }
 
     private:
-        bool is_alive() const { return jsbi_handle_IsValid(jsb::impl::Broker::get_engine(isolate_), value_); }
+        bool is_alive() const
+        {
+            if (jsb::impl::Broker::is_closed(isolate_)) return false;
+            jsb_check(jsb::impl::Broker::is_owner(isolate_));
+            return jsbi_handle_IsValid(jsb::impl::Broker::get_engine(isolate_), value_);
+        }
 
         Isolate* isolate_ = nullptr;
 

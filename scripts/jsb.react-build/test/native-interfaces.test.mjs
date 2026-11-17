@@ -18,18 +18,18 @@ function evaluate(code, imports) {
 }
 
 test('generated Script.ts has stable exact-leaf identity and distinct profile paths',()=>{
-  const a=generateNativeInterface(schema,{profile:'player'}),b=generateNativeInterface(schema,{profile:'enemy'});
+  const a=generateNativeInterface(schema,{renderer:'legacy',profile:'player'}),b=generateNativeInterface(schema,{renderer:'legacy',profile:'enemy'});
   assert.equal(a.nativeLeaf,'Node2D');assert.equal(a.schemaHash,native.nativeInterfaceSchemaHash(schema));
   assert.equal(a.relativeSource,`generated/react/native/player-${a.schemaHash}.ts`);
   assert.notEqual(a.relativeSource,b.relativeSource);assert.equal(a.schemaHash,b.schemaHash);
-  const oldGeneration=generateNativeInterface(schema,{profile:'player',generation:'gen-old'}),newGeneration=generateNativeInterface(schema,{profile:'player',generation:'gen-new'});
+  const oldGeneration=generateNativeInterface(schema,{renderer:'legacy',profile:'player',generation:'gen-old'}),newGeneration=generateNativeInterface(schema,{renderer:'legacy',profile:'player',generation:'gen-new'});
   assert.equal(newGeneration.relativeSource,`generated/react/native/gen-new/player-${a.schemaHash}.ts`);
   assert.notEqual(oldGeneration.relativeSource,newGeneration.relativeSource);assert.equal(oldGeneration.schemaHash,newGeneration.schemaHash);
   assert.match(a.source,/export default class ReactNative_player_\w+ extends Node2D/);
   assert.match(a.source,/invokeNative\(this, "get_meta", "__godot_react_identity"\)/);
   assert.doesNotMatch(a.source,/set_script|add_child|get_instance_id|new Node/);
   assert.equal(compile(a.source).includes('__esDecorate'),true);
-  assert.equal(generateNativeInterface({...schema,callbacks:[...schema.callbacks].reverse()},{profile:'player'}).source,a.source);
+  assert.equal(generateNativeInterface({...schema,callbacks:[...schema.callbacks].reverse()},{renderer:'legacy',profile:'player'}).source,a.source);
 });
 
 test('generated modern decorators register real createClassBinder RPC metadata and all stubs forward DTOs',()=>{
@@ -41,7 +41,7 @@ test('generated modern decorators register real createClassBinder RPC metadata a
     jsb:{internal:{names:{get_member:value=>value,get_enum_value:value=>value},add_script_rpc:(prototype,method,config)=>{captured.push({method,config});prototypes.push(prototype);}}},
     proxy:{object_proxy:value=>value,key_only_proxy:value=>value},Node,Resource:class{},Variant:{Type:{TYPE_OBJECT:24}},PropertyHint:{},PropertyUsageFlags:{},ProxyTarget:Symbol(),FloatType:Symbol(),IntegerType:Symbol(),
   }});
-  const generated=generateNativeInterface(schema,{profile:'player'});
+  const generated=generateNativeInterface(schema,{renderer:'legacy',profile:'player'});
   const result=evaluate(compile(generated.source),{
     godot:{Node2D,InputEvent:class{},MultiplayerAPI:{RPCMode:{RPC_MODE_AUTHORITY:2,RPC_MODE_ANY_PEER:1}},MultiplayerPeer:{TransferMode:{TRANSFER_MODE_RELIABLE:2,TRANSFER_MODE_UNRELIABLE:0,TRANSFER_MODE_UNRELIABLE_ORDERED:1}}},
     'godot.annotations':annotations,
@@ -72,9 +72,26 @@ test('generated modern decorators register real createClassBinder RPC metadata a
 });
 
 test('generator rejects invalid static schemas, traversals and noncanonical runtime singletons',()=>{
-  assert.throws(()=>generateNativeInterface({...schema,rpc:{rpcPing:{arguments:['Node']}}},{profile:'player'}));
+  assert.throws(()=>generateNativeInterface({...schema,rpc:{rpcPing:{arguments:['Node']}}},{renderer:'legacy',profile:'player'}));
   for(const profile of ['../escape','Player','a/b',''])assert.throws(()=>generateNativeInterface(schema,{profile}));
-  for(const generatedDir of ['../src','/tmp/generated','res://generated/react','src','a//b'])assert.throws(()=>generateNativeInterface(schema,{profile:'player',generatedDir}));
-  assert.throws(()=>generateNativeInterface(schema,{profile:'player',runtimeModule:'./other-runtime'}),/canonical singleton/);
-  assert.throws(()=>generateNativeInterface(schema,{profile:'player',generation:'../escape'}),/generation identity/);
+  for(const generatedDir of ['../src','/tmp/generated','res://generated/react','src','a//b'])assert.throws(()=>generateNativeInterface(schema,{renderer:'legacy',profile:'player',generatedDir}));
+  assert.throws(()=>generateNativeInterface(schema,{renderer:'legacy',profile:'player',runtimeModule:'./other-runtime'}),/canonical singleton/);
+  assert.throws(()=>generateNativeInterface(schema,{renderer:'legacy',profile:'player',generation:'../escape'}),/generation identity/);
 });
+
+test('engine generation shares the direct renderer endpoint singleton',()=>{
+  const generated=generateNativeInterface(schema,{profile:'player',renderer:'engine'}),calls=[];
+  assert.match(generated.source,/@godot-js\/react\/engine-native-interfaces/);
+  assert.doesNotMatch(generated.source,/["']@godot-js\/react\/native-interfaces["']/);
+  class Node2D {get_meta(){return 'ni1:world:1:1';}}
+  const result=evaluate(compile(generated.source),{
+    godot:{Node2D,InputEvent:class{},MultiplayerAPI:{RPCMode:{RPC_MODE_AUTHORITY:2,RPC_MODE_ANY_PEER:1}},MultiplayerPeer:{TransferMode:{TRANSFER_MODE_RELIABLE:2,TRANSFER_MODE_UNRELIABLE:0,TRANSFER_MODE_UNRELIABLE_ORDERED:1}}},
+    'godot.annotations':{createClassBinder:()=>Object.assign(()=>()=>{},{rpc:()=>()=>{}})},
+    '@godot-js/react/engine-native-interfaces':{dispatchNativeInterface:(...args)=>calls.push(args)},
+  });
+  new result.default()._ready();
+  assert.equal(calls.length,1);assert.equal(calls[0][0],'ni1:world:1:1');assert.equal(calls[0][3],'_ready');
+  assert.throws(()=>generateNativeInterface(schema,{profile:'player',renderer:'engine',runtimeModule:'@godot-js/react/native-interfaces'}),/canonical singleton/);
+});
+
+test("native interface generator defaults to the direct engine singleton",()=>{assert.match(generateNativeInterface(schema,{profile:"default"}).source,/@godot-js\/react\/engine-native-interfaces/);});

@@ -64,6 +64,7 @@ namespace jsb
     {
         static void invoke(const v8::FunctionCallbackInfo<v8::Value>& info)
         {
+            if (!Environment::allow_variant_access(info.GetIsolate())) return;
             v8::Isolate* isolate = info.GetIsolate();
             v8::Local<v8::Context> context = isolate->GetCurrentContext();
             const Variant::Operator op = (Variant::Operator) info.Data().As<v8::Int32>()->Value();
@@ -110,6 +111,7 @@ namespace jsb
     {
         static void invoke(const v8::FunctionCallbackInfo<v8::Value>& info)
         {
+            if (!Environment::allow_variant_access(info.GetIsolate())) return;
             v8::Isolate* isolate = info.GetIsolate();
             v8::Local<v8::Context> context = isolate->GetCurrentContext();
             const Variant::Operator op = (Variant::Operator) info.Data().As<v8::Int32>()->Value();
@@ -167,6 +169,7 @@ namespace jsb
     {
         static void constructor(const v8::FunctionCallbackInfo<v8::Value>& info)
         {
+            if (!Environment::allow_variant_access(info.GetIsolate())) return;
             v8::Isolate* isolate = info.GetIsolate();
             v8::Local<v8::Context> context = isolate->GetCurrentContext();
 
@@ -256,6 +259,7 @@ namespace jsb
     {
         jsb_force_inline static void constructor(const v8::FunctionCallbackInfo<v8::Value>& info)
         {
+            if (!Environment::allow_variant_access(info.GetIsolate())) return;
             VariantBindFallbacks::constructor(info);
         }
     };
@@ -294,6 +298,7 @@ namespace jsb
 
         static void _getter(const v8::FunctionCallbackInfo<v8::Value>& info)
         {
+            if (!Environment::allow_variant_access(info.GetIsolate())) return;
             v8::Isolate* isolate = info.GetIsolate();
             const v8::Local<v8::Context> context = isolate->GetCurrentContext();
             jsb_check(TypeConvert::is_variant(info.This()));
@@ -316,6 +321,7 @@ namespace jsb
 
         static void _setter(const v8::FunctionCallbackInfo<v8::Value>& info)
         {
+            if (!Environment::allow_variant_access(info.GetIsolate())) return;
             v8::Isolate* isolate = info.GetIsolate();
             const v8::Local<v8::Context> context = isolate->GetCurrentContext();
             jsb_check(TypeConvert::is_variant(info.This()));
@@ -333,6 +339,7 @@ namespace jsb
 
         static void _set_indexed(const v8::FunctionCallbackInfo<v8::Value>& info)
         {
+            if (!Environment::allow_variant_access(info.GetIsolate())) return;
             v8::Isolate* isolate = info.GetIsolate();
             const v8::Local<v8::Context> context = isolate->GetCurrentContext();
             jsb_check(TypeConvert::is_variant(info.This()));
@@ -363,6 +370,7 @@ namespace jsb
 
         static void _get_indexed(const v8::FunctionCallbackInfo<v8::Value>& info)
         {
+            if (!Environment::allow_variant_access(info.GetIsolate())) return;
             v8::Isolate* isolate = info.GetIsolate();
             const v8::Local<v8::Context> context = isolate->GetCurrentContext();
             jsb_check(TypeConvert::is_variant(info.This()));
@@ -393,6 +401,7 @@ namespace jsb
 
         static void _set_keyed(const v8::FunctionCallbackInfo<v8::Value>& info)
         {
+            if (!Environment::allow_variant_access(info.GetIsolate())) return;
             v8::Isolate* isolate = info.GetIsolate();
             const v8::Local<v8::Context> context = isolate->GetCurrentContext();
             jsb_check(TypeConvert::is_variant(info.This()));
@@ -423,6 +432,7 @@ namespace jsb
 
         static void _get_keyed(const v8::FunctionCallbackInfo<v8::Value>& info)
         {
+            if (!Environment::allow_variant_access(info.GetIsolate())) return;
             v8::Isolate* isolate = info.GetIsolate();
             const v8::Local<v8::Context> context = isolate->GetCurrentContext();
             jsb_check(TypeConvert::is_variant(info.This()));
@@ -588,6 +598,7 @@ namespace jsb
         template<bool HasReturnValueT>
         static void _instance_method(const v8::FunctionCallbackInfo<v8::Value>& info)
         {
+            if (!Environment::allow_variant_access(info.GetIsolate())) return;
             v8::Isolate* isolate = info.GetIsolate();
             const v8::Local<v8::Context> context = isolate->GetCurrentContext();
             const int method_index = info.Data().As<v8::Int32>()->Value();
@@ -607,6 +618,7 @@ namespace jsb
         template<bool HasReturnValueT>
         static void _static_method(const v8::FunctionCallbackInfo<v8::Value>& info)
         {
+            if (!Environment::allow_variant_access(info.GetIsolate())) return;
             v8::Isolate* isolate = info.GetIsolate();
             v8::Local<v8::Context> context = isolate->GetCurrentContext();
             const internal::FBuiltinMethodInfo& method_info = GetVariantInfoCollection(Environment::wrap(context)).methods[info.Data().As<v8::Int32>()->Value()];
@@ -617,6 +629,7 @@ namespace jsb
         template<Variant::Type VariantT, bool HasReturnValueT>
         static void _utility_method(const v8::FunctionCallbackInfo<v8::Value>& info)
         {
+            if (!Environment::allow_variant_access(info.GetIsolate())) return;
             v8::Isolate* isolate = info.GetIsolate();
 
             if (info.Length() < 1 || info[0]->IsObject() || info[0]->IsNull())

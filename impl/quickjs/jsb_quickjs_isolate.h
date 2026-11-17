@@ -149,6 +149,10 @@ namespace v8
         void* GetData(int index) const { jsb_check(index == 0); return embedder_data_; }
         void SetData(int index, void* data);
         void PerformMicrotaskCheckpoint();
+        struct PendingJobResult { uint32_t executed = 0; bool pending = false; bool failed = false; };
+        PendingJobResult PumpPendingJobs(uint32_t max_jobs, uint64_t max_microseconds = 2000, uint64_t hard_job_microseconds = 2000000);
+        uint64_t BeginExecutionBudget(uint64_t max_microseconds);
+        void EndExecutionBudget(uint64_t previous_deadline) { execution_deadline_us_ = previous_deadline; }
         void LowMemoryNotification();
         void SetBatterySaverMode(bool) {}
         void RequestGarbageCollectionForTesting(GarbageCollectionType type);
@@ -404,7 +408,10 @@ namespace v8
 
         void swap_free_queue()
         {
-            jsb_check(!swapping_free_queue_);
+            // Native finalizers may reenter JS and unwind another outermost
+            // HandleScope. New releases already target the other buffer; the
+            // active drain must finish before another buffer may be swapped.
+            if (swapping_free_queue_) return;
             Vector<JSValue>& queue = using_front_free_queue_ ? front_free_queue_ : back_free_queue_;
             if (queue.is_empty()) return;
 
@@ -428,7 +435,7 @@ namespace v8
 
         static void _finalizer(JSRuntime* rt, JSValue val);
         static void _promise_rejection_tracker(JSContext* ctx, JSValueConst promise, JSValueConst reason, PromiseRejectionHandled is_handled, void* user_data);
-        static int _interrupt_callback(JSRuntime* rt, void* data) { return ((Isolate*) data)->interrupted_.is_set(); }
+        static int _interrupt_callback(JSRuntime* rt, void* data);
 
         jsb::impl::ClassID class_id_;
         uint32_t ref_count_;
@@ -456,6 +463,7 @@ namespace v8
         void* context_embedder_data_ = nullptr;
 
         SafeFlag interrupted_ = SafeFlag(false);
+        uint64_t execution_deadline_us_ = 0;
     };
 }
 

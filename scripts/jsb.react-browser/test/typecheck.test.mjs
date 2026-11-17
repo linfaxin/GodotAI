@@ -34,7 +34,7 @@ await copyTree(path.dirname(createRequire(path.join(reactTypesRoot, 'package.jso
 const lib = path.dirname(ts.getDefaultLibFilePath({}));
 for (const name of await readdir(lib)) if (/^lib\..*\.d\.ts$/.test(name)) files['/typescript/lib/' + name] = await readFile(path.join(lib, name), 'utf8');
 
-const valid = 'import {Label} from "@godot-js/react/legacy";\nexport default function App(props:{count:number}) {const message=String(props.count);return <Label text={message}/>;}';
+const valid = 'import {Label} from "@godot-js/react/engine-components";\nexport default function App(props:{count:number}) {const message=String(props.count);return <Label text={message}/>;}';
 function input(source = valid, extra = {}) {
   return { project: { hash: 'resolved-one', files: { ...files, '/src/App.tsx': source }, typeGraph: { edges: [] }, runtimeGraph: { entries: ['/src/App.tsx'] } }, entries: { app: { module: '/src/App.tsx', props: { count: 1 } } }, mode: 'production', profileId: 'core-ui-v1', projectKey: 'build-one', revision: 'rev-one', ...extra };
 }
@@ -56,7 +56,7 @@ test('configured entry props and export are checked and report entry identity', 
   assert(checkProjectTypes(ts, value).diagnostics.some(item => item.code === 'E_ENTRY_EXPORT'));
 });
 test('profile checks follow SDK alias and namespace symbol identity', () => {
-  for (const [imports, expression] of [['import {CharacterBody2D as Body} from "@godot-js/react/legacy";', '<Body/>'], ['import * as SDK from "@godot-js/react/legacy";', '<SDK.CharacterBody2D/>'], ['import {G} from "@godot-js/react/legacy";', '<G.CharacterBody2D/>']]) {
+  for (const [imports, expression] of [['import {CharacterBody2D as Body} from "@godot-js/react/engine-components";', '<Body/>'], ['import * as SDK from "@godot-js/react/engine-components";', '<SDK.CharacterBody2D/>'], ['import {G} from "@godot-js/react/engine-components";', '<G.CharacterBody2D/>']]) {
     const value = input(imports + 'export default function App(){return ' + expression + ';}', { entries: { app: { module: '/src/App.tsx' } } });
     assert(checkProjectTypes(ts, value).diagnostics.some(item => item.code === 'E_PROFILE_UNSUPPORTED'), imports);
     checked({ ...value, profileId: 'behavior-physics-v1' });
@@ -73,7 +73,7 @@ test('strict settings and declaration checking cannot be weakened by project opt
   assert(checkProjectTypes(ts, broken).diagnostics.some(item => item.code === 2304));
 });
 test('virtual multi-file modules and frozen package type edges resolve without I/O', () => {
-  const value = input('import {Label} from "@godot-js/react/legacy"; import {answer} from "./answer.js"; import {format} from "data-lib"; export default function App(){return <Label text={format(answer)}/>;}', { entries: { app: { module: '/src/App.tsx' } } });
+  const value = input('import {Label} from "@godot-js/react/engine-components"; import {answer} from "./answer.js"; import {format} from "data-lib"; export default function App(){return <Label text={format(answer)}/>;}', { entries: { app: { module: '/src/App.tsx' } } });
   value.project.files['/src/answer.ts'] = 'export const answer=42;';
   value.project.files['/node_modules/.store/data-lib@1/node_modules/data-lib/index.d.ts'] = 'export declare function format(value:number):string;';
   value.project.typeGraph.edges.push({ importer: '/src/App.tsx', specifier: 'data-lib', mode: 'import', resolved: '/node_modules/.store/data-lib@1/node_modules/data-lib/index.d.ts' });
@@ -120,15 +120,15 @@ test('release-supplied Godot globals are opt-in and media hosts follow the selec
   const value = input(valid + '\nconsole.log("ready");');
   value.project.files['/node_modules/@types/godot-runtime/index.d.ts'] = 'declare const console:{log(...args:unknown[]):void};';
   checked(value);
-  const media = input('import {TextureRect,asset} from "@godot-js/react/legacy";export default function App(){return <TextureRect texture={asset("image","ImageTexture")}/>;}', {entries:{app:{module:'/src/App.tsx'}},profileId:'ui-media-v1'});
+  const media = input('import {TextureRect,asset} from "@godot-js/react/engine-components";export default function App(){return <TextureRect texture={asset("image","ImageTexture")}/>;}', {entries:{app:{module:'/src/App.tsx'}},profileId:'ui-media-v1'});
   checked(media);
   assert(checkProjectTypes(ts,{...media,profileId:'core-ui-v1'}).diagnostics.some(item=>item.code==='E_PROFILE_UNSUPPORTED'));
 });
 test('unified 2D profile accepts mixed hosts by SDK identity and preserves the old profile boundaries', () => {
   for (const [imports, expression] of [
-    ['import {CharacterBody2D as Body,Sprite2D as Picture,CollisionShape2D,ProgressBar} from "@godot-js/react/legacy";', '<><Body><CollisionShape2D/><Picture/></Body><ProgressBar/></>'],
-    ['import * as SDK from "@godot-js/react/legacy";', '<><SDK.CharacterBody2D><SDK.CollisionShape2D/><SDK.Sprite2D/></SDK.CharacterBody2D><SDK.ProgressBar/></>'],
-    ['import {G} from "@godot-js/react/legacy";', '<><G.CharacterBody2D><G.CollisionShape2D/><G.Sprite2D/></G.CharacterBody2D><G.ProgressBar/></>'],
+    ['import {CharacterBody2D as Body,Sprite2D as Picture,CollisionShape2D,ProgressBar} from "@godot-js/react/engine-components";', '<><Body><CollisionShape2D/><Picture/></Body><ProgressBar/></>'],
+    ['import * as SDK from "@godot-js/react/engine-components";', '<><SDK.CharacterBody2D><SDK.CollisionShape2D/><SDK.Sprite2D/></SDK.CharacterBody2D><SDK.ProgressBar/></>'],
+    ['import {G} from "@godot-js/react/engine-components";', '<><G.CharacterBody2D><G.CollisionShape2D/><G.Sprite2D/></G.CharacterBody2D><G.ProgressBar/></>'],
   ]) {
     const value = input(imports + 'export default function App(){return ' + expression + ';}', { entries: { app: { module: '/src/App.tsx' } }, profileId: 'game-2d-v1' });
     for (const mode of ['production', 'development']) checked({ ...value, mode });
@@ -188,7 +188,7 @@ async function compilerFixture() {
 }
 test('real browser compiler packs textures and collision shapes together and selects physics by capability', async () => {
   const { compiler, png } = await compilerFixture();
-  const source = 'import {Node,CharacterBody2D,CollisionShape2D,Sprite2D,ProgressBar,asset} from "@godot-js/react/legacy"; export default function App(){return <Node><CharacterBody2D engineOwned={["position","velocity"]}><CollisionShape2D shape={asset("shape","CircleShape2D")}/><Sprite2D texture={asset("image","Texture2D")}/></CharacterBody2D><ProgressBar value={42}/></Node>;}';
+  const source = 'import {Node,CharacterBody2D,CollisionShape2D,Sprite2D,ProgressBar,asset} from "@godot-js/react/engine-components"; export default function App(){return <Node><CharacterBody2D engineOwned={["position","velocity"]}><CollisionShape2D shape={asset("shape","CircleShape2D")}/><Sprite2D texture={asset("image","Texture2D")}/></CharacterBody2D><ProgressBar value={42}/></Node>;}';
   const config = { schemaVersion: 1, entry: '/src/App.tsx', dependencies: {}, profileId: 'game-2d-v1', mode: 'production', assets: {
     image: { source: '/assets/image.png', type: 'Texture2D' }, shape: { source: '/assets/shape.tres', type: 'CircleShape2D' } } };
   const project = { '/src/App.tsx': source, '/assets/image.png': png, '/assets/shape.tres': '[gd_resource type="CircleShape2D" format=3]\n[resource]\nradius=12.0\n' };
@@ -206,7 +206,7 @@ test('real browser compiler packs textures and collision shapes together and sel
   }
   assert.notEqual(keys[0], keys[1]);
   for (const profileId of ['core-ui-v1', 'ui-media-v1', 'behavior-physics-v1']) {
-    const artifact = await compiler.build(await createSnapshot({ revision: profileId, config: { ...config, profileId, assets: {} }, files: { '/src/App.tsx': 'import {Label} from "@godot-js/react/legacy";export default function App(){return <Label text="old profile"/>;}' } }));
+    const artifact = await compiler.build(await createSnapshot({ revision: profileId, config: { ...config, profileId, assets: {} }, files: { '/src/App.tsx': 'import {Label} from "@godot-js/react/engine-components";export default function App(){return <Label text="old profile"/>;}' } }));
     assert.match(new TextDecoder().decode(unpackPck(artifact.pack).get('res://project.godot')), new RegExp('2d/physics_engine="' + (profileId === 'behavior-physics-v1' ? 'GodotPhysics2D' : 'Dummy') + '"'));
   }
 });

@@ -8,27 +8,31 @@ import {createRequire} from 'node:module';
 import {serveIsolatedBrowserPair} from './browser-server.mjs';
 import {buildEngineVendor} from '../../apps/playground/scripts/full-engine-release.mjs';
 import {resolveBrowserExecutable} from './browser-launch.mjs';
+import {getEngineProfile,FULL_ENGINE_PROFILE,WORKER_RUNTIME_ABI} from '../release/engine-profiles.mjs';
+import {assertWorkerSdkBuildFrozen} from '../../apps/playground/scripts/worker-sdk-proof.mjs';
 
 const repository=fileURLToPath(new URL('../../',import.meta.url));
 const request=createRequire(path.join(repository,'apps/playground/package.json'));
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
 const utf8=value=>new TextEncoder().encode(value);
-const cleanupComplete=value=>value&&value.errors.length===0&&value.workers===value.terminatedWorkers&&value.audioContexts===value.closedAudioContexts&&(value.messagePorts??0)===(value.closedMessagePorts??0)&&(value.glContexts??0)===(value.lostGlContexts??0)&&(value.mediaTracks??0)===(value.stoppedMediaTracks??0)&&(value.networkResources??0)===(value.closedNetworkResources??0);
+const cleanupComplete=value=>value&&value.status==='complete'&&value.errors.length===0&&value.workers===value.terminatedWorkers&&value.audioContexts===value.closedAudioContexts&&(value.messagePorts??0)===(value.closedMessagePorts??0)&&(value.glContexts??0)===(value.lostGlContexts??0)&&(value.mediaTracks??0)===(value.stoppedMediaTracks??0)&&(value.networkResources??0)===(value.closedNetworkResources??0);
 async function deadline(operation,label,ms=90000){let timer;try{return await Promise.race([operation,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('E_WORKER_DEADLINE: '+label)),ms);})]);}finally{clearTimeout(timer);}}
 const parse=values=>Object.fromEntries(values.reduce((rows,value,index)=>value.startsWith('--')?[...rows,[value.slice(2),values[index+1]?.startsWith('--')?true:values[index+1]??true]]:rows,[]));
 
-export function workerProbeFiles(vendor,{hang=false,stopAudioBeforeQuit=false}={}) {
+export function workerProbeFiles(vendor,{hang=false,stopAudioBeforeQuit=false,runtimeProfile=FULL_ENGINE_PROFILE}={}) {
+ const profile=getEngineProfile(runtimeProfile);
  const main=`const G=require('godot'),J=require('godot-jsb'),React=require('res://.playground/vendor.js').React,R=require('res://.playground/vendor.js').engineReact;
 const host=globalThis.__godotjsRuntimeHost;
 const assert=(value,message)=>{if(!value)throw Error('WORKER_PROBE '+message);};
 exports.default=class WorkerProbe extends G.Node2D{
  _ready(){
   assert(typeof document==='undefined','business code must execute without DOM');assert(host&&host.role==='engine','explicit engine role');
+  this.entry=host.openEntry();
   this.frames=0;this.physicsFrames=0;this.collided=false;this.echo=false;this.inputs=0;this.reactValue=0;
-  this.lifecycle=require('res://worker-react-probe.js').run(G,R,React);
-  const ir=J.internal.get_engine_api();assert(ir.modules.includes('GodotJS')&&ir.modules.includes('gltf')&&ir.modules.includes('godot_physics_3d'),'full module set');
+  J.internal.native_runtime.scheduleCheckpoint(()=>{this.lifecycle=require('res://worker-react-probe.js').run(G,R,React,{entry:this.entry.capability});});
+  const ir=J.internal.get_engine_api(),classes=new Set(ir.classes.map(item=>item.nativeName??item.name));assert(${JSON.stringify(profile.requiredModules)}.every(name=>ir.modules.includes(name)),'profile required module set');assert(${JSON.stringify(profile.forbiddenModules)}.every(name=>!ir.modules.includes(name)),'profile forbidden module set');assert(${JSON.stringify(profile.requiredClasses)}.every(name=>classes.has(name)),'profile required classes');assert(${JSON.stringify(profile.forbiddenClasses)}.every(name=>!classes.has(name)),'profile forbidden classes');
   this.mount=new G.Node();this.add_child(this.mount);
-  this.root=R.createRoot(this.mount,{autoProcess:false,onError:(error,info)=>host.reportDiagnostic({kind:info.kind,message:String(error),stack:info.stack})});
+  this.root=R.createRoot(this.mount,{entry:this.entry.capability,autoProcess:false,onError:(error,info)=>host.reportDiagnostic({kind:info.kind,message:String(error),stack:info.stack})});
   const self=this;
   function App(){const [value,set]=React.useState(0);self.setReact=set;React.useLayoutEffect(()=>{self.reactValue=value;},[value]);return React.createElement(R.EngineNode,{ctor:G.Label,native:{text:'Worker '+value}});}
   this.root.render(React.createElement(App));this.root.flush();
@@ -36,18 +40,20 @@ exports.default=class WorkerProbe extends G.Node2D{
   const floor=new G.StaticBody2D(),shape=new G.CollisionShape2D();shape.shape=new G.RectangleShape2D();shape.shape.size=new G.Vector2(300,20);floor.add_child(shape);floor.position=new G.Vector2(100,120);this.add_child(floor);
   const player=new G.AudioStreamPlayer(),stream=new G.AudioStreamGenerator();stream.mix_rate=22050;stream.buffer_length=0.2;player.stream=stream;player.playback_type=G.AudioServer.PlaybackType.PLAYBACK_TYPE_STREAM;this.audioPlayer=player;this.add_child(player);player.play();this.playback=player.get_stream_playback();this.audioPhase=0;
   this.echoCount=0;this.workerRealms=[];this.spawnEchoWorker();
-  host.bindProjectCommand(raw=>{const command=JSON.parse(raw);if(command.type==='hang'){host.emitProjectEvent({type:'hang-entered'});for(;;){}}else if(command.type==='stop'){this.cleanupProbe();this.stopAt=this.frames+6;}else if(command.type==='stale-packet'){postMessage({__godotjsRuntime:1,sessionId:command.oldSession,workerId:command.workerId,type:'project',role:'engine',data:{type:'stale-must-not-arrive'}});host.emitProjectEvent({type:'stale-probe-complete'});}});
+  host.bindProjectCommand(command=>{assert(command&&typeof command==='object'&&!Array.isArray(command),'project commands are data objects');if(command.type==='hang'){host.emitProjectEvent({type:'hang-entered'});for(;;){}}else if(command.type==='stop'){void this.cleanupProbe().then(()=>{this.stopAt=this.frames+6;}).catch(error=>host.reportDiagnostic({kind:'runtime',message:String(error)}));}else if(command.type==='stale-packet'){postMessage({__godotjsRuntime:${WORKER_RUNTIME_ABI.protocolVersion},sessionId:host.sessionId,workerId:command.workerId,type:'project',role:'engine',data:{type:'current-packet-control',token:command.token}});postMessage({__godotjsRuntime:${WORKER_RUNTIME_ABI.protocolVersion},sessionId:command.oldSession,workerId:command.workerId,type:'project',role:'engine',data:{type:'stale-must-not-arrive',token:command.token}});host.emitProjectEvent({type:'stale-probe-complete',token:command.token,protocolVersion:${WORKER_RUNTIME_ABI.protocolVersion}});}});
   const screen=G.DisplayServer.screen_get_size();assert(screen.x>0&&screen.y>0,'synchronous host display query');
-  host.emitProjectEvent({type:'probe-start',role:host.role,documentAbsent:typeof document==='undefined',workerIsolated:crossOriginIsolated,workerSecure:isSecureContext,sab:typeof SharedArrayBuffer==='function',syncHost:{display:G.DisplayServer.get_name(),screen:{x:screen.x,y:screen.y}},modules:ir.modules.length,has3D:!!G.Node3D,hasXR:!!G.WebXRInterface});
+  this.entry.finishStartup();host.emitProjectEvent({type:'probe-start',runtimeProfile:${JSON.stringify(runtimeProfile)},role:host.role,documentAbsent:typeof document==='undefined',workerIsolated:crossOriginIsolated,workerSecure:isSecureContext,sab:typeof SharedArrayBuffer==='function',syncHost:{display:G.DisplayServer.get_name(),screen:{x:screen.x,y:screen.y}},modules:ir.modules.length,has3D:classes.has('Node3D'),hasXR:classes.has('WebXRInterface')});
  }
  _input(event){if(event instanceof G.InputEventKey&&event.pressed)this.inputs++;}
- _physics_process(delta){this.physicsFrames++;this.body.velocity=new G.Vector2(0,220);this.body.move_and_slide();if(this.body.get_slide_collision_count()>0)this.collided=true;this.root.physics(delta);this.lifecycle.physics();}
+ _physics_process(delta){this.physicsFrames++;this.body.velocity=new G.Vector2(0,220);this.body.move_and_slide();if(this.body.get_slide_collision_count()>0)this.collided=true;this.root.physics(delta);if(this.lifecycle)this.lifecycle.physics();}
  _process(delta){
-  this.frames++;if(this.stopAt&&this.frames>=this.stopAt){this.get_tree().quit(0);return;}if(this.restartWorkerAt&&this.frames>=this.restartWorkerAt){this.restartWorkerAt=0;this.spawnEchoWorker();}this.root.process(delta);this.lifecycle.process();if(this.frames===4)this.setReact(7);
+  this.frames++;if(this.stopAt&&this.frames>=this.stopAt){this.get_tree().quit(0);return;}if(this.restartWorkerAt&&this.frames>=this.restartWorkerAt){this.restartWorkerAt=0;this.spawnEchoWorker();}this.root.process(delta);if(this.lifecycle)this.lifecycle.process();if(this.frames>=4&&this.setReact&&!this.reactRequested){this.reactRequested=true;this.setReact(7);}
+  if(this.cleaned&&this.frames%30===0)host.emitProjectEvent({type:'probe-cleanup-progress',main:this.root.getCloseProgress(),fixture:this.lifecycle?.results().cleanup});
   if(this.echo&&!this.closeProbe)this.closeProbe=require('res://worker-close-probe.js').run(G);if(this.closeProbe)this.closeProbe.process();
   if(this.playback){const count=Math.min(this.playback.get_frames_available(),1024);for(let i=0;i<count;i++){const value=Math.sin(this.audioPhase++*Math.PI*2*440/22050)*0.2;this.playback.push_frame(new G.Vector2(value,value));}}
   if(this.closeProbe&&this.closeProbe.results().done&&!this.closeProbe.results().passed)throw Error(JSON.stringify(this.closeProbe.results()));
-  if(this.frames>20&&this.collided&&this.echo&&this.closeProbe?.results().passed&&this.reactValue===7&&this.inputs>0&&!this.sent){assert(this.lifecycle.results().passed&&this.lifecycle.results().extendedPassed===true,JSON.stringify(this.lifecycle.results()));this.sent=true;host.emitProjectEvent({type:'probe-ready',frames:this.frames,physicsFrames:this.physicsFrames,collided:this.collided,echo:this.echo,workerReuse:{count:this.echoCount,realms:this.workerRealms},workerClose:this.closeProbe.results(),reactValue:this.reactValue,inputs:this.inputs,reactLifecycle:this.lifecycle.results()});${hang?'for(;;){}':''}}
+  if(this.lifecycle){const status=this.lifecycle.results();assert(status.errors.length===0&&status.extendedErrors.length===0,JSON.stringify(status));if(this.frames>20&&this.collided&&this.echo&&this.closeProbe?.results().passed&&this.reactValue===7&&this.inputs>0&&!this.sent&&status.passed&&status.extendedPassed){this.sent=true;host.emitProjectEvent({type:'probe-ready',frames:this.frames,physicsFrames:this.physicsFrames,collided:this.collided,echo:this.echo,workerReuse:{count:this.echoCount,realms:this.workerRealms},workerClose:this.closeProbe.results(),reactValue:this.reactValue,inputs:this.inputs,reactLifecycle:status});${hang?'for(;;){}':''}}}
+  if(!this.sent&&this.frames%60===0)host.emitProjectEvent({type:'probe-pending',frames:this.frames,collided:this.collided,echo:this.echo,...(this.closeProbe?{workerClose:this.closeProbe.results()}:{}),reactValue:this.reactValue,inputs:this.inputs,...(this.lifecycle?{reactLifecycle:this.lifecycle.results()}:{})});
  }
  spawnEchoWorker(){
   const {JSWorker}=require('godot.worker');this.worker=new JSWorker('src/echo.worker');
@@ -59,8 +65,8 @@ exports.default=class WorkerProbe extends G.Node2D{
    else{assert(this.workerRealms[0].tag===data.realmTag&&data.incarnation>this.workerRealms[0].incarnation,'pooled browser Worker reinitialized after native join');this.echo=true;}
   };
  }
- cleanupProbe(){if(this.cleaned)return;this.restartWorkerAt=0;this.cleaned=true;${stopAudioBeforeQuit?'if(this.audioPlayer){this.audioPlayer.stop();this.playback=null;}':''}if(this.worker){this.worker.terminate();this.worker=null;}if(this.closeProbe)this.closeProbe.dispose();if(this.root)this.root.shutdown();if(this.lifecycle)this.lifecycle.dispose();}
- _exit_tree(){this.cleanupProbe();}
+ cleanupProbe(){if(this.cleanupPromise)return this.cleanupPromise;this.restartWorkerAt=0;this.cleaned=true;${stopAudioBeforeQuit?'if(this.audioPlayer){this.audioPlayer.stop();this.playback=null;}':''}if(this.worker){this.worker.terminate();this.worker=null;}if(this.closeProbe)this.closeProbe.dispose();this.cleanupPromise=Promise.all([this.root?this.root.close():Promise.resolve({status:'complete'}),this.lifecycle?this.lifecycle.dispose():Promise.resolve()]).then(results=>{assert(results[0].status==='complete','main root native cleanup');host.emitProjectEvent({type:'probe-cleanup-complete'});});return this.cleanupPromise;}
+ _exit_tree(){if(this.entry)this.entry.close();}
 };`;
  const echo=`const G=require('godot'),{JSWorkerParent}=require('godot.worker');if(!JSWorkerParent)throw Error('missing worker parent');globalThis.__workerProbeRealmTag??='realm-'+Math.random();globalThis.__workerProbeIncarnation=(globalThis.__workerProbeIncarnation??0)+1;JSWorkerParent.onmessage=data=>{if(!(data.vector instanceof G.Vector2))throw Error('worker Variant decode');JSWorkerParent.postMessage({kind:data.kind,vector:data.vector,realmTag:globalThis.__workerProbeRealmTag,incarnation:globalThis.__workerProbeIncarnation});JSWorkerParent.close();};`;
  const closeProbe=request(path.join(repository,'scripts/test/fixtures/worker-close-probe.cjs'));
@@ -92,12 +98,15 @@ async function certificate(directory) {
  return {key:await readFile(key),cert:await readFile(cert),spki:createHash('sha256').update(der.stdout).digest('base64')};
 }
 
-export async function runWorkerIntegration({engineReport,out,loops=3,browserName='chromium',verbose=process.env.GODOTJS_WORKER_VERBOSE==='1',stopAudioBeforeQuit=process.env.GODOTJS_WORKER_PRESTOP_AUDIO==='1'}={}) {
+export async function runWorkerIntegration({engineReport,sdkProof,out,loops=3,browserName='chromium',verbose=process.env.GODOTJS_WORKER_VERBOSE==='1',stopAudioBeforeQuit=process.env.GODOTJS_WORKER_PRESTOP_AUDIO==='1'}={}) {
  const harnessBytes=await readFile(fileURLToPath(import.meta.url));
  if(!['chromium','firefox','webkit'].includes(browserName))throw Error('E_WORKER_BROWSER: Expected chromium, firefox or webkit');
  if(!engineReport)throw Error('Pass --engine-report with an actual source-bound proxy-pthread build');
  const report=JSON.parse(await readFile(engineReport,'utf8'));
  if(report.status!=='built'||report.execution?.executionModel!=='proxy-pthread')throw Error('E_WORKER_ENGINE_REPORT');
+ const runtimeProfile=getEngineProfile(report.runtimeProfile).id;
+ const sdkProofBytes=sdkProof?await readFile(sdkProof):undefined,sdk=sdkProofBytes?JSON.parse(sdkProofBytes):undefined;
+ if(sdk)await assertWorkerSdkBuildFrozen(repository,sdk);
  const directory=path.resolve(out??'/workspace/output/engine-worker-implementation/runtime');await mkdir(directory,{recursive:true});
  await mkdir(path.join(directory,'producer'),{recursive:true});await writeFile(path.join(directory,'producer/harness.mjs'),harnessBytes);
  const site=path.join(directory,'site');await mkdir(path.join(site,'engine'),{recursive:true});
@@ -109,10 +118,13 @@ export async function runWorkerIntegration({engineReport,out,loops=3,browserName
  await build({entryPoints:[path.join(repository,'packages/engine/src/browser/engine-session.ts')],bundle:true,format:'iife',globalName:'EngineHost',platform:'browser',target:'es2022',outfile:path.join(site,'session.js')});
  const {packProject}=await import('@godot-js/project-tools/pck');
  const vendor=await buildEngineVendor();
- const files=workerProbeFiles(vendor,{stopAudioBeforeQuit}),pack=packProject(files).pack;
+ const files=workerProbeFiles(vendor,{stopAudioBeforeQuit,runtimeProfile}),pack=packProject(files).pack;
  await writeFile(path.join(site,'project.pck'),pack);
  await writeFile(path.join(site,'preview.html'),`<!doctype html><link rel="icon" href="data:,"><button id="unlock" style="position:fixed;top:0;left:0;z-index:10000">Enable audio</button><canvas id="canvas" width="320" height="240" tabindex="0"></canvas><script src="session.js"></script><script src="engine/godot.js"></script><script>
  window.probe={documentId:crypto.randomUUID(),events:[],roles:[],progress:[],errors:[],exits:[],sessions:[],ready:false};
+ // Harness deadlines belong to the test owner. Capture the host scheduler
+ // before BrowserEngineSession gates ordinary project timers during shutdown.
+ const probeSetTimeout=globalThis.setTimeout.bind(globalThis);
  // Preserve real native execution but hold final packets long enough for the
  // receiver to attempt reaping a completed sender before delivery.
  const postWorkerMessage=Worker.prototype.postMessage;
@@ -128,15 +140,15 @@ export async function runWorkerIntegration({engineReport,out,loops=3,browserName
   if(probe.sessions.length||probe.session)throw Error('E_PROBE_ONE_SESSION_PER_DOCUMENT');
   const id=crypto.randomUUID(),identity={runId:id,revision:1,generation:id,buildKey:'probe'};
   probe.ready=false;probe.current=id;
-  const session=new EngineHost.BrowserEngineSession({identity,executionModel:'proxy-pthread',requiresCrossOriginIsolation:true,onProject:data=>{probe.events.push({runId:id,...data});if(data.type==='probe-ready')probe.ready=true;},onWorkerRole:data=>probe.roles.push({runId:id,...data}),onProgress:data=>probe.progress.push({runId:id,...data}),onDiagnostic:data=>{probe.errors.push(JSON.stringify(data));console.error(JSON.stringify(data));},onLog:(level,text)=>{if(level==='error')probe.errors.push(text);}});
+  const session=new EngineHost.BrowserEngineSession({identity,executionModel:'proxy-pthread',requiresCrossOriginIsolation:true,hostResourceAbi:${JSON.stringify(report.execution.hostResourceAbi)},onProject:data=>{probe.events.push({runId:id,...data});if(data.type==='probe-ready')probe.ready=true;},onWorkerRole:data=>probe.roles.push({runId:id,...data}),onProgress:data=>probe.progress.push({runId:id,...data}),onDiagnostic:data=>{probe.errors.push(JSON.stringify(data));console.error(JSON.stringify(data));},onLog:(level,text)=>{if(level==='error')probe.errors.push(text);}});
   probe.session=session;
   const previous=document.querySelector('canvas'),canvas=document.createElement('canvas');canvas.id='canvas';canvas.width=320;canvas.height=240;canvas.tabIndex=0;if(previous)previous.replaceWith(canvas);else document.body.append(canvas);
   const engine=new Engine({canvas,executable:'engine/godot',emscriptenPoolSize:3,persistentPaths:[],persistentDrops:false,focusCanvas:false,onPrintError:text=>probe.errors.push(String(text)),onExit:code=>{probe.exits.push({runId:id,code});}});probe.engine=engine;
-  await engine.preloadFile(new Uint8Array(await(await fetch('project.pck')).arrayBuffer()),'/project.pck');await engine.init('engine/godot');session.attachEngine(engine);await engine.start({args:[${verbose?"'--verbose',":''}'--main-pack','/project.pck','--rendering-method','gl_compatibility']});
+  session.installResourceOwner(engine);await engine.preloadFile(new Uint8Array(await(await fetch('project.pck')).arrayBuffer()),'/project.pck');await engine.init('engine/godot');session.attachEngine(engine);await engine.start({args:[${verbose?"'--verbose',":''}'--main-pack','/project.pck','--rendering-method','gl_compatibility']});
   probe.sessions.push(id);return id;
  };
  document.querySelector('#unlock').onclick=()=>{const runtime=probe.engine?.rtenv;if(runtime?.resumeAudio)runtime.resumeAudio();document.querySelector('canvas').focus();};
- window.stopProbe=async function(mode='clean'){if(mode==='clean'){probe.session.command({type:'stop'});for(let i=0;i<200&&!probe.exits.some(item=>item.runId===probe.current);i++)await new Promise(resolve=>setTimeout(resolve,20));if(!probe.exits.some(item=>item.runId===probe.current))throw Error('E_PROBE_COOPERATIVE_STOP_TIMEOUT');}const result=await probe.session.dispose(mode);probe.cleanup=result;return result;};
+ window.stopProbe=async function(mode='clean'){if(mode==='clean'){probe.session.command({type:'stop'});for(let i=0;i<200&&!probe.exits.some(item=>item.runId===probe.current);i++)await new Promise(resolve=>probeSetTimeout(resolve,20));if(!probe.exits.some(item=>item.runId===probe.current))throw Error('E_PROBE_COOPERATIVE_STOP_TIMEOUT '+JSON.stringify({events:probe.events.slice(-10),errors:probe.errors}));}const result=await probe.session.dispose(mode);probe.cleanup=result;return result;};
  </script>`);
  const tls=await certificate(directory),pair=await serveIsolatedBrowserPair({root:site,tls});
  await writeFile(path.join(site,'index.html'),`<!doctype html><link rel="icon" href="data:,"><title>Full Worker lifecycle integration</title><main id="sessions"></main>`);
@@ -148,7 +160,7 @@ export async function runWorkerIntegration({engineReport,out,loops=3,browserName
  try{selectedBrowser=resolveBrowserExecutable(playwright[browserName],browserName);browser=await playwright[browserName].launch({headless,executablePath:selectedBrowser.executablePath,...(browserName==='chromium'?{args:launchArgs}:{}),...(browserName==='firefox'?{firefoxUserPrefs}:{})});}
  catch(error){await writeFile(path.join(directory,'worker-integration.json'),JSON.stringify({schemaVersion:1,kind:'godotjs-worker-integration',status:'failed',phase:'browser-launch',browser:{name:browserName,playwrightVersion:request('playwright/package.json').version,...selectedBrowser},launchEnvironment,engineReport:path.resolve(engineReport),error:String(error?.stack??error)},null,2)+'\n');await pair.close();throw error;}
  const producerInputs={harness:hash(harnessBytes),host:hash(await readFile(path.join(site,'session.js'))),vendor:hash(vendor),pack:hash(pack),projectFiles:Object.fromEntries([...files].map(([name,bytes])=>[name,hash(bytes)])),editorHtml:hash(await readFile(path.join(site,'index.html'))),previewHtml:hash(await readFile(path.join(site,'preview.html')))};
- const result={schemaVersion:1,kind:'godotjs-worker-integration',status:'running',contextLifecycle:'fresh-document-per-session',verbose:!!verbose,stopAudioBeforeQuit:!!stopAudioBeforeQuit,validationBatchId:randomUUID(),sourceSnapshotHash:report.source.snapshotHash,producerHash:hash(JSON.stringify(producerInputs)),producerInputs,engineReport:path.resolve(engineReport),engineReportHash:hash(await readFile(engineReport)),templateSha256:report.template.sha256,os:process.platform,browser:{name:browserName,version:browser.version(),playwrightVersion:request('playwright/package.json').version,...selectedBrowser},launchEnvironment,origins:{editor:pair.editor.origin,preview:pair.preview.origin},cases:[],limitations:[],launchArgs:browserName==='chromium'?launchArgs:[],startedAt:new Date().toISOString()};
+ const result={schemaVersion:1,kind:'godotjs-worker-integration',status:'running',runtimeProfile,protocolVersion:WORKER_RUNTIME_ABI.protocolVersion,...(sdk?{sdk:{proofSha256:hash(sdkProofBytes),sourceSnapshotHash:sdk.sourceSnapshotHash,outputSnapshotHash:sdk.outputSnapshotHash}}:{}),contextLifecycle:'fresh-document-per-session',verbose:!!verbose,stopAudioBeforeQuit:!!stopAudioBeforeQuit,validationBatchId:randomUUID(),sourceSnapshotHash:report.source.snapshotHash,producerHash:hash(JSON.stringify(producerInputs)),producerInputs,engineReport:path.resolve(engineReport),engineReportHash:hash(await readFile(engineReport)),templateSha256:report.template.sha256,os:process.platform,browser:{name:browserName,version:browser.version(),playwrightVersion:request('playwright/package.json').version,...selectedBrowser},launchEnvironment,origins:{editor:pair.editor.origin,preview:pair.preview.origin},cases:[],limitations:[],launchArgs:browserName==='chromium'?launchArgs:[],startedAt:new Date().toISOString()};
  try {
   const context=await browser.newContext(browserName==='chromium'?{}:{ignoreHTTPSErrors:true});
   await context.addInitScript(()=>{
@@ -173,8 +185,9 @@ export async function runWorkerIntegration({engineReport,out,loops=3,browserName
   const page=await context.newPage();const browserErrors=[];result.browserErrors=browserErrors;
   if(browserName==='firefox'&&!headless)await page.bringToFront();
   let rejectBrowser;const browserFailure=new Promise((_,reject)=>{rejectBrowser=reject;});void browserFailure.catch(()=>{});
-  const step=(operation,label)=>deadline(Promise.race([operation,browserFailure]),label);
+  const step=async(operation,label)=>{try{return await deadline(Promise.race([operation,browserFailure]),label);}catch(error){result.failureFacts=await deadline(Promise.all(page.frames().map(frame=>frame.evaluate(()=>globalThis.probe?{url:location.href,events:probe.events.slice(-10),errors:probe.errors,exits:probe.exits,progress:probe.progress.slice(-4)}:undefined).catch(()=>undefined))),'capture failed session',3000).catch(()=>({unavailable:true}));throw error;}};
   page.on('pageerror',error=>{const detail=error.stack??String(error);browserErrors.push(detail);rejectBrowser(Error(detail));});
+  page.on('crash',()=>rejectBrowser(Error('E_WORKER_PAGE_CRASH')));
   page.on('console',message=>{process.stderr.write('[browser:'+message.type()+'] '+message.text()+'\n');if(message.type()==='error'){browserErrors.push(message.text());rejectBrowser(Error(message.text()));}});
   const browserWorkers={created:0,closed:0};
   page.on('worker',worker=>{browserWorkers.created++;worker.once('close',()=>browserWorkers.closed++);process.stderr.write('[worker] '+worker.url()+'\n');});
@@ -224,9 +237,9 @@ export async function runWorkerIntegration({engineReport,out,loops=3,browserName
    const staleSessionId=previousSessionId??'obsolete-session';
    const staleSessionRejected=await frame.evaluate(async oldSession=>{
     const role=probe.roles.find(item=>item.runId===probe.current&&item.role==='engine');
-    probe.session.command({type:'stale-packet',oldSession,workerId:role.workerId});
-    for(let i=0;i<200&&!probe.events.some(item=>item.runId===probe.current&&item.type==='stale-probe-complete');i++)await new Promise(resolve=>setTimeout(resolve,10));
-    return probe.events.some(item=>item.runId===probe.current&&item.type==='stale-probe-complete')&&!probe.events.some(item=>item.type==='stale-must-not-arrive');
+    const token=crypto.randomUUID();probe.session.command({type:'stale-packet',oldSession,workerId:role.workerId,token});
+    for(let i=0;i<200&&!probe.events.some(item=>item.runId===probe.current&&item.type==='stale-probe-complete'&&item.token===token);i++)await new Promise(resolve=>setTimeout(resolve,10));
+    return probe.events.some(item=>item.runId===probe.current&&item.type==='stale-probe-complete'&&item.token===token)&&probe.events.some(item=>item.type==='current-packet-control'&&item.token===token)&&!probe.events.some(item=>item.type==='stale-must-not-arrive'&&item.token===token);
    },staleSessionId);
    if(!staleSessionRejected)throw Error('E_WORKER_STALE_MESSAGE');
    let cleanup,termination;
@@ -238,7 +251,7 @@ export async function runWorkerIntegration({engineReport,out,loops=3,browserName
     if(!termination.engineHung)throw Error('E_WORKER_HANG_PROBE');
     cleanup=await step(frame.evaluate(()=>stopProbe('forced')),'forced session cleanup');
    }
-   else cleanup=await deadline(frame.evaluate(()=>stopProbe('clean')),'stop session '+index);
+   else cleanup=await step(frame.evaluate(()=>stopProbe('clean')),'stop session '+index);
    if(!cleanupComplete(cleanup))throw Error('E_WORKER_CLEANUP '+JSON.stringify(cleanup));
    const audio=await frame.evaluate(()=>globalThis.__workerAudioEvidence.map(item=>({state:item.context.state,peak:item.peak,checks:item.checks})));
    if(audio.some(item=>item.state!=='closed'))throw Error('E_WORKER_AUDIO_CLEANUP '+JSON.stringify(audio));
@@ -256,9 +269,9 @@ export async function runWorkerIntegration({engineReport,out,loops=3,browserName
   if(!result.afterForcedRestartWorkerClose.results?.passed||result.afterForcedRestartWorkerClose.delayedClosePackets!==6)throw Error('E_WORKER_RESTART_CLOSE_ASSERT');
   const recoveredStaleRejected=await frame.evaluate(async oldSession=>{
    const role=probe.roles.find(item=>item.runId===probe.current&&item.role==='engine');
-   probe.session.command({type:'stale-packet',oldSession,workerId:role.workerId});
-   for(let i=0;i<200&&!probe.events.some(item=>item.runId===probe.current&&item.type==='stale-probe-complete');i++)await new Promise(resolve=>setTimeout(resolve,10));
-   return probe.events.some(item=>item.runId===probe.current&&item.type==='stale-probe-complete')&&!probe.events.some(item=>item.type==='stale-must-not-arrive');
+   const token=crypto.randomUUID();probe.session.command({type:'stale-packet',oldSession,workerId:role.workerId,token});
+   for(let i=0;i<200&&!probe.events.some(item=>item.runId===probe.current&&item.type==='stale-probe-complete'&&item.token===token);i++)await new Promise(resolve=>setTimeout(resolve,10));
+   return probe.events.some(item=>item.runId===probe.current&&item.type==='stale-probe-complete'&&item.token===token)&&probe.events.some(item=>item.type==='current-packet-control'&&item.token===token)&&!probe.events.some(item=>item.type==='stale-must-not-arrive'&&item.token===token);
   },previousSessionId);
   if(!recoveredStaleRejected)throw Error('E_WORKER_RESTART_STALE_MESSAGE');
   result.afterForcedRestart=await step(frame.evaluate(()=>stopProbe('clean')),'restart cooperative cleanup');
@@ -269,6 +282,7 @@ export async function runWorkerIntegration({engineReport,out,loops=3,browserName
   result.documentCount=documentIds.size;result.finalErrors=allErrors;
   if(result.documentCount!==Number(loops)+1)throw Error('E_WORKER_DOCUMENT_COUNT');
   if(!cleanupComplete(result.afterForcedRestart)||result.finalErrors.length)throw Error('E_WORKER_RESTART_CLEANUP '+JSON.stringify({cleanup:result.afterForcedRestart,errors:result.finalErrors}));
+  if(sdk)await assertWorkerSdkBuildFrozen(repository,sdk);
   result.status='passed';
   result.limitations.push('This fixture proves its stated systems; it does not certify all resource importers, IME composition, XR hardware, Safari, or GPU reclamation.');
  }catch(error){result.status='failed';result.error=String(error?.stack??error);throw error;}
@@ -278,5 +292,5 @@ export async function runWorkerIntegration({engineReport,out,loops=3,browserName
 
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
  const values=parse(process.argv.slice(2));
- runWorkerIntegration({engineReport:values['engine-report'],out:values.out,loops:values.loops??3,browserName:values.browser??'chromium',...(values.verbose?{verbose:true}:{}),...(values['active-audio-at-quit']?{stopAudioBeforeQuit:false}:{}),...(values['stop-audio-before-quit']?{stopAudioBeforeQuit:true}:{})}).then(result=>console.log(JSON.stringify({status:result.status,cases:result.cases.length}))).catch(error=>{console.error(error);process.exitCode=1;});
+ runWorkerIntegration({engineReport:values['engine-report'],sdkProof:values['sdk-proof'],out:values.out,loops:values.loops??3,browserName:values.browser??'chromium',...(values.verbose?{verbose:true}:{}),...(values['active-audio-at-quit']?{stopAudioBeforeQuit:false}:{}),...(values['stop-audio-before-quit']?{stopAudioBeforeQuit:true}:{})}).then(result=>console.log(JSON.stringify({status:result.status,cases:result.cases.length}))).catch(error=>{console.error(error);process.exitCode=1;});
 }

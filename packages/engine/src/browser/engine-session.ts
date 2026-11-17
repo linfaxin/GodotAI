@@ -1,3 +1,4 @@
+import {PTHREAD_CLASSIC_BOOTSTRAP_SOURCE,PTHREAD_MODULE_BOOTSTRAP_SOURCE} from './pthread/runtime-bootstrap-source.js';
 import {isProjectData, previewDiagnostic, type PreviewDiagnostic, type RunIdentity} from './protocol.js';
 import {createRuntimeBinding, type RuntimeBinding, type RuntimeSummary, type RuntimeDiagnostic as HostDiagnostic} from '../runtime-host.js';
 import {isRuntimeSummary, factsFromRuntimeSummaries, type SessionFacts} from '../session-facts.js';
@@ -25,6 +26,7 @@ export interface BrowserEngineSessionOptions {
   identity: RunIdentity;
   executionModel?: EngineExecutionModel;
   requiresCrossOriginIsolation?: boolean;
+  hostResourceAbi?:1;
   scope?: typeof globalThis;
   onProgress?: (progress: {workerId: number; sequence: number; role: 'engine'}) => void;
   onDiagnostic?: (diagnostic: RuntimeDiagnostic) => void;
@@ -47,90 +49,11 @@ interface WorkerRecord {
   commands: Map<number,number>; commandBytes:number;
 }
 
-/** Serialized into a fresh realm. Every dependency is an explicit argument. */
-export function installWorkerRuntimeHost(sessionId: string, workerId: number, factory:typeof createRuntimeBinding, lifecycleFactory?:typeof installNativeLifecycleGate): void {
-  const scope = globalThis as unknown as {
-    __godotjsRuntimeHost?: RuntimeBinding;
-    __godotjsInstallLifecycle?: (module: NativeLifecycleModule) => void;
-    postMessage(value: unknown): void;
-    addEventListener(type: string, listener: (event: MessageEvent) => void, options?: boolean): void;
-  };
-  let role:RuntimeRole='host',sequence=0,lastProgress=-Infinity,projectSerial=0,projectBytes=0,lastCommand=0;
-  const projects=new Map<number,number>();
-  const byteLength=(text:string):number=>{let size=0;for(const character of text){const code=character.codePointAt(0)!;size+=code<128?1:code<2048?2:code<65536?3:4;}return size;};
-  const send=(type:RuntimePacket['type'],data?:unknown,extra:object={}):boolean=>{
-    try{scope.postMessage({__godotjsRuntime:2,sessionId,workerId,type,role,...extra,...(data===undefined?{}:{data})});return true;}catch{return false;}
-  };
-  const host=factory({sessionId,schedule:callback=>{void Promise.resolve().then(callback);},
-    onRole(value){role=value;send('role');},
-    onProgress(){if(role!=='engine')return;const time=Date.now();if(time-lastProgress<250)return;lastProgress=time;send('progress',undefined,{sequence:++sequence});},
-    onDiagnostic(value){return send('diagnostic',value);},
-    onLog(level,text){return send('log',{level,text});},
-    onProject(value,serialized){
-      const bytes=byteLength(serialized);
-      if(projects.size>=64||projectBytes+bytes>1048576)return false;
-      const ticket=++projectSerial;projects.set(ticket,bytes);projectBytes+=bytes;
-      if(send('project',value,{sequence:ticket}))return true;
-      projects.delete(ticket);projectBytes-=bytes;return false;
-    },
-    onSummary(value){send('summary',value);},
-  });
-  const begin=host.beginNativeEpoch.bind(host);
-  host.beginNativeEpoch=epoch=>{begin(epoch);send('epoch',{epoch});};
-  if(scope.__godotjsRuntimeHost)throw new Error('E_RUNTIME_HOST_IN_USE');
-  scope.__godotjsRuntimeHost=host;
-  const installedModules = new WeakSet<object>();
-  scope.__godotjsInstallLifecycle = module => {
-    if (installedModules.has(module)) return;
-    if (!lifecycleFactory) throw Error('E_NATIVE_LIFECYCLE_HELPER');
-    lifecycleFactory(module, host, {onBegin(){if(role==='engine')send('closing');},onError(error){
-      const message=error instanceof Error?error.message:'Native cleanup tick failed';
-      host.reportDiagnostic({kind:'runtime',message});
-    }});
-    installedModules.add(module);
-  };
-  const output=globalThis.console;
-  const format=(value:unknown):string=>{
-    if(typeof value==='string')return value.slice(0,4096);
-    if(value===null||['undefined','number','boolean','bigint'].includes(typeof value))return String(value);
-    if(typeof value==='function')return '[function]';if(typeof value==='symbol')return '[symbol]';
-    try{const descriptor=Object.getOwnPropertyDescriptor(value,'message');if(descriptor&&'value'in descriptor&&typeof descriptor.value==='string')return descriptor.value.slice(0,4096);}catch{}
-    return '[object]';
-  };
-  if(output)for(const name of ['log','info','debug','warn','error'] as const){
-    const original=output[name];if(typeof original!=='function')continue;
-    const wrapped=(...args:unknown[])=>{Reflect.apply(original,output,args);host.reportLog(name==='warn'?'warn':name==='error'?'error':'log',args.slice(0,20).map(format).join(' ').slice(0,4096));};
-    Object.defineProperty(wrapped,'__godotjsConsoleForwarded',{value:true});output[name]=wrapped;
-  }
-  scope.addEventListener('message',event=>{
-    const data=event.data;
-    if(!data||data.__godotjsRuntime!==2||data.sessionId!==sessionId||!['project-command','project-receipt','drain'].includes(data.type))return;
-    event.stopImmediatePropagation();
-    if(data.type==='drain'){host.beginClose('session-stop');return;}
-    if(data.type==='project-receipt'){
-      const bytes=projects.get(data.sequence);if(bytes!==undefined){projects.delete(data.sequence);projectBytes-=bytes;}return;
-    }
-    if(role!=='engine'||!Number.isSafeInteger(data.sequence)||data.sequence<=lastCommand)return;
-    lastCommand=data.sequence;
-    host.receiveProjectCommand(data.data,()=>{send('command-receipt',undefined,{sequence:data.sequence});});
-  },true);
-  const ownText=(value:unknown,key:string):string|undefined=>{if(!value||typeof value!=='object')return;try{const descriptor=Object.getOwnPropertyDescriptor(value,key);return descriptor&&'value'in descriptor&&typeof descriptor.value==='string'?descriptor.value:undefined;}catch{return;}};
-  const browserFailure=(diagnostic:HostDiagnostic)=>{
-    // A native epoch can be logically sealed before its physical teardown.
-    // Browser-global failures still belong to this live Worker/session control
-    // channel; rejecting scoped project work must not hide those failures.
-    const value:HostDiagnostic={kind:diagnostic.kind,message:diagnostic.message.slice(0,4096),
-      ...(typeof diagnostic.stack==='string'?{stack:diagnostic.stack.slice(0,32768)}:{}),
-      ...(typeof diagnostic.componentStack==='string'?{componentStack:diagnostic.componentStack.slice(0,8192)}:{})};
-    if(!host.reportDiagnostic(value))send('diagnostic',value);
-  };
-  scope.addEventListener('error',event=>{const error=event as unknown as ErrorEvent;void Promise.resolve().then(()=>{if(!event.defaultPrevented)browserFailure({kind:'runtime',message:ownText(error.error,'message')??error.message??'Worker execution failed',stack:ownText(error.error,'stack')});});});
-  scope.addEventListener('unhandledrejection',event=>{const rejection=event as unknown as PromiseRejectionEvent;void Promise.resolve().then(()=>{if(!event.defaultPrevented)browserFailure({kind:'runtime',message:ownText(rejection.reason,'message')??(typeof rejection.reason==='string'?rejection.reason:'Unhandled Worker rejection'),stack:ownText(rejection.reason,'stack')});});});
-}
-
+export {installWorkerRuntimeHost} from './pthread/runtime-host-bootstrap.js';
+/** Prebuilt closed code plus data-only configuration. No function serialization. */
 export function runtimeWorkerBootstrap(url:string,sessionId:string,workerId:number,module=false):string {
-  const install=`(${installWorkerRuntimeHost.toString()})(${JSON.stringify(sessionId)},${workerId},(${createRuntimeBinding.toString()}),(${installNativeLifecycleGate.toString()}));\n`;
-  return install+(module?`await import(${JSON.stringify(url)});\n`:`importScripts(${JSON.stringify(url)});\n`);
+  const configuration=JSON.stringify({url,sessionId,workerId});
+  return `globalThis.__godotjsRuntimeBootstrapConfig = ${configuration};\n`+(module?PTHREAD_MODULE_BOOTSTRAP_SOURCE:PTHREAD_CLASSIC_BOOTSTRAP_SOURCE);
 }
 
 const owners = new WeakMap<object, BrowserEngineSession>();
@@ -150,6 +73,7 @@ export class BrowserEngineSession {
   private readonly ports = new Set<MessagePort>();
   private readonly gl = new Set<WebGLRenderingContext|WebGL2RenderingContext>();
   private readonly timers = new Map<unknown, 'timeout' | 'interval'>();
+  private readonly cleanupTimers=new Set<ReturnType<typeof globalThis.setTimeout>>();
   private readonly listeners: Array<{target:EventTarget;type:string;listener:EventListenerOrEventListenerObject;capture:boolean}> = [];
   private readonly resources: Array<() => void> = [];
   private module?: {PThread?: {terminateAllThreads?:()=>void}; [key:string]:unknown};
@@ -178,7 +102,7 @@ export class BrowserEngineSession {
     if (owners.has(this.scope)) throw new Error('E_SESSION_CONTEXT_IN_USE');
     if (options.requiresCrossOriginIsolation && (!this.scope.crossOriginIsolated || typeof this.scope.SharedArrayBuffer !== 'function')) throw new Error('E_SESSION_REQUIRES_ISOLATION');
     owners.set(this.scope, this);
-    try {this.installRuntimeHost(); this.installWorkers(); this.installAudio(); this.installChannelsAndGraphics(); this.installMediaAndNetwork(); this.installTimers(); this.installListeners();}
+    try {this.installRuntimeHost(); this.installWorkers(); this.installAudio(); if(options.hostResourceAbi!==1){this.installChannelsAndGraphics(); this.installMediaAndNetwork();} this.installTimers(); this.installListeners();}
     catch (error) {for (const undo of this.restore.reverse()) undo(); owners.delete(this.scope); throw error;}
   }
 
@@ -211,6 +135,17 @@ export class BrowserEngineSession {
     };
     this.localBinding=local;
     this.replace(this.scope,'__godotjsRuntimeHost',local);
+    if(this.executionModel==='window'){
+      const installed=new WeakSet<object>();
+      this.replace(this.scope,'__godotjsInstallLifecycle',(module:NativeLifecycleModule)=>{
+        if(installed.has(module))return;
+        const gate=installNativeLifecycleGate(module,local,{
+          onBegin:()=>{this.beginDrain();this.options.onClosing?.();},
+          onError:value=>{const diagnostic=previewDiagnostic(value);this.report({kind:'runtime',message:diagnostic.message,...(diagnostic.stack?{stack:diagnostic.stack}:{})});},
+        });
+        installed.add(module);this.resources.push(()=>gate.dispose());
+      });
+    }
   }
 
   private installWorkers(): void {
@@ -338,7 +273,7 @@ export class BrowserEngineSession {
   }
 
   private installAudio(): void {
-    for (const key of ['AudioContext','webkitAudioContext']) {
+    for (const key of this.options.hostResourceAbi===1?[]:['AudioContext','webkitAudioContext']) {
       const Original=(this.scope as unknown as Record<string,unknown>)[key];
       if (typeof Original!=='function') continue;
       const owner=this;
@@ -363,14 +298,54 @@ export class BrowserEngineSession {
     }
   }
 
+  /** Installed before init so asynchronous native creation retains its owner,
+   * including media arriving after the run has closed. */
+  installResourceOwner(engine:unknown):void {
+    if(this.options.hostResourceAbi!==1)return;
+    const config=(engine as {config?:{getModuleConfig?:(...args:unknown[])=>Record<string,unknown>}})?.config;
+    if(!config||typeof config.getModuleConfig!=='function')throw Error('E_HOST_RESOURCE_API');
+    const original=config.getModuleConfig,owner=this;
+    this.replace(config,'getModuleConfig',function(this:typeof config,...args:unknown[]){
+      const module=original.apply(this,args);
+      module.godotjsOwnResource=(kind:string,value:unknown)=>owner.ownResource(kind,value);
+      module.godotjsScheduleCleanup=(callback:()=>void)=>owner.scheduleNativeCleanup(callback);
+      return module;
+    });
+  }
+
+  private scheduleNativeCleanup(callback:()=>void):void {
+    if(this.stopped)return;
+    if(typeof callback!=='function'||this.cleanupTimers.size>=64)throw Error('E_HOST_CLEANUP_SCHEDULE_LIMIT');
+    const timer=this.deadlineSet(()=>{this.cleanupTimers.delete(timer);if(!this.stopped)callback();},0);
+    this.cleanupTimers.add(timer);
+  }
+
+  private ownResource(kind:string,value:unknown):boolean {
+    if(!value)return false;
+    const closed=this.stopped||this.draining;
+    const late=(dispose:()=>unknown)=>{
+      try{const pending=dispose();if(pending&&typeof (pending as Promise<unknown>).then==='function')void Promise.resolve(pending).catch(error=>this.options.onLog?.('warn','Late resource cleanup failed: '+previewDiagnostic(error).message));}
+      catch(error){this.options.onLog?.('warn','Late resource cleanup failed: '+previewDiagnostic(error).message);}
+      return false;
+    };
+    switch(kind){
+      case 'audio': {const resource=value as AudioContext;if(closed)return late(()=>resource.state==='closed'?undefined:resource.close());this.contexts.add(resource);return true;}
+      case 'media': {const resource=value as MediaStream;if(closed)return late(()=>{for(const track of resource.getTracks())track.stop();});this.media.add(resource);return true;}
+      case 'network': {const resource=value as {close:()=>unknown;[key:string]:unknown};if(closed)return late(()=>resource.close());this.network.add(resource);return true;}
+      case 'port': {const resource=value as MessagePort;if(closed)return late(()=>resource.close());this.ports.add(resource);return true;}
+      case 'gl': {const resource=value as WebGLRenderingContext;if(closed)return late(()=>resource.getExtension('WEBGL_lose_context')?.loseContext());this.gl.add(resource);return true;}
+      default: throw Error('E_HOST_RESOURCE_KIND');
+    }
+  }
+
   private installTimers(): void {
     const owner=this;
     for (const [name,kind] of [['setTimeout','timeout'],['setInterval','interval']] as const) {
       const original=this.scope[name];if(typeof original!=='function')continue;
       const wrapped=((handler:TimerHandler,timeout?:number,...args:unknown[])=>{
-        if(owner.stopped)return 0;
+        if(owner.stopped||owner.draining)return 0;
         let handle: unknown;
-        const invoke=typeof handler==='function'?()=>{if(kind==='timeout')owner.timers.delete(handle);if(!owner.stopped)Reflect.apply(handler,owner.scope,args);}:handler;
+        const invoke=typeof handler==='function'?()=>{if(kind==='timeout')owner.timers.delete(handle);if(!owner.stopped&&!owner.draining)Reflect.apply(handler,owner.scope,args);}:handler;
         handle=original.call(owner.scope,invoke,timeout,...(typeof handler==='function'?[]:args));owner.timers.set(handle,kind);return handle;
       });
       this.replace(this.scope,name,wrapped);
@@ -470,6 +445,7 @@ export class BrowserEngineSession {
   attachEngine(engine: unknown): void {
     if(this.stopped)throw new Error('E_SESSION_DISPOSED');
     const module=(engine as {rtenv?:BrowserEngineSession['module']})?.rtenv;
+    if(this.options.hostResourceAbi===1&&module?.godotjsHostResourceAbi!==1)throw Error('E_HOST_RESOURCE_ABI');
     if(module)this.module=module;
     const canvas=(engine as {config?:{canvas?:HTMLCanvasElement}})?.config?.canvas;
     if(canvas)this.ownCanvas(canvas);
@@ -507,6 +483,8 @@ export class BrowserEngineSession {
     }
     for(const [handle,kind]of this.timers){safely(()=>{if(kind==='timeout')this.scope.clearTimeout(handle as number);else this.scope.clearInterval(handle as number);receipt.clearedTimers++;});}
     this.timers.clear();
+    for(const timer of this.cleanupTimers)this.deadlineClear(timer);
+    this.cleanupTimers.clear();
     // Remove host callbacks before close()/stop() can synchronously dispatch.
     for(const dispose of this.resources.splice(0))safely(dispose);
     for(const port of this.ports)safely(()=>{port.onmessage=null;port.onmessageerror=null;port.close();receipt.closedMessagePorts!++;});

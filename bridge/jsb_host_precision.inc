@@ -1,6 +1,6 @@
         Object* managed_live_node(Root& root,Object* object)
         {
-            Node* node=Object::cast_to<Node>(object);if(!node||!node->is_inside_tree())return nullptr;const NativeObjectID id=environment->try_get_object_id(node);return root.nodes.has(*id)?node:nullptr;
+            Node* node=Object::cast_to<Node>(object);if(!node||!node->is_inside_tree())return nullptr;const NativeObjectID id=environment->try_get_object_id(node);return resolve(root,id)==node?node:nullptr;
         }
         template<class T> Object* managed_shape(Root& root,T* body,int index)
         {
@@ -19,7 +19,7 @@
         bool shape_contact_event(Root& root,Node* emitter,const Variant** args,int count,Variant& result)
         {
             if(count!=4||args[2]->get_type()!=Variant::INT||args[3]->get_type()!=Variant::INT)return false;const int64_t other=*args[2],local=*args[3];if(other<0||other>65535||local<0||local>65535)return false;
-            Object* object=args[1]->get_type()==Variant::OBJECT?static_cast<Object*>(*args[1]):nullptr;Node* collider=Object::cast_to<Node>(managed_live_node(root,object));Dictionary data;data["collider"]=collider?Variant(collider):Variant();data["colliderShapeIndex"]=other;data["localShapeIndex"]=local;Object* other_shape=shape_owner(root,collider,other);Object* local_shape=shape_owner(root,emitter,local);data["colliderShape"]=other_shape?Variant(other_shape):Variant();data["localShape"]=local_shape?Variant(local_shape):Variant();result=data;return true;
+            Object* object=args[1]->get_type()==Variant::OBJECT?args[1]->get_validated_object():nullptr;Node* collider=Object::cast_to<Node>(managed_live_node(root,object));Dictionary data;data["collider"]=collider?Variant(collider):Variant();data["colliderShapeIndex"]=other;data["localShapeIndex"]=local;Object* other_shape=shape_owner(root,collider,other);Object* local_shape=shape_owner(root,emitter,local);data["colliderShape"]=other_shape?Variant(other_shape):Variant();data["localShape"]=local_shape?Variant(local_shape):Variant();result=data;return true;
         }
         bool precision_command(Root& root,Node* node,const String& operation,const Array& args,Variant& result)
         {

@@ -279,6 +279,11 @@ export function patchWorkerRuntimeFile(path,source){
 export function workerRuntimeBuildProof(patches){
  const records=patches.filter(record=>record.patchId===WORKER_RUNTIME_PATCH);
  if(records.length!==WORKER_RUNTIME_PATHS.length)throw Error('E_WORKER_RUNTIME_PROOF: incomplete patched source set');
- const files={};let implementation;for(const path of WORKER_RUNTIME_PATHS){const found=records.filter(record=>record.path===path);if(found.length!==1||!(/^[a-f0-9]{64}$/).test(found[0].afterSha256)||!found[0].implementation?.sha256)throw Error('E_WORKER_RUNTIME_PROOF: '+path);files[path]=found[0].afterSha256;implementation=found[0].implementation;}
+ const files={};let implementation;for(const path of WORKER_RUNTIME_PATHS){
+  const found=records.filter(record=>record.path===path),edges=patches.filter(record=>record.path===path);
+  if(found.length!==1||!found[0].implementation?.sha256)throw Error('E_WORKER_RUNTIME_PROOF: '+path);
+  let previous;for(const edge of edges){if(!(/^[a-f0-9]{64}$/).test(edge.beforeSha256)||!(/^[a-f0-9]{64}$/).test(edge.afterSha256)||previous&&previous!==edge.beforeSha256)throw Error('E_WORKER_RUNTIME_PROOF: broken source chain '+path);previous=edge.afterSha256;}
+  files[path]=previous;implementation=found[0].implementation;
+ }
  return {runtimeAbi:{...WORKER_RUNTIME_ABI},workerPatch:{patchId:WORKER_RUNTIME_PATCH,version:1,implementation,files}};
 }

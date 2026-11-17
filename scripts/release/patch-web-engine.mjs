@@ -14,6 +14,11 @@ import {patchShaderUtf8} from './patch-web-shader-utf8.mjs';
 import {patchAudioServerFinish} from './patch-web-audio-server-finish.mjs';
 import {patchWorkerRuntimeFile,WORKER_RUNTIME_PATHS} from './patch-web-worker-runtime.mjs';
 import {patchWebLifecycleFile} from './patch-web-lifecycle.mjs';
+import {patchArtifactSetMount,unpatchArtifactSetMount} from './patch-artifact-set-mount.mjs';
+import {NATIVE_OBSERVER_PATHS,patchNativeObserverFile} from './patch-native-observer.mjs';
+import {HOST_RESOURCE_PATHS,patchHostResourceFile,unpatchHostResourceFile} from './patch-web-resource-owner.mjs';
+import {MANAGED_SHUTDOWN_PATHS,patchManagedShutdownQueue,unpatchManagedShutdownQueue} from './patch-managed-shutdown-queue.mjs';
+import {AUDIO_WORKLET_FINISH_PATH,patchAudioWorkletFinish,unpatchAudioWorkletFinish} from './patch-web-audio-worklet-finish.mjs';
 
 const repo=fileURLToPath(new URL('../../',import.meta.url));
 const execute=promisify(execFile),hash=value=>createHash('sha256').update(value).digest('hex');
@@ -47,19 +52,50 @@ export async function applyWebEnginePatches(root,{python='python3',executionMode
   ['core/object/worker_thread_pool.cpp',patchThreadlessGroups,'scripts/release/patch-web-threadless-groups.mjs'],
   ['platform/web/js/engine/config.js',patchPresentationBoundary,'scripts/release/patch-web-presentation-boundary.mjs'],
  ]) {
-  const result=apply(await readFile(resolve(root,path),'utf8'));
-  await add(path,result.code,result.patchId,implementation);
+  const baseline=await readFile(resolve(root,path),'utf8');
+  const normalized=unpatchHostResourceFile(path,baseline),result=apply(normalized);
+  if(result.code===normalized)result.code=baseline;
+  await add(path,result.code,result.patchId,implementation,baseline);
  }
  // The Worker audio imports compose after the independently checked lifecycle
  // patch. Keep both receipts, binding the second receipt to the first output.
  for(const path of executionModel==='window'?WORKER_RUNTIME_PATHS:[]){
   const before=planned.findLast(item=>item.record.path===path)?.code??await readFile(resolve(root,path),'utf8');
-  const result=patchWorkerRuntimeFile(path,before);
+  let normalized=unpatchManagedShutdownQueue(path,unpatchHostResourceFile(path,path==='main/main.cpp'?unpatchArtifactSetMount(before):before));
+  if(path===AUDIO_WORKLET_FINISH_PATH)normalized=unpatchAudioWorkletFinish(normalized);
+  const result=patchWorkerRuntimeFile(path,normalized);
+  if(result.code===normalized)result.code=before;
   await add(path,result.code,result.patchId,'scripts/release/patch-web-worker-runtime.mjs',before);
  }
  for(const path of ['scene/main/scene_tree.h','scene/main/scene_tree.cpp',...(executionModel==='proxy-pthread'?['platform/web/web_main.cpp']:[])]){
-  const result=patchWebLifecycleFile(path,await readFile(resolve(root,path),'utf8'));
-  await add(path,result.code,result.patchId,'scripts/release/patch-web-lifecycle.mjs');
+  const before=await readFile(resolve(root,path),'utf8'),normalized=unpatchManagedShutdownQueue(path,before);
+  const result=patchWebLifecycleFile(path,normalized);
+  await add(path,result.code===normalized?before:result.code,result.patchId,'scripts/release/patch-web-lifecycle.mjs',before);
+ }
+ {
+  const path='main/main.cpp',before=planned.findLast(item=>item.record.path===path)?.code??await readFile(resolve(root,path),'utf8');
+  const result=patchArtifactSetMount(before);
+  await add(path,result.code,result.patchId,'scripts/release/patch-artifact-set-mount.mjs',before);
+ }
+ for(const path of HOST_RESOURCE_PATHS){
+  const before=planned.findLast(item=>item.record.path===path)?.code??await readFile(resolve(root,path),'utf8');
+  const result=patchHostResourceFile(path,before);
+  await add(path,result.code,result.patchId,'scripts/release/patch-web-resource-owner.mjs',before);
+ }
+ for(const path of NATIVE_OBSERVER_PATHS){
+  const before=planned.findLast(item=>item.record.path===path)?.code??await readFile(resolve(root,path),'utf8');
+  const result=patchNativeObserverFile(path,before);
+  await add(path,result.code,result.patchId,'scripts/release/patch-native-observer.mjs',before);
+ }
+ for(const path of MANAGED_SHUTDOWN_PATHS){
+  const before=planned.findLast(item=>item.record.path===path)?.code??await readFile(resolve(root,path),'utf8');
+  const result=patchManagedShutdownQueue(path,before);
+  await add(path,result.code,result.patchId,'scripts/release/patch-managed-shutdown-queue.mjs',before);
+ }
+ {
+  const path=AUDIO_WORKLET_FINISH_PATH,before=planned.findLast(item=>item.record.path===path)?.code??await readFile(resolve(root,path),'utf8');
+  const result=patchAudioWorkletFinish(before);
+  await add(path,result.code,result.patchId,'scripts/release/patch-web-audio-worklet-finish.mjs',before);
  }
  for(const {code,record}of planned)if(record.changed)await writeFile(resolve(root,record.path),code);
  return planned.map(({record})=>record);

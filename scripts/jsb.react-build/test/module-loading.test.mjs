@@ -48,7 +48,7 @@ test('a late event loader fails publication and literal loading publishes the mo
   await fs.writeFile(path.join(root,'project.godot'),'config_version=5\n[application]\nconfig/name="module-loading"\n');
   await fs.writeFile(path.join(root,'godot-react.config.mjs'),'export default {entries:{app:"src/App.tsx"}};');
   await fs.writeFile(path.join(root,'src/models/inventory.ts'),'export const inventory="INVENTORY_CONTENT";');
-  const source=body=>`declare const require:(id:string)=>any;import {Button} from "@godot-js/react/legacy";${body}`;
+  const source=body=>`declare const require:(id:string)=>any;import {Button} from "@godot-js/react/engine-components";${body}`;
   await fs.writeFile(path.join(root,'src/App.tsx'),source('function load(name:string){return require(name)}export default function App(){return <Button onPressed={()=>load("./models/inventory")}/>;}'));
   await assert.rejects(buildProject({projectRoot:root}),e=>e.code==='E_DYNAMIC_MODULE'&&/App.tsx/.test(e.message));
   await assert.rejects(fs.access(path.join(root,'generated/react/active.json')));

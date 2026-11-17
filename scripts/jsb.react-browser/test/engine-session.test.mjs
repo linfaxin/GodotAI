@@ -23,6 +23,39 @@ function fixture(){
  return{scope,Worker,workers,contexts,urls,revoked,timers,Target};
 }
 
+test('native resource creation uses an explicit owner without replacing browser constructors',async()=>{
+ const f=fixture(),originalAudio=f.scope.AudioContext;
+ const session=new BrowserEngineSession({identity,scope:f.scope,hostResourceAbi:1});
+ assert.equal(f.scope.AudioContext,originalAudio);
+ const config={getModuleConfig(){return {};}};
+ session.installResourceOwner({config});const module=config.getModuleConfig(),own=module.godotjsOwnResource;
+ assert.throws(()=>session.attachEngine({rtenv:{}}),/E_HOST_RESOURCE_ABI/);
+ session.attachEngine({rtenv:{godotjsHostResourceAbi:1}});
+ const audio=new originalAudio();let stopped=0,closed=0,ports=0,lost=false;
+ assert.equal(own('audio',audio),true);assert.equal(own('audio',audio),true);
+ own('media',{getTracks:()=>[{readyState:'live',stop(){stopped++;}}]});
+ own('network',{close(){closed++;}});own('port',{close(){ports++;}});
+ own('gl',{isContextLost:()=>lost,getExtension:()=>({loseContext(){lost=true;}})});
+ const receipt=await session.dispose('clean');
+ assert.equal(receipt.status,'complete');assert.equal(receipt.audioContexts,1);assert.equal(audio.closed,1);
+ assert.equal(stopped,1);assert.equal(closed,1);assert.equal(ports,1);assert.equal(lost,true);
+ assert.equal(own('media',{getTracks:()=>[{stop(){stopped++;}}]}),false);
+ assert.equal(own('network',{close(){closed++;}}),false);
+ const lateAudio=new originalAudio();assert.equal(own('audio',lateAudio),false);
+ await Promise.resolve();assert.equal(lateAudio.closed,1);assert.equal(stopped,2);assert.equal(closed,2);
+ assert.equal(f.scope.AudioContext,originalAudio);
+});
+
+test('the window engine installs the same native owner lifecycle gate as worker backends',async()=>{
+ const f=fixture();let closing=0,released=0;
+ const session=new BrowserEngineSession({identity,scope:f.scope,onClosing(){closing++;}});
+ const binding=f.scope.__godotjsRuntimeHost;binding.assignRole('engine');binding.beginNativeEpoch('window-owner');
+ const module={godotjsLifecycleVersion:1,godotjsCheckpointAbi:1,godotjsReleaseExit(){released++;},godotjsScheduleCleanupCheckpoint(callback){void Promise.resolve().then(callback);return true;}};
+ f.scope.__godotjsInstallLifecycle(module);module.godotjsBeginExit();
+ for(let i=0;i<20;i++)await Promise.resolve();assert.equal(closing,1);assert.equal(released,1);
+ const receipt=await session.dispose('clean');assert.equal(receipt.status,'complete');assert.equal(f.scope.__godotjsInstallLifecycle,undefined);assert.equal(module.godotjsBeginExit,undefined);
+});
+
 test('session tracks every pthread, only native engine progress counts, and stale messages cannot update it',async()=>{
  const f=fixture(),progress=[],roles=[],projects=[];
  const session=new BrowserEngineSession({identity,scope:f.scope,executionModel:'proxy-pthread',requiresCrossOriginIsolation:true,onProgress:value=>progress.push(value),onWorkerRole:value=>roles.push(value),onProject:value=>projects.push(value)});
@@ -34,7 +67,7 @@ test('session tracks every pthread, only native engine progress counts, and stal
  packet(engine,1,'project',{data:{type:'chunk',text:'x'.repeat(65536)}});assert.equal(projects.length,1);
  assert.equal(session.command({type:'controls',speed:2}),true);assert.equal(engine.sent.filter(item=>item.type==='project-command').length,1);assert.equal(script.sent.length,0);
  assert.equal(engine.sent[0].sessionId,identity.runId);
- const source=await f.urls.get(engine.url).text();assert.match(source,/installWorkerRuntimeHost/);assert.match(source,/importScripts\("https:\/\/preview.test\/engine.worker.js"\)/);
+ const source=await f.urls.get(engine.url).text();assert.match(source,/__godotjsRuntimeBootstrapConfig/);assert(source.includes('"url":"https://preview.test/engine.worker.js"'));assert.match(source,/importScripts/);assert(!source.includes('.toString()'));
  const cleanup=await session.dispose('forced');assert.equal(cleanup.workers,2);assert.equal(cleanup.terminatedWorkers,2);assert.equal(engine.terminated,1);assert.equal(script.terminated,1);
  assert.equal(session.command({type:'action'}),false);assert.equal(f.scope.Worker,f.Worker);assert.equal(f.revoked.length,2);
  packet(engine,1,'progress',{sequence:2});assert.equal(progress.length,1);
@@ -48,6 +81,25 @@ test('draining ignores late pthread progress while retaining final summary and c
  send('role');send('epoch',{data:{epoch:'native-A'}});session.beginDrain();send('progress',{sequence:1});
  send('project',{sequence:4,data:{type:'late-event'}});send('summary',{data:{schemaVersion:1,epoch:'native-A',sealed:true,overflow:false,entries:[]}});
  assert.equal(progress.length,0);assert(worker.sent.some(m=>m.type==='project-receipt'&&m.sequence===4));assert.equal(session.sessionFacts().runtimeSummary,'sealed');await session.dispose();
+});
+
+test('cleanup-only suppresses queued business timers and refuses new timer work',async()=>{
+ const f=fixture(),session=new BrowserEngineSession({identity,scope:f.scope});let calls=0;
+ f.scope.setTimeout(()=>calls++,0);f.scope.setInterval(()=>calls++,0);
+ const pending=[...f.timers.values()];session.beginDrain();for(const callback of pending)callback();
+ assert.equal(calls,0);assert.equal(f.scope.setTimeout(()=>calls++,0),0);assert.equal(f.scope.setInterval(()=>calls++,0),0);
+ await session.dispose();assert.equal(calls,0);
+});
+
+test('native platform finish has a private cleanup scheduler after business admission closes',async()=>{
+ const f=fixture(),session=new BrowserEngineSession({identity,scope:f.scope,hostResourceAbi:1});
+ const config={getModuleConfig(){return {};}};session.installResourceOwner({config});const module=config.getModuleConfig();
+ session.beginDrain();let completed=0;
+ assert.equal(f.scope.setTimeout(()=>completed+=100,0),0);
+ module.godotjsScheduleCleanup(()=>completed++);
+ await new Promise(resolve=>setTimeout(resolve,5));assert.equal(completed,1);
+ module.godotjsScheduleCleanup(()=>completed+=100);
+ await session.dispose();await new Promise(resolve=>setTimeout(resolve,5));assert.equal(completed,1);
 });
 
 test('whole-session disposal closes audio, pooled workers, timers, callbacks and canvas exactly once',async()=>{

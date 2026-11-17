@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Node, Button } from "@godot-js/react/legacy";
+import { Node, Button } from "@godot-js/react/engine-components";
 import Panel from "@project/react-templates/panel";
 
 function Content() {

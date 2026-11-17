@@ -1,14 +1,22 @@
 /** Private build-local byte ownership. Public reads never expose stored buffers. */
 const owned = new WeakSet<Uint8Array>();
 const maps = new WeakMap<object, ReadonlyMap<string, Uint8Array>>();
+const digests = new WeakMap<Uint8Array, Promise<string>>();
+const metrics = {bytesCopied: 0, bytesHashed: 0};
+export function ownedByteMetrics(): Readonly<typeof metrics> { return {...metrics}; }
 
 /** Internal fast path: no public aliases can change bytes during this await. */
 export async function hashOwnedBytes(bytes: Uint8Array): Promise<string> {
-  return Array.from(new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', bytes as Uint8Array<ArrayBuffer>)), byte => byte.toString(16).padStart(2, '0')).join('');
+  const previous=owned.has(bytes)&&digests.get(bytes);if(previous)return previous;
+  metrics.bytesHashed+=bytes.byteLength;
+  const pending=globalThis.crypto.subtle.digest('SHA-256', bytes as Uint8Array<ArrayBuffer>).then(value=>Array.from(new Uint8Array(value), byte => byte.toString(16).padStart(2, '0')).join(''));
+  if(owned.has(bytes))digests.set(bytes,pending);
+  return pending;
 }
 
 export function captureBytes(value: ArrayLike<number>): Uint8Array {
   const bytes = new Uint8Array(value);
+  metrics.bytesCopied+=bytes.byteLength;
   owned.add(bytes);
   return bytes;
 }

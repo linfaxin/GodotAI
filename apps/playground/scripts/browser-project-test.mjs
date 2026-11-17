@@ -1,3 +1,4 @@
+import {readStorageSnapshot,writeStorageSnapshot} from './project-storage-browser-helpers.mjs';
 import {launchBrowser,withAcceptanceContext,defaultTestDirectory} from './browser-harness.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
@@ -28,7 +29,7 @@ async function init(url=legacyBase){const context=await browser.newContext({view
 async function mark(p,name){await p.locator('#source .monaco-editor').click({position:{x:180,y:80}});await p.keyboard.press('ControlOrMeta+End');await p.keyboard.insertText('\n// '+name+'\n');await p.waitForFunction(name=>{const p=window.__playgroundWorkbench.inspect().project;return p.files[p.entry].includes(name)&&document.querySelector('#saved').textContent==='已自动保存';},name);}
 async function importProject(page,project){await page.locator('#import').setInputFiles({name:'project.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(project))});}
 async function menuAction(page,id){if(!await page.locator('#project-menu').evaluate(node=>node.open))await page.locator('#project-menu summary').click();await page.locator('#'+id).click();}
-async function snapshot(page){return page.evaluate(()=>new Promise((resolve,reject)=>{const open=indexedDB.open(window.__playgroundWorkbench.inspect().storageDatabaseName,1);open.onsuccess=()=>{const db=open.result,r=db.transaction('projects').objectStore('projects').get('current');r.onsuccess=()=>{db.close();resolve(r.result);};r.onerror=()=>reject(r.error);};}));}
+const snapshot=page=>readStorageSnapshot(page);
 try{
  let original;
  {
@@ -60,7 +61,7 @@ try{
  {
   const {context,page}=await init();await mark(page,'KEEP_BEFORE_RECOVERY');
   const recovery={selected:'shader',projects:[['shader',{...original,files:{...original.files,'/restored.txt':'RECOVERED_VALID_BACKUP'}}]]};
-  await page.evaluate(recovery=>new Promise((resolve,reject)=>{const open=indexedDB.open(window.__playgroundWorkbench.inspect().storageDatabaseName,1);open.onsuccess=()=>{const db=open.result,tx=db.transaction('projects','readwrite');tx.objectStore('projects').put(recovery,'recovery');tx.oncomplete=()=>{db.close();resolve();};tx.onabort=()=>reject(tx.error);};}),recovery);
+  await writeStorageSnapshot(page,recovery,'recovery');
   await page.reload();await loaded(page);const beforeRecovery=await snapshot(page);assert.ok((await state(page)).files[original.entry].includes('KEEP_BEFORE_RECOVERY'));
   await menuAction(page,'restore-recovery');await page.waitForFunction(()=>window.__playgroundWorkbench.inspect().project.files['/restored.txt']==='RECOVERED_VALID_BACKUP'&&document.querySelector('#saved').textContent==='已自动保存'&&document.querySelector('#toast').textContent.includes('已从恢复备份还原项目'));
   const restored=await snapshot(page);assert.ok(restored.versions.shader>beforeRecovery.versions.shader,'Recovery must advance the conflict revision');assert.ok(!(await state(page)).files[original.entry].includes('KEEP_BEFORE_RECOVERY'));
@@ -68,10 +69,23 @@ try{
   await page.reload();await loaded(page);assert.equal((await state(page)).files['/restored.txt'],'RECOVERED_VALID_BACKUP');record('restore-recovery applies a valid backup, preserves the replaced contents and persists a newer revision');await context.close();
  }
  {
+  const {context,page}=await init();await mark(page,'COMPLETE_ARCHIVE_SOURCE');
+  const downloaded=page.waitForEvent('download');await menuAction(page,'export-storage-recovery');
+  const archive=JSON.parse(await fs.readFile(await (await downloaded).path(),'utf8'));
+  assert.equal(archive.kind,'godotjs-project-storage-recovery');assert.equal(archive.storageLayout,1);
+  assert.ok(archive.records.find(([key])=>key==='current')[1].projects.some(([,project])=>project.files?.[project.entry]?.includes('COMPLETE_ARCHIVE_SOURCE')));
+  await mark(page,'AFTER_COMPLETE_ARCHIVE');const before=await state(page),chooser=page.waitForEvent('filechooser');
+  await menuAction(page,'import-storage-recovery');await (await chooser).setFiles({name:'recovery.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(archive))});
+  await page.waitForFunction(()=>document.querySelector('#toast').textContent.includes('恢复存档已保留'));assert.deepEqual(await state(page),before);
+  await menuAction(page,'restore-recovery');await page.waitForFunction(()=>{const project=window.__playgroundWorkbench.inspect().project;return project.files[project.entry].includes('COMPLETE_ARCHIVE_SOURCE')&&!project.files[project.entry].includes('AFTER_COMPLETE_ARCHIVE')&&document.querySelector('#saved').textContent==='已自动保存';});
+  await page.reload();await loaded(page);assert.ok(!(await state(page)).files[original.entry].includes('AFTER_COMPLETE_ARCHIVE'));
+  record('complete storage archive exports self-contained files, imports without activation and restores through the versioned UI');await context.close();
+ }
+ {
   const {context,page}=await init();const valid={...original,demoId:'lights',files:{...original.files,'/kept.txt':'KEEP_VALID_AFTER_BAD'}};
   const bad={...original,files:{'/README.md':'KEEP_RECOVERY_BACKUP'}};
   const saved={selected:'lights',projects:[['shader',bad],['lights',valid]]};
-  await page.evaluate(saved=>new Promise((resolve,reject)=>{const open=indexedDB.open(window.__playgroundWorkbench.inspect().storageDatabaseName,1);open.onsuccess=()=>{const db=open.result,tx=db.transaction('projects','readwrite');tx.objectStore('projects').put(saved,'current');tx.oncomplete=()=>{db.close();resolve();};tx.onabort=()=>reject(tx.error);};}),saved);
+  await writeStorageSnapshot(page,saved);
   await page.reload();await loaded(page);assert.equal((await state(page)).files['/kept.txt'],'KEEP_VALID_AFTER_BAD');assert.ok((await snapshot(page)).projects.some(([id,p])=>id==='lights'&&p.files['/kept.txt']));
   await page.reload();await loaded(page);await page.locator('#project-menu summary').click();const download=page.waitForEvent('download');await page.locator('#export-recovery').click();assert.deepEqual(JSON.parse(await fs.readFile(await (await download).path(),'utf8')),saved);record('bad stored record is backed up and later valid projects restore');await context.close();
  }

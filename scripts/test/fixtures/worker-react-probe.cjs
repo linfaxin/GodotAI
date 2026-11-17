@@ -2,7 +2,7 @@
 
 // Executed by GodotJS in the engine Worker. The caller supplies the engine and
 // its single React/reconciler realm; this fixture has no Node/browser DOM APIs.
-exports.run = function run(G, R, React) {
+exports.run = function run(G, R, React, options) {
   var h = React.createElement;
   var state = {
     detached: { done: false, passed: false },
@@ -15,7 +15,7 @@ exports.run = function run(G, R, React) {
     extendedErrors: []
   };
   var roots = [], mounts = [], rootA, rootB, phaseRef = React.createRef();
-  var disposed = false;
+  var disposed = false, disposePromise;
   function call(object, name) {
     var args = Array.prototype.slice.call(arguments, 2);
     var camel = name.replace(/_([a-z])/g, function (_, c) { return c.toUpperCase(); });
@@ -38,7 +38,7 @@ exports.run = function run(G, R, React) {
     state.errors.push((info && info.kind ? info.kind + ': ' : '') + detail(value));
   }
   function root(mount) {
-    var result = R.createRoot(mount, { godot: G, autoProcess: false, onError: record });
+    var result = R.createRoot(mount, { godot: G, entry: options.entry, autoProcess: false, onError: record });
     roots.push(result);
     return result;
   }
@@ -96,7 +96,7 @@ exports.run = function run(G, R, React) {
     var borrowed = mount(), expected = new Error('B5_EXPECTED_FRAME_ERROR');
     var calls = [], object, attempted = false;
     var renderer = R.createRoot(borrowed, {
-      godot: G, autoProcess: false,
+      godot: G, entry: options.entry, autoProcess: false,
       onError: function (value, info) { calls.push({ value: value, info: info }); }
     });
     roots.push(renderer);
@@ -119,7 +119,7 @@ exports.run = function run(G, R, React) {
     renderer.shutdown();
     renderer.flush();
     assert(valid(object), 'explicit shutdown does not bypass the asynchronous release barrier');
-    await Promise.resolve();
+    assert((await renderer.close()).status === 'complete', 'error root close confirms native retirement');
     assert(!valid(object) && valid(borrowed), 'error callback does not prevent normal owned-node cleanup');
     assert(calls.length === 1 && renderer.getErrors().length === 1, 'shutdown does not duplicate the reported runtime error');
     state.errorForwarding = {
@@ -156,7 +156,7 @@ exports.run = function run(G, R, React) {
     renderer.unmount();
     renderer.flush();
     assert(valid(object) && renderer.getStats().releaseRequested === 0, 'explicit flush waits for the full native stack to unwind');
-    await Promise.resolve();
+    assert((await renderer.close()).status === 'complete', 'detached root close confirms native retirement');
     var stats = renderer.getStats();
     renderer.shutdown();
     renderer.shutdown();
@@ -209,7 +209,7 @@ exports.run = function run(G, R, React) {
     renderer.shutdown();
     renderer.flush();
     assert(valid(owner) && valid(portalObject), 'explicit shutdown preserves owner and portal until the release checkpoint');
-    await Promise.resolve();
+    assert((await renderer.close()).status === 'complete', 'opaque root close confirms native retirement');
     var stats = renderer.getStats();
     assert(cleanupCount === 1 && ownerAliveAtCleanup && portalAliveAtCleanup, 'portal cleanup precedes owner release');
     assert(!valid(portalObject) && !valid(owner), 'React-owned portal node and adopted owner were released');
@@ -242,7 +242,7 @@ exports.run = function run(G, R, React) {
     call(object, 'emit_signal', 'pressed');
     renderer.flush();
     assert(calls === 1 && valid(object), 'synchronous flush after emission still cannot attest stack unwinding');
-    await Promise.resolve();
+    assert((await renderer.close()).status === 'complete', 'signal root close confirms native retirement');
     var stats = renderer.getStats();
     assert(!valid(object) && stats.freed === 1 && stats.releaseRequested === 1, 'raw signal host is destroyed exactly once after the checkpoint');
     assert(stats.cleanExit && renderer.getErrors().length === 0, 'raw signal teardown has no swallowed native release error');
@@ -311,20 +311,25 @@ exports.run = function run(G, R, React) {
         extendedPassed: state.propertyWrites.passed && state.errorForwarding.passed && state.extendedErrors.length === 0,
         propertyWrites: Object.assign({}, state.propertyWrites),
         errorForwarding: Object.assign({}, state.errorForwarding),
-        extendedErrors: state.extendedErrors.slice()
+        extendedErrors: state.extendedErrors.slice(),
+        ...(disposed ? {cleanup: roots.map(function (renderer) { return renderer.getCloseProgress(); })} : {})
       };
     },
     dispose: function () {
-      if (disposed) return;
+      if (disposePromise) return disposePromise;
       disposed = true;
-      for (var i = roots.length - 1; i >= 0; i--) {
-        try { roots[i].shutdown(); roots[i].flush(); }
-        catch (value) { record(value); }
-      }
-      for (var j = mounts.length - 1; j >= 0; j--) if (valid(mounts[j])) {
-        try { call(mounts[j], 'free'); }
-        catch (value) { record(value); }
-      }
+      disposePromise = Promise.all(roots.map(function (renderer) { return renderer.close(); })).then(function (results) {
+        assert(results.every(function (result) { return result.status === 'complete'; }), 'all fixture roots confirm actual native retirement');
+        return new Promise(function (resolve, reject) {
+          require('godot-jsb').internal.native_runtime.scheduleCheckpoint(function () {
+            try {
+              for (var j = mounts.length - 1; j >= 0; j--) if (valid(mounts[j])) call(mounts[j], 'free');
+              resolve();
+            } catch (value) { reject(value); }
+          });
+        });
+      });
+      return disposePromise;
     }
   };
 };

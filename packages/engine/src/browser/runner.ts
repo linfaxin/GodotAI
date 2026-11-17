@@ -4,6 +4,7 @@ import { validateRelease, type VerifiedRelease } from './verified-loader.js';
 import type {SessionCleanupReceipt} from './engine-session.js';
 import {assertArtifactReceipt} from '../identities.js';
 import {sessionExitReason,type SessionFacts} from '../session-facts.js';
+import {captureBrowserArtifact,browserArtifactTransfers} from './artifact-input.js';
 
 const MAX_PROJECT_EVENTS=64,MAX_PROJECT_BYTES=1048576;
 
@@ -143,7 +144,7 @@ export class PreviewRunner {
   }
   async run(artifact: BrowserArtifact): Promise<RunResult> {
     if (this.disposed) throw new Error('E_RUNNER_DISPOSED');
-    if (!(artifact.pack instanceof Uint8Array) || artifact.pack.byteLength === 0 || artifact.pack.byteLength > 64 * 1024 * 1024) throw new Error('E_ARTIFACT_PACK');
+    if (!artifact.artifactSet&&(!(artifact.pack instanceof Uint8Array) || artifact.pack.byteLength === 0 || artifact.pack.byteLength > 64 * 1024 * 1024)) throw new Error('E_ARTIFACT_PACK');
     if (!artifact.manifest || typeof artifact.manifest !== 'object' || (artifact.manifest as { generation?: unknown }).generation !== artifact.generation) throw new Error('E_ARTIFACT_GENERATION');
     if(artifact.packSha256!==undefined&&!/^[a-f0-9]{64}$/i.test(artifact.packSha256))throw new Error('E_ARTIFACT_PACK_HASH');
     if((artifact.manifest as {buildKey?:unknown}).buildKey!==undefined&&(artifact.manifest as {buildKey?:unknown}).buildKey!==artifact.buildKey)throw new Error('E_ARTIFACT_BUILD_KEY');
@@ -152,16 +153,15 @@ export class PreviewRunner {
     if (manifest.engineReleaseId !== undefined && manifest.engineReleaseId !== this.options.release.releaseId) throw new Error('E_ARTIFACT_ENGINE_RELEASE');
     if (manifest.engineProfile !== undefined && manifest.engineProfile !== this.options.release.profile) throw new Error('E_ARTIFACT_ENGINE_PROFILE');
     const sequence = ++this.sequence;
-    const snapshot = { ...artifact, manifest: structuredClone(artifact.manifest), pack: artifact.pack.slice() };
-    delete snapshot.compatibility;
+    const allowLegacy=this.options.allowLegacyArtifacts===true&&this.options.release.artifactReceiptVersion!==2;
+    const capture=captureBrowserArtifact(artifact,this.options.release,allowLegacy);
     // Retire the prior run synchronously, before receipt hashing yields. State
     // listeners may request this replacement while an old phase is emitting;
     // letting that phase continue would falsely resolve the retired run.
     const stopping=this.stopActive();
-    const allowLegacy=this.options.allowLegacyArtifacts===true&&this.options.release.artifactReceiptVersion!==2;
-    const receipt=await assertArtifactReceipt((snapshot.manifest as {artifactReceipt?:unknown}).artifactReceipt,{pack:snapshot.pack,buildKey:snapshot.buildKey,artifactId:snapshot.artifactId??(snapshot.manifest as {artifactId?:string}).artifactId,allowLegacy});
-    if(receipt?.artifactId){snapshot.artifactId=receipt.artifactId;snapshot.manifest={...(snapshot.manifest as object),artifactId:receipt.artifactId};}
-    else if(allowLegacy){delete snapshot.artifactId;snapshot.compatibility='legacy-artifact-v1';}
+    const snapshot=await capture;
+    delete snapshot.compatibility;
+    if(allowLegacy&&!snapshot.artifactId){delete snapshot.artifactId;snapshot.compatibility='legacy-artifact-v1';}
     if(sequence!==this.sequence||this.disposed)throw new DOMException('Superseded','AbortError');
     await stopping;
     if (sequence !== this.sequence || this.disposed) throw new DOMException('Superseded', 'AbortError');
@@ -204,7 +204,7 @@ export class PreviewRunner {
         if (!this.transition(session, 'downloading')) return;
         // Transfer a private snapshot so compiling/saving cannot mutate an active pack.
         try { channel.port1.postMessage({ protocolVersion: PREVIEW_PROTOCOL, type: 'run', ...identity, release: this.options.release,
-          artifact: snapshot }, [snapshot.pack.buffer]); }
+          artifact: snapshot }, browserArtifactTransfers(snapshot)); }
         catch { this.finish(session, 'crashed', undefined, 'Could not send the project to the preview.'); }
       } else if (message.type === 'closing') {
         void this.stopActive();

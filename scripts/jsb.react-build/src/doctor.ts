@@ -1,6 +1,6 @@
 import path from "node:path";
 import { promises as fs } from "node:fs";
-import { parseRuntimeManifest, validateActiveDescriptor,type RuntimeManifestV1 } from "@godot-js/react/contracts";
+import { parseRuntimeManifest, validateActiveDescriptor,ENGINE_NATIVE_ABI,type RuntimeManifestV1 } from "@godot-js/react/contracts";
 import { profileReference } from "@godot-js/react/schema";
 import { loadConfig } from "./config.js";
 import { exists, fromRes, readJson, sha256 } from "./fs.js";
@@ -21,6 +21,7 @@ export async function doctorProject(options: BuildOptions = {}): Promise<DoctorR
     const bytes = await fs.readFile(fromRes(config.projectRoot, active.manifestPath));
     if (sha256(bytes) !== active.manifestSha256) errors.push("E_MANIFEST_HASH: active manifest digest mismatch");
     manifest = parseRuntimeManifest(bytes.toString("utf8"), { manifestUri: active.manifestPath, expectedGeneration: active.generation });
+    if(manifest.nativeBridgeAbi!==ENGINE_NATIVE_ABI)errors.push("E_RUNTIME_ABI: This generation uses the retained NativePort ABI; rebuild it with the direct engine renderer");
     const profile = profileReference(config.profileId);
     if (manifest.profile.id !== profile.id || manifest.profile.version !== profile.version || manifest.profile.hash !== profile.hash) errors.push("E_PROFILE_HASH: installed compiler schema differs from generation");
     errors.push(...await verifyArtifacts(config, manifest));

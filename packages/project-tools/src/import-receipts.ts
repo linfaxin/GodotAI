@@ -5,7 +5,8 @@ import SparkMD5 from 'spark-md5';
 import {readProjectStringSettings} from './project-settings.js';
 
 export interface ImportTarget {resourceAbi:string;features:Readonly<Record<string,string|number|boolean>>}
-export interface ImportConverter {id:string;version:string}
+export interface ImportOutputFormat {extension:string;resourceType:string;resourceAbi:string}
+export interface ImportConverter {id:string;version:string;output?:ImportOutputFormat}
 export interface ResourceHash {path:string;sha256:string}
 export interface ImportReceipt {
  schemaVersion:1;kind:'godotjs-import-receipt';resource:string;uid?:string;
@@ -72,6 +73,7 @@ export function assessLegacyImportCaches(files:ReadonlyMap<string,Uint8Array>,ob
 const normalized=(paths:readonly string[])=>[...new Set(paths.map(resourcePath))].sort();
 function validProducer(input:Pick<ImportInspection,'converter'|'target'>):void {
  if(typeof input.converter.id!=='string'||!input.converter.id||typeof input.converter.version!=='string'||!input.converter.version||typeof input.target.resourceAbi!=='string'||!input.target.resourceAbi||!input.target.features||Object.values(input.target.features).some(value=>!['string','number','boolean'].includes(typeof value)))throw new ProjectToolError('E_IMPORT_RECEIPT','Converter version, resource ABI and target features are required');
+ if(input.converter.output){const format=input.converter.output;if(!/^[a-z0-9]{1,16}$/.test(format.extension)||!/^[A-Za-z][A-Za-z0-9_]{0,127}$/.test(format.resourceType)||typeof format.resourceAbi!=='string'||!format.resourceAbi||format.resourceAbi.length>128||Object.keys(format).some(key=>!['extension','resourceType','resourceAbi'].includes(key)))throw new ProjectToolError('E_IMPORT_RECEIPT','Invalid producer output format');}
  canonicalJson(input.target);
 }
 export function parseImportReceipt(value:unknown):ImportReceipt {

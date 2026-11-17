@@ -7,7 +7,7 @@ import { buildProject, loadConfig, watchProject } from '../dist/index.js';
 import { startManagedPreview } from '../dist/preview.js';
 import { activeRunLeases, processAlive } from '../dist/publication.js';
 
-const source = text => `import {Label} from "@godot-js/react/legacy";export default function App(){return <Label text=${JSON.stringify(text)}/>}`;
+const source = text => `import {Label} from "@godot-js/react/engine-components";export default function App(){return <Label text=${JSON.stringify(text)}/>}`;
 async function waitFor(predicate, timeout = 45000) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) { const value = await predicate(); if (value) return value; await new Promise(r => setTimeout(r, 25)); }
@@ -24,7 +24,7 @@ async function project(t) {
   await fs.writeFile(executable, `#!${process.execPath}
 const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
 const args=process.argv.slice(2),root=args[args.indexOf('--path')+1];
-if(root.endsWith('binary-descriptor')){console.log('GODOT_REACT_NATIVE_DESCRIPTOR '+JSON.stringify({engine:'quickjs',godotVersion:'4.6.1.test',nativeBridgeAbi:'godot-react-native/1'}));process.exit(0);}
+if(root.endsWith('binary-descriptor')){console.log('GODOT_REACT_NATIVE_DESCRIPTOR '+JSON.stringify({engine:'quickjs',godotVersion:'4.6.1.test',nativeRuntimeAbi:1,nativeBridgeAbi:'godot-engine-native/1'}));process.exit(0);}
 if(args.includes('--import'))process.exit(0);
 const base=path.join(root,'generated/react'),active=JSON.parse(fs.readFileSync(path.join(base,'active.json'),'utf8'));
 const identity='stand-in:'+process.pid,name=process.pid+'-'+crypto.createHash('sha256').update(identity).digest('hex')+'.json';
@@ -44,7 +44,7 @@ test('watch shuts down before rebuilding, waits through a failed build and resta
   const watching = watchProject({ projectRoot: root, entry: 'app', headless: true, signal: abort.signal, pollMs: 25, onEvent: e => events.push(e) });
   try {
     const [first] = await waitFor(async () => { const runs = await processes(); return runs.length === 1 && runs; });
-    await fs.writeFile(path.join(root, 'src/App.tsx'), 'import {Label} from "@godot-js/react/legacy";export default function App(){return <Label text={123}/>}');
+    await fs.writeFile(path.join(root, 'src/App.tsx'), 'import {Label} from "@godot-js/react/engine-components";export default function App(){return <Label text={123}/>}');
     await waitFor(() => events.some(e => e.event === 'error' && e.error.includes('E_TYPESCRIPT')));
     assert.equal(processAlive(first.pid), false); assert.equal((await processes()).length, 1);
     await fs.writeFile(path.join(root, 'src/App.tsx'), source('fixed'));

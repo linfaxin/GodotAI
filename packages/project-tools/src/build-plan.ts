@@ -10,13 +10,16 @@ import {type ResourceImportRequest,type ResourceConverterRegistry,type ResourceC
 import type {ImportTarget} from './import-receipts.js';
 import {parseProjectLaunch} from './launch.js';
 import {createArtifactIdentity} from '@godot-js/engine/identities';
-import {adoptBytes,byteMap,borrowByteMap,captureBytes,hashOwnedBytes} from './owned-bytes.js';
+import {adoptBytes,byteMap,borrowByteMap,captureBytes,retainBytes,hashOwnedBytes} from './owned-bytes.js';
+import {ProjectBuildCache,getCachedPack,putCachedPack} from './build-cache.js';
 
 export type ProjectLaunch={kind:'scene';source:'project'}|{kind:'scene';source:'override';path:string}|{kind:'script';module:string;export?:string};
 export interface SourceFile {readonly path:string;readonly encoding:'utf8'|'binary';/** Each public read is an isolated copy. */readonly bytes:Uint8Array;readonly sha256:string}
 export interface SourceSnapshot {readonly schemaVersion:2;readonly files:readonly SourceFile[];readonly sourceHash:string}
 const sourceBytes=new WeakMap<SourceFile,Uint8Array>();
+const sourceText=new WeakMap<SourceFile,string>();
 const borrowSourceBytes=(file:SourceFile)=>sourceBytes.get(file)??captureBytes(file.bytes);
+export const sourceFileText=(file:SourceFile):string=>sourceText.get(file)??new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(borrowSourceBytes(file));
 const sourceByteMap=(snapshot:SourceSnapshot)=>new Map(snapshot.files.map(file=>[file.path,borrowSourceBytes(file)]));
 export interface BuildPlan {
  readonly schemaVersion:1;readonly snapshot:SourceSnapshot;readonly launch:ProjectLaunch;
@@ -32,26 +35,60 @@ function immutableJson<T>(value:T):T {
  return freeze(copy);
 }
 export type SourceInput=Readonly<Record<string,string|readonly number[]|Uint8Array>>|ReadonlyMap<string,string|readonly number[]|Uint8Array>;
-export async function createSourceSnapshot(input:SourceInput,limits:{maxFiles?:number;maxBytes?:number}={}):Promise<SourceSnapshot>{
- for(const [name,value]of Object.entries(limits))if(value!==undefined&&(!Number.isSafeInteger(value)||value<1))throw new ProjectToolError('E_PROJECT_BUDGET','Invalid '+name);
+function textByteLength(text:string,path:string,limit:number):number {
+ let bytes=0;
+ for(let index=0;index<text.length;index++){
+  const code=text.charCodeAt(index);
+  if(code<0x80)bytes++;else if(code<0x800)bytes+=2;
+  else if(code>=0xd800&&code<=0xdbff&&index+1<text.length&&text.charCodeAt(index+1)>=0xdc00&&text.charCodeAt(index+1)<=0xdfff){bytes+=4;index++;}
+  else if(code>=0xd800&&code<=0xdfff)throw new ProjectToolError('E_PROJECT_TEXT','Source text contains an unpaired UTF-16 surrogate; the original editor text is retained: '+path);
+  else bytes+=3;
+  if(bytes>limit)throw new ProjectToolError('E_PROJECT_BUDGET','Source bytes exceed budget');
+ }
+ return bytes;
+}
+export async function createSourceSnapshot(input:SourceInput,limits:{maxFiles?:number;maxBytes?:number;previous?:SourceSnapshot}={}):Promise<SourceSnapshot>{
+ for(const [name,value]of [['maxFiles',limits.maxFiles],['maxBytes',limits.maxBytes]] as const)if(value!==undefined&&(!Number.isSafeInteger(value)||value<1))throw new ProjectToolError('E_PROJECT_BUDGET','Invalid '+name);
  const rows=typeof (input as ReadonlyMap<string,unknown>)[Symbol.iterator]==='function'?[...(input as ReadonlyMap<string,string|readonly number[]|Uint8Array>)]:Object.entries(input);
  if(!rows.length||rows.length>(limits.maxFiles??10000))throw new ProjectToolError('E_PROJECT_BUDGET','Source file count exceeds budget');
- let size=0;const folded=new Set<string>();
+ let size=0;const folded=new Set<string>(),previous=new Map(limits.previous?.files.map(file=>[file.path,file]));
  const files=await Promise.all(rows.map(async([name,value])=>{
   const path=resourcePath(name);if(folded.has(path.toLowerCase()))throw new ProjectToolError('E_PROJECT_PATH_COLLISION',`Source paths collide at ${path}`);folded.add(path.toLowerCase());
   if(typeof value!=='string'&&!(value instanceof Uint8Array)&&(!Array.isArray(value)||!value.every(byte=>Number.isInteger(byte)&&byte>=0&&byte<=255)))throw new ProjectToolError('E_PROJECT_BYTES',`Invalid source bytes at ${path}`);
   // UTF-16 length is a lower bound on encoded UTF-8 bytes; typed bytes are exact.
   if(value.length>(limits.maxBytes??64*1024*1024)-size)throw new ProjectToolError('E_PROJECT_BUDGET','Source bytes exceed budget');
+  const old=previous.get(path),oldBytes=old&&sourceBytes.get(old);
+  if(old&&oldBytes&&(typeof value==='string'?old.encoding==='utf8'&&sourceText.get(old)===value:old.encoding==='binary'&&oldBytes.length===value.length&&oldBytes.every((byte,index)=>byte===value[index]))){
+   size+=oldBytes.length;if(size>(limits.maxBytes??64*1024*1024))throw new ProjectToolError('E_PROJECT_BUDGET','Source bytes exceed budget');return old;
+  }
+  if(typeof value==='string')textByteLength(value,path,(limits.maxBytes??64*1024*1024)-size);
   const bytes=typeof value==='string'?adoptBytes(new TextEncoder().encode(value)):captureBytes(value as ArrayLike<number>);
   size+=bytes.byteLength;if(size>(limits.maxBytes??64*1024*1024))throw new ProjectToolError('E_PROJECT_BUDGET','Source bytes exceed budget');
   const file:SourceFile=Object.freeze({path,encoding:typeof value==='string'?'utf8' as const:'binary' as const,get bytes(){return new Uint8Array(bytes);},sha256:await hashOwnedBytes(bytes)});
-  sourceBytes.set(file,bytes);return file;
+  sourceBytes.set(file,bytes);if(typeof value==='string')sourceText.set(file,value);return file;
  }));
  const identities=files.map(({path,encoding,sha256})=>({path,encoding,sha256})).sort((left,right)=>left.path<right.path?-1:left.path>right.path?1:0);
  return Object.freeze({schemaVersion:2 as const,files:Object.freeze(files),sourceHash:await hashJson(identities)});
 }
+/** Apply an explicit editor delta without visiting unchanged binary payloads.
+ * The base must be a package-owned immutable snapshot, never document JSON. */
+export async function applySourceSnapshotDelta(base:SourceSnapshot,changed:SourceInput,removed:readonly string[]=[],limits:{maxFiles?:number;maxBytes?:number}={}):Promise<SourceSnapshot>{
+ limits={...limits};
+ if(base.files.some(file=>!sourceBytes.has(file)))throw new ProjectToolError('E_PROJECT_SNAPSHOT','Delta base is not an owned source snapshot');
+ for(const [name,value]of [['maxFiles',limits.maxFiles],['maxBytes',limits.maxBytes]] as const)if(value!==undefined&&(!Number.isSafeInteger(value)||value<1))throw new ProjectToolError('E_PROJECT_BUDGET','Invalid '+name);
+ const rows=typeof (changed as ReadonlyMap<string,unknown>)[Symbol.iterator]==='function'?[...(changed as ReadonlyMap<string,string|readonly number[]|Uint8Array>)]:Object.entries(changed);
+ const removedPaths=new Set<string>();for(const name of removed){const path=resourcePath(name);if(removedPaths.has(path))throw new ProjectToolError('E_PROJECT_PATH_COLLISION','Duplicate removed source '+path);removedPaths.add(path);}
+ // Capture changed external buffers synchronously, before hashing yields.
+ const additions=rows.length?createSourceSnapshot(new Map(rows),limits):undefined;
+ const files=new Map(base.files.filter(file=>!removedPaths.has(file.path)).map(file=>[file.path,file]));
+ if(additions)for(const file of (await additions).files){if(removedPaths.has(file.path))throw new ProjectToolError('E_PROJECT_PATH_COLLISION','Source is both changed and removed: '+file.path);files.set(file.path,file);}
+ if(!files.size||files.size>(limits.maxFiles??10000))throw new ProjectToolError('E_PROJECT_BUDGET','Source file count exceeds budget');
+ let bytes=0;const folded=new Set<string>();for(const file of files.values()){const key=file.path.toLowerCase();if(folded.has(key))throw new ProjectToolError('E_PROJECT_PATH_COLLISION','Case-colliding source '+file.path);folded.add(key);bytes+=sourceBytes.get(file)!.length;if(bytes>(limits.maxBytes??64*1024*1024))throw new ProjectToolError('E_PROJECT_BUDGET','Source bytes exceed budget');}
+ const identities=[...files.values()].map(({path,encoding,sha256})=>({path,encoding,sha256})).sort((a,b)=>a.path<b.path?-1:a.path>b.path?1:0);
+ return Object.freeze({schemaVersion:2 as const,files:Object.freeze([...files.values()]),sourceHash:await hashJson(identities)});
+}
 export function snapshotFiles(snapshot:SourceSnapshot):Record<string,string|number[]>{
- return Object.fromEntries(snapshot.files.map(file=>[file.path,file.encoding==='utf8'?new TextDecoder('utf-8',{fatal:true}).decode(borrowSourceBytes(file)):[...borrowSourceBytes(file)]]));
+ return Object.fromEntries(snapshot.files.map(file=>[file.path,file.encoding==='utf8'?sourceFileText(file):[...borrowSourceBytes(file)]]));
 }
 export function resolveProjectLaunch(snapshot:SourceSnapshot,launch:ProjectLaunch):{launch:ProjectLaunch;mainScene?:string}{
  launch=parseProjectLaunch(launch);
@@ -87,12 +124,12 @@ export async function createBuildPlan(snapshot:SourceSnapshot,launch:ProjectLaun
  const identity={sourceHash:snapshot.sourceHash,launch:resolved.launch,inputs,...(compatibility?{compatibility}:{})};
  return Object.freeze({schemaVersion:1 as const,snapshot,launch:Object.freeze(resolved.launch),inputs:Object.freeze(inputs),...(compatibility?{compatibility}:{}),buildKey:await hashJson({kind:'godotjs-build-key-v1',inputs:identity})});
 }
-export async function adaptLegacyLaunch(document:unknown,options:{inputs?:Readonly<Record<string,unknown>>;limits?:{maxBytes?:number;maxFiles?:number}}={}):Promise<BuildPlan>{
+export async function adaptLegacyLaunch(document:unknown,options:{inputs?:Readonly<Record<string,unknown>>;limits?:{maxBytes?:number;maxFiles?:number};snapshot?:SourceSnapshot}={}):Promise<BuildPlan>{
  const envelope=document as any,data=envelope?.project??envelope,version=envelope?.schemaVersion??data?.schemaVersion??1;
  if(![1,2,3].includes(version)||!data?.files)throw new ProjectToolError('E_PROJECT_SCHEMA','Expected a schema 1/2/3 project');
  const runtime=version===1||data.runtime==='legacy-react'?'react':data.runtime;
  if(runtime!=='godot'&&runtime!=='react')throw new ProjectToolError('E_PROJECT_SCHEMA','Unknown legacy runtime');
- const snapshot=await createSourceSnapshot(data.files,options.limits),entry=data.entry??data.config?.entry;
+ const snapshot=options.snapshot??await createSourceSnapshot(data.files,options.limits),entry=data.entry??data.config?.entry;
  const explicitScene=data.mainSceneSource==='project'?undefined:data.mainScene??data.config?.mainScene;
  let launch:ProjectLaunch;
  if(runtime==='react')launch={kind:'script',module:entry,export:data.entryExport??data.config?.entryExport??'default'};
@@ -119,8 +156,8 @@ export async function createOutputOverlay(snapshot:SourceSnapshot,files:Readonly
 }
 async function compilationInputs(options:Omit<EngineProjectOptions,'files'|'launch'|'entry'|'mainScene'>={}):Promise<Record<string,unknown>>{
  return {
-  ...(options.vendor?{vendor:await hashBytes(options.vendor)}:{}),
-  ...(options.runtimeModules?{runtimeModules:Object.fromEntries(await Promise.all(Object.entries(options.runtimeModules).map(async([name,bytes])=>[name,await hashBytes(bytes)])))}:{}),
+  ...(options.vendor?{vendor:await hashOwnedBytes(options.vendor)}:{}),
+  ...(options.runtimeModules?{runtimeModules:Object.fromEntries(await Promise.all(Object.entries(options.runtimeModules).map(async([name,bytes])=>[name,await hashOwnedBytes(bytes)])))}:{}),
   ...(options.generatedJs?{generatedJs:Object.fromEntries(await Promise.all(Object.entries(options.generatedJs).map(async([name,text])=>[name,await hashBytes(text)])))}:{}),
   ...(options.startup?{startup:options.startup}:{}),
   ...(options.maxBytes!==undefined?{maxBytes:options.maxBytes}:{}),...(options.maxFiles!==undefined?{maxFiles:options.maxFiles}:{}),
@@ -128,8 +165,8 @@ async function compilationInputs(options:Omit<EngineProjectOptions,'files'|'laun
 }
 function copyCompilerOptions(options:PrepareBuildPlanOptions['compilerOptions']):PrepareBuildPlanOptions['compilerOptions']{
  if(!options)return undefined;
- return {...options,...(options.vendor?{vendor:new Uint8Array(options.vendor)}:{}),
-  ...(options.runtimeModules?{runtimeModules:Object.fromEntries(Object.entries(options.runtimeModules).map(([name,bytes])=>[name,new Uint8Array(bytes)]))}:{}),
+ return {...options,...(options.vendor?{vendor:retainBytes(options.vendor)}:{}),
+  ...(options.runtimeModules?{runtimeModules:Object.fromEntries(Object.entries(options.runtimeModules).map(([name,bytes])=>[name,retainBytes(bytes)]))}:{}),
   ...(options.generatedJs?{generatedJs:{...options.generatedJs}}:{}),
   ...(options.startup?{startup:{...options.startup,...(options.startup.requiredModules?{requiredModules:[...options.startup.requiredModules]}:{}),...(options.startup.vendorExports?{vendorExports:{...options.startup.vendorExports}}:{})}}:{}),
  };
@@ -140,8 +177,18 @@ export interface PrepareBuildPlanOptions {
  importCacheObservations?:readonly LegacyImportObservation[];
  resourceImports?:readonly ResourceImportRequest[];resourceConverters?:ResourceConverterRegistry;resourceTarget?:ImportTarget;
  resourceLimits?:ResourceConversionLimits;
+ cache?:ProjectBuildCache;
+}
+/** Capture mutable host options before the first await. Stateful execution
+ * objects keep their identity, while every semantic JSON/byte input is owned. */
+export function capturePrepareBuildPlanOptions(options:PrepareBuildPlanOptions):PrepareBuildPlanOptions{
+ const captured={...options,compilerOptions:copyCompilerOptions(options.compilerOptions),resourceLimits:{...options.resourceLimits}};
+ for(const key of ['imports','storedImportReceipts','importChecks','importCacheObservations','resourceImports','resourceTarget'] as const)
+  if(options[key]!==undefined)(captured as Record<string,unknown>)[key]=immutableJson(options[key]);
+ return captured;
 }
 export async function prepareBuildPlan(plan:BuildPlan,options:PrepareBuildPlanOptions={}):Promise<PlannedProject>{
+ options=capturePrepareBuildPlanOptions(options);
  const compilerSnapshot=copyCompilerOptions(options.compilerOptions);
  const resourceLimits={maxOutputBytes:64*1024*1024,maxDecodedPixels:16*1024*1024,...options.resourceLimits};
  requireFreshImports(options.imports??[]);
@@ -154,9 +201,9 @@ export async function prepareBuildPlan(plan:BuildPlan,options:PrepareBuildPlanOp
   conversion=await options.resourceConverters.run(options.resourceImports,sources,options.resourceTarget,options.storedImportReceipts,resourceLimits);
  }
  const legacy=plan.compatibility;
- const compilationFiles:Record<string,string|Uint8Array>=Object.fromEntries(plan.snapshot.files.map(file=>[file.path,file.encoding==='utf8'?new TextDecoder('utf-8',{fatal:true}).decode(borrowSourceBytes(file)):borrowSourceBytes(file)]));
+ const compilationFiles:Record<string,string|Uint8Array>=Object.fromEntries(plan.snapshot.files.map(file=>[file.path,file.encoding==='utf8'?sourceFileText(file):borrowSourceBytes(file)]));
  for(const [path,bytes]of conversion?borrowByteMap(conversion.files):[])compilationFiles[path]=bytes;
- const compilerOptions:EngineProjectOptions={...copyCompilerOptions(compilerSnapshot),files:compilationFiles,runtime:legacy?.runtime??'engine',...(!legacy?{launch:plan.launch}:{
+ const compilerOptions:EngineProjectOptions={...copyCompilerOptions(compilerSnapshot),...(options.cache?{cache:options.cache}:{}),files:compilationFiles,runtime:legacy?.runtime??'engine',...(!legacy?{launch:plan.launch}:{
   ...(legacy.entry?{entry:legacy.entry}:{}),...(legacy.entryExport?{entryExport:legacy.entryExport}:{}),...(legacy.mainScene?{mainScene:legacy.mainScene}:{})})};
  const prepare=options.prepare??(await import('./engine-project.js')).prepareEngineProject;
  // Injected adapters may retain or mutate their input; the stored source stays private.
@@ -175,20 +222,29 @@ export async function prepareBuildPlan(plan:BuildPlan,options:PrepareBuildPlanOp
  const imports=[...(options.imports??[]),...(conversion?.assessments??[]),...assessments,...stored,...legacyImports];
  const assessedResources=new Set(imports.map(item=>item.resource));
  const reportedPrepared={...prepared,diagnostics:[...prepared.diagnostics.filter(item=>item.code!=='W_ENGINE_IMPORT_UNVERIFIED'||!item.file||!assessedResources.has(item.file)),...imports.filter(item=>item.status==='unverified').map(item=>({file:item.resource,line:0,column:0,category:'warning' as const,code:'W_ENGINE_IMPORT_UNVERIFIED',message:`${item.resource}: cached import provenance is unverified; a source scan does not establish freshness.`})),...(conversion?.retainedOutputs??[]).map(item=>({file:item.path,line:0,column:0,category:'warning' as const,code:'W_RESOURCE_PREVIOUS_OUTPUT_RETAINED',message:`Previous converted output for ${item.resource} is preserved in the artifact and counts toward its byte budget; source/cache files are not automatically deleted.`}))]};
- return Object.freeze({plan:effectivePlan,prepared:reportedPrepared,overlay:await createOutputOverlay(plan.snapshot,prepared.files,conversion?.reasons),imports:immutableJson(imports),importReceipts:immutableJson(conversion?.receipts??[])});
+ // Receipt provenance is semantic. Execution details (cache hit/miss, timing)
+ // remain in the import assessment and must not change an artifact identity.
+ const semanticReasons=new Map(conversion?.reasons);
+ for(const receipt of conversion?.receipts??[])for(const output of receipt.outputs)
+  semanticReasons.set(output.path,`Converted by ${receipt.converter.id}@${receipt.converter.version}`);
+ return Object.freeze({plan:effectivePlan,prepared:reportedPrepared,overlay:await createOutputOverlay(plan.snapshot,prepared.files,semanticReasons),imports:immutableJson(imports),importReceipts:immutableJson(conversion?.receipts??[])});
 }
-export async function packPreparedProject(result:PlannedProject,options:PackOptions={}){
+export async function packPreparedProject(result:PlannedProject,options:PackOptions={},cache?:ProjectBuildCache){
  const packOptions=JSON.parse(canonicalJson(options)) as PackOptions;
  const outputEntries=immutableJson(result.overlay.entries),importReceipts=immutableJson(result.importReceipts);
  const files=byteMap(result.overlay.files),verified=await createOutputOverlay(result.plan.snapshot,files);
  const hashes=(entries:readonly OutputEntry[])=>entries.map(({reason,...entry})=>entry);
  if(canonicalJson(hashes(verified.entries))!==canonicalJson(hashes(outputEntries)))throw new ProjectToolError('E_PROJECT_OVERLAY','Output overlay differs from its recorded hashes; prepare the audited outputs again');
- const {packProject}=await import('./pck.js'),packed=packProject(files,packOptions),packSha256=await hashOwnedBytes(packed.pack);
+ const cacheKey=canonicalJson({pack:packOptions,outputs:hashes(outputEntries)});
+ let packed=getCachedPack(cache,cacheKey);
+ if(!packed){const {packProject}=await import('./pck.js');packed=packProject(files,packOptions);putCachedPack(cache,cacheKey,packed);}
+ const packSha256=await hashOwnedBytes(packed.pack);
  const packedPlan=await createBuildPlan(result.plan.snapshot,result.plan.launch,{compatibility:result.plan.compatibility,inputs:{...result.plan.inputs,pack:packOptions}});
  const receipt={schemaVersion:2 as const,buildKey:packedPlan.buildKey,sourceHash:result.plan.snapshot.sourceHash,packSha256,outputs:outputEntries,...(importReceipts.length?{imports:importReceipts}:{})};
  return {...result,plan:packedPlan,...packed,receipt:{...receipt,artifactId:await createArtifactIdentity(receipt)}};
 }
 export async function packBuildPlan(plan:BuildPlan,options:Parameters<typeof prepareBuildPlan>[1]&{pack?:PackOptions}={}){
- const maxOutputBytes=Math.min(options.resourceLimits?.maxOutputBytes??64*1024*1024,options.pack?.maxBytes??64*1024*1024);
- return packPreparedProject(await prepareBuildPlan(plan,{...options,resourceLimits:{...options.resourceLimits,maxOutputBytes}}),options.pack);
+ const pack=immutableJson(options.pack??{}) as PackOptions;
+ const maxOutputBytes=Math.min(options.resourceLimits?.maxOutputBytes??64*1024*1024,pack.maxBytes??64*1024*1024);
+ return packPreparedProject(await prepareBuildPlan(plan,{...options,resourceLimits:{...options.resourceLimits,maxOutputBytes}}),pack,options.cache);
 }

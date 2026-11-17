@@ -1,11 +1,12 @@
 import {assertReleaseContext,assertSameRelease,assertArtifactTarget,type ReleaseContext} from './release-context';
 import {assertNativeReleaseIdentity,assertSiteDescriptorIdentity,assertArtifactReceipt} from '@godot-js/engine/identities';
 import type {VerifiedRelease,VerifiedAsset} from '@godot-js/engine/browser/verified-loader';
+import {assertArtifactSet,type ArtifactSet} from '@godot-js/engine/artifact-set';
 
 const digest=async(bytes:Uint8Array)=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes.slice().buffer)),value=>value.toString(16).padStart(2,'0')).join('');
 /** Verify the preview origin's own mirrored release, independently of the
  * objects supplied by its parent. Origins/paths may differ; content may not. */
-export async function verifyPreviewReleaseContext(expected:ReleaseContext,options:{baseUrl?:string;fetch?:typeof fetch;signal?:AbortSignal;artifactManifest?:unknown;artifactPack?:Uint8Array;artifactBuildKey?:string;artifactId?:string;allowLegacyArtifacts?:boolean;release?:VerifiedRelease}={}):Promise<void>{
+export async function verifyPreviewReleaseContext(expected:ReleaseContext,options:{baseUrl?:string;fetch?:typeof fetch;signal?:AbortSignal;artifactManifest?:unknown;artifactPack?:Uint8Array;artifactSet?:ArtifactSet;artifactBuildKey?:string;artifactId?:string;allowLegacyArtifacts?:boolean;release?:VerifiedRelease}={}):Promise<void>{
  assertReleaseContext(expected);
  const root=new URL('./',options.baseUrl??location.href),request=options.fetch??globalThis.fetch;
  const read=async(name:string,optional=false)=>{
@@ -22,7 +23,13 @@ export async function verifyPreviewReleaseContext(expected:ReleaseContext,option
   const artifact=options.artifactManifest as {artifactReceipt?:unknown;artifactId?:string;buildKey?:string};
   if(options.artifactId!==undefined&&artifact.artifactId!==undefined&&options.artifactId!==artifact.artifactId)throw Error('E_ARTIFACT_IDENTITY');
   if(options.artifactBuildKey!==undefined&&artifact.buildKey!==undefined&&options.artifactBuildKey!==artifact.buildKey)throw Error('E_ARTIFACT_BUILD_KEY');
-  await assertArtifactReceipt(artifact.artifactReceipt,{pack:options.artifactPack,buildKey:options.artifactBuildKey??artifact.buildKey,artifactId:options.artifactId??artifact.artifactId,allowLegacy:options.allowLegacyArtifacts===true&&descriptor.value.artifactReceiptVersion!==2});
+  if(options.artifactSet){
+   const set=await assertArtifactSet(options.artifactSet);
+   if((descriptor.value.execution??descriptor.value.engine?.execution)?.artifactSetAbi!==1)throw Error('E_ARTIFACT_SET_ABI');
+   if(set.manifest.target.engineReleaseId!==descriptor.value.id||set.manifest.target.engineProfile!==descriptor.value.runtimeProfile)throw Error('E_ARTIFACT_RELEASE_MISMATCH');
+   assertArtifactTarget(descriptor.value,set.manifest.target);
+   if((options.artifactId??artifact.artifactId)!==set.manifest.artifactSetId)throw Error('E_ARTIFACT_IDENTITY');
+  }else await assertArtifactReceipt(artifact.artifactReceipt,{pack:options.artifactPack,buildKey:options.artifactBuildKey??artifact.buildKey,artifactId:options.artifactId??artifact.artifactId,allowLegacy:options.allowLegacyArtifacts===true&&descriptor.value.artifactReceiptVersion!==2});
  }
  const host=descriptor.value.engine?.host;
  if(host){

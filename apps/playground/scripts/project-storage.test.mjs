@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createProjectStorage,projectDatabaseName,copyLegacyProjectStorage} from '../src/project-storage.ts';
+import {createProjectStorage,projectDatabaseName,copyLegacyProjectStorage,isProjectPersistenceUnavailable} from '../src/project-storage.ts';
 import {parseProject,exportProject} from '../src/project-model.ts';
 import {defaultProject} from '../src/project-templates.ts';
 import {database} from './project-storage-fixture.mjs';
@@ -9,6 +9,31 @@ import {database} from './project-storage-fixture.mjs';
 // and an injected abort discards every put, including the recovery backup.
 const legacy=()=>({schemaVersion:1,demoId:'old',entry:'/src/App.tsx',selected:'/asset.bin',files:{'/src/App.tsx':'export default function App(){return null}','/asset.bin':[0,255],'/project.godot':'config_version=5\n'},controls:{speed:1},mode:'production'});
 const snapshot=()=>({selected:'old',projects:[['old',legacy()]],versions:{old:7}});
+test('blocked local persistence does not block an already owned in-memory compile snapshot',async()=>{
+ const storage=createProjectStorage(Promise.reject(new DOMException('IndexedDB is blocked','SecurityError')));
+ const pin=await storage.pinSnapshot({files:{'/entry.ts':'export const value=1;'}},'compile:1');
+ await pin.release();await pin.release();
+ await assert.rejects(storage.load(),/IndexedDB is blocked/);
+ await assert.rejects(storage.save('project'),/IndexedDB is blocked/);
+});
+test('quota failure of a durable compile pin falls back without claiming a saved project',async()=>{
+ const quota=new DOMException('Origin quota is full','QuotaExceededError'),failures=[];
+ const db={objectStoreNames:{contains:name=>['projects','blobs','pins'].includes(name)},transaction(){throw quota;}};
+ const storage=createProjectStorage(Promise.resolve(db),{onPersistenceUnavailable:error=>failures.push(error)});
+ const project=defaultProject();storage.stage('edited',project);
+ const pin=await storage.pinSnapshot({files:{'/entry.ts':'export const value=1;'}},'compile:quota');await pin.release();
+ assert.deepEqual(failures,[quota]);await assert.rejects(storage.save('edited'),{name:'QuotaExceededError'});
+ assert.equal(storage.hasPending('edited'),true);
+});
+test('compile pin fallback never swallows snapshot encoding or application failures',async()=>{
+ const failures=[],storage=createProjectStorage(Promise.resolve(undefined),{onPersistenceUnavailable:error=>failures.push(error)});
+ await assert.rejects(storage.pinSnapshot({files:{'/bad.ts':()=>{}}}),{name:'DataCloneError'});
+ const bad=createProjectStorage(Promise.reject(Error('broken storage implementation')),{onPersistenceUnavailable:error=>failures.push(error)});
+ await assert.rejects(bad.pinSnapshot({files:{'/entry.ts':'text'}}),/broken storage implementation/);
+ assert.equal(isProjectPersistenceUnavailable(new DOMException('bad value','DataCloneError')),false);
+ assert.equal(isProjectPersistenceUnavailable(Object.assign(Error('fake quota'),{name:'QuotaExceededError'})),false);
+ assert.deepEqual(failures,[]);
+});
 test('migration commit backs up the complete original snapshot atomically and keeps original export',async()=>{
  const original=snapshot(),db=database(original),storage=createProjectStorage(Promise.resolve(db));
  const loaded=await storage.load();assert.deepEqual(db.records.get('current'),original);assert.deepEqual(loaded.migrated,['old']);
@@ -130,4 +155,24 @@ test('an edit racing an already committed recovery rejects the old UI snapshot a
  const result=await storage.restore({selected:'same',projects:[['same',replacement]]});assert.equal(result.interrupted,true);assert.equal(result.snapshot,undefined);assert.equal(storage.hasPending('same'),true);
  assert.deepEqual((await storage.save('same')).conflicts,[]);visible.files['/later.txt']='later';storage.stage('same',visible);await storage.save('same');
  const saved=db.records.get('current').projects[0][1];assert.equal(saved.files['/note.txt'],'typed at commit');assert.equal(saved.files['/later.txt'],'later');
+});
+
+test('an edit after the restore completion handler revokes publication and remains saveable',async()=>{
+ const before=defaultProject(),replacement=defaultProject(),initial={selected:'same',projects:[['same',before]],versions:{same:1}};
+ const db=database(initial),storage=createProjectStorage(Promise.resolve(db));storage.remember(initial);
+ const edited=structuredClone(before);edited.files['/note.txt']='typed after commit';
+ const transaction=db.transaction.bind(db);let intercept=true;
+ db.transaction=(...args)=>{const tx=transaction(...args);if(args[1]==='readwrite'&&intercept){let handler;Object.defineProperty(tx,'oncomplete',{get:()=>handler,set:fn=>{handler=()=>{intercept=false;fn();storage.stage('same',edited);};}});}return tx;};
+ const result=await storage.restore({selected:'same',projects:[['same',replacement]]});
+ assert.equal(result.snapshot,undefined);assert.equal(result.interrupted,true);assert.equal(result.canApply(),false);assert.equal(storage.hasPending('same'),true);
+ assert.deepEqual((await storage.save('same')).conflicts,[]);assert.equal(db.records.get('current').projects[0][1].files['/note.txt'],'typed after commit');
+});
+
+test('restore publication stays revoked after an edit is saved and a newer restore supersedes old results',async()=>{
+ const initial={selected:'same',projects:[['same',defaultProject()]],versions:{same:1}},db=database(initial),storage=createProjectStorage(Promise.resolve(db));storage.remember(initial);
+ const first=await storage.restore(initial);assert.equal(first.canApply(),true);
+ const edited=defaultProject();edited.files['/note.txt']='fresh edit';storage.stage('same',edited);await storage.save('same');
+ assert.equal(first.canApply(),false,'Saving an edit must not make an older view current again');
+ const second=await storage.restore(initial);assert.equal(second.canApply(),true);
+ const third=await storage.restore(initial);assert.equal(second.canApply(),false);assert.equal(third.canApply(),true);
 });

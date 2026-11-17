@@ -6,6 +6,8 @@
 #include "jsb_web_handle_scope.h"
 #include "jsb_web_array_buffer.h"
 #include "jsb_web_promise_reject.h"
+#include <atomic>
+#include "core/os/thread.h"
 
 namespace jsb::impl
 {
@@ -74,6 +76,9 @@ namespace v8
 
         static Isolate* New(const CreateParams& params);
         void Dispose();
+        bool is_disposed() const { return disposed_.load(std::memory_order_acquire); }
+        bool is_owner_thread() const { return Thread::get_caller_id() == owner_thread_; }
+        uint32_t handle_scope_depth() const { return handle_scope_depth_; }
 
         void* GetData(int index) const { jsb_check(index == 0); return embedder_data_; }
         void SetData(int index, void* data);
@@ -112,19 +117,15 @@ namespace v8
 
         void _add_reference()
         {
-            jsb_check(ref_count_ > 0);
-            ++ref_count_;
-            JSB_WEB_LOG(VeryVerbose, "_add_reference %s", ref_count_);
+            const uint32_t previous = ref_count_.fetch_add(1, std::memory_order_relaxed);
+            jsb_check(previous > 0 && previous != UINT32_MAX);
         }
 
         void _remove_reference()
         {
-            jsb_check(ref_count_ > 0);
-            if (--ref_count_ == 0)
-            {
-                _release();
-            }
-            JSB_WEB_LOG(VeryVerbose, "_remove_reference %s", ref_count_);
+            const uint32_t previous = ref_count_.fetch_sub(1, std::memory_order_acq_rel);
+            jsb_check(previous > 0);
+            if (previous == 1) { _release(); return; }
         }
 
         template<int N>
@@ -147,8 +148,11 @@ namespace v8
 
         void _release();
 
-        uint32_t ref_count_;
-        bool disposed_;
+        std::atomic<uint32_t> ref_count_;
+        std::atomic<bool> disposed_;
+        std::atomic<bool> runtime_released_{false};
+        const Thread::ID owner_thread_;
+        uint32_t handle_scope_depth_ = 0;
         jsb::impl::JSRuntime rt_;
         HandleScope* handle_scope_;
 

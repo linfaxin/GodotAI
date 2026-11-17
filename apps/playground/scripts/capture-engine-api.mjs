@@ -104,7 +104,7 @@ export async function captureEngineApi({engineJs,engineWasm,output,reportPath=ou
    window.__engineApiCapture={ir:null,audit:null,exitCode:null};
    window.__captureEngineApi=(raw,audit)=>{window.__engineApiCapture.ir=JSON.parse(raw);window.__engineApiCapture.audit=JSON.parse(audit);};
    const chunks=[];let total;
-   const session=new EngineHost.BrowserEngineSession({identity:{runId:crypto.randomUUID(),revision:1,generation:'capture',buildKey:'capture'},executionModel:execution?.executionModel??'window',requiresCrossOriginIsolation:!!execution?.requiresCrossOriginIsolation,onDiagnostic:item=>{throw Error(item.message);},onProject:item=>{
+   const session=new EngineHost.BrowserEngineSession({identity:{runId:crypto.randomUUID(),revision:1,generation:'capture',buildKey:'capture'},executionModel:execution?.executionModel??'window',requiresCrossOriginIsolation:!!execution?.requiresCrossOriginIsolation,hostResourceAbi:execution?.hostResourceAbi,onDiagnostic:item=>{throw Error(item.message);},onProject:item=>{
     if(item.type!=='engine-api-capture-chunk')return;
     if(!Number.isSafeInteger(item.index)||!Number.isSafeInteger(item.total)||item.total<1||item.total>1024||item.index<0||item.index>=item.total||typeof item.data!=='string'||item.data.length>65536||total!==undefined&&total!==item.total||chunks[item.index]!==undefined)throw Error('E_ENGINE_API_CHUNKS');
     total=item.total;chunks[item.index]=item.data;
@@ -115,6 +115,7 @@ export async function captureEngineApi({engineJs,engineWasm,output,reportPath=ou
    const deadline=new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('E_ENGINE_API_CAPTURE_TIMEOUT')),timeout);});
    const initialize=async()=>{
     const engine=new Engine({canvas:document.querySelector('canvas'),executable:'/engine/godot',emscriptenPoolSize:2,persistentPaths:[],persistentDrops:false,onExit:code=>{window.__engineApiCapture.exitCode=code;exited();}});
+    session.installResourceOwner(engine);
     const pack=new Uint8Array(await(await fetch('/capture.pck')).arrayBuffer());
     await engine.preloadFile(pack,'/capture.pck');await engine.init('/engine/godot');session.attachEngine(engine);
     await Promise.race([engine.start({args:['--main-pack','/capture.pck','--rendering-method','gl_compatibility']}),exit]);

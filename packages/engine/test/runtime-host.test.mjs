@@ -56,6 +56,13 @@ test('script workers report diagnostics but cannot bind or emit project traffic'
  const binding=createRuntimeBinding({sessionId:'worker',role:'script-worker',onDiagnostic:()=>true,onProject:()=>true});
  assert.equal(binding.emitProjectEvent({}),false);assert.throws(()=>binding.bindProjectCommand(()=>{}),/E_RUNTIME_ROLE/);assert.equal(binding.reportDiagnostic({kind:'recoverable',message:'worker'}),true);
 });
+test('script workers own entry cleanup without gaining project traffic or engine progress',async()=>{
+ let progressed=0,cleaned=false,finish;const complete=new Promise(resolve=>finish=resolve),binding=createRuntimeBinding({sessionId:'worker-lifetime',role:'script-worker',onProgress:()=>progressed++,onProject:()=>true});
+ const entry=binding.openEntry();entry.lifetime.defer(async()=>{for(let i=0;i<8;i++)await Promise.resolve();cleaned=true;finish();});entry.ready();
+ assert.equal(entry.host.role,'script-worker');assert.equal(entry.host.emitProjectEvent({}),false);assert.throws(()=>entry.host.bindProjectCommand(()=>{}),/E_RUNTIME_ROLE/);binding.markProgress();assert.equal(progressed,0);
+ binding.beginClose();assert.equal((await binding.drainClose()).status,'pending');await complete;await flush();assert.equal(cleaned,true);assert.equal(binding.closeProgress().status,'complete');binding.endNativeEpoch('untracked');assert.equal(binding.snapshotSummary().entries[0].cleanup,'complete');
+ assert.throws(()=>createRuntimeBinding({sessionId:'host-only',role:'host'}).openEntry(),/E_RUNTIME_ROLE/);
+});
 test('factory survives independent serialization without module closure dependencies',async()=>{
  const context=vm.createContext({});vm.runInContext('this.binding=('+createRuntimeBinding.toString()+')({sessionId:"serialized",role:"engine"});binding.beginNativeEpoch("epoch");const entry=binding.openEntry();entry.ready();entry.close();binding.endNativeEpoch("epoch");',context);
  assert.equal(context.binding.snapshotSummary().sealed,true);assert.equal(context.binding.snapshotSummary().entries[0].cleanup,'complete');

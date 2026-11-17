@@ -8,7 +8,7 @@ import { slash } from './fs.js';
 export function checkHostProfile(program: ts.Program, runtimeRoot: string, projectRoot: string, profileId?: string): void {
   const profile = getProfileSchema(profileId);
   const checker = program.getTypeChecker();
-  const components = program.getSourceFile(path.join(runtimeRoot, 'dist/components.d.ts'));
+  const components = program.getSourceFile(path.join(runtimeRoot, 'dist/engine-components.d.ts'));
   const module = components && checker.getSymbolAtLocation(components);
   const hosts = new Map<ts.Symbol, string>();
   const declarations = new Map<ts.Declaration, string>();

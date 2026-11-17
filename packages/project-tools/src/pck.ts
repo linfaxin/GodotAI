@@ -2,6 +2,8 @@ import SparkMD5 from 'spark-md5';
 import { ProjectToolError as BrowserBuildError } from './errors.js';
 import { canonicalPath } from './paths.js';
 import {knownByteMap,retainBytes} from './owned-bytes.js';
+export {readPckIndex,pckMd5} from '@godot-js/engine/pck-index';
+export type {PckIndex,PckIndexEntry,PckReadLimits} from '@godot-js/engine/pck-index';
 
 export interface PackOptions { formatVersion?: 3; engineVersion?: readonly [number, number, number]; maxBytes?: number; maxFiles?: number }
 export interface PackResult { pack: Uint8Array; index: Readonly<Record<string, { offset: number; size: number }>> }

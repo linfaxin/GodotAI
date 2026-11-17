@@ -1,5 +1,6 @@
 #ifndef GODOTJS_TRANSPILER_H
 #define GODOTJS_TRANSPILER_H
+#include "jsb_native_world.h"
 
 #include "jsb_bridge_pch.h"
 #include "jsb_environment.h"
@@ -292,6 +293,7 @@ namespace jsb
 
         static void constructor(const v8::FunctionCallbackInfo<v8::Value>& info)
         {
+            NativeInteropScope native_interop;
             v8::Isolate* isolate = info.GetIsolate();
             const internal::Index32 class_id(info.Data().As<v8::Uint32>()->Value());
 

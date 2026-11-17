@@ -31,6 +31,11 @@ namespace jsb::impl
         }
     }
 
+    bool Broker::is_closed(v8::Isolate* isolate) { return isolate->is_disposed(); }
+    bool Broker::is_owner(v8::Isolate* isolate) { return isolate->is_owner_thread(); }
+    void Broker::retain(v8::Isolate* isolate) { isolate->_add_reference(); }
+    void Broker::release(v8::Isolate* isolate) { isolate->_remove_reference(); }
+
     JSRuntime Broker::get_engine(v8::Isolate* isolate)
     {
         return isolate->rt();

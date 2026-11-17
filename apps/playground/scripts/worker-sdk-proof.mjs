@@ -1,5 +1,6 @@
 import {readFile,readdir} from 'node:fs/promises';
 import path from 'node:path';
+import {pathToFileURL} from 'node:url';
 import ts from 'typescript';
 import {canonical,digest} from './site-evidence.mjs';
 
@@ -65,18 +66,31 @@ export async function proveWorkerSdkBuild(repository,{packages=WORKER_SDK_PACKAG
    if(result.emitSkipped||parsed.errors.length)throw Error('E_WORKER_SDK_EMIT: '+directory+'/'+filename+' '+ts.formatDiagnosticsWithColorAndContext([...parsed.errors,...ts.getPreEmitDiagnostics(program)].slice(0,5),{getCanonicalFileName:value=>value,getCurrentDirectory:()=>repository,getNewLine:()=> '\n'}));
   }
   for(const [filename,text]of emitted){
-   // This one entry is deliberately replaced by the package build script.
-   if(directory==='scripts/jsb.react'&&filename===path.join(repository,directory,'dist/reconciler.js'))continue;
    await compare(filename,text);
+  }
+  if(directory==='packages/project-tools'){
+   const {nativeNamespaceSourceOutput}=await import(pathToFileURL(path.join(repository,directory,'scripts/build-native-namespace-source.mjs')).href);
+   const namespace=await nativeNamespaceSourceOutput(path.join(repository,directory));
+   if(await readFile(namespace.filename,'utf8')!==namespace.source)throw Error('E_WORKER_SDK_STALE: native namespace source differs from its producer; rebuild project-tools');
+  }
+  if(directory==='packages/engine'){
+   const {runtimeBindingSourceOutput}=await import(pathToFileURL(path.join(repository,directory,'scripts/build-runtime-binding-source.mjs')).href);
+   const binding=await runtimeBindingSourceOutput(path.join(repository,directory));
+   if(await readFile(binding.filename,'utf8')!==binding.source)throw Error('E_WORKER_SDK_STALE: runtime binding source differs from its producer; rebuild engine');
+   const {runtimeBootstrapOutputs}=await import(pathToFileURL(path.join(repository,directory,'scripts/build-runtime-bootstrap.mjs')).href);
+   for(const [filename,bytes]of await runtimeBootstrapOutputs(path.join(repository,directory))){
+    if(filename.endsWith('/src/browser/pthread/runtime-bootstrap-source.ts')){
+     if(!(await readFile(filename)).equals(Buffer.from(bytes)))throw Error('E_WORKER_SDK_STALE: prebuilt pthread bootstrap source; rebuild engine');
+    }else await compare(filename,bytes);
+   }
   }
  }
  if(verifyReactGenerated&&packages.includes('scripts/jsb.react')){
   const {build}=await import('esbuild'),sdk=path.join(repository,'scripts/jsb.react');
-  await compare(path.join(sdk,'dist/reconciler.js'),'if (process.env.NODE_ENV === "production") { module.exports = require("./reconciler.production.js"); } else { module.exports = require("./reconciler.development.js"); }\n');
   const performance=await build({absWorkingDir:sdk,entryPoints:[path.join(sdk,'src/internal/performance.ts')],outfile:path.join(sdk,'dist/internal/performance.mjs'),format:'esm',platform:'neutral',target:'es2022',sourcemap:true,write:false});
   for(const output of performance.outputFiles)await compare(output.path,output.contents);
   for(const mode of ['development','production']){
-   const compiled=await build({absWorkingDir:sdk,entryPoints:[path.join(sdk,'src/reconciler.ts')],outfile:path.join(sdk,'dist/reconciler.'+mode+'.js'),bundle:true,platform:'neutral',format:'cjs',target:'es2022',sourcemap:true,external:['react'],inject:[path.join(sdk,'dist/internal/performance.mjs')],define:{'process.env.NODE_ENV':JSON.stringify(mode)},plugins:[{name:'godot-private-scheduler',setup(builder){builder.onResolve({filter:/^(?:scheduler|\.\.\/scheduler)$/},()=>({path:'./scheduler.js',external:true}));}}],write:false});
+   const compiled=await build({absWorkingDir:sdk,entryPoints:[path.join(sdk,'src/internal/reconciler-vendor.ts')],outfile:path.join(sdk,'dist/reconciler.'+mode+'.js'),bundle:true,platform:'neutral',format:'cjs',target:'es2022',sourcemap:true,external:['react'],inject:[path.join(sdk,'dist/internal/performance.mjs')],define:{'process.env.NODE_ENV':JSON.stringify(mode)},plugins:[{name:'godot-private-scheduler',setup(builder){builder.onResolve({filter:/^(?:scheduler|\.\.\/scheduler)$/},()=>({path:'./scheduler.js',external:true}));}}],write:false});
    for(const output of compiled.outputFiles)await compare(output.path,output.contents);
   }
  }

@@ -28,6 +28,13 @@ namespace jsb
         }
 
         static void collect(Environment* p_env) { p_env->_on_gc_request(); }
+        static void discard_transfer(const Variant& value)
+        {
+            std::vector<Environment::AsyncCall> unconsumed;
+            unconsumed.emplace_back(Environment::AsyncCall::TYPE_TRANSFER_, memnew(TransferData({}, 0, value)));
+            unconsumed.reserve(8); // payload ownership survives vector movement
+        }
+
     };
 }
 

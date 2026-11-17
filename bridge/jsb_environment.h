@@ -2,6 +2,7 @@
 #define GODOTJS_ENVIRONMENT_H
 
 #include <future>
+#include <atomic>
 #include "jsb_bridge_pch.h"
 #include "jsb_module.h"
 #include "jsb_message.h"
@@ -30,6 +31,10 @@
 namespace jsb
 {
     class ReactBridge;
+    class NativeWorld;
+    class EngineRunLease;
+    class ResourceScopes;
+    class EngineHostOperations;
     enum : uint32_t { kIsolateEmbedderData = 0, };
     enum : uint32_t { kContextEmbedderData = 0, };
 
@@ -91,9 +96,12 @@ namespace jsb
 
             void* binding_;
             std::shared_ptr<ObjectBindingTicket> ticket_;
+            struct TransferDeleter { void operator()(TransferData* data) const { if (data) memdelete(data); } };
+            std::unique_ptr<TransferData, TransferDeleter> transfer_;
 
             AsyncCall(Type p_type, void* p_binding, const std::shared_ptr<ObjectBindingTicket>& p_ticket = {})
-                : type_(p_type), binding_(p_binding), ticket_(p_ticket)
+                : type_(p_type), binding_(p_binding), ticket_(p_ticket),
+                  transfer_(p_type == TYPE_TRANSFER_ ? static_cast<TransferData*>(p_binding) : nullptr)
             {}
             ~AsyncCall() = default;
 
@@ -124,7 +132,26 @@ namespace jsb
 
         /*volatile*/
         Thread::ID thread_id_;
+        const Thread::ID runtime_owner_thread_;
+        std::atomic<bool> runtime_released_{false};
+        std::atomic<Thread::ID> runtime_release_thread_{Thread::UNASSIGNED_ID};
         const uint64_t binding_epoch_;
+        std::shared_ptr<NativeWorld> native_world_;
+        v8::Global<v8::Function> native_cleanup_begin_;
+        v8::Global<v8::Function> native_cleanup_tick_;
+        v8::Global<v8::Function> native_cleanup_seal_;
+        bool native_cleanup_started_ = false;
+        bool native_cleanup_checkpoint_ = false;
+        bool native_cleanup_failed_ = false;
+        std::atomic<bool> native_cleanup_aborted_{false};
+        std::atomic<bool> native_cleanup_registered_{false};
+        // 0 running, 1 owner cleanup requested, 2 complete, 3 disposed/unconfirmed, 4 failed.
+        std::atomic<unsigned> native_cleanup_phase_{0};
+        std::mutex native_transfer_admission_mutex_;
+        std::atomic<uint64_t> native_cleanup_deadline_us_{0};
+#if JSB_WITH_WEB
+        uint32_t web_checkpoint_ticket_ = 0;
+#endif
         uint64_t next_binding_generation_ = 0;
         // Owner-thread registry also covers bindings retired by a background
         // callback before its handle-reset message reaches this thread.
@@ -169,6 +196,9 @@ namespace jsb
 
         ObjectDB object_db_;
         std::unique_ptr<ReactBridge> react_bridge_;
+        std::unique_ptr<EngineRunLease> engine_run_lease_;
+        std::unique_ptr<ResourceScopes> resource_scopes_;
+        std::unique_ptr<EngineHostOperations> engine_host_operations_;
         HashSet<void*> persistent_objects_;
 
         internal::VariantAllocator variant_allocator_;
@@ -278,6 +308,12 @@ namespace jsb
         // is no critical references exist (such as Global handles) to avoid crashes.
         // Should avoid any script execution during this phase (after disposed before destructed).
         void dispose();
+        // Explicit physical release after every VM scope has unwound. Production
+        // Web owners call this before dropping their final owner reference.
+        void release_runtime_on_owner();
+        bool runtime_released() const { return runtime_released_.load(std::memory_order_acquire); }
+        bool is_runtime_owner_thread() const { return Thread::get_caller_id() == runtime_owner_thread_; }
+        Thread::ID runtime_release_thread() const { return runtime_release_thread_.load(std::memory_order_acquire); }
 
         jsb_force_inline static Environment* wrap(v8::Isolate* p_isolate)
         {
@@ -295,6 +331,23 @@ namespace jsb
         jsb_force_inline v8::Isolate* get_isolate() const { return isolate_; }
         jsb_force_inline v8::Local<v8::Context> get_context() const { return context_.Get(isolate_); }
         jsb_force_inline EnvironmentID id() const { return (EnvironmentID) this; }
+        uint64_t binding_epoch() const { return binding_epoch_; }
+        const std::shared_ptr<NativeWorld>& get_native_world() const { return native_world_; }
+        bool is_native_cleanup_checkpoint() const { return native_cleanup_checkpoint_; }
+        bool has_native_cleanup() const { return native_cleanup_registered_.load(std::memory_order_acquire); }
+        void request_native_cleanup(uint64_t deadline_us) { native_cleanup_deadline_us_.store(deadline_us, std::memory_order_release); unsigned running = 0; native_cleanup_phase_.compare_exchange_strong(running, 1); }
+        uint64_t native_cleanup_budget_us() const;
+        unsigned native_cleanup_phase() const { return native_cleanup_phase_.load(std::memory_order_acquire); }
+#if JSB_WITH_WEB
+        uint32_t enter_web_native_checkpoint();
+        void leave_web_native_checkpoint(uint32_t ticket);
+#endif
+        bool set_native_cleanup(const v8::Local<v8::Function>& begin, const v8::Local<v8::Function>& tick, const v8::Local<v8::Function>& seal);
+        void begin_native_cleanup();
+        void seal_native_cleanup();
+        bool tick_native_cleanup(uint32_t job_budget = 256);
+        void exec_cleanup_async_calls();
+        static std::vector<std::shared_ptr<Environment>> all_environments();
 
         jsb_force_inline internal::VariantInfoCollection& get_variant_info_collection() { return variant_info_collection_; }
 
@@ -337,7 +390,8 @@ namespace jsb
         Variant call_script_method(ScriptClassID p_script_class_id, NativeObjectID p_object_id, const StringName& p_method, const Variant** p_argv, int p_argc, Callable::CallError& r_error);
 
         bool prepare_transfer_out(NativeObjectID p_worker_handle_id, int transfer_index, const Variant& p_variant, TransferData& r_transfer_data);
-        void finalize_transfer_out(const TransferData& p_data);
+        bool validate_transfer_out(const TransferData& p_data, v8::Global<v8::Object>& p_pin);
+        bool finalize_transfer_out(const TransferData& p_data);
         void transfer_in_bind(const v8::Local<v8::Context>& p_context, const TransferData& p_data);
         void transfer_in_apply_state(const TransferData& p_data);
 
@@ -436,6 +490,17 @@ namespace jsb
         jsb_force_inline void notify_microtasks_run() { flags_ |= EF_MicrotaskCheckpoint; }
         jsb_force_inline bool is_disposing() const { return (flags_ & EF_PreDispose) != 0; }
 
+        static bool allow_variant_access(v8::Isolate* isolate)
+        {
+            Environment* env = wrap(isolate);
+            if (!env || env->variant_allocator_.is_sealed())
+            {
+                impl::Helper::throw_error(isolate, "E_NATIVE_EPOCH_SEALED: native Variant payload is retired");
+                return false;
+            }
+            return true;
+        }
+
         jsb_force_inline Variant* alloc_variant(const Variant& p_templet) { jsb_check(p_templet.get_type() != Variant::OBJECT); return variant_allocator_.alloc(p_templet); }
         jsb_force_inline Variant* alloc_variant() { return variant_allocator_.alloc(); }
         jsb_force_inline void dealloc_variant(Variant* p_var) { variant_allocator_.free(p_var); }
@@ -470,6 +535,9 @@ namespace jsb
         jsb_force_inline NativeObjectID try_get_object_id(void* p_pointer) const { return object_db_.try_get_object_id(p_pointer); }
 
         ReactBridge& get_react_bridge();
+        EngineRunLease& get_engine_run_lease();
+        ResourceScopes& get_resource_scopes();
+        EngineHostOperations& get_engine_host_operations();
         jsb_force_inline ReactBridge* get_react_bridge_if_exists() const { return react_bridge_.get(); }
         jsb_force_inline uint64_t react_owner_for_pointer(void* p_pointer) const { return object_db_.get_react_owner(p_pointer); }
         jsb_force_inline bool claim_react_owner(NativeObjectID p_id, uint64_t p_owner, bool p_created = false, ObjectID p_object_id = ObjectID())
@@ -538,6 +606,8 @@ namespace jsb
         // [thread safe] it's OK to call this method before the env is initialized.
         void post_message(Message&& p_message)
         {
+            std::lock_guard<std::mutex> admission(native_transfer_admission_mutex_);
+            if (native_cleanup_phase() != 0) return;
             JSB_LOG(VeryVerbose, "inbox message %d: %d", p_message.get_id(), p_message.get_buffer().size());
             inbox_.add(std::move(p_message));
         }
@@ -745,27 +815,13 @@ namespace jsb
 
             // valuetype deleter is run in a background thread in v8.impl and jsc.impl
 #if JSB_WITH_V8 || JSB_WITH_JAVASCRIPTCORE
-            // `Callable/Array/Dictionary` may contain reference-based objects.
-            // executing the destructor of a reference-based object may cause crash (not thread-safe),
-            // release them in main thread for simplicity.
-            if (const Variant::Type type = variant->get_type();
-                type == Variant::CALLABLE || type == Variant::ARRAY || type == Variant::DICTIONARY)
-            {
-                env->variant_allocator_.free_safe(variant);
-                JSB_LOG(VeryVerbose, "deleting possibly reference-based variant (%s:%d) thread:%s",
-                    Variant::get_type_name(type), (uintptr_t) variant,
-                    uitos(Thread::get_caller_id()));
-                return;
-            }
-            else
-            {
-                // JSB_LOG(VeryVerbose, "deleting valuetype variant (%s:%d)", Variant::get_type_name(type), (uintptr_t) variant);
-                jsb_check(type != Variant::OBJECT);
-            }
+            env->variant_allocator_.free_safe(variant);
+            return;
 #endif
             env->dealloc_variant(variant);
         }
 
+        void release_runtime();
         void free_object(void* p_pointer, FinalizationType p_finalize, const std::shared_ptr<ObjectBindingTicket>& p_ticket = {}, bool p_native_free = false);
     };
 

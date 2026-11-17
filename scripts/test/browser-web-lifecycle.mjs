@@ -11,6 +11,7 @@ import {fileURLToPath} from 'node:url';
 import {serveBrowserSite} from './browser-server.mjs';
 import {options} from '../release/web-release-utils.mjs';
 import {webLifecycleBuildProof} from '../release/patch-web-lifecycle.mjs';
+import {resolveBrowserExecutable} from './browser-launch.mjs';
 
 const repository=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../..');
 const request=createRequire(path.join(repository,'apps/playground/package.json'));
@@ -33,6 +34,9 @@ exports.default=class NativeLifecycleProbe extends G.Node {
   const binding=globalThis.__godotjsRuntimeHost;
   if(!binding||typeof binding.beginClose!=='function')throw Error('Missing managed lifecycle binding');
   this.entry=binding.openEntry();this.frames=0;
+  const cleanupTicks=[];
+  this.entry.onCleanupTick(()=>{for(const resume of cleanupTicks.splice(0))resume();});
+  const nextCleanupTick=()=>new Promise(resolve=>cleanupTicks.push(resolve));
   const audioServer=G.AudioServer,staleNative=audioServer.get_bus_index;
   this.callStaleNative=()=>staleNative.call(audioServer,'Master');
   // A pthread can close before queued microtasks run. Observe the real logical
@@ -55,13 +59,13 @@ exports.default=class NativeLifecycleProbe extends G.Node {
    const frames=this.frames;
    emit({phase:'cleanup-start',frames,worker:typeof WorkerGlobalScope!=='undefined'});
    if(mode==='hang-cleanup')await new Promise(()=>{});
-   await new Promise(resolve=>setTimeout(resolve,25));
+   await nextCleanupTick();
    if(this.frames!==frames)throw Error('Business frames continued during native cleanup gate');
    if(G.AudioServer.get_bus_index('Master')<0)throw Error('Audio service closed before cleanup');
-   if(mode==='failing-cleanup')throw Error('EXPECTED_LIFECYCLE_CLEANUP_FAILURE');
    this.attached.queue_free();this.detached.queue_free();
-   for(let i=0;i<200&&(G.is_instance_valid(this.attached)||G.is_instance_valid(this.detached));i++)await new Promise(resolve=>setTimeout(resolve,5));
+   for(let i=0;i<200&&(G.is_instance_valid(this.attached)||G.is_instance_valid(this.detached));i++)await nextCleanupTick();
    if(G.is_instance_valid(this.attached)||G.is_instance_valid(this.detached))throw Error('Native delete queue did not run during cleanup');
+   if(mode==='failing-cleanup')throw Error('EXPECTED_LIFECYCLE_CLEANUP_FAILURE');
    emit({phase:'cleanup-complete',frames:this.frames,destroyed:true});
   });
   if(mode!=='pending-startup')this.entry.finishStartup();
@@ -115,8 +119,9 @@ export async function runWebLifecycleProbe({engineReport,out,timeout=10000}={}){
  await writeFile(path.join(site,'index.html'),'<!doctype html><link rel="icon" href="data:,"><canvas id="canvas" width="96" height="64"></canvas><script src="session.js"></script><script src="engine/godot.js"></script>');
  const tls=await localCertificate(directory);
  const server=await serveBrowserSite({root:site,tls,isolation:report.execution.requiresCrossOriginIsolation?'require-corp':false});
- const browser=await chromium.launch({headless:true,executablePath:process.env.BROWSER_EXECUTABLE??'/usr/bin/chromium',args:['--no-sandbox','--enable-webgl','--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader','--disable-dev-shm-usage','--ignore-certificate-errors-spki-list='+tls.spki]});
- const result={schemaVersion:1,kind:'godotjs-real-web-lifecycle',status:'running',engineReport:path.resolve(engineReport),engineReportSha256:hash(reportBytes),templateSha256:report.template.sha256,execution:report.execution,browser:browser.version(),packs,cases:[]};
+ const selected=resolveBrowserExecutable(chromium,'chromium');
+ const browser=await chromium.launch({headless:true,executablePath:selected.executablePath,args:['--no-sandbox','--enable-webgl','--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader','--disable-dev-shm-usage','--ignore-certificate-errors-spki-list='+tls.spki]});
+ const result={schemaVersion:1,kind:'godotjs-real-web-lifecycle',status:'running',engineReport:path.resolve(engineReport),engineReportSha256:hash(reportBytes),templateSha256:report.template.sha256,sdkBundleSha256:hash(await readFile(path.join(site,'session.js'))),execution:report.execution,browser:browser.version(),packs,cases:[]};
  try{
   for(const mode of Object.keys(packs)){
    const page=await browser.newPage(),events=[],errors=[],logs=[],failedRequests=[];
@@ -127,19 +132,14 @@ export async function runWebLifecycleProbe({engineReport,out,timeout=10000}={}){
    await page.goto(server.url);
    await page.evaluate(async({mode,execution})=>{
     const probe=window.__lifecycleProbe={exitCode:null,diagnostics:[],errors:[],forced:false,module:null};
-    const session=probe.session=new EngineHost.BrowserEngineSession({identity:{runId:crypto.randomUUID(),revision:1,generation:'lifecycle',buildKey:'lifecycle'},executionModel:execution.executionModel,requiresCrossOriginIsolation:execution.requiresCrossOriginIsolation,onDiagnostic:item=>probe.diagnostics.push(item)});
-    // Window execution is a native gate probe only. Dedicated product coverage
-    // uses the actual Worker host; pthread installs this in its own bootstrap.
-    if(execution.executionModel==='window')globalThis.__godotjsInstallLifecycle=module=>{
-     probe.module=module;
-     EngineHost.installNativeLifecycleGate(module,globalThis.__godotjsRuntimeHost,{onError:error=>probe.errors.push(String(error))});
-    };
+    const deadlineSet=globalThis.setTimeout.bind(globalThis),deadlineClear=globalThis.clearTimeout.bind(globalThis);
+    const session=probe.session=new EngineHost.BrowserEngineSession({identity:{runId:crypto.randomUUID(),revision:1,generation:'lifecycle',buildKey:'lifecycle'},executionModel:execution.executionModel,requiresCrossOriginIsolation:execution.requiresCrossOriginIsolation,hostResourceAbi:execution.hostResourceAbi,onDiagnostic:item=>probe.diagnostics.push(item)});
     const engine=probe.engine=new Engine({canvas:document.querySelector('canvas'),executable:'/engine/godot',emscriptenPoolSize:2,persistentPaths:[],persistentDrops:false,onExit:code=>{probe.exitCode=code;}});
     const pack=new Uint8Array(await(await fetch('/'+mode+'.pck')).arrayBuffer());
-    await engine.preloadFile(pack,'/application.pck');await engine.init('/engine/godot');session.attachEngine(engine);
+    session.installResourceOwner(engine);await engine.preloadFile(pack,'/application.pck');await engine.init('/engine/godot');session.attachEngine(engine);if(execution.executionModel==='window')probe.module=engine.rtenv;
     let deadline;
-    try{await Promise.race([engine.start({args:['--main-pack','/application.pck','--rendering-method','gl_compatibility']}),new Promise((_,reject)=>{deadline=setTimeout(()=>reject(Error('E_LIFECYCLE_NATIVE_START_TIMEOUT')),120000);})]);}
-    finally{clearTimeout(deadline);}
+    try{await Promise.race([engine.start({args:['--main-pack','/application.pck','--rendering-method','gl_compatibility']}),new Promise((_,reject)=>{deadline=deadlineSet(()=>reject(Error('E_LIFECYCLE_NATIVE_START_TIMEOUT')),120000);})]);}
+    finally{deadlineClear(deadline);}
    },{mode,execution:report.execution});
    await until(()=>events.some(event=>event.phase==='ready'),'actual project ready');
    if(mode==='command-quit'){
@@ -157,7 +157,7 @@ export async function runWebLifecycleProbe({engineReport,out,timeout=10000}={}){
     const facts=p.session.sessionFacts({...(p.exitCode!==null?{nativeExit:{code:p.exitCode}}:{}),forcedTerminationIssued:p.forced});
     const native=p.module?{version:p.module.godotjsLifecycleVersion,ticks:p.module.godotjsNativeCleanupTicks,phase:p.module.godotjsNativeExitPhase}:null;
     const cleanup=p.cleanup??await p.session.dispose(p.forced?'forced':'clean');
-    return {exitCode:p.exitCode,diagnostics:p.diagnostics,errors:p.errors,forced:p.forced,facts,native,cleanup};
+    return {exitCode:p.exitCode,diagnostics:p.diagnostics,errors:p.errors,forced:p.forced,facts:{...facts,hostCleanup:cleanup.status},native,cleanup};
    });
    assert.deepEqual(errors,[]);assert.deepEqual(observed.errors,[]);
    if(mode==='failing-cleanup')assert(observed.diagnostics.some(item=>item.message==='EXPECTED_LIFECYCLE_CLEANUP_FAILURE'));
@@ -169,12 +169,12 @@ export async function runWebLifecycleProbe({engineReport,out,timeout=10000}={}){
    if(!['hang-cleanup','pending-startup'].includes(mode)){
     assert.equal(observed.exitCode,0);
     if(mode==='failing-cleanup'){
-     assert(first('exit-tree')>first('cleanup-start'));
+     assert.equal(first('exit-tree'),-1,'Native finalization cannot resume project callbacks');
      assert.equal(observed.facts.entryCleanup,'failed');
      assert.equal(observed.facts.failure.message,'EXPECTED_LIFECYCLE_CLEANUP_FAILURE');
     }else{
      assert(first('cleanup-complete')>first('cleanup-start'));
-     assert(first('exit-tree')>first('cleanup-complete'),'Native tree finalization occurs after awaited cleanup');
+     assert.equal(first('exit-tree'),-1,'Native finalization cannot resume project callbacks');
      assert.equal(observed.facts.entryCleanup,'complete');
     }
     assert.equal(observed.facts.runtimeSummary,'sealed');

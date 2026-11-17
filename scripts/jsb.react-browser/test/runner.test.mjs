@@ -7,6 +7,7 @@ import { PreviewRunner } from '../dist/runner.js';
 import { PREVIEW_PROTOCOL, isPreviewEnvelope, isProjectData } from '../dist/protocol.js';
 import { fetchVerifiedAsset, injectVerifiedWasm } from '../dist/verified-loader.js';
 import { patchOptionalPwa } from '../../release/patch-web-optional-pwa.mjs';
+import {createArtifactSet} from '@godot-js/project-tools/artifact-set';
 
 const release = { releaseId: 'test', profile: 'core-ui-v1', engineJs: { url: 'http://preview.test/godot.js', sha256: 'a'.repeat(64) }, engineWasm: { url: 'http://preview.test/godot.wasm', sha256: 'b'.repeat(64) } };
 const artifact = { revision: 'revision-1', buildKey: 'build-1', generation: 42, pack: new Uint8Array([1, 2, 3]), manifest: { generation: 42 } };
@@ -49,6 +50,18 @@ function fixture({ pauseAt, heartbeat = true, engineProgress = true, exitOnStop 
   return { runner, frames, events, messages, send: (...args) => send(...args), get identity() { return identity; },
     async cleanup() { resources.forEach(clearInterval); await runner.dispose(); remotePorts.forEach(port => port.close()); } };
 }
+
+test('PreviewRunner admits and transfers an independent ArtifactSet without a full-pack receipt',async()=>{
+ const runtimeRelease={...release,artifactReceiptVersion:2,execution:{schemaVersion:1,executionModel:'window',wasmThreads:false,proxyToPthread:false,requiresCrossOriginIsolation:false,hostProtocolVersion:1,artifactSetAbi:1}};
+ const artifactSet=await createArtifactSet(new Map([['res://project.godot',new TextEncoder().encode('config_version=5\n')],['res://data.bin',new Uint8Array([1,2,3])]]),{target:{engineReleaseId:runtimeRelease.releaseId}});
+ const f=fixture({runtimeRelease,allowLegacyArtifacts:false});
+ try{
+  await f.runner.run({variant:'pack-set',artifactSet,revision:1,generation:42,buildKey:'pack-set-input',manifest:{generation:42}});
+  const sent=f.messages.find(message=>message.type==='run').artifact;
+  assert.equal(sent.variant,'pack-set');assert.equal(sent.pack,undefined);assert.equal(sent.artifactId,artifactSet.manifest.artifactSetId);assert.equal(sent.artifactSet.packs.size,2);
+  assert(artifactSet.packs.values().next().value.byteLength>0,'transfer must not detach compiler-owned buffers');
+ }finally{await f.cleanup();}
+});
 
 test('modern runners verify receipt identity and pack before creating a frame; compatibility cannot downgrade a v2 release',async()=>{
  const sha=value=>createHash('sha256').update(value).digest('hex'),pack=artifact.pack.slice();

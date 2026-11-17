@@ -26,6 +26,7 @@ env:
     module_text_server_fb_enabled=yes
     "accesskit_sdk_path=${{ github.workspace }}/accesskit-c-0.${{ inputs.version_mm == '4.5' && '17' || '18' }}.0/"
     skip_js_runtime=yes
+    enable_legacy_react=no
 
 jobs:
   build-macos:
@@ -55,6 +56,19 @@ jobs:
           path: ${{github.workspace}}/modules/GodotJS/
           lfs: true
           submodules: recursive
+
+      - name: Setup Node.js for the pinned native integration
+        if: inputs.version == '4.6.1'
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+
+      - name: Prepare the verified Godot 4.6.1 native source hooks
+        if: inputs.version == '4.6.1'
+        shell: bash
+        run: >-
+          node modules/GodotJS/scripts/test/prepare-native-engine.mjs
+          --godot-source . --out native-integration.json
 
       - name: Restore Godot build cache
         uses: ./.github/actions/godot-cache-restore
@@ -193,6 +207,14 @@ jobs:
           ${{ env.BIN }} --version
           ${{ env.BIN }} --help
           ${{ env.BIN }} --headless --test --test-case="[jsb]*" --force-colors
+
+      - name: Upload the native source integration receipt
+        if: always() && inputs.version == '4.6.1'
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-integration-macos-${{ matrix.target }}-${{ inputs.version }}-${{ matrix.engine }}
+          path: native-integration.json
+          if-no-files-found: warn
 
   build-macos-apps:
     needs:

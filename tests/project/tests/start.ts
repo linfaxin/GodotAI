@@ -1,4 +1,4 @@
-import { Node, PackedScene, ResourceLoader } from "godot";
+import { is_instance_valid, Node, PackedScene, ResourceLoader } from "godot";
 import {
 	getActiveAsyncTestCount,
 	hasActiveAsyncTests,
@@ -13,6 +13,7 @@ const ASYNC_TEST_DRAIN_POLL_MS = 10;
 
 export default class Start extends Node {
     async _ready() {
+        const createdScenes: Node[] = [];
         try {
             const scenes = [
                 "res://tests/resource/Resource.tscn",
@@ -34,6 +35,7 @@ export default class Start extends Node {
                     throw new Error(`failed to load PackedScene: ${scene}`);
                 }
                 const sceneAsNode = loadedScene.instantiate();
+                createdScenes.push(sceneAsNode);
 
                 this.get_tree().root?.call_deferred("add_child", sceneAsNode);
                 await new Promise((resolve) => setTimeout(resolve, SCENE_SETTLE_DELAY_MS));
@@ -51,10 +53,27 @@ export default class Start extends Node {
 				await new Promise((resolve) => setTimeout(resolve, ASYNC_TEST_DRAIN_POLL_MS));
 			}
 
-            reportTestCompleted();
         } catch (error) {
             reportTestFailure("start", error);
         } finally {
+            try {
+                // remove_child only detaches: retain each fixture until its
+                // async tests settle, then wait for actual queued destruction.
+                for (const scene of createdScenes) {
+                    if (is_instance_valid(scene)) scene.queue_free();
+                }
+                const cleanupStartedAt = Date.now();
+                while (createdScenes.some((scene) => is_instance_valid(scene))) {
+                    if (Date.now() - cleanupStartedAt > ASYNC_TEST_DRAIN_TIMEOUT_MS) {
+                        throw new Error("test scene cleanup did not reach native destruction");
+                    }
+                    await new Promise((resolve) => setTimeout(resolve, ASYNC_TEST_DRAIN_POLL_MS));
+                }
+                createdScenes.length = 0;
+                reportTestCompleted();
+            } catch (error) {
+                reportTestFailure("scene-cleanup", error);
+            }
             this.get_tree().quit();
         }
     }

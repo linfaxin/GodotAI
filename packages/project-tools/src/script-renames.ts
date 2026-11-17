@@ -19,7 +19,7 @@ function relative(from:string,to:string):string {
  const value=[...left.map(()=>'..'),...right].join('/');return value.startsWith('.')?value:'./'+value;
 }
 /** Runs in a compiler worker/Node adapter, keeping TypeScript out of the editor bundle. */
-export function prepareScriptRename(files:Readonly<Record<string,string|readonly number[]>>,oldPath:string,newPath:string):ScriptRenamePlan {
+export function prepareScriptRename(files:Readonly<Record<string,string|readonly number[]|Uint8Array>>,oldPath:string,newPath:string):ScriptRenamePlan {
  for(const path of [oldPath,newPath])if(!path.startsWith('/')||path!==normalize(path)||/[\\:\x00-\x1f]/.test(path))throw Error('E_RENAME_PATH: '+path);
  const sources:Record<string,string>={},changes:Record<string,string>={};
  for(const [path,value]of Object.entries(files))if(typeof value==='string'&&script.test(path))sources[path]=value;

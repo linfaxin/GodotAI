@@ -23,12 +23,12 @@ addEventListener('message', event => {
   document.getElementById('connection-status')!.hidden = true;
   startWorkerPreviewHost(message, event.ports[0], {
     canvas: document.getElementById('canvas') as HTMLCanvasElement,
-    async verifyRelease(release, manifest, signal) {
+    async verifyRelease(release, manifest, signal,artifact) {
       const context = (release as typeof release & { releaseContext?: ReleaseContext }).releaseContext;
       if (!context?.candidateId) throw Error('E_WORKER_CANDIDATE_ID');
       if (context.engineReleaseId !== release.releaseId || context.engineProfile !== release.profile) throw Error('E_PREVIEW_RELEASE_CONTEXT');
       assertCompiledRelease(context, manifest);
-      await verifyPreviewReleaseContext(context, { signal, release });
+      await verifyPreviewReleaseContext(context, { signal, release,artifactManifest:manifest,artifactPack:artifact?.pack,artifactSet:artifact?.artifactSet,artifactBuildKey:artifact?.buildKey,artifactId:artifact?.artifactId });
     },
     onSnapshot(snapshot) {
       runtimeSnapshot = snapshot;

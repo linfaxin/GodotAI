@@ -1,4 +1,4 @@
-export { CANONICAL_IMPORTS } from './imports.js';
+export { CANONICAL_IMPORTS,HISTORICAL_REACT_MODULE_ADAPTER } from './imports.js';
 export { bundleClosedModulesWith, type BundlerPort } from './module-loading.js';
 export { bootstrapSource } from '../bootstrap.js';
 

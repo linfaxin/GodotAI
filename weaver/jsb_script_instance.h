@@ -74,6 +74,27 @@ public:
         return false;
     }
 
+    virtual void get_property_state(List<Pair<StringName, Variant>>& r_state) override
+    {
+        // Shadow set() records native properties as well as script exports.
+        // The base implementation only visits the script property list.
+        for (const KeyValue<StringName, Variant>& pair : state_)
+        {
+            r_state.push_back({pair.key, pair.value});
+        }
+    }
+
+    static void restore_state(Object* p_owner, const List<Pair<StringName, Variant>>& p_state)
+    {
+        for (const Pair<StringName, Variant>& pair : p_state)
+        {
+            bool valid = false;
+            // Object::set first offers script exports, then native properties.
+            p_owner->set(pair.first, pair.second, &valid);
+            ERR_CONTINUE_MSG(!valid, "Failed to restore a threaded GodotJS resource property: " + String(pair.first));
+        }
+    }
+
     virtual void get_property_list(List<PropertyInfo>* p_properties) const override
     {
         script_->get_script_property_list(p_properties);

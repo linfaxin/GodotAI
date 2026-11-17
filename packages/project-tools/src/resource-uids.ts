@@ -51,6 +51,15 @@ export function readResourceUidCache(cached:Uint8Array):ResourceUidCacheReadResu
   }
  return {entries,diagnostics};
 }
+/** Aggregate verified package caches before Godot initializes its global UID table.
+ * Package-local replacement order never decides cross-package identities. */
+export function mergeResourceUidCaches(caches:readonly Uint8Array[]):Uint8Array {
+ const entries=new Map<bigint,string>();
+ for(const cache of caches){const parsed=readResourceUidCache(cache);if(parsed.diagnostics.length)throw Error('E_ENGINE_UID_CACHE_INVALID: Package UID cache is malformed');
+  for(const [id,path]of parsed.entries){const previous=entries.get(id);if(previous!==undefined&&previous!==path)throw Error('E_ENGINE_UID_CACHE_CONFLICT: UID '+id+' maps to both '+previous+' and '+path);entries.set(id,path);}
+ }
+ return serialize(entries);
+}
 /** Resolve a UID using only verified binary-cache records; invalid UIDs return undefined. */
 export function resolveResourceUidFromCache(uid:string,cache:Uint8Array):string|undefined {
  const id=resourceUidTextToId(uid);return id===undefined?undefined:readResourceUidCache(cache).entries.get(id);

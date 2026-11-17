@@ -50,7 +50,7 @@ test('format directory distinguishes native API, ResourceLoader and executable b
  for(const extension of ['png','jpg','svg','tscn','tres','gltf','glb','ogg','wav','blend'])assert(resourceFormat('res://asset.'+extension),extension);
  assert.equal(resourceFormat('res://x.tscn').resourceLoader,'native');
  for(const format of ['svg','gltf','ogg','editor-source'])assert.deepEqual(RESOURCE_FORMATS.find(item=>item.id===format).browserConverters,[]);
- assert.deepEqual(inspectResourceFormat('x.png',{registeredConverters:createBrowserResourceConverters().ids}).converters,[]);
+ assert.deepEqual(inspectResourceFormat('x.png',{registeredConverters:createBrowserResourceConverters().ids}).converters,['godotjs/png-ctex']);
  assert.equal(inspectResourceFormat('x.ogg',{apiSymbols:new Set()}).directApi[0].present,false);
 });
 test('registered PCM conversion creates remap/receipt, preserves originals and UID, and reuses only verified current cache',async()=>{
@@ -60,7 +60,7 @@ test('registered PCM conversion creates remap/receipt, preserves originals and U
  const output=receipt.outputs.find(item=>item.path.endsWith('.tres')).path;
  assert.match(decode(first.files.get(output)),/data=PackedByteArray\("gAB\/"\)/);assert.doesNotMatch(decode(first.files.get(output)),/uid=/);assert.match(decode(first.files.get('res://tone.wav.import')),/uid="uid:\/\/bb"/);
  assert.match(decode(first.files.get('res://tone.wav.import')),/AudioStreamWAV/);assert.deepEqual(files.get('res://tone.wav'),original);assert.equal(files.size,2);
- const cached=new Map([...files,...first.files]);const reused=await registry.run([request],cached,target,[receipt]);assert.equal(reused.assessments[0].status,'fresh');assert.match(reused.reasons.get(output),/Verified cached/);
+ const cached=new Map([...files,...first.files]);const reused=await registry.run([request],cached,target,[receipt]);assert.equal(reused.assessments[0].status,'fresh');assert.equal(reused.reasons.get(output),first.reasons.get(output));assert.equal(reused.telemetry.cacheHits,1);
  const external=await createBrowserResourceConverters().run([request],cached,target,[receipt]);assert.match(external.reasons.get(output),/Converted/,'An imported self-declared producer receipt must execute again');
  assert.equal((await assessStoredImportReceipt(receipt,cached,cached)).status,'unverified');
  const broken=new Map(cached);broken.set(output,encode('corrupt'));const rebuilt=await registry.run([request],broken,target,[receipt]);assert.match(rebuilt.reasons.get(output),/Converted/);assert.deepEqual(rebuilt.files.get(output),first.files.get(output));

@@ -83,6 +83,23 @@ Cancel asynchronous work in effect cleanup; React does not await async cleanup.
 
 ### Root lifecycle and ownership
 
+Generated script entries pass an entry capability to `start(ctx)`. Pass that
+capability when creating a root so cancellation, asynchronous native retirement
+and epoch sealing belong to that entry:
+
+```tsx
+export function start(ctx: { mount: G.Node; entry: EngineEntryCapability }) {
+  const root = createRoot(ctx.mount, { entry: ctx.entry });
+  root.render(<App />);
+}
+```
+
+Import `createRoot` and the `EngineEntryCapability` type from
+`@godot-js/react/engine`. Capabilities are local objects minted by the runtime;
+copied objects and capabilities from another binding are rejected. The native
+bootstrap installs the same runtime core as the browser host. Renderer mode is
+fixed for the native world, so engine and legacy roots cannot share that world.
+
 Create a root on an existing native Node. By default the mount must already be
 in SceneTree: the root connects to `process_frame` and `physics_frame` and
 disconnects on shutdown. For a native bootstrap that owns frame forwarding:
@@ -112,7 +129,9 @@ export default class ReactMount extends G.Node {
 | `pump()` | Advance scheduled React work and deferred signal callbacks. |
 | `process(delta)` / `physics(delta)` | Forward frame callbacks; `process` also pumps. |
 | `unmount()` | Enqueue removal of rendered children and keep the root reusable. |
-| `shutdown()` | Unmount, release owned Nodes and subscriptions, and close the root; repeated calls are safe. |
+| `shutdown()` | Request unmount and pump cleanup; native release may finish at a later checkpoint. |
+| `close()` | Return the same completion promise; `complete` requires actual native retirement. |
+| `getCloseProgress()` | Inspect logical disposal and pending native releases without treating an empty JS queue as completion. |
 | `portal(element, nativeTarget, key?)` | Render into a borrowed native mount. |
 | `getStats()` / `getErrors()` | Inspect lifecycle counters and captured errors. |
 
@@ -134,6 +153,37 @@ runtime. The package root exports exactly the same native API. Legacy applicatio
 import the explicit `/legacy` entry. Importing the SDK in Node does not import Godot until a native root is
 created; tests can inject a native implementation with `options.godot`.
 
+### Typed component adapters and templates
+
+`@godot-js/react/engine-components` provides the schema-based component names,
+templates and read handles used by imported projects. Configure them once with
+`configureEngineComponents(root, { profileId, assets, nativeScriptProfiles })`.
+The returned services expose `preloadAssets`, `assetStatus` and
+`getDiagnostics`. These adapters use the direct renderer and the native domain
+operations; they do not open a legacy root.
+
+`initial` establishes a host baseline. Changing it later retains that baseline
+and produces a development diagnostic; change the React key to reinitialize.
+Removing a controlled prop restores its baseline. `engineOwned` reserves fields
+for a single writing frame registration. `useProcess`, `usePhysicsProcess` and
+`useInput` pass commands that expire when their synchronous callback returns.
+Their refs expose read handles; use a direct `EngineNode` ref for Godot's full
+native API. Input callbacks receive immutable value snapshots. Shutdown revokes
+frame commands and endpoint callbacks immediately, while captured read handles
+and template resource metadata remain available during synchronous layout and
+passive cleanup. They expire before native release is requested.
+
+Typed UI controls restore a declared button state, text, range value or selection
+after their input signal, using the latest committed prop. Controls without that
+declaration keep their native state. Restoration tracks only signaled controls;
+it does not poll the scene or change the direct renderer's commit-based property
+contract.
+
+Imported templates materialize while detached, restore serialized owners, then
+finish local resource setup before entering SceneTree. Local resources share
+one native clone map within an instance and remain isolated between instances.
+Godot's serialization `owner` is distinct from renderer ownership.
+
 ### Shared session, structure and cleanup
 
 Every root in one native world shares an `EngineSession`. Its stage gate covers
@@ -143,8 +193,15 @@ all roots, the pinned reconciler, scheduler and signal queues. `render()` queues
 `new EngineSession(G, { canCommit, requestPump })` via `options.session` and call
 `session.pump()` at its engine safe point. `runSafe()` cannot override physics.
 This permission governs React work; arbitrary direct Godot calls still follow
-Godot's own phase rules. The default browser integration requests a microtask
-pump after native JS/WASM callbacks return.
+Godot's own phase rules. Matching native/browser runtimes authorize destruction
+through their owner checkpoint. A runtime without that capability cannot certify
+native destruction through a JavaScript microtask alone.
+
+The compiled native Observer supplies structural changes and actual retirement
+receipts. With `observationAbi === 1`, settled idle roots visit no records and
+make no `get_children` calls. Overflow triggers a complete audit to establish a
+new baseline. Older engines retain full structural audits. `getStats()` exposes
+audit, retirement, publication and observation counters for verifying this path.
 
 `childScope` defaults to `react-managed`: public children are tracked by React.
 Composite native constructors/scripts that create public children use
@@ -174,8 +231,12 @@ handlers. A custom `requestPump` hook is a wakeup notification and cannot bypass
 that barrier. A rejected or unconfirmed immediate free retains the ownership
 island and reports a non-clean exit for session teardown; it is never counted as
 an accepted release request or retried as if nothing happened.
-`releaseRequested` counts native free requests, `pendingReleases` counts queued
-objects awaiting native destruction, and `freed` counts observed destruction.
+`releaseRequested` counts accepted native lifetime releases, `pendingReleases`
+counts objects awaiting native destruction, and `freed` counts observed
+destruction. A matching native runtime can validate a complete retired subtree
+once and queue its frontier; descendant records still wait for individual native
+retirement receipts. `batchReleaseRequests` and `releaseFrontiers` expose that
+path. Older native adapters keep the individual release path.
 
 Property writes use `godot-jsb.internal.try_set_property` when available and retain
 its stored value for normalized comparisons. Its acceptance flag proves native

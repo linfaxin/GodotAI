@@ -1,3 +1,4 @@
+import {readStorageSnapshot,writeStorageSnapshot} from './project-storage-browser-helpers.mjs';
 import {launchBrowser,defaultTestDirectory} from './browser-harness.mjs';
 import {getEngineProfile} from '../../../scripts/release/engine-profiles.mjs';
 import path from 'node:path';
@@ -35,7 +36,7 @@ self.onmessage=({data})=>self.postMessage({id:data.id,code:'',diagnostics:[],res
  assert.equal(downloads.length,0);assert.deepEqual((await project()).files,original);
  // Existing IndexedDB selections of the hidden manifest migrate back to entry.
  await page.waitForFunction(()=>document.querySelector('#saved').textContent==='已自动保存');
- await page.evaluate(()=>new Promise((resolve,reject)=>{const open=indexedDB.open(window.__playgroundWorkbench.inspect().storageDatabaseName,1);open.onerror=()=>reject(open.error);open.onsuccess=()=>{const db=open.result,tx=db.transaction('projects','readwrite'),store=tx.objectStore('projects'),get=store.get('current');get.onsuccess=()=>{const saved=get.result;for(const [id,p] of saved.projects)if(id===saved.selected)p.selected='/package.json';store.put(saved,'current');};tx.oncomplete=()=>{db.close();resolve();};tx.onerror=()=>reject(tx.error);};}));
+ const saved=await readStorageSnapshot(page);for(const [id,p] of saved.projects)if(id===saved.selected)p.selected='/package.json';await writeStorageSnapshot(page,saved);
  await page.reload({waitUntil:'networkidle'});await running();await assertHidden();assert.equal((await project()).selected,(await project()).entry);
  // Filtering the tree does not remove metadata from exported projects.
  const download=page.waitForEvent('download');await page.locator('#project-menu summary').click();await page.locator('#export').click();assert.ok(JSON.parse(await fs.readFile(await (await download).path(),'utf8')).files['/package.json']);

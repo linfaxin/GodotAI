@@ -147,6 +147,7 @@ namespace jsb
     // translate js val into gd variant with an expected type
     bool TypeConvert::js_to_gd_var(v8::Isolate* isolate, const v8::Local<v8::Context>& context, const v8::Local<v8::Value>& p_jval, Variant::Type p_type, Variant& r_cvar)
     {
+        if (!Environment::allow_variant_access(isolate)) return false;
 #if JSB_WITH_V8
         if (p_jval->IsProxy())
 #else
@@ -307,6 +308,7 @@ namespace jsb
 
     bool TypeConvert::gd_var_to_js(v8::Isolate* isolate, const v8::Local<v8::Context>& context, const Variant& p_cvar, Variant::Type p_type, v8::Local<v8::Value>& r_jval)
     {
+        if (!Environment::allow_variant_access(isolate)) return false;
         switch (p_type)
         {
         case Variant::FLOAT:
@@ -473,6 +475,7 @@ namespace jsb
 
     bool TypeConvert::js_to_gd_var(v8::Isolate* isolate, const v8::Local<v8::Context>& context, const v8::Local<v8::Value>& p_jval, Variant& r_cvar)
     {
+        if (!Environment::allow_variant_access(isolate)) return false;
         if (p_jval.IsEmpty() || p_jval->IsNullOrUndefined())
         {
             r_cvar = {};
@@ -571,6 +574,7 @@ namespace jsb
 
     bool TypeConvert::can_convert_strict(v8::Isolate* isolate, const v8::Local<v8::Context>& context, const v8::Local<v8::Value>& p_val, Variant::Type p_type)
     {
+        if (!Environment::allow_variant_access(isolate)) return false;
         switch (p_type)
         {
         case Variant::BOOL: { return p_val->IsBoolean(); }

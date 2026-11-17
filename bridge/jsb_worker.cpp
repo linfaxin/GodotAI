@@ -23,6 +23,11 @@ namespace jsb
     namespace
     {
 #if JSB_WITH_WEB
+        struct StagedWebMessage {
+            uint32_t ticket = 0;
+            ~StagedWebMessage() { if (ticket) jsbi_DiscardMessage(ticket); }
+        };
+
         v8::Local<v8::Value> restore_transfer_markers_impl(
             v8::Isolate* isolate,
             const v8::Local<v8::Context>& context,
@@ -86,8 +91,6 @@ namespace jsb
     }
 
     constexpr int kPostMessageFailed = -1;
-    // constexpr int kPostMessageSuccess = 0;
-    constexpr int kPostMessageNativeTransfersUnused = 1;
 #endif
 
     class WorkerImpl;
@@ -373,6 +376,8 @@ namespace jsb
         {
             std::vector<WorkerMessage>& messages = inbox_.swap();
 
+            if (p_env->native_cleanup_phase() != 0) { messages.clear(); return; }
+
             if (messages.empty())
             {
                 return;
@@ -435,6 +440,11 @@ namespace jsb
             if (env_)
             {
                 env_->dispose();
+#if JSB_WITH_WEB
+                // _web_tick and _run have returned all Handle/ContextScopes.
+                // Foreign registry snapshots may retain only the C++ shell.
+                env_->release_runtime_on_owner();
+#endif
                 env_.reset();
             }
         }
@@ -843,28 +853,45 @@ namespace jsb
                 ? static_cast<impl::StackPosition>(info[1])
                 : jsb::impl::StackBase::Undefined;
             const uintptr_t env_token = reinterpret_cast<uintptr_t>(from_env);
-            const int message_result = jsbi_PostMessage(
+            StagedWebMessage staged{jsbi_PrepareMessage(
                 sender_pthread_id,
                 static_cast<jsb::impl::JSRuntime>(env_token),
-                data_sp,
-                transfer_id,
-                transfer_sp,
-                true);
-
-            if (message_result == kPostMessageFailed)
+                data_sp, transfer_id, transfer_sp, true)};
+            if (!staged.ticket)
             {
                 Worker::web_discard_transfers(sender_pthread_id, transfer_id);
-                jsb_throw(isolate, "postMessage: native web postMessage failed");
+                if (!jsbi_HasError(0)) jsb_throw(isolate, "postMessage: native message preparation failed");
                 return;
             }
-            else if (message_result == kPostMessageNativeTransfersUnused)
+            // Clone getters can invalidate a later item. Validate and pin all
+            // sources before any binding is detached or packet is published.
+            if (from_env->native_cleanup_phase() != 0)
             {
                 Worker::web_discard_transfers(sender_pthread_id, transfer_id);
+                jsb_throw(isolate, "E_NATIVE_TRANSFER: source epoch closed during serialization");
+                return;
             }
-
+            std::vector<v8::Global<v8::Object>> pins(transfer_map.size());
             for (const auto& entry : transfer_map)
             {
-                from_env->finalize_transfer_out(entry.value);
+                if (!from_env->validate_transfer_out(entry.value, pins[entry.value.transfer_index]))
+                {
+                    Worker::web_discard_transfers(sender_pthread_id, transfer_id);
+                    return;
+                }
+            }
+            for (const auto& entry : transfer_map)
+            {
+                if (!from_env->finalize_transfer_out(entry.value))
+                {
+                    Worker::web_discard_transfers(sender_pthread_id, transfer_id);
+                    return;
+                }
+            }
+            if (!jsbi_PublishMessage(staged.ticket))
+            {
+                Worker::web_discard_transfers(sender_pthread_id, transfer_id);
+                if (!jsbi_HasError(0)) jsb_throw(isolate, "postMessage: native message publication failed");
             }
             return;
 #else
@@ -1402,37 +1429,45 @@ namespace jsb
         const impl::StackPosition transfer_sp = info.Length() > 1 ? static_cast<impl::StackPosition>(info[1]) : jsb::impl::StackBase::Undefined;
         const uintptr_t env_token = reinterpret_cast<uintptr_t>(from_env);
 
-        const int message_result = jsbi_PostMessage(
+        StagedWebMessage staged{jsbi_PrepareMessage(
             (uintptr_t) pthread_id,
             static_cast<jsb::impl::JSRuntime>(env_token),
-            data_sp,
-            transfer_id,
-            transfer_sp,
-            false);
-
-        if (message_result == kPostMessageFailed)
+            data_sp, transfer_id, transfer_sp, false)};
+        if (!staged.ticket)
         {
-            if (impl)
-            {
-                impl->discard_transfers(transfer_id);
-            }
-            jsb_throw(isolate, "postMessage: native web postMessage failed");
+            if (impl) impl->discard_transfers(transfer_id);
+            if (!jsbi_HasError(0)) jsb_throw(isolate, "postMessage: native message preparation failed");
             return;
         }
-        else if (message_result == kPostMessageNativeTransfersUnused)
+        if (from_env->native_cleanup_phase() != 0)
         {
-            if (impl)
-            {
-                impl->discard_transfers(transfer_id);
-            }
+            if (impl) impl->discard_transfers(transfer_id);
+            jsb_throw(isolate, "E_NATIVE_TRANSFER: source epoch closed during serialization");
+            return;
         }
-
-        // Mirror native worker transfer lifecycle: after a successful enqueue/post,
-        // finalize transfer-out ownership in the source environment.
+        std::vector<v8::Global<v8::Object>> pins(transfer_map.size());
         for (const auto& entry : transfer_map)
         {
-            from_env->finalize_transfer_out(entry.value);
+            if (!from_env->validate_transfer_out(entry.value, pins[entry.value.transfer_index]))
+            {
+                if (impl) impl->discard_transfers(transfer_id);
+                return;
+            }
         }
+        for (const auto& entry : transfer_map)
+        {
+            if (!from_env->finalize_transfer_out(entry.value))
+            {
+                if (impl) impl->discard_transfers(transfer_id);
+                return;
+            }
+        }
+        if (!jsbi_PublishMessage(staged.ticket))
+        {
+            if (impl) impl->discard_transfers(transfer_id);
+            if (!jsbi_HasError(0)) jsb_throw(isolate, "postMessage: native message publication failed");
+        }
+
 #else
         internal::ReferentialVariantMap<TransferData> transfer_map;
         const std::pair<uint8_t*, size_t> data = Worker::handle_post_message(info, transfer_map);
@@ -1902,9 +1937,19 @@ namespace jsb
             return {nullptr, 0};
         }
 
+        if (from_env->native_cleanup_phase() != 0)
+        {
+            jsb_throw(isolate, "E_NATIVE_TRANSFER: source epoch closed during serialization");
+            return {nullptr, 0};
+        }
+        std::vector<v8::Global<v8::Object>> pins(transfers.size());
         for (const auto& entry : transfers)
         {
-            from_env->finalize_transfer_out(entry.value);
+            if (!from_env->validate_transfer_out(entry.value, pins[entry.value.transfer_index])) return {nullptr, 0};
+        }
+        for (const auto& entry : transfers)
+        {
+            if (!from_env->finalize_transfer_out(entry.value)) return {nullptr, 0};
         }
 
         return serializer.Release();

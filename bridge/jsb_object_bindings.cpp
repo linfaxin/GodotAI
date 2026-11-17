@@ -2,6 +2,7 @@
 #include "jsb_transpiler.h"
 #include "jsb_type_convert.h"
 #include "jsb_react_bridge.h"
+#include "jsb_native_world.h"
 // TODO: Refactor. Violates isolation of bridge.
 #include "../weaver/jsb_script_instance.h"
 #include "../weaver/jsb_script_language.h"
@@ -168,6 +169,7 @@ namespace jsb
 
     void ObjectReflectBindingUtil::_godot_object_signal_get(const v8::FunctionCallbackInfo<v8::Value>& info)
     {
+        NativeInteropScope native_interop;
         v8::Isolate* isolate = info.GetIsolate();
         const v8::Local<v8::Context> context = isolate->GetCurrentContext();
 
@@ -204,6 +206,7 @@ namespace jsb
 
     void ObjectReflectBindingUtil::_godot_object_cached_export_update(const v8::FunctionCallbackInfo<v8::Value>& info)
     {
+        NativeInteropScope native_interop;
         v8::Isolate* isolate = info.GetIsolate();
         const v8::Local<v8::Context> context = isolate->GetCurrentContext();
 
@@ -268,6 +271,7 @@ namespace jsb
 
     void ObjectReflectBindingUtil::_godot_object_free(const v8::FunctionCallbackInfo<v8::Value>& info)
     {
+        NativeInteropScope native_interop;
         v8::Isolate* isolate = info.GetIsolate();
         v8::Local<v8::Context> context = isolate->GetCurrentContext();
         Object* gd_object;
@@ -350,6 +354,7 @@ namespace jsb
 
     void ObjectReflectBindingUtil::_godot_object_method(const v8::FunctionCallbackInfo<v8::Value>& info)
     {
+        NativeInteropScope native_interop;
         jsb_check(info.Data()->IsExternal());
         v8::Isolate* isolate = info.GetIsolate();
         v8::Local<v8::Context> context = isolate->GetCurrentContext();
@@ -448,6 +453,7 @@ namespace jsb
 
     void ObjectReflectBindingUtil::_godot_object_get2(const v8::FunctionCallbackInfo<v8::Value>& info)
     {
+        NativeInteropScope native_interop;
         jsb_check(info.Data()->IsInt32());
         v8::Isolate* isolate = info.GetIsolate();
         Environment* env = Environment::wrap(isolate);
@@ -498,6 +504,7 @@ namespace jsb
 
     void ObjectReflectBindingUtil::_godot_object_set2(const v8::FunctionCallbackInfo<v8::Value>& info)
     {
+        NativeInteropScope native_interop;
         jsb_check(info.Data()->IsInt32());
         v8::Isolate* isolate = info.GetIsolate();
         Environment* env = Environment::wrap(isolate);

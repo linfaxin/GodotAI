@@ -16,3 +16,4 @@ export * from './errors.js';
 export * from './compiler-policy.js';
 export * from './type-environment.js';
 export * from './compiler.js';
+export * from './artifact-set.js';

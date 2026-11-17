@@ -87,7 +87,7 @@ namespace jsb::internal
         if (!read_object(manifest_path, manifest) || (int) manifest.get("schemaVersion", 0) != 1
             || String(manifest.get("generation", "")) != String(active.get("generation", ""))
             || String(manifest.get("runtimeAbi", "")) != "godot-react/1"
-            || String(manifest.get("nativeBridgeAbi", "")) != "godot-react-native/1")
+            || (String(manifest.get("nativeBridgeAbi", "")) != "godot-react-native/1" && String(manifest.get("nativeBridgeAbi", "")) != "godot-engine-native/1"))
         {
             r_error = "E_MANIFEST_ABI: incompatible React manifest";
             return ERR_FILE_CORRUPT;

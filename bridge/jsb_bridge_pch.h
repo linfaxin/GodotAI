@@ -4,6 +4,7 @@
 #include <memory>
 #include <cstdint>
 #include <unordered_map>
+#include "modules/modules_enabled.gen.h"
 
 #include "../jsb.config.h"
 #include "../jsb.gen.h"

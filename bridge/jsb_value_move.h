@@ -23,7 +23,7 @@ namespace jsb
         JSValueMove& operator=(const JSValueMove& p_other) = delete;
 
         JSValueMove(JSValueMove&& p_other) noexcept = default;
-        JSValueMove& operator=(JSValueMove&& p_other) noexcept = default;
+        JSValueMove& operator=(JSValueMove&& p_other) noexcept;
 
         jsb_force_inline void ignore() const {}
         bool is_valid() const;

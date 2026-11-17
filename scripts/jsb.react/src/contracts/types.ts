@@ -1,6 +1,8 @@
 export const CONTRACT_VERSION = 1 as const;
 export const RUNTIME_ABI = "godot-react/1" as const;
 export const NATIVE_BRIDGE_ABI = "godot-react-native/1" as const;
+/** Direct engine scope/observation/lifecycle ABI; no NativePort capabilities. */
+export const ENGINE_NATIVE_ABI = "godot-engine-native/1" as const;
 export const REACT_VERSIONS = Object.freeze({ react: "19.3.1", reconciler: "0.34.0", scheduler: "0.28.0" });
 
 export type Sha256 = string;

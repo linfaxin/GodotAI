@@ -14,7 +14,7 @@ JSWorkerParent.onmessage=data=>{
  }else{
   JSWorkerParent.postMessage({kind:'p1-close-final',sequence:1,plain:'final result'});
   JSWorkerParent.postMessage({kind:'p1-close-final',sequence:2,vector:new G.Vector2(7,8),bytes:new Uint8Array([4,5,6])});
-  const node=new G.Node();node.set_name('P1_final_node');
+  const node=new G.Node();node.set('name','P1_final_node');
   JSWorkerParent.postMessage({kind:'p1-close-final',sequence:3,node},[node]);
  }
  JSWorkerParent.close();
@@ -38,7 +38,8 @@ exports.run = function run(G) {
       if(data.sequence===1)assert(data.plain==='final result','plain final payload survives close');
       if(data.sequence===2){state.variant=data.vector instanceof G.Vector2&&data.vector.x===7&&data.vector.y===8;state.typedArray=data.bytes instanceof Uint8Array&&data.bytes.join(',')==='4,5,6';assert(state.variant&&state.typedArray,'Variant and typed-array payloads survive close');}
       if(data.sequence===3){
-        state.nativeNode=G.is_instance_valid(data.node)&&data.node.get_name()==='P1_final_node';assert(state.nativeNode,'transferred native Node survives sender disposal');data.node.free();
+        state.transferredNode={valid:G.is_instance_valid(data.node),name:data.node&&String(data.node.get('name'))};
+        state.nativeNode=state.transferredNode.valid&&state.transferredNode.name==='P1_final_node';assert(state.nativeNode,'transferred native Node survives sender disposal: '+JSON.stringify(state.transferredNode));data.node.free();
         startCancellation();
       }
     });
