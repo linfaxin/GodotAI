@@ -147,10 +147,53 @@ test('phase notifications cannot bypass the connected handshake and artifact dis
 test('missing host Worker termination receipt is only forced frame disposal',async()=>{
  const f=fixture({stopReply:false});
  try{
-  await f.runner.run(artifact);const report=await f.runner.stop();
+  const running=await f.runner.run(artifact),report=await f.runner.stop();
   assert.equal(report.reason,'forced-frame-disposal');assert.equal(Object.hasOwn(report,'code'),false);
+  for(const key of ['engineOutcome','hostCleanup','sessionFacts','cleanup'])assert.equal(Object.hasOwn(report,key),false,key+' cannot be inferred from frame removal');
+  for(const key of ['runId','revision','buildKey','generation','documentId','workerId','runConfigurationHash'])assert.equal(report[key],running[key]);
   assert.equal(f.frames[0].removed,true);assert.equal(f.messages.filter(message=>message.type==='stop').length,1);
   assert.equal(f.events.filter(event=>event.type==='exit').length,1);
+ }finally{await f.cleanup();}
+});
+
+test('Worker events and observed terminal reports expose the same complete seven-field identity',async()=>{
+ const f=fixture();
+ try{
+  const running=await f.runner.run(artifact);
+  f.host.send({type:'log',level:'log',text:'linked runtime log'});
+  f.host.send({type:'project',data:{type:'identity-barrier'}});
+  await until(()=>f.events.some(event=>event.type==='project'&&event.data.type==='identity-barrier'));
+  const report=await f.runner.stop();
+  for(const event of f.events){
+   const identity=event.type==='exit'?event.report:event;
+   for(const key of ['runId','revision','buildKey','generation','documentId','workerId','runConfigurationHash'])assert.equal(identity[key],running[key],event.type+'/'+key);
+  }
+  assert.deepEqual(report.engineOutcome,{kind:'native-exit',code:0});assert.deepEqual(report.hostCleanup,{status:'complete'});
+  assert.equal(report.sessionFacts.nativeExit.code,0);assert.equal(report.sessionFacts.runtimeSummary,'sealed');
+  assert.equal(Object.hasOwn(report,'cleanup'),false,'legacy counted cleanup is a different contract');
+  assert.equal(f.events.filter(event=>event.type==='exit').length,1);
+ }finally{await f.cleanup();}
+});
+
+test('invalid replacement input leaves the current running session intact',async()=>{
+ const f=fixture();
+ try{
+  const running=await f.runner.run(artifact);
+  await assert.rejects(f.runner.run({...artifact,manifest:{generation:'wrong'}}),/E_ARTIFACT_GENERATION/);
+  await assert.rejects(f.runner.run({...artifact,manifest:{generation:42,artifactReceipt:{}}}),/E_ARTIFACT_RECEIPT/);
+  assert.equal(f.runner.state,'running');assert.equal(f.frames.length,1);assert.equal(f.frames[0].removed,undefined);
+  assert.equal(f.events.filter(event=>event.type==='exit').length,0);assert.equal(f.messages.some(message=>message.type==='stop'),false);
+  assert.equal((await f.runner.stop()).runId,running.runId);
+ }finally{await f.cleanup();}
+});
+
+test('cancelling a pre-session validation preserves its actual failure without manufacturing an exit',async()=>{
+ const f=fixture();
+ try{
+  const pending=f.runner.run({...artifact,manifest:{generation:42,artifactReceipt:{}}});
+  const rejected=assert.rejects(pending,/E_ARTIFACT_RECEIPT/);
+  assert.equal(await f.runner.stop(),undefined);await rejected;
+  assert.equal(f.frames.length,0);assert.equal(f.events.filter(event=>event.type==='exit').length,0);
  }finally{await f.cleanup();}
 });
 

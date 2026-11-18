@@ -6,10 +6,10 @@ import {tmpdir} from 'node:os';
 import {fileURLToPath} from 'node:url';
 import {canonical,digest} from './site-evidence.mjs';
 import {collectManifestPayloads} from './profile-resources.mjs';
-import {describeWorkerCandidate,WORKER_NATIVE_PATCH_FILES,runConfigurationHash} from './worker-candidate.mjs';
-import {WORKER_RUNTIME_ABI} from '../../../scripts/release/engine-profiles.mjs';
+import {describeWorkerCandidate,runConfigurationHash} from './worker-candidate.mjs';
 import {sealSiteAcceptance} from './seal-site-acceptance.mjs';
 import {describeWorkerSdkSources,describeWorkerSdkEntrypoints,WORKER_SDK_PACKAGES} from './worker-sdk-proof.mjs';
+import {workerBuildReportFixture} from './fixtures/worker-build-report.mjs';
 
 test('schema-3 sealing cannot mix legacy reports, presenter identities, old SDK sources or override-browser evidence',async t=>{
  const root=await mkdtemp(path.join(tmpdir(),'worker-site-seal-')),site=path.join(root,'site'),reports=path.join(root,'reports'),repo=fileURLToPath(new URL('../../../',import.meta.url));
@@ -17,13 +17,18 @@ test('schema-3 sealing cannot mix legacy reports, presenter identities, old SDK 
  for(const [name,entry]of [['main.js.map','apps/playground/src/main.ts'],['compiler.worker.js.map','apps/playground/src/compiler.worker.ts'],['preview.js.map','apps/playground/preview.ts'],['runtime.worker.js.map','apps/playground/runtime.worker.ts'],['runtime.audio.worklet.js.map','packages/engine/src/browser/dedicated/worker-audio-worklet.ts']])await writeFile(path.join(site,name),JSON.stringify({sources:['../../../'+entry],sourcesContent:[await readFile(path.join(repo,entry),'utf8')]}));
  const runtimeMap=JSON.parse(await readFile(path.join(site,'runtime.worker.js.map'),'utf8'));runtimeMap.sources.push('../../../packages/engine/src/runtime-host.ts');runtimeMap.sourcesContent.push(await readFile(path.join(repo,'packages/engine/src/runtime-host.ts'),'utf8'));await writeFile(path.join(site,'runtime.worker.js.map'),JSON.stringify(runtimeMap));
  for(const name of ['preview.js','runtime.worker.js','runtime.audio.worklet.js'])await writeFile(path.join(site,name),'synthetic '+name);
- const implementation={path:'scripts/release/patch-web-worker-runtime.mjs',sha256:digest('synthetic patch')},patchId='godotjs-web-worker-runtime-v1',files=Object.fromEntries(WORKER_NATIVE_PATCH_FILES.map(name=>[name,digest(name)])),recipe={args:['platform=web','threads=no','dlink_enabled=no','use_quickjs_ng=no'],patches:Object.entries(files).map(([path,afterSha256])=>({patchId,path,afterSha256,beforeSha256:digest('before '+path),implementation}))};
+ const native=workerBuildReportFixture();
  const sourceInputs=await describeWorkerSdkSources(repo),entrypoints=await describeWorkerSdkEntrypoints(repo),outputs=Object.fromEntries(Object.values(entrypoints).flat().map(name=>[name,{sha256:digest('synthetic'),bytes:9}])),sdkBuild={schemaVersion:1,kind:'worker-sdk-source-build-proof',packages:WORKER_SDK_PACKAGES,entrypoints,sourceInputs,sourceSnapshotHash:digest(canonical(sourceInputs)),outputs,outputSnapshotHash:digest(canonical(outputs))};
- const release={schemaVersion:2,runtimeProfile:'full-engine-v1',runtimeAbi:{protocolVersion:2,host:1,audio:1,presentation:1},verifiedRelease:{},engine:{worklets:[{path:'engine/game.audio.worklet.js',sha256:digest('synthetic audio')},{path:'engine/game.audio.position.worklet.js',sha256:digest('synthetic position')}]},payloads:{},build:{sourceCertified:true,sdkBuild,workerPatch:{patchId,version:1,implementation,files},engineRecipe:recipe,recipeSha256:digest(canonical(recipe)),godotSource:{inputs:files,snapshotHash:digest(canonical(files))}}};
+ const release={schemaVersion:2,runtimeProfile:'full-engine-v1',runtimeAbi:native.runtimeAbi,execution:native.execution,verifiedRelease:{},engine:{worklets:[{path:'engine/game.audio.worklet.js',sha256:digest('synthetic audio')},{path:'engine/game.audio.position.worklet.js',sha256:digest('synthetic position')}]},payloads:{},build:{sourceCertified:true,sdkBuild,workerPatch:native.workerPatch,engineSource:native.source,engineRecipe:native.recipe,recipeSha256:native.recipeSha256,godotSource:native.godotSource,...Object.fromEntries(['lifecycleAbi','lifecyclePatch','artifactSetAbi','artifactSetPatch','observerAbi','nativeObserverPatch','hostResourceAbi','hostResourcePatch','shutdownQueueAbi','shutdownQueuePatch'].map(field=>[field,native[field]]))}};
  release.id=digest(canonical(release));release.verifiedRelease.releaseId=release.id;await writeFile(path.join(site,'engine-release.json'),JSON.stringify(release));
  const resource=Buffer.from('synthetic resources'),asset={path:'resource.bin',bytes:resource.length,sha256:digest(resource)};await writeFile(path.join(site,asset.path),resource);
  await writeFile(path.join(site,'resource-build.json'),JSON.stringify({runtimeProfile:release.runtimeProfile,engineReleaseId:release.id,exporter:{path:'/synthetic/editor',version:'4.6.1.test',sha256:digest('editor')},generatedManifest:asset,output:asset,demoPack:asset}));
  await writeFile(path.join(site,'manifest.json'),JSON.stringify({schemaVersion:3,runtimeProfile:release.runtimeProfile,engineReleaseId:release.id,runtime:await describeWorkerCandidate(site,release),payloads:await collectManifestPayloads(site)}));
+ for(const field of ['lifecyclePatch','artifactSetPatch','hostResourcePatch','shutdownQueuePatch']){
+  const changed=structuredClone(release);delete changed.build[field];await writeFile(path.join(site,'engine-release.json'),JSON.stringify(changed));
+  await assert.rejects(sealSiteAcceptance(site,reports,{begin:true}),/E_EXECUTION_CONTRACT/,field);
+ }
+ await writeFile(path.join(site,'engine-release.json'),JSON.stringify(release));
  await sealSiteAcceptance(site,reports,{begin:true});const context=JSON.parse(await readFile(path.join(reports,'site-start.json'),'utf8'));
  assert(context.acceptanceBatchId);assert(!Object.hasOwn(context,'runId'));
  for(const plan of context.reportPlan){

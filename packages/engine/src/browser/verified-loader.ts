@@ -1,5 +1,6 @@
 import {legacyExecution,validateExecution,type ExecutionContract} from '../execution.js';
 import {assertBrowserSharedMemoryGrowth} from './shared-memory-growth.js';
+import {verifyAndDecodeAsset} from '../release-assets.js';
 export type {ExecutionContract,ExecutionWorkerAsset} from '../execution.js';
 export interface VerifiedAsset {
   url: string;
@@ -114,10 +115,6 @@ function byteLimit(value: number | undefined): number {
   if (value === undefined) return DEFAULT_ASSET_LIMIT;
   if (!Number.isSafeInteger(value) || value <= 0) throw new Error('E_RELEASE_ASSET_SIZE');
   return value;
-}
-async function digestMatches(bytes: Uint8Array<ArrayBuffer>, expected: string): Promise<boolean> {
-  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
-  return Array.from(digest, n => n.toString(16).padStart(2, '0')).join('') === expected.toLowerCase();
 }
 async function readLimited(stream: ReadableStream<Uint8Array>, max: number, errorCode: string, signal?: AbortSignal): Promise<Uint8Array<ArrayBuffer>> {
   const chunks: Uint8Array[] = [];
@@ -307,39 +304,24 @@ export async function loadVerifiedWorkerEngine(release: VerifiedRelease, options
   } catch (error) { dispose(); throw error; }
 }
 export async function fetchVerifiedAsset(asset: VerifiedAsset, options: { signal?: AbortSignal; maxBytes?: number; maxDecodedBytes?: number; fetch?: typeof fetch; cachePolicy?: 'revalidate' | 'public-immutable' } = {}): Promise<Uint8Array> {
-  abort(options.signal);
+  asset = {...asset};
+  const {signal, fetch: request = globalThis.fetch, cachePolicy, maxBytes, maxDecodedBytes} = options;
+  abort(signal);
   assetMetadata(asset);
-  const max = byteLimit(options.maxBytes);
-  const maxDecoded = Math.min(byteLimit(options.maxDecodedBytes), byteLimit(asset.maxDecodedBytes));
+  const max = byteLimit(maxBytes);
+  const maxDecoded = Math.min(byteLimit(maxDecodedBytes), byteLimit(asset.maxDecodedBytes));
   if (asset.decodedBytes !== undefined && asset.decodedBytes > maxDecoded) throw new Error('E_ASSET_DECODED_SIZE');
   // Preserve the current host's login for private static assets. Fetch still
   // omits credentials for every other origin, including the public npm CDN.
-  const immutable = options.cachePolicy === 'public-immutable';
-  if (options.cachePolicy !== undefined && !['revalidate', 'public-immutable'].includes(options.cachePolicy)) throw new Error('E_RELEASE_CACHE_POLICY');
+  const immutable = cachePolicy === 'public-immutable';
+  if (cachePolicy !== undefined && !['revalidate', 'public-immutable'].includes(cachePolicy)) throw new Error('E_RELEASE_CACHE_POLICY');
   if (immutable && !/^\/releases\/[A-Za-z0-9_-]{8,}\//.test(new URL(asset.url, globalThis.location?.href).pathname)) throw new Error('E_RELEASE_IMMUTABLE_URL');
-  const response = await (options.fetch ?? globalThis.fetch)(asset.url, { signal: options.signal, credentials: immutable ? 'omit' : 'same-origin', redirect: 'error', cache: immutable ? 'force-cache' : 'no-cache' });
+  const response = await request(asset.url, { signal, credentials: immutable ? 'omit' : 'same-origin', redirect: 'error', cache: immutable ? 'force-cache' : 'no-cache' });
   if (!response.ok) throw new Error(`E_ASSET_HTTP: ${response.status} ${new URL(asset.url, globalThis.location?.href).pathname}`);
   if (Number(response.headers.get('content-length')) > max) { void response.body?.cancel().catch(() => {}); throw new Error('E_ASSET_SIZE'); }
   if (!response.body) throw new Error('E_ASSET_BODY');
-  let bytes = await readLimited(response.body, max, 'E_ASSET_SIZE', options.signal);
-  if(asset.bytes!==undefined&&bytes.byteLength!==asset.bytes)throw Error('E_ASSET_LENGTH');
-  if (!await digestMatches(bytes, asset.sha256)) throw new Error('E_ASSET_HASH');
-  abort(options.signal);
-  if (asset.encoding === 'gzip') {
-    if (typeof DecompressionStream === 'undefined') throw new Error('E_ASSET_DECOMPRESSION_UNAVAILABLE');
-    try {
-      const stream = new Blob([bytes.buffer]).stream().pipeThrough(new DecompressionStream('gzip'));
-      bytes = await readLimited(stream, Math.min(maxDecoded, asset.decodedBytes ?? maxDecoded), 'E_ASSET_DECODED_SIZE', options.signal);
-    } catch (error) {
-      abort(options.signal);
-      if (error instanceof Error && error.message === 'E_ASSET_DECODED_SIZE') throw error;
-      throw new Error('E_ASSET_DECOMPRESSION', { cause: error });
-    }
-    if (asset.decodedBytes !== undefined && bytes.byteLength !== asset.decodedBytes) throw new Error('E_ASSET_DECODED_LENGTH');
-    if (!await digestMatches(bytes, asset.decodedSha256!)) throw new Error('E_ASSET_DECODED_HASH');
-  }
-  abort(options.signal);
-  return bytes;
+  const bytes = await readLimited(response.body, max, 'E_ASSET_SIZE', signal);
+  return verifyAndDecodeAsset(bytes, asset, {signal, maxStoredBytes: max, maxDecodedBytes: maxDecoded});
 }
 
 /** Godot 4.6.1's public Engine.load synchronously starts one fetch. This adapter

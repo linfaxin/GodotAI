@@ -29,6 +29,37 @@ only explicit schema 4 documents; existing editor storage continues using its
 existing schema until migration is deliberately enabled. Legacy React requires
 an explicit preparation adapter from `@godot-js/react-build/core`.
 
+## Release environment and browser artifacts
+
+`@godot-js/project-tools/environment` exports `prepareCompilerEnvironmentInput()`.
+Provide the exact release JSON bytes, naming, an explicit engine or SDK mode and
+a bounded `readRawAsset` callback. The callback returns stored file bytes before
+descriptor-level gzip decoding. The helper verifies declarations and optional
+API IR, prepares the SDK closure selected by the caller, and returns owned base
+`CompilerEnvironmentInput`, JSON facts and an optional validated API IR. Apply
+host-specific declarations or historical aliases before calling the existing
+`createCompilerEnvironment()` once. Check and build consume that final environment
+and the same captured project source.
+
+The Node entry's `checkNodeProject()` returns `scope: 'typecheck'`, the captured
+`sourceHash`, type diagnostics and the final environment identity. Unknown
+resource targets or unregistered converters do not suppress type diagnostics;
+`prepareNodeProject()` and `compileNodeProject()` validate those build prerequisites.
+
+Facts describe the verified base inputs; the final environment identity includes
+the actual host overlays. `facts.resources` supplies the matched `ImportTarget`
+or an explicit unknown reason. Pass an available target to both
+`registry.describe(target)` and resource conversion. Description does not execute
+custom converter callbacks or establish that native loading succeeded.
+
+The separate `@godot-js/project-tools/browser` entry exports
+`prepareBrowserArtifact()`. Feed it the single pack or ArtifactSet plus
+`compileResultMetadata(result)`, independently prepared release facts, revision
+and generation. It checks the expected target and artifact closure and returns
+owned run buffers. Plans, compiler environments and caches do not cross the Worker
+boundary. See the [minimum contract implementation](../../docs/engine-minimum-contracts-delivery.zh-CN.md)
+for the production integration and regression entry point.
+
 Import receipts are created only after successful conversions. Their source and
 dependency hashes, parameters, converter version, target resource ABI/features,
 and output hashes determine freshness. Scanning legacy imported bytes does not

@@ -20,6 +20,10 @@
 
 For full documentation, visit [godotjs.github.io](https://godotjs.github.io/documentation/getting-started/).
 
+The [engine goals and platform boundaries](docs/engine-goals.zh-CN.md) define the AI game creation platform use case, engine responsibilities and reusable integration contracts.
+The [next-stage proposal](docs/engine-next-stage.zh-CN.md) prioritizes independent platform integration, runtime observation and interaction, with concrete acceptance criteria.
+The [minimum engine contracts and core regression plan V4](docs/design/engine-minimum-contracts-v4.zh-CN.md) defines the engine prerequisites for adding the Playground AI assistant. The [implementation and integration record](docs/engine-minimum-contracts-delivery.zh-CN.md) documents the completed SDK/Playground/Node integration and passing core regression scope.
+
 For the React / TSX renderer and scene migration workflow, see the [React / TSX guide](docs/react-tsx.zh-CN.md).
 The [implementation and support matrix](docs/react-tsx-implementation.zh-CN.md) lists the available profiles and their limits.
 The [browser Worker engine guide](docs/browser-worker-engine.zh-CN.md) describes the complete-engine Worker candidate, neutral engine/project tools, compatibility paths, HTTPS isolation and activation gates. React is an optional reactive syntax layer over the same engine.

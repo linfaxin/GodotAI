@@ -176,6 +176,7 @@ export async function buildRelease(configuration) {
       recipeSha256: report.recipeSha256 ?? digest(canonical(report.recipe)), builder: report.builder,
       toolchains: report.toolchains, versionEvidence: report.versionEvidence,
       engineReportSha256: digest(await readFile(reportPath)), templateSha256: report.template.sha256,
+      ...Object.fromEntries(['runtimeAbi','workerPatch','lifecycleAbi','lifecyclePatch','artifactSetAbi','artifactSetPatch','observerAbi','nativeObserverPatch','hostResourceAbi','hostResourcePatch','shutdownQueueAbi','shutdownQueuePatch'].filter(field=>report[field]!==undefined).map(field=>[field,report[field]])),
       sourceCertified, requestedArgs:report.requestedArgs??report.recipe?.args, resolvedFeatures:report.resolvedFeatures, resolvedBuildOptions:report.resolvedBuildOptions??report.resolvedOptions, execution:sourceExecution, featuresEvidence:report.featuresEvidence, modulesEvidence:report.modulesEvidence, modules:report.modules, runtimeProfile, jsGluePatches, notes: sourceCertified ? [] : ['Development template; source-to-template provenance was not established.'],
     };
     await asset('attestation.json', `${JSON.stringify(attestation, null, 2)}\n`, 'attestation');

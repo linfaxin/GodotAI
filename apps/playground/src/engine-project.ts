@@ -1,12 +1,12 @@
 import {prepareEngineProject as prepareCore,EngineProjectBuildError,type EngineProjectOptions as CoreOptions} from '@godot-js/project-tools/engine-project';
-import {createSourceSnapshot,createBuildPlan,adaptLegacyLaunch,packPreparedProject,type ProjectLaunch,type OutputEntry,type SourceSnapshot} from '@godot-js/project-tools/build-plan';
-import {compileBuildPlan,type CompilerEnvironment,ProjectBuildCache,type CompileResult} from '@godot-js/project-tools/compiler';
+import {createSourceSnapshot,createBuildPlan,adaptLegacyLaunch,type ProjectLaunch,type SourceSnapshot} from '@godot-js/project-tools/build-plan';
+import {compileBuildPlan,compileProject,type CompilerEnvironment,ProjectBuildCache,type CompileResult,type CheckedCompileResult,type ProjectLanguageService} from '@godot-js/project-tools/compiler';
 import {prepareEngineProject as prepareReactProject,prepareLegacyBuildPlan,type EngineProjectOptions as LegacyOptions,type EngineProjectManifest,type EngineProjectDiagnostic} from '@godot-js/react-build/core';
 import type {ImportReceipt,ImportInspection,LegacyImportObservation} from '@godot-js/project-tools/import-receipts';
 import type {ImportTarget} from '@godot-js/project-tools/import-receipts';
 import type {ResourceImportRequest,ResourceConverterRegistry} from '@godot-js/project-tools/resource-converters';
 import {ProjectToolError} from '@godot-js/project-tools/errors';
-import type {ArtifactSet,ArtifactSetOptions} from '@godot-js/project-tools/artifact-set';
+import type {ArtifactSetOptions} from '@godot-js/project-tools/artifact-set';
 
 export {EngineProjectBuildError};
 export type {EngineProjectManifest,EngineProjectDiagnostic,PreparedEngineProject} from '@godot-js/react-build/core';
@@ -18,6 +18,7 @@ export interface EngineProjectOptions extends Omit<LegacyOptions,'runtime'> {
  compilerEnvironment?:CompilerEnvironment;
  sourceSnapshot?:SourceSnapshot;
  buildCache?:ProjectBuildCache;
+ languageService?:ProjectLanguageService;
  signal?:AbortSignal;
  artifactSet?:boolean|Omit<ArtifactSetOptions,'target'|'launch'>;
  importReceipts?:readonly ImportReceipt[];
@@ -34,7 +35,7 @@ export function prepareEngineProject(options:EngineProjectOptions) {
  return options.runtime==='react'&&options.launch===undefined?prepareReactProject({...options,runtime:'react'}):prepareCore(options);
 }
 
-export type EngineProjectResult=CompileResult;
+export type EngineProjectResult=CompileResult|CheckedCompileResult;
 
 /** Product path: read-only source -> explicit plan -> audited overlay -> PCK.
  * Existing runtime labels preserve their exact old launch semantics. New engine
@@ -67,6 +68,11 @@ async function compileSnapshot(options:EngineProjectOptions):Promise<EngineProje
  };
  const buildOptions={compilerOptions,...(options.importChecks?{importChecks:options.importChecks}:{}),...(options.importReceipts?{storedImportReceipts:options.importReceipts}:{}),...(options.importCacheObservations?{importCacheObservations:options.importCacheObservations}:{}),
   ...(options.resourceImports?{resourceImports:options.resourceImports,resourceConverters:options.resourceConverters,resourceTarget:options.resourceTarget}:{})};
- return compileBuildPlan(plan,{environment:options.compilerEnvironment,preparation:buildOptions,pack:packLimits,cache:options.buildCache,signal:options.signal,artifactSet:options.artifactSet,
-  ...(plan.compatibility?{preparePlan:(input,preparation)=>prepareLegacyBuildPlan(input,{...preparation,...(options.props?{props:options.props}:{})})}:{})});
+ const compileOptions={preparation:buildOptions,pack:packLimits,cache:options.buildCache,signal:options.signal,artifactSet:options.artifactSet,
+  ...(plan.compatibility?{preparePlan:(input:Parameters<typeof prepareLegacyBuildPlan>[0],preparation:Parameters<typeof prepareLegacyBuildPlan>[1])=>prepareLegacyBuildPlan(input,{...preparation,...(options.props?{props:options.props}:{})})}:{})};
+ // Production builds check the exact captured source with their final adapted
+ // environment. Unchecked callers remain available for low-level pack fixtures.
+ return options.compilerEnvironment
+  ?compileProject({plan,environment:options.compilerEnvironment,languageService:options.languageService,...compileOptions})
+  :compileBuildPlan(plan,compileOptions);
 }

@@ -5,6 +5,14 @@
   "type": "module",
   "description": "Browser Godot engine API, runtime contracts and session integration",
   "exports": {
+    "./browser/release-adapter": {
+      "types": "./dist/browser/release-adapter.d.ts",
+      "import": "./dist/browser/release-adapter.js"
+    },
+    "./release-assets": {
+      "types": "./dist/release-assets.d.ts",
+      "import": "./dist/release-assets.js"
+    },
     "./execution": {
       "types": "./dist/execution.d.ts",
       "import": "./dist/execution.js"

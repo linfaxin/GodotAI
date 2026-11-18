@@ -275,6 +275,15 @@ jobs:
           --out "$RUNNER_TEMP/default-playground-site"
       - name: Prepare transparent HTTP delivery variants
         run: node apps/playground/scripts/prepare-site-delivery.mjs "$RUNNER_TEMP/default-playground-site"
+      - name: Verify minimum engine contracts with independent real-browser groups
+        if: always() && matrix.profile == 'full-engine-v1'
+        env:
+          PLAYWRIGHT_CHROMIUM_EXECUTABLE: ${{ env.CHROMIUM }}
+          PLAYGROUND_TEST_DIRECTORY: ${{ runner.temp }}/default-playground-site
+          PLAYGROUND_ENGINE_CONTRACT_REPORT: ${{ runner.temp }}/engine-contracts/contracts.json
+          PLAYGROUND_PRESENTATION_BACKEND: direct
+          BROWSER: chromium
+        run: node apps/playground/scripts/browser-engine-contracts-test.mjs
       - name: Verify the actual product remains usable when persistence is unavailable
         env:
           PLAYWRIGHT_CHROMIUM_EXECUTABLE: ${{ env.CHROMIUM }}
@@ -356,6 +365,7 @@ jobs:
             ${{ runner.temp }}/web-lifecycle/
             ${{ runner.temp }}/binary-resource-probe/
             ${{ runner.temp }}/storage-degradation.json
+            ${{ runner.temp }}/engine-contracts
             ${{ runner.temp }}/browser-engine-measurement.json
             ${{ runner.temp }}/browser-engine-performance.legacy.json
             ${{ runner.temp }}/browser-engine-performance.worker-direct.json

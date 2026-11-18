@@ -33,7 +33,7 @@ export async function sealSiteAcceptance(directory,reports,{verify=false,begin=f
  const manifest=worker?await json(path.join(directory,'manifest.json')):undefined;
  if(release.schemaVersion!==2||!isEngineProfile(release.runtimeProfile))throw Error('E_SITE_PROFILE');
  if(release.build?.sourceCertified!==true)throw Error('E_SITE_UNCERTIFIED_SOURCE');
- if(worker)assertWorkerBuildProof({kind:'godot-js-browser-engine-build',status:'built',runtimeAbi:release.runtimeAbi,execution:release.execution,source:release.build.engineSource,lifecyclePatch:release.build.lifecyclePatch,workerPatch:release.build.workerPatch,recipe:release.build.engineRecipe,recipeSha256:release.build.recipeSha256,godotSource:release.build.godotSource});
+ if(worker)assertWorkerBuildProof({...release.build,kind:'godot-js-browser-engine-build',status:'built',runtimeAbi:release.runtimeAbi,execution:release.execution,source:release.build.engineSource,recipe:release.build.engineRecipe});
  if(worker)await assertWorkerSdkSources(repo,release.build.sdkBuild);
  const resources=await json(path.join(directory,'resource-build.json'));
  if(resources.runtimeProfile!==release.runtimeProfile||resources.engineReleaseId!==release.id)throw Error('E_SITE_RESOURCE_IDENTITY');

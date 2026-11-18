@@ -1,0 +1,277 @@
+{
+  "schemaVersion": 1,
+  "kind": "godotjs-engine-minimum-contracts-verification",
+  "status": "passed",
+  "date": "2026-11-18",
+  "baselineCommit": "a518dab2e4d0e68918ba3cda13545de0af1c349d",
+  "scope": {
+    "profile": "full-engine-v1",
+    "target": "template_debug",
+    "executionBackend": "worker",
+    "presentationBackend": "direct",
+    "browser": "Chromium 154.0.8037.57",
+    "node": "24.15.0",
+    "pnpm": "10.11.0",
+    "browserSettings": "Engineering overrides including SwiftShader; per-case autoplay settings are retained in raw reports.",
+    "fullReleaseMatrix": "outside-this-scope"
+  },
+  "build": {
+    "workspacePackages": "passed",
+    "playgroundTypecheck": "passed",
+    "productionNativeApiCapture": [
+      "snake",
+      "camel"
+    ],
+    "site": "work/engine-minimum-contracts/site",
+    "packageBuildLog": "/workspace/work/engine-contracts-implementation/build-packages-main-merge.log",
+    "packageBuildLogSha256": "e66ad02d1897e1565c1768f7629e91d6df083e32d6416adc78563e71cca1131a",
+    "siteBuildLog": "/workspace/work/engine-contracts-implementation/site-build-main-merge.log",
+    "siteBuildLogSha256": "85d19c0f0c5ebf89a29a43bfa45a419047c848c8f1188965c5c71b1e627f1766"
+  },
+  "identity": {
+    "releaseId": "b478cd0991b3a55f271bb3c17c3c2fee543acb85e2ca60ed4409311f29c12361",
+    "engineId": "e655c5f2b51a7da53f8bdc06dd3ecd368e285a4d09fc9a92c2617a8cfd51c20a",
+    "extensionId": "4406eacbdb457746cd2594cee5b043b42ce09a23d58f8ab6e3d51a44e9c04d6d",
+    "descriptorSha256": "7445c56465f725616e57bc95e5aa1d0b7b838da566cd0046dbdf2211690ee7c2",
+    "candidateId": "dc4daa9062c3ad7125bfb1b4bc2b169192dfa676bd6f99d757a0e2c3c98a50dc",
+    "siteHash": "eb296e3ff9e8276f77a82893e7a790d1dc8bce8808f3a128b50ad3601d6b3185",
+    "sdkSourceSnapshotHash": "bd4a0800cb9c7a2e7cdd49774f36dd5d18846d44794beb21b6cc0e2ab1998cec",
+    "nativeTemplateSha256": "4450b02dbcc1b102d656ee6d759e8b70baa296fe3bd61dd12cb58ca8507440ed",
+    "nativeBuildReportSha256": "3d6a4ff2a58aab42c1954db583c799c2c04fb8e6c7685b09dbc7daa5fbff33b8"
+  },
+  "sourceValidation": {
+    "status": "prepared",
+    "mode": "seal-site-acceptance --begin (source/candidate validation)",
+    "files": 214,
+    "log": "/workspace/work/engine-contracts-implementation/main-merge/site-source-validation.log",
+    "logSha256": "ddd1058a0155a9a8e1b14bb6f12925f0afc2cbe87bbd1f5d88e8326ffeb2ae34"
+  },
+  "delivery": {
+    "status": "prepared",
+    "files": 68,
+    "gzipLevel": 9,
+    "brotliQuality": 5
+  },
+  "tests": [
+    {
+      "suite": "engine-and-project-tools",
+      "tests": 221,
+      "pass": 221,
+      "fail": 0,
+      "skipped": 0,
+      "log": "/workspace/work/engine-contracts-implementation/main-merge/engine-project-tests.log",
+      "logSha256": "252a62cb453cb1881e040f9fca856ae9161e3e92978bd7f74d5647cf96e7d3e0"
+    },
+    {
+      "suite": "playground",
+      "tests": 365,
+      "pass": 365,
+      "fail": 0,
+      "skipped": 0,
+      "log": "/workspace/work/engine-contracts-implementation/main-merge/playground-tests.log",
+      "logSha256": "a6915eededa8a5f7e561b7dc8eda406e20cc83d19ffb2d444fd46435ea40b2fa"
+    },
+    {
+      "suite": "worker-runtime-and-session",
+      "tests": 25,
+      "pass": 25,
+      "fail": 0,
+      "skipped": 0,
+      "log": "/workspace/work/engine-contracts-implementation/worker-runtime-tests.log",
+      "logSha256": "8497f4a79d1a30c7ab46afb11d4eb4be5d93e83cb4e454189d0108f7a5b061ab"
+    },
+    {
+      "suite": "native-proof-preservation",
+      "tests": 34,
+      "pass": 34,
+      "fail": 0,
+      "skipped": 0,
+      "log": "/workspace/work/engine-contracts-implementation/native-proof-regression.log",
+      "logSha256": "b41a98ca833075ee4258c4beaa4ee8c7a189d6ea6b5e831f5e117372bdd0b3bd"
+    }
+  ],
+  "requiredGroups": [
+    "preflight",
+    "lifecycle",
+    "failure-recovery",
+    "replacement",
+    "entry-resources"
+  ],
+  "groups": [
+    {
+      "name": "preflight",
+      "status": "passed",
+      "cases": []
+    },
+    {
+      "name": "lifecycle",
+      "status": "passed",
+      "cases": [
+        {
+          "name": "runtime-host",
+          "status": "passed",
+          "engineExecuted": true,
+          "sessions": 3,
+          "steps": [
+            {
+              "name": "normal-host-roundtrip",
+              "status": "passed"
+            },
+            {
+              "name": "stop-restart",
+              "status": "passed"
+            }
+          ],
+          "report": "/workspace/work/engine-contracts-implementation/main-merge/contracts.cases/lifecycle-runtime-host.json",
+          "reportSha256": "2c71892bcc540286edea01b719033091d761cbbac6196a49bf8af8d0aac65402"
+        }
+      ]
+    },
+    {
+      "name": "failure-recovery",
+      "status": "passed",
+      "cases": [
+        {
+          "name": "runtime-host",
+          "status": "passed",
+          "engineExecuted": true,
+          "sessions": 3,
+          "steps": [
+            {
+              "name": "async-start-failure",
+              "status": "passed"
+            },
+            {
+              "name": "recovery-after-failure",
+              "status": "passed"
+            },
+            {
+              "name": "pending-startup-late-async-cleanup",
+              "status": "passed"
+            }
+          ],
+          "report": "/workspace/work/engine-contracts-implementation/main-merge/contracts.cases/failure-recovery-runtime-host.json",
+          "reportSha256": "fd98ac95787623394741c2fc3e61c169ffb4446116defac49eb1d566107b2556"
+        }
+      ]
+    },
+    {
+      "name": "replacement",
+      "status": "passed",
+      "cases": [
+        {
+          "name": "isolated-consumer",
+          "status": "passed",
+          "engineExecuted": true,
+          "sessions": 8,
+          "steps": [
+            {
+              "name": "compiled-native-readback",
+              "status": "passed"
+            },
+            {
+              "name": "type-error-no-run",
+              "status": "passed"
+            },
+            {
+              "name": "captured-second-build",
+              "status": "passed"
+            },
+            {
+              "name": "cancel-before-session",
+              "status": "passed"
+            },
+            {
+              "name": "stop-before-ready",
+              "status": "passed"
+            },
+            {
+              "name": "wrong-target-and-hash-preserve-active-run",
+              "status": "passed"
+            },
+            {
+              "name": "active-build-replacement",
+              "status": "passed"
+            },
+            {
+              "name": "newer-preparation-wins",
+              "status": "passed"
+            },
+            {
+              "name": "lost-host-and-recovery",
+              "status": "passed"
+            },
+            {
+              "name": "ordinary-scene-entry",
+              "status": "passed"
+            },
+            {
+              "name": "artifact-set-early-mount",
+              "status": "passed"
+            }
+          ],
+          "report": "/workspace/work/engine-contracts-implementation/main-merge/contracts.cases/replacement-isolated-consumer.json",
+          "reportSha256": "11ce5ae211c30cd0e2c9f0df7d1586644f32a55b9ab71f7be54487f9568c8ed6"
+        }
+      ]
+    },
+    {
+      "name": "entry-resources",
+      "status": "passed",
+      "cases": [
+        {
+          "name": "react-entry",
+          "status": "passed",
+          "engineExecuted": true,
+          "sessions": 4,
+          "steps": [
+            {
+              "name": "new-react-template",
+              "status": "passed"
+            }
+          ],
+          "report": "/workspace/work/engine-contracts-implementation/main-merge/contracts.cases/entry-resources-react-entry.json",
+          "reportSha256": "32fcddf79a84687b35764c594ad17eab3b2c0da228026896cc5118f63f7bc3ad"
+        },
+        {
+          "name": "schema4-entry",
+          "status": "passed",
+          "engineExecuted": true,
+          "sessions": 1,
+          "steps": [],
+          "report": "/workspace/work/engine-contracts-implementation/main-merge/contracts.cases/entry-resources-schema4-entry.json",
+          "reportSha256": "cb4dd209d6e348bda33f42e52609fb04385ff5383adb22d4bdd50ee24bcad2c4"
+        },
+        {
+          "name": "native-resources",
+          "status": "passed",
+          "engineExecuted": true,
+          "sessions": 2,
+          "steps": [],
+          "report": "/workspace/work/engine-contracts-implementation/main-merge/contracts.cases/entry-resources-native-resources.json",
+          "reportSha256": "e7376d2e90e92ec467c1c23e99b56d650d3e5a5144e6932e502c7874ad4379ea"
+        }
+      ]
+    }
+  ],
+  "coreReport": "/workspace/work/engine-contracts-implementation/main-merge/contracts.json",
+  "coreReportSha256": "d180fc5678ed458e19ba5e8c2f3461dabf120c5d3492319f54d002a44fb5ef92",
+  "nativeSource": {
+    "run": "https://github.com/linfaxin/GodotAI/actions/runs/44046900983",
+    "artifact": "https://github.com/linfaxin/GodotAI/actions/runs/44046900983/artifacts/14314188455",
+    "reuse": "Original complete template and receipts are immutable external native inputs; current SDK, host and site are rebuilt."
+  },
+  "reviewFixes": {
+    "status": "passed",
+    "changes": [
+      "Legacy releases retain absent native identities throughout environment, checked build and browser artifact preparation for engine and SDK selections.",
+      "Node typecheck retains diagnostics independently of resource build prerequisites.",
+      "Required browser cases match the preflight identity and include confirmed Worker/direct execution.",
+      "Schema 4 and native resource reports explicitly record observed engine execution."
+    ],
+    "retainedSuiteEvidence": [
+      "worker-runtime-and-session",
+      "native-proof-preservation"
+    ]
+  }
+}
