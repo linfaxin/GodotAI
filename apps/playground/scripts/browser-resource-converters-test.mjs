@@ -7,18 +7,22 @@ import {deflateSync} from 'node:zlib';
 import {build as bundle} from 'esbuild';
 import {launchBrowser,withAcceptanceContext} from './browser-harness.mjs';
 import {createStaticServer} from './serve.mjs';
+import {runReportedBrowserTest,browserTestFailureStatus,listenBrowserTestServer as listen,closeBrowserTestServer as close} from './browser-contract-report.mjs';
+
+await runReportedBrowserTest({scope:'actual-product-resource-converters',reportFile:process.env.PLAYGROUND_RESOURCE_REPORT,run:async test=>{
 
 // Records actual production Worker messages; no compiler or runtime replacement.
 const directory=path.resolve(process.env.PLAYGROUND_TEST_DIRECTORY??fileURLToPath(new URL('../dist',import.meta.url)));
-const manifestBytes=await fs.readFile(path.join(directory,'manifest.json')),site=JSON.parse(manifestBytes),release=JSON.parse(await fs.readFile(path.join(directory,'engine-release.json'),'utf8'));
-const prefix=site.publicAssets?'/releases/'+createHash('sha256').update(manifestBytes).digest('hex')+'/':'/';
+const {site,release,candidateId}=await test.preflight(directory);
+const prefix=site.publicAssets?'/releases/'+candidateId+'/':'/';
 const options=site.publicAssets?{publicImmutable:true,urlPrefix:prefix}:{};
 const editor=createStaticServer(directory,options),preview=createStaticServer(directory,options);
-const listen=server=>new Promise(resolve=>server.listen(0,'127.0.0.1',resolve)),close=server=>new Promise(resolve=>server.close(resolve));
+test.defer(()=>close(editor));test.defer(()=>close(preview));
 await Promise.all([listen(editor),listen(preview)]);
 const editorRoot=`http://127.0.0.1:${editor.address().port}${prefix}`,previewRoot=`http://127.0.0.1:${preview.address().port}${prefix}`;
 const timeout=Number(process.env.PLAYGROUND_RESOURCE_TIMEOUT??180000),checks=[],errors=[],cases=[],artifactBuilds=[];
 let browser,context,page,report={status:'failed',scope:'actual-product-resource-converters',checks};
+test.defer(()=>browser?.close());test.defer(()=>context?.close());test.checkpoint(report);
 function wav(samples){const bytes=Buffer.alloc(44+samples.length+(samples.length%2));bytes.write('RIFF');bytes.writeUInt32LE(bytes.length-8,4);bytes.write('WAVEfmt ',8);bytes.writeUInt32LE(16,16);bytes.writeUInt16LE(1,20);bytes.writeUInt16LE(1,22);bytes.writeUInt32LE(8000,24);bytes.writeUInt32LE(8000,28);bytes.writeUInt16LE(1,32);bytes.writeUInt16LE(8,34);bytes.write('data',36);bytes.writeUInt32LE(samples.length,40);bytes.set(samples,44);return bytes;}
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
 const receiptImports=build=>build.manifest.importReceipts??build.manifest.artifactReceipt?.imports;
@@ -53,7 +57,7 @@ function whitePng(dimension){
 async function ready(){await page.waitForFunction(()=>globalThis.__playgroundWorkbench?.inspect().ready&&document.querySelector('#saved').textContent==='已自动保存',null,{timeout});}
 const inspect=()=>page.evaluate(()=>{const value=globalThis.__playgroundWorkbench.inspect();return {...value,project:{runtime:value.project.runtime,entry:value.project.entry,launch:value.project.engineDocument?.launch,files:Object.fromEntries(Object.entries(value.project.files).map(([path,value])=>[path,Array.isArray(value)?{byteLength:value.length}:value]))}};});
 async function imported(document){await page.locator('#import').setInputFiles({name:'resource-project.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(document))});await ready();}
-async function running(after=0,seconds=0.0005){await page.waitForFunction(({after,seconds})=>{const state=globalThis.__playgroundWorkbench.inspect();if(globalThis.__resourceBuildErrors.length)throw Error(globalThis.__resourceBuildErrors.join('\n'));if(state.diagnostics.some(item=>item.category==='error'))throw Error(JSON.stringify(state.diagnostics));return state.engine?.state==='running'&&document.querySelector('#logs')?.textContent.includes('RESOURCE_FORMAT_NATIVE_OK '+seconds)&&globalThis.__resourceBuilds.length>after;},{after,seconds},{timeout});assert.deepEqual(errors,[]);assert.doesNotMatch(await page.locator('#logs').textContent(),/ERROR:|SCRIPT ERROR|\[jsb\]\[Error\]/);return page.evaluate(()=>globalThis.__resourceBuilds.at(-1));}
+async function running(after=0,seconds=0.0005){await page.waitForFunction(({after,seconds})=>{const state=globalThis.__playgroundWorkbench.inspect();if(globalThis.__resourceBuildErrors.length)throw Error(globalThis.__resourceBuildErrors.join('\n'));if(state.diagnostics.some(item=>item.category==='error'))throw Error(JSON.stringify(state.diagnostics));return state.engine?.state==='running'&&document.querySelector('#logs')?.textContent.includes('RESOURCE_FORMAT_NATIVE_OK '+seconds)&&globalThis.__resourceBuilds.length>after;},{after,seconds},{timeout});assert.deepEqual(errors,[]);assert.doesNotMatch(await page.locator('#logs').textContent(),/ERROR:|SCRIPT ERROR|\[jsb\]\[Error\]/);test.checkpoint({engineExecuted:true});return page.evaluate(()=>globalThis.__resourceBuilds.at(-1));}
 async function download(id){const promise=page.waitForEvent('download');if(!await page.locator('#'+id).isVisible())await page.locator('#project-menu summary').click();await page.locator('#'+id).click();return JSON.parse(await fs.readFile(await(await promise).path(),'utf8'));}
 const source=`import {ResourceLoader,Resource,CompressedTexture2D,AudioStreamWAV,Image,FileAccess,AudioStreamOggVorbis,GLTFDocument,GLTFState,PackedScene,Node,print} from 'godot';
 export function start({mount}:{mount:Node}){
@@ -132,7 +136,8 @@ export function start({mount,host}:{mount:Node;host?:any}){
  checks.push('An independent 2K PNG imports through the real UI/shared compiler into '+(binary?'a compact CTEX artifact':'an explicit legacy Base64 artifact')+'; the actual native Worker loads '+textureType+' by original path/UID and confirms dimensions and native pixel samples while preserving source bytes, original export and receipt');
 }
 try{
- browser=await launchBrowser({headless:true,args:['--no-sandbox','--enable-webgl','--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader','--disable-dev-shm-usage']});
+ test.stage='browser';browser=await launchBrowser({headless:true,args:['--no-sandbox','--enable-webgl','--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader','--disable-dev-shm-usage']});
+ test.stage='run';
  context=await browser.newContext({viewport:{width:1536,height:1000},acceptDownloads:true});
  const observer=await bundle({entryPoints:[fileURLToPath(new URL('./resource-artifact-observer.mjs',import.meta.url))],bundle:true,write:false,platform:'browser',format:'iife',globalName:'ResourceArtifactObserver',target:'es2022'});
  await context.addInitScript({content:observer.outputFiles[0].text+`;const NativeWorker=globalThis.Worker;globalThis.__resourceBuilds=[];globalThis.__resourceBuildErrors=[];globalThis.Worker=class extends NativeWorker{constructor(...args){super(...args);if(String(args[0]).includes('compiler.worker'))this.addEventListener('message',({data})=>{if(data?.manifest&&(data.variant==='single-pack'||data.variant==='pack-set'))ResourceArtifactObserver.observeResourceArtifact(data).then(build=>globalThis.__resourceBuilds.push(build),error=>globalThis.__resourceBuildErrors.push(String(error)));});}};`});
@@ -159,7 +164,8 @@ try{
  const secondExport=await download('export');assert.deepEqual(secondExport.files['/assets/tone.wav'],[...secondWav]);assert.deepEqual(secondExport.importReceipts,receiptImports(second));assert.deepEqual((await download('export-original')).files['/assets/tone.wav'],[...firstWav]);checks.push('replacing WAV through the resource UI reexecutes conversion and changes source/output hashes and buildKey while original export stays intact');
  await imported({...original,resourceImports:[{resource:'res://assets/tone.wav',converter:'unavailable-editor-importer'}]});await page.waitForFunction(()=>globalThis.__playgroundWorkbench.inspect().diagnostics.some(item=>item.code==='E_RESOURCE_CONVERTER'&&item.message.includes('not registered')),null,{timeout});checks.push('unavailable converters fail explicitly instead of blessing an existing cache');
  await page.locator('#stop').click();
- await page.waitForFunction(()=>globalThis.__playgroundWorkbench.inspect().engine?.state==='exited'&&!document.querySelector('#preview iframe'),null,{timeout});await largeTextureCase(true);await largeTextureCase(false);
- report=await withAcceptanceContext({status:'passed',scope:'actual-product-resource-converters',checks,cases,artifactBuilds,pageErrors:errors,receiptExamples:firstImports.map(({resource,converter,target,uid,parameterHash})=>({resource,converter,target,...(uid?{uid}:{}),parameterHash}))},{directory,browser});
-}catch(error){report={...report,error:String(error),stack:error?.stack,checks,cases,artifactBuilds,pageErrors:errors,...(page?{observed:await inspect().catch(()=>undefined),logs:await page.locator('#logs').textContent().catch(()=>undefined)}:{})};process.exitCode=1;}
-finally{if(process.env.PLAYGROUND_RESOURCE_REPORT){const file=path.resolve(process.env.PLAYGROUND_RESOURCE_REPORT);await fs.mkdir(path.dirname(file),{recursive:true});await fs.writeFile(file,JSON.stringify(report,null,2)+'\n');}console.log(JSON.stringify(report,null,2));await context?.close();await browser?.close();await Promise.all([close(editor),close(preview)]);}
+ await page.waitForFunction(()=>globalThis.__playgroundWorkbench.inspect().engine?.state==='exited'&&!document.querySelector('#preview iframe'),null,{timeout});if(process.env.PLAYGROUND_ENGINE_CONTRACTS!=='1'){await largeTextureCase(true);await largeTextureCase(false);}
+ report=await withAcceptanceContext({status:'passed',scope:'actual-product-resource-converters',engineExecuted:true,checks,cases,artifactBuilds,pageErrors:errors,receiptExamples:firstImports.map(({resource,converter,target,uid,parameterHash})=>({resource,converter,target,...(uid?{uid}:{}),parameterHash}))},{directory,browser});
+}catch(error){report={...report,status:browserTestFailureStatus(error,test.stage),error:String(error),stack:error?.stack,checks,cases,artifactBuilds,pageErrors:errors,...(page?{observed:await inspect().catch(()=>undefined),logs:await page.locator('#logs').textContent().catch(()=>undefined)}:{})};process.exitCode=1;}
+return report;
+}});

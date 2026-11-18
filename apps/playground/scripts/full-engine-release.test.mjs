@@ -8,6 +8,9 @@ import {auditEngineBinding} from './engine-api-binding-audit.mjs';
 import {FULL_WEB_MODULE_BASELINE} from './full-engine-profile.mjs';
 import {getEngineProfile} from '../../../scripts/release/engine-profiles.mjs';
 import {assertFullEngineIdentities} from '../../../scripts/release/release-identities.mjs';
+import {assertWorkerBuildProof} from './worker-candidate.mjs';
+import {WORKER_SDK_PACKAGES} from './worker-sdk-proof.mjs';
+import {workerBuildReportFixture} from './fixtures/worker-build-report.mjs';
 import {createRequire} from 'node:module';
 const {ENGINE_SDK_MODULES}=createRequire(new URL('../../../scripts/jsb.react/package.json',import.meta.url))('@godot-js/react/engine-modules');
 const sdkDeclarations=()=>Object.fromEntries(Object.values(ENGINE_SDK_MODULES).map(entry=>[entry.declaration,'export {};\n']));
@@ -67,6 +70,29 @@ test('SDK type-only changes update extension identity while preserving engine-on
  const after=assembleFullEngineRelease(changed).manifest;
  assert.equal(after.engineId,before.engineId);assert.notEqual(after.extensionId,before.extensionId);assert.notEqual(after.sdk.typesHash,before.sdk.typesHash);
  assert.doesNotThrow(()=>assertFullEngineIdentities(after));
+});
+
+test('Worker release retains composed native ABI receipts for later verification',()=>{
+ const input=fixture(),report=workerBuildReportFixture(),original=structuredClone(report);
+ const sourceInputs=Object.fromEntries(WORKER_SDK_PACKAGES.flatMap(name=>[[name+'/package.json',sha256('synthetic manifest')],[name+'/tsconfig.json',sha256('synthetic config')]]));
+ const entrypoints=Object.fromEntries(WORKER_SDK_PACKAGES.map(name=>[name,[name+'/dist/index.js']])),outputs=Object.fromEntries(Object.values(entrypoints).flat().map(name=>[name,{sha256:sha256('synthetic SDK output'),bytes:20}]));
+ const sdkBuild={schemaVersion:1,kind:'worker-sdk-source-build-proof',packages:WORKER_SDK_PACKAGES,entrypoints,sourceInputs,sourceSnapshotHash:sha256(canonical(sourceInputs)),outputs,outputSnapshotHash:sha256(canonical(outputs))};
+ input.engine.execution=report.execution;input.runtimeAbi=report.runtimeAbi;input.engineBuildReport=report;
+ input.build={...input.build,sdkBuild,engineSource:report.source,godotSource:report.godotSource,recipeSha256:report.recipeSha256};
+ const {manifest}=assembleFullEngineRelease(input);
+ for(const field of ['workerPatch','lifecycleAbi','lifecyclePatch','artifactSetAbi','artifactSetPatch','observerAbi','nativeObserverPatch','hostResourceAbi','hostResourcePatch','shutdownQueueAbi','shutdownQueuePatch'])assert.deepEqual(manifest.build[field],report[field],field);
+ assert.doesNotThrow(()=>assertWorkerBuildProof({...manifest.build,kind:report.kind,status:report.status,runtimeAbi:manifest.runtimeAbi,execution:manifest.execution,source:manifest.build.engineSource,recipe:manifest.build.engineRecipe}));
+ assert.deepEqual(report,original,'assembling a release must not rewrite its original native report');
+ for(const [field,mutate]of [
+  ['workerPatch',proof=>{proof.files[Object.keys(proof.files)[0]]=sha256('wrong worker source');}],
+  ['lifecyclePatch',proof=>{proof.files['scene/main/scene_tree.h'].sha256=sha256('wrong lifecycle source');}],
+  ['artifactSetPatch',proof=>{proof.sha256=sha256('wrong mount source');}],
+  ['hostResourcePatch',proof=>{proof.files[Object.keys(proof.files)[0]].sha256=sha256('wrong resource source');}],
+  ['shutdownQueuePatch',proof=>{proof.files['main/main.cpp'].sha256=sha256('wrong shutdown source');}],
+ ]){
+  const changed=structuredClone(report);mutate(changed[field]);
+  assert.throws(()=>assembleFullEngineRelease({...input,engineBuildReport:changed}),/E_WORKER_BUILD_PROOF|E_EXECUTION_CONTRACT/,field);
+ }
 });
 test('actual browser host bytes change engine identity without changing the optional React extension',()=>{
  const input=fixture(),host=Buffer.from('/* actual bundled host fixture */');

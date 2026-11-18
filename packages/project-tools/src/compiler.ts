@@ -177,6 +177,7 @@ export function compileProject(request:CompileProjectRequest&{artifactSet?:false
 export function compileProject(request:CompileProjectRequest&{artifactSet:true|Omit<ArtifactSetOptions,'target'|'launch'>}):Promise<CheckedCompileResult<PackSetCompileResult>>;
 export function compileProject(request:CompileProjectRequest):Promise<CheckedCompileResult>;
 export async function compileProject(request: CompileProjectRequest) {
+ const releaseSnapshot = request.releaseSnapshot;
  try{
   assertBuildActive(request.signal);
   const typeEnvironment=request.environment.createTypeEnvironment(snapshotTextFiles(request.plan.snapshot));
@@ -185,5 +186,5 @@ export async function compileProject(request: CompileProjectRequest) {
     category: item.category === 'error' ? 'error' : 'warning'})));
   const result = await compileBuildPlan(request.plan, request);
   return {...result, diagnostics: [...diagnostics, ...result.diagnostics] as CompilerDiagnostic[]};
- }finally{request.releaseSnapshot?.();}
+ }finally{releaseSnapshot?.();}
 }

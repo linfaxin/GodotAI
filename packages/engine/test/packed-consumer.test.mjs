@@ -47,9 +47,10 @@ test('packed engine SDK works in an isolated consumer without React, workspace a
  await t.test('all published subpaths load without a DOM, Godot, React or compiler runtime',async()=>{
   const result=await execute(`import assert from 'node:assert/strict';
 const names=${JSON.stringify(entries.map(name=>'@godot-js/engine'+name.slice(1)))};
-for(const name of names){const value=await import(name);assert(Object.keys(value).length>0,name);}
+for(const name of names){const value=await import(name);if(name!=='@godot-js/engine/release-assets')assert(Object.keys(value).length>0,name);}
 for(const name of ['react','react-reconciler','scheduler','typescript','@godot-js/react','godot'])assert.throws(()=>import.meta.resolve(name),{code:'ERR_MODULE_NOT_FOUND'});
 const api=await import('@godot-js/engine/api');assert.equal(typeof api.generateEngineDeclarations,'function');
+const assets=await import('@godot-js/engine/release-assets');assert.equal(typeof assets.verifyAndDecodeAsset,'function');
 const browser=await import('@godot-js/engine/browser');for(const name of ['BrowserEngineSession','PreviewRunner','validateRelease','fetchVerifiedAsset','validateExecution'])assert.equal(typeof browser[name],'function',name);
 assert.equal(globalThis.document,undefined);console.log('isolated-imports-passed');`);
   assert.match(result.stdout,/isolated-imports-passed/);
@@ -60,6 +61,18 @@ assert.equal(globalThis.document,undefined);console.log('isolated-imports-passed
 import {createRuntimeBinding,installRuntimeHost,getRuntimeHost,type RuntimeHost} from '@godot-js/engine/runtime';
 import {createEngineIdentity,assertRuntimeTargetIdentity} from '@godot-js/engine/identities';
 import {parseEngineApi,type EngineApiIR} from '@godot-js/engine/api';
+import type {AssetIntegrity,StoredAsset,ReleaseFacts,RawAssetReader} from '@godot-js/engine/release-assets';
+import type {WorkerRunnerEvent,WorkerRunnerExit} from '@godot-js/engine/browser/dedicated/worker-runner';
+const integrity:AssetIntegrity={sha256:'a'.repeat(64)};
+const stored:StoredAsset={...integrity,path:'asset.bin',bytes:1};
+// @ts-expect-error Release assets require a declared stored length.
+const incomplete:StoredAsset={sha256:'a'.repeat(64),path:'asset.bin'};
+declare const releaseFacts:ReleaseFacts;declare const readRaw:RawAssetReader;
+declare const workerEvent:WorkerRunnerEvent;declare const workerExit:WorkerRunnerExit;
+if(workerEvent.type!=='exit'){workerEvent.documentId.toUpperCase();workerEvent.workerId.toUpperCase();workerEvent.runConfigurationHash.toUpperCase();}
+else workerEvent.report.documentId.toUpperCase();
+if(workerExit.sessionFacts)workerExit.engineOutcome.kind;
+void stored;void releaseFacts;void readRaw;
 const identity={runId:'run',revision:1,buildKey:'build',generation:'generation'};
 const session:BrowserEngineSessionOptions={identity,executionModel:'proxy-pthread',requiresCrossOriginIsolation:true,onProgress(p){p.sequence.toFixed();}};
 declare const release:VerifiedRelease;

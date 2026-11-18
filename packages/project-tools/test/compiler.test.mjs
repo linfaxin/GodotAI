@@ -18,6 +18,8 @@ import {assessStoredImportReceipt} from '../dist/import-receipts.js';
 import {readPckIndex} from '@godot-js/engine/pck-index';
 import {createExtensionIdentity, nativeExtensionIdentityInputs,createEngineIdentity,nativeEngineIdentityInputs} from '@godot-js/engine/identities';
 import {nativeReleaseFixture, sealRelease} from '../../engine/test/fixtures/native-release.mjs';
+import {prepareCompilerEnvironmentInput} from '../dist/environment.js';
+import {prepareBrowserArtifact} from '../dist/browser/index.js';
 
 const encoder = new TextEncoder(), decoder = new TextDecoder();
 const libRoot = path.dirname(ts.getDefaultLibFilePath({target: ts.ScriptTarget.ES2022}));
@@ -39,6 +41,56 @@ const readPacked = (artifact, name) => { const item = artifact.index[name]; asse
 async function environment(overrides = {}) {
   return createCompilerEnvironment({target: {engineId: 'e'.repeat(64), naming: 'snake'}, declarations: await standardLibraries(), ...overrides});
 }
+
+test('legacy release facts stay consistent through environment, checked build and browser artifact preparation', async () => {
+  const fixture = await nativeReleaseFixture({legacy: true});
+  delete fixture.manifest.api.ir;
+  const declarations = {...fixture.types, ...await standardLibraries()};
+  fixture.manifest.api.typeSnapshot = fixture.asset('types.json', JSON.stringify(declarations));
+  fixture.manifest.api.namingProfiles.snake.typeSnapshot = fixture.manifest.api.typeSnapshot;
+  fixture.manifest.sdk.typesHash = await hashJson(Object.fromEntries(Object.entries(declarations).filter(([name]) => name !== '/godot/index.d.ts')));
+  sealRelease(fixture.manifest);
+  const descriptorBytes = encoder.encode(JSON.stringify(fixture.manifest));
+  const plan = await planFor({'/start.ts': 'import {Node} from "godot"; export function start(){return new Node();}'});
+  for (const selection of [{kind: 'engine'}, {kind: 'sdk', mode: 'production'}]) {
+    const prepared = await prepareCompilerEnvironmentInput({descriptorBytes, naming: 'snake', selection,
+      readRawAsset: async asset => new Uint8Array(fixture.files.get(asset.path))});
+    assert.equal(prepared.facts.release.engineId, undefined);
+    assert.equal(prepared.facts.release.extensionId, undefined);
+    assert.equal(prepared.facts.resources.status, 'unknown');
+    assert.equal(Object.hasOwn(prepared.input.target, 'engineId'), false);
+    assert.equal(prepared.input.target.engineReleaseId, fixture.manifest.id);
+    const compiled = await compileProject({plan, environment: await createCompilerEnvironment(prepared.input)});
+    assert.deepEqual(compiled.diagnostics, []);
+    const metadata = compileResultMetadata(compiled);
+    assert.equal(Object.hasOwn(metadata, 'engineId'), false);
+    assert.equal(Object.hasOwn(metadata, 'extensionId'), false);
+    const artifact = await prepareBrowserArtifact({output: {variant: compiled.variant, pack: compiled.pack, manifest: metadata},
+      target: prepared.facts.release, revision: 1, generation: 'legacy-1'});
+    assert.equal(artifact.manifest.engineReleaseId, fixture.manifest.id);
+    assert.equal(artifact.manifest.engineId, undefined);
+    assert.equal(artifact.buildKey, compiled.buildKey);
+    assert.deepEqual(artifact.pack, compiled.pack);
+  }
+});
+
+for (const fails of [false, true]) test(`checked build retains its original release callback when the request changes (${fails ? 'failure' : 'success'})`, async () => {
+  let original = 0, replacement = 0, entered, resume;
+  const started = new Promise(resolve => entered = resolve), paused = new Promise(resolve => resume = resolve);
+  const request = {plan: await planFor(source()), environment: await environment(), releaseSnapshot() { original++; },
+    async preparePlan(plan, options) {
+      entered(); await paused;
+      if (fails) throw Error('controlled preparation failure');
+      return prepareBuildPlan(plan, options);
+    }};
+  const pending = compileProject(request);
+  await started;
+  request.releaseSnapshot = () => replacement++;
+  resume();
+  if (fails) await assert.rejects(pending, /controlled preparation failure/);
+  else assert.equal((await pending).variant, 'single-pack');
+  assert.equal(original, 1); assert.equal(replacement, 0);
+});
 
 test('versioned policy derives distinct checking/emitting settings and virtual checking cannot load Node ambient types', async () => {
   assert.equal(engineCheckOptions().noEmit, true); assert.equal(engineCheckOptions().rewriteRelativeImportExtensions, false);
@@ -99,6 +151,10 @@ test('artifact facade preserves legacy class/component launch metadata for an in
 
 async function localRelease(t,{artifactSetAbi,historicalSdk}={}) {
   const fixture = await nativeReleaseFixture();
+  // These compiler fixtures carry sealed declarations without an API IR. An
+  // advertised malformed IR must now be rejected by the shared environment.
+  delete fixture.manifest.api.ir;
+  fixture.manifest.engine.version = '4.6.1';
   if(artifactSetAbi){fixture.manifest.execution.artifactSetAbi=artifactSetAbi;fixture.manifest.engineId=await createEngineIdentity(nativeEngineIdentityInputs(fixture.manifest));}
   let suppliedTypes=fixture.types;
   if(historicalSdk){
@@ -113,6 +169,7 @@ async function localRelease(t,{artifactSetAbi,historicalSdk}={}) {
   fixture.manifest.api.typeSnapshot = fixture.asset('types.json', JSON.stringify(types));
   fixture.manifest.api.namingProfiles.snake.typeSnapshot = fixture.manifest.api.typeSnapshot;
   fixture.manifest.sdk.typesHash = await hashJson(Object.fromEntries(Object.entries(types).filter(([name]) => name !== '/godot/index.d.ts')));
+  fixture.manifest.engineId = await createEngineIdentity(nativeEngineIdentityInputs(fixture.manifest));
   fixture.manifest.extensionId = await createExtensionIdentity(nativeExtensionIdentityInputs(fixture.manifest)); sealRelease(fixture.manifest);
   const directory = await mkdtemp(path.join(tmpdir(), 'godotjs-node-compiler-')); t.after(() => rm(directory, {recursive: true, force: true}));
   for (const [name, bytes] of fixture.files) { const filename = path.join(directory, name); await mkdir(path.dirname(filename), {recursive: true}); await writeFile(filename, bytes); }
@@ -150,10 +207,11 @@ test('Node adapter and neutral compiler produce identical artifacts for the same
   await assert.rejects(checkNodeProject(options), /profiles differ/);
   await writeFile(fixture.project, JSON.stringify({...project, files: {...project.files, '/image.png': [1]},
     resourceImports: [{resource: 'res://image.png', converter: 'godotjs/image-rgba'}]}));
-  await assert.rejects(checkNodeProject(options), /no registered producer/);
+  assert.equal((await checkNodeProject(options)).ok, true);
+  await assert.rejects(compileNodeProject(options), /no registered producer/);
   await writeFile(fixture.project, JSON.stringify(project));
   await writeFile(path.join(fixture.directory, 'types.json'), '{}');
-  await assert.rejects(checkNodeProject(options), /Release bytes differ/);
+  await assert.rejects(checkNodeProject(options), /E_ASSET_LENGTH/);
 });
 
 test('Node directory adapter retains source resources/import cache and supports explicit ordinary script startup', async t => {

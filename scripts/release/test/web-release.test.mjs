@@ -13,6 +13,7 @@ import { collectBrowserEvidence } from '../collect-browser-evidence.mjs';
 import { buildBrowserEngine, snapshotBrowserSources } from '../../test/build-browser-engine.mjs';
 import { canonical, digest, inspectRelease, json, writeJson, identity, hashSiteRuntimeFiles, assertSourcePatchChains } from '../web-release-utils.mjs';
 import { patchAudioLifecycle } from '../patch-web-audio-lifecycle.mjs';
+import {workerBuildReportFixture} from '../../../apps/playground/scripts/fixtures/worker-build-report.mjs';
 
 test('composed native source patches require a continuous chain ending at the compiled snapshot',()=>{
  const first=digest('upstream'),middle=digest('lifecycle'),last=digest('worker imports');
@@ -147,6 +148,25 @@ test('encoded WASM verifies decoded bytes and raw mode is development-only', asy
   assert.equal((await inspectRelease(f.dir)).files.find(file => file.kind === 'engine-wasm').path, 'assets/godot.wasm');
   const formal = await fixture(t, true);
   await assert.rejects(buildRelease({ ...formal.configuration, 'raw-wasm': true }), /E_RELEASE_ENCODING/);
+});
+
+test('release attestation retains modern native ABI receipts and rejects changed source proof',async t=>{
+ const f=await fixture(t,true),native=workerBuildReportFixture();Object.assign(f.report,native);
+ await writeJson(f.configuration['engine-report'],f.report);await buildRelease(f.configuration);
+ const descriptor=await inspectRelease(f.dir),attestation=await json(resolve(f.dir,descriptor.attestation));
+ for(const field of ['runtimeAbi','workerPatch','lifecycleAbi','lifecyclePatch','artifactSetAbi','artifactSetPatch','observerAbi','nativeObserverPatch','hostResourceAbi','hostResourcePatch','shutdownQueueAbi','shutdownQueuePatch'])assert.deepEqual(attestation[field],native[field],field);
+ for(const [field,mutate]of [
+  ['lifecyclePatch',proof=>{proof.files['scene/main/scene_tree.h'].sha256=digest('wrong lifecycle source');}],
+  ['artifactSetPatch',proof=>{proof.sha256=digest('wrong mount source');}],
+  ['hostResourcePatch',proof=>{proof.files[Object.keys(proof.files)[0]].sha256=digest('wrong resource source');}],
+  ['shutdownQueuePatch',proof=>{proof.files['main/main.cpp'].sha256=digest('wrong shutdown source');}],
+ ]){
+  const changed=structuredClone(attestation),updated=structuredClone(descriptor);mutate(changed[field]);
+  await writeJson(resolve(f.dir,descriptor.attestation),changed);
+  const bytes=await readFile(resolve(f.dir,descriptor.attestation));Object.assign(updated.files.find(file=>file.path===descriptor.attestation),{sha256:digest(bytes),bytes:bytes.length});
+  updated.id=updated.runtimeRelease=identity(updated);await writeJson(resolve(f.dir,'release.json'),updated);
+  await assert.rejects(inspectRelease(f.dir),/E_EXECUTION_CONTRACT/,field);
+ }
 });
 
 test('browser certification binds every candidate asset and cannot certify an old template', async t => {

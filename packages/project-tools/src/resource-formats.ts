@@ -1,6 +1,21 @@
 /** Tooling routes, not a whitelist of engine classes. `directApi` names a
  * native API; its presence in a release must still be checked against that
  * release's captured API. It does not assert that an editor importer runs. */
+import type {ImportTarget} from './import-receipts.js';
+
+export const BINARY_RESOURCE_TARGET_ABI = 'godot-4.6.1-resources-v2';
+/** This is the supported producer target, not a capability inferred from an
+ * arbitrary profile or a registry that happens to contain the same names. */
+export function resourceTargetForEngine(engineVersion: unknown, engineId: unknown): Readonly<
+  {status: 'available'; target: ImportTarget} | {status: 'unknown'; reason: string}
+> {
+  if (typeof engineId !== 'string' || !/^[a-f0-9]{64}$/.test(engineId))
+    return Object.freeze({status: 'unknown', reason: 'Release has no verified native engine identity'});
+  if (typeof engineVersion !== 'string' || !/^4\.6\.1(?:$|[.\-+])/.test(engineVersion))
+    return Object.freeze({status: 'unknown', reason: 'No resource producer target is registered for this engine version'});
+  return Object.freeze({status: 'available', target: Object.freeze({resourceAbi: BINARY_RESOURCE_TARGET_ABI, features: Object.freeze({engineId})})});
+}
+
 export interface ResourceFormatCapability {
  id:string;extensions:readonly string[];
  directApi:readonly string[];

@@ -18,12 +18,15 @@ async function standardLibraries(){
  await load('es2022');return libraries=files;
 }
 const document=version=>({schemaVersion:4,runtime:'engine',engineProfile:'engine-2d-v1',launch:{kind:'script',module:'/start.ts'},files:{'/start.ts':`export const version=${version};export function start(){}`, '/asset.bin':[1,2,3]}});
-async function fixture(t,{set=false}={}){
+async function fixture(t,{set=false,engineVersion='4.6.1'}={}){
  const release=await nativeReleaseFixture(),types={...release.types,...await standardLibraries()};
+ delete release.manifest.api.ir;
+ release.manifest.engine.version=engineVersion;
  if(set){release.manifest.execution.artifactSetAbi=1;release.manifest.engineId=await createEngineIdentity(nativeEngineIdentityInputs(release.manifest));}
  release.manifest.api.typeSnapshot=release.asset('types.json',JSON.stringify(types));
  release.manifest.api.namingProfiles.snake.typeSnapshot=release.manifest.api.typeSnapshot;
  release.manifest.sdk.typesHash=await hashJson(Object.fromEntries(Object.entries(types).filter(([name])=>name!=='/godot/index.d.ts')));
+ release.manifest.engineId=await createEngineIdentity(nativeEngineIdentityInputs(release.manifest));
  release.manifest.extensionId=await createExtensionIdentity(nativeExtensionIdentityInputs(release.manifest));sealRelease(release.manifest);
  const directory=await mkdtemp(path.join(tmpdir(),'godotjs-output-owner-'));t.after(()=>rm(directory,{recursive:true,force:true}));
  for(const [name,bytes]of release.files){const file=path.join(directory,name);await mkdir(path.dirname(file),{recursive:true});await writeFile(file,bytes);}
@@ -36,6 +39,25 @@ function barrier(){
  return {started,release,async prepare(plan,options){entered();await blocked;return prepareBuildPlan(plan,options);}};
 }
 const absent=async file=>{try{await stat(file);return false;}catch(error){if(error.code==='ENOENT')return true;throw error;}};
+
+for(const scenario of [
+ {name:'unknown resource target',engineVersion:'4.6.2.stable',converter:'godotjs/png-ctex',error:/No resource producer target/},
+ {name:'unregistered converter',engineVersion:'4.6.1',converter:'unavailable-editor-importer',error:/no registered producer/},
+])test(`typecheck returns source diagnostics independently of ${scenario.name}, while build rejects it`,async t=>{
+ const f=await fixture(t,{engineVersion:scenario.engineVersion}),project=document(1);
+ project.files['/pixel.png']=[1,2,3];
+ project.resourceImports=[{resource:'res://pixel.png',converter:scenario.converter}];
+ await writeFile(f.project,JSON.stringify(project));
+ const checked=await checkNodeProject(f);
+ assert.equal(checked.scope,'typecheck');assert.equal(checked.ok,true);assert.deepEqual(checked.diagnostics,[]);
+ assert.match(checked.sourceHash,/^[a-f0-9]{64}$/);
+ await assert.rejects(compileNodeProject(f),scenario.error);
+ project.files['/start.ts']='export function start(){const value:number="wrong";return value}';
+ await writeFile(f.project,JSON.stringify(project));
+ const invalid=await checkNodeProject(f);
+ assert.equal(invalid.ok,false);assert(invalid.diagnostics.some(item=>item.code===2322));
+ assert.notEqual(invalid.sourceHash,checked.sourceHash);
+});
 
 test('an older output keeps its captured destination when caller options change to a newer output',async t=>{
  const f=await fixture(t),a=path.join(f.directory,'a.pck'),b=path.join(f.directory,'b.pck'),pause=barrier();

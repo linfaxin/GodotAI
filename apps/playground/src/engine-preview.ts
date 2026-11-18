@@ -2,7 +2,10 @@ import {PreviewRunner} from '@godot-js/engine/browser/runner';
 import {WorkerPreviewRunner} from '@godot-js/engine/browser/dedicated/worker-runner';
 import type {RunnerEvent} from '@godot-js/engine/browser/protocol';
 import type {VerifiedRelease} from '@godot-js/engine/browser/verified-loader';
-import {loadEngineRelease,loadReleaseContext,loadRuntimeCandidate,type ReleaseContext} from './engine-assets';
+import {prepareWorkerRelease} from '@godot-js/engine/browser/release-adapter';
+import type {ReleaseFacts} from '@godot-js/engine/release-assets';
+import {prepareBrowserArtifact} from '@godot-js/project-tools/browser';
+import {loadEngineRelease,loadReleaseContext,loadReleaseInputs,loadRuntimeCandidate,type ReleaseContext} from './engine-assets';
 import {assertCompiledRelease,assertArtifactTarget} from './release-context';
 import {assertArtifactReceipt} from '@godot-js/engine/identities';
 import {assertArtifactSet,type ArtifactSet} from '@godot-js/engine/artifact-set';
@@ -27,30 +30,30 @@ export async function createEnginePreview(container:HTMLElement, listener:(event
  if(!['direct','bitmap'].includes(presentationBackend))throw Error('E_PRESENTATION_BACKEND');
  const preview=new URL('preview.html',previewRoot);
  if(preview.origin===location.origin)throw Error('预览站点须使用独立域名或端口');
- const resolve=(asset:any)=>({...asset,url:new URL(asset.url??asset.path,previewRoot).href,sha256:asset.sha256});
- const release:VerifiedRelease&{releaseContext:ReleaseContext}={
-  releaseId:manifest.id,profile:manifest.runtimeProfile,releaseContext:context,
-  engineJs:resolve(manifest.engine.javascript),engineWasm:resolve(manifest.engine.wasm),
-  worklets:(manifest.engine.worklets??[]).map((asset:any)=>({...resolve(asset),name:asset.path.split('/').at(-1).replace(/\.gz$/,'')})),
-  execution:manifest.execution??manifest.engine.execution,
-  artifactReceiptVersion:manifest.artifactReceiptVersion,
-  workerAssets:(manifest.engine.workerAssets??(manifest.execution??manifest.engine.execution)?.workerAssets??[]).map((asset:any)=>({...resolve(asset),name:asset.path.split('/').at(-1).replace(/\.gz$/,''),role:asset.role})),
-  allowedOrigins:[preview.origin],cachePolicy:context.publicAssets?'public-immutable':'revalidate',
- };
+ let release:VerifiedRelease&{releaseContext:ReleaseContext};
  const allowLegacyArtifacts=options.allowLegacyArtifacts===true&&manifest.artifactReceiptVersion!==2;
- const runnerOptions={container,previewUrl:preview.href,release,deadlines:{initializing:120_000,starting:60_000,downloading:120_000}};
- const runtime=release.execution?.executionModel==='proxy-pthread'?undefined:await loadRuntimeCandidate();
+ const runtime=(manifest.execution??manifest.engine.execution)?.executionModel==='proxy-pthread'?undefined:await loadRuntimeCandidate();
+ let target:ReleaseFacts|undefined;
  let runner:PreviewRunner|WorkerPreviewRunner;
  if(runtime?.executionBackend==='worker'){
-  if(!context.candidateId||!manifest.runtimeAbi||!runtime.presentationBackends?.includes(presentationBackend))throw Error('E_WORKER_CANDIDATE_ABI');
-  release.runtimeAbi=manifest.runtimeAbi;
-  const asset=(name:string)=>{const value=runtime.assets?.[name];if(!value)throw Error('E_WORKER_CANDIDATE_ASSET: '+name);return resolve({...value,path:name});};
-  release.runtimeWorker=asset(runtime.entry);release.runtimeAudioWorklet=asset(runtime.audioWorklet);
+  const inputs=await loadReleaseInputs();
+  if(!inputs.siteManifestBytes)throw Error('E_WORKER_CANDIDATE_ABI');
+  const prepared=await prepareWorkerRelease({...inputs,siteManifestBytes:inputs.siteManifestBytes,previewBaseUrl:previewRoot.href,
+   presentationBackend:presentationBackend as 'direct'|'bitmap',allowedOrigins:[preview.origin],cachePolicy:context.publicAssets?'public-immutable':'revalidate'});
+  if(prepared.facts.descriptorSha256!==context.descriptorHash||prepared.facts.candidateId!==context.candidateId)throw Error('E_PREVIEW_RELEASE_CONTEXT');
+  target=prepared.facts;release={...prepared.release,releaseContext:context};
   const benchmark=requested.get('benchmarkTimings')==='1';
-  runner=new WorkerPreviewRunner({...runnerOptions,configuration:{presentationBackend:presentationBackend as 'direct'|'bitmap',...(benchmark?{budgets:{benchmarkTimingSamples:512}}:{})}});
+  runner=new WorkerPreviewRunner({container,previewUrl:preview.href,release,deadlines:{initializing:120_000,starting:60_000,downloading:120_000},configuration:{presentationBackend:presentationBackend as 'direct'|'bitmap',...(benchmark?{budgets:{benchmarkTimingSamples:512}}:{})}});
  }else{
   if(manifest.runtimeAbi)throw Error('E_WORKER_CANDIDATE_ABI');
-  runner=new PreviewRunner({...runnerOptions,allowLegacyArtifacts});
+  const resolve=(asset:import('./engine-assets').ReleaseAsset)=>({...asset,url:new URL(asset.path,previewRoot).href});
+  release={releaseId:manifest.id,profile:manifest.runtimeProfile,releaseContext:context,
+   engineJs:resolve(manifest.engine.javascript),engineWasm:resolve(manifest.engine.wasm),
+   worklets:(manifest.engine.worklets??[]).map(asset=>({...resolve(asset),name:asset.path.split('/').at(-1)!.replace(/\.gz$/,'')})),
+   execution:manifest.execution??manifest.engine.execution,artifactReceiptVersion:manifest.artifactReceiptVersion,
+   workerAssets:(manifest.engine.workerAssets??(manifest.execution??manifest.engine.execution)?.workerAssets??[]).map(asset=>({...resolve(asset),name:asset.path.split('/').at(-1)!.replace(/\.gz$/,''),role:asset.role})),
+   allowedOrigins:[preview.origin],cachePolicy:context.publicAssets?'public-immutable':'revalidate'};
+  runner=new PreviewRunner({container,previewUrl:preview.href,release,deadlines:{initializing:120_000,starting:60_000,downloading:120_000},allowLegacyArtifacts});
  }
  runner.subscribe(listener);
  let operationSequence=0,disposed=false;
@@ -61,6 +64,12 @@ export async function createEnginePreview(container:HTMLElement, listener:(event
   const operation=++operationSequence;
   const generation=compiled.generation??crypto.randomUUID();
   if(!(typeof generation==='string'&&generation.length>0&&generation.length<=256)&&!(typeof generation==='number'&&Number.isSafeInteger(generation)&&generation>=0))throw Error('E_ARTIFACT_GENERATION');
+  if(target){
+   const output=artifactSet?{variant:'pack-set' as const,artifactSet,manifest:compiled}:{variant:'single-pack' as const,pack:pack!,manifest:compiled};
+   const artifact=await prepareBrowserArtifact({output,target,revision,generation});
+   if(disposed||operation!==operationSequence)throw new DOMException('Superseded','AbortError');
+   return runner.run(artifact);
+  }
   if(artifactSet){
    const captured=await assertArtifactSet(artifactSet);
    if(release.execution?.artifactSetAbi!==1)throw Error('E_ARTIFACT_SET_ABI');

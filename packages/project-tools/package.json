@@ -7,6 +7,14 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
+    "./browser": {
+      "types": "./dist/browser/index.d.ts",
+      "import": "./dist/browser/index.js"
+    },
+    "./environment": {
+      "types": "./dist/environment.d.ts",
+      "import": "./dist/environment.js"
+    },
     "./artifact-set": {
       "types": "./dist/artifact-set.d.ts",
       "import": "./dist/artifact-set.js"

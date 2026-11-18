@@ -4,11 +4,12 @@ import {renameSync,realpathSync} from 'node:fs';
 import {basename,dirname, resolve, relative, isAbsolute,sep} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {createRequire} from 'node:module';
-import {gunzipSync} from 'node:zlib';
 import {tmpdir} from 'node:os';
 import {createHash,randomUUID} from 'node:crypto';
 import ts from 'typescript';
-import {assertNativeReleaseIdentity, assertNativeTypeSnapshot} from '@godot-js/engine/identities';
+import {assertNativeReleaseIdentity} from '@godot-js/engine/identities';
+import type {RawAssetReader} from '@godot-js/engine/release-assets';
+import {prepareCompilerEnvironmentInput} from '../environment.js';
 import {readProjectDocument} from '../project-document.js';
 import {createSourceSnapshot, createBuildPlan, type BuildPlan, type PrepareBuildPlanOptions, type ProjectLaunch} from '../build-plan.js';
 import {createCompilerEnvironment, compileProject,compileResultMetadata,ProjectBuildCache,ProjectWorkspace,ProjectLanguageService, type CompileBuildPlanOptions} from '../compiler.js';
@@ -17,7 +18,6 @@ import {createBrowserResourceConverters, parseResourceImports,type ResourceExecu
 import {createNodeResourceExecutionCache} from './resource-cache.js';
 export {createNodeResourceExecutionCache} from './resource-cache.js';
 import {decodeProjectText, readProjectBooleanSetting} from '../project-settings.js';
-import {hashBytes} from '../hash.js';
 import {ProjectToolError} from '../errors.js';
 import {projectScript, projectDeclaration} from '../project-modules.js';
 import {moduleRequireOffsets} from '../script-bindings.js';
@@ -110,22 +110,20 @@ async function readBounded(filename: string, limit: number): Promise<Uint8Array>
   return bytes;
 }
 
-async function releaseAsset(root: string, asset: any): Promise<Uint8Array> {
-  if (!asset || typeof asset.path !== 'string' || !/^[-a-zA-Z0-9_./]+$/.test(asset.path) || asset.path.startsWith('/') || asset.path.split('/').some((part: string) => part === '..' || !part)
-      || !/^[a-f0-9]{64}$/i.test(asset.sha256) || !Number.isSafeInteger(asset.bytes) || asset.bytes < 0 || asset.bytes > MAX_ASSET_BYTES)
-    throw new ProjectToolError('E_COMPILER_RELEASE_ASSET', 'Invalid local release asset descriptor');
-  const filename = resolve(root, asset.path), path = relative(root, filename);
-  if (path.startsWith('..') || isAbsolute(path)) throw new ProjectToolError('E_COMPILER_RELEASE_ASSET', 'Release asset escapes its directory');
-  const encoded = await readBounded(filename, MAX_ASSET_BYTES);
-  if (encoded.byteLength !== asset.bytes || await hashBytes(encoded) !== asset.sha256.toLowerCase())
-    throw new ProjectToolError('E_COMPILER_RELEASE_ASSET', `Release bytes differ: ${asset.path}`);
-  if (asset.encoding === undefined) return encoded;
-  if (asset.encoding !== 'gzip' || !Number.isSafeInteger(asset.decodedBytes) || asset.decodedBytes < 0 || asset.decodedBytes > MAX_ASSET_BYTES || !/^[a-f0-9]{64}$/i.test(asset.decodedSha256))
-    throw new ProjectToolError('E_COMPILER_RELEASE_ASSET', 'Invalid decoded release identity');
-  const decoded = new Uint8Array(gunzipSync(encoded, {maxOutputLength: MAX_ASSET_BYTES}));
-  if (decoded.byteLength !== asset.decodedBytes || await hashBytes(decoded) !== asset.decodedSha256.toLowerCase())
-    throw new ProjectToolError('E_COMPILER_RELEASE_ASSET', `Decoded release bytes differ: ${asset.path}`);
-  return decoded;
+function localRawAssets(root: string): RawAssetReader {
+  return async (asset, options) => {
+    options.signal?.throwIfAborted();
+    if (!asset || typeof asset.path !== 'string' || !/^[-a-zA-Z0-9_./]+$/.test(asset.path) || asset.path.startsWith('/') || asset.path.split('/').some(part => part === '..' || !part))
+      throw new ProjectToolError('E_COMPILER_RELEASE_ASSET', 'Invalid local release asset path');
+    const filename = resolve(root, asset.path), path = relative(root, filename);
+    if (path === '..' || path.startsWith('..' + sep) || isAbsolute(path))
+      throw new ProjectToolError('E_COMPILER_RELEASE_ASSET', 'Release asset escapes its directory');
+    // Only transport belongs here. Shared environment assembly verifies the
+    // stored bytes, decodes once and checks the decoded identity and budget.
+    const bytes = await readBounded(filename, Math.min(options.maxStoredBytes, MAX_ASSET_BYTES));
+    options.signal?.throwIfAborted();
+    return bytes;
+  };
 }
 
 function sdkImports(files: Readonly<Record<string, string | number[]>>): Set<string> {
@@ -191,10 +189,15 @@ async function legacyPreparer(options: NodeCompileOptions, plan: BuildPlan): Pro
 /** Local files and release decoding stop at this boundary; all checking and
  * artifact production below use exactly the same neutral compiler as browser. */
 export async function prepareNodeProject(options: NodeCompileOptions) {
+  return prepareNodeProjectInput(options, 'build');
+}
+
+async function prepareNodeProjectInput(options: NodeCompileOptions, scope: 'build' | 'typecheck') {
   options=captureNodeOptions(options);
-  const manifest = JSON.parse(new TextDecoder().decode(await readBounded(resolve(options.release), 16 * 1024 * 1024)));
+  const descriptorBytes = await readBounded(resolve(options.release), 16 * 1024 * 1024);
+  const manifest = JSON.parse(new TextDecoder().decode(descriptorBytes));
   await assertNativeReleaseIdentity(manifest);
-  if(options.artifactSetDirectory&&(manifest.execution??manifest.engine?.execution)?.artifactSetAbi!==1)
+  if(scope==='build'&&options.artifactSetDirectory&&(manifest.execution??manifest.engine?.execution)?.artifactSetAbi!==1)
     throw new ProjectToolError('E_ARTIFACT_SET_TARGET','The matched engine does not support ArtifactSet startup');
   if (typeof manifest.runtimeProfile !== 'string') throw new ProjectToolError('E_PROJECT_ENGINE_PROFILE', 'Release is missing its engine profile');
   const input = await projectDocument(options, manifest), document = input.document;
@@ -210,49 +213,52 @@ export async function prepareNodeProject(options: NodeCompileOptions) {
   if (read.plan.inputs.engineProfile !== manifest.runtimeProfile) throw new ProjectToolError('E_PROJECT_ENGINE_PROFILE', 'Project and release engine profiles differ');
   const configuration = decodeProjectText(read.plan.snapshot.files.find(file => file.path === 'res://project.godot')?.bytes);
   const naming = readProjectBooleanSetting(configuration ?? '', 'GodotJS', 'runtime/core/camel_case_bindings_enabled') ? 'camel' : 'snake';
-  const snapshot = manifest.api?.namingProfiles?.[naming]?.typeSnapshot ?? (naming === 'snake' ? manifest.api?.typeSnapshot : undefined);
-  if (!snapshot) throw new ProjectToolError('E_COMPILER_NAMING', `Release has no ${naming} declaration snapshot`);
-  const root = dirname(resolve(options.release));
-  const declarations = JSON.parse(new TextDecoder().decode(await releaseAsset(root, snapshot)));
-  await assertNativeTypeSnapshot(manifest, declarations, naming);
-  const routes: Record<string, string> = {'godot': '/godot/index.d.ts', 'godot-jsb': '/godot-jsb/index.d.ts', 'godot.annotations': '/godot.annotations/index.d.ts'};
-  for (const [specifier, contract] of Object.entries(manifest.sdk?.moduleContract ?? {}) as Array<[string, any]>) routes[specifier] = contract.declaration;
-  const needsSdk = read.plan.compatibility?.runtime === 'react' || [...sdkImports(files)].some(name => Object.hasOwn(manifest.sdk?.runtimeModules ?? {}, name));
-  const runtimeModules: Record<string, Uint8Array> = Object.create(null);
-  let vendor: Uint8Array | undefined;
-  if (needsSdk) {
-    vendor = await releaseAsset(root, manifest.sdk?.vendors?.[options.mode ?? 'production'] ?? manifest.sdk?.vendor);
-    for (const [name, asset] of Object.entries(manifest.sdk?.runtimeModules ?? {})) runtimeModules[name] = await releaseAsset(root, asset);
+  const imports = sdkImports(files);
+  const needsSdk = read.plan.compatibility?.runtime === 'react' || [...imports].some(name => Object.hasOwn(manifest.sdk?.runtimeModules ?? {}, name));
+  const prepared = await prepareCompilerEnvironmentInput({descriptorBytes, naming,
+    selection: needsSdk ? {kind: 'sdk', mode: options.mode ?? 'production'} : {kind: 'engine'},
+    readRawAsset: localRawAssets(dirname(options.release)), signal: options.signal});
+  let compilerInput = prepared.input;
+  if (historical) {
+    const adapted = historical.apply({moduleDeclarations: compilerInput.moduleDeclarations ?? {},
+      runtimeModules: compilerInput.runtimeModules, runtimeImports: imports});
+    compilerInput = {...compilerInput, target: {...compilerInput.target, compatibilityAdapter: historical.id},
+      moduleDeclarations: adapted.moduleDeclarations, runtimeModules: adapted.runtimeModules};
   }
-  if(historical){const adapted=historical.apply({moduleDeclarations:routes,runtimeModules,runtimeImports:sdkImports(files)});Object.assign(routes,adapted.moduleDeclarations);Object.assign(runtimeModules,adapted.runtimeModules);}
-  const target = {engineId: manifest.engineId ?? manifest.id, engineReleaseId: manifest.id, engineProfile: manifest.runtimeProfile, naming,
-    ...(needsSdk && manifest.extensionId ? {extensionId: manifest.extensionId} : {}),...(historical?{compatibilityAdapter:historical.id}:{}), bindingVersion: manifest.api?.bindingVersion ?? 'unknown',
-    ...((manifest.execution??manifest.engine?.execution)?.artifactSetAbi===1?{artifactSetAbi:1}:{})};
-  const environment = await createCompilerEnvironment({target, declarations, moduleDeclarations: routes, runtimeModules, vendor});
+  const environment = await createCompilerEnvironment(compilerInput);
   const data = document.project ?? document;
-  // Downloaded projects cannot bring their own records into the trusted cache.
-  // Default storage belongs to the host tool, outside every project directory.
-  const defaultCache=resolve(tmpdir(),'godotjs-owned-resource-cache-v2',String(process.getuid?.()??'user'),createHash('sha256').update(resolve(options.project)).digest('hex'));
-  const resourceCache=options.resourceCache??createNodeResourceExecutionCache(options.resourceCacheDirectory??defaultCache);
-  const converters = createBrowserResourceConverters(undefined,{cache:resourceCache}), resourceImports = data.resourceImports === undefined ? undefined : parseResourceImports(data.resourceImports);
-  for (const request of resourceImports ?? []) if (!converters.ids.has(request.converter))
-    throw new ProjectToolError('E_RESOURCE_CONVERTER', `Node has no registered producer ${request.converter}; supply a converter through the shared compiler API`);
-  const preparation: PrepareBuildPlanOptions = {
-    ...(data.importReceipts ? {storedImportReceipts: data.importReceipts} : {}),
-    ...(resourceImports ? {resourceImports, resourceConverters: converters, resourceTarget: {resourceAbi: 'godot-4.6.1-resources-v2', features: {engineId: target.engineId}}} : {}),
-    ...(data.importCacheObservations ? {importCacheObservations: data.importCacheObservations} : {}),
-  };
+  const preparation: PrepareBuildPlanOptions = {};
+  // Typechecking needs source and declarations. Resource recipes and target
+  // support are build prerequisites, and cannot suppress type diagnostics.
+  if (scope === 'build') {
+    // Downloaded projects cannot bring their own records into the trusted cache.
+    // Default storage belongs to the host tool, outside every project directory.
+    const defaultCache=resolve(tmpdir(),'godotjs-owned-resource-cache-v2',String(process.getuid?.()??'user'),createHash('sha256').update(resolve(options.project)).digest('hex'));
+    const resourceCache=options.resourceCache??createNodeResourceExecutionCache(options.resourceCacheDirectory??defaultCache);
+    const converters = createBrowserResourceConverters(undefined,{cache:resourceCache}), resourceImports = data.resourceImports === undefined ? undefined : parseResourceImports(data.resourceImports);
+    for (const request of resourceImports ?? []) if (!converters.ids.has(request.converter))
+      throw new ProjectToolError('E_RESOURCE_CONVERTER', `Node has no registered producer ${request.converter}; supply a converter through the shared compiler API`);
+    if (resourceImports?.length && prepared.facts.resources.status !== 'available')
+      throw new ProjectToolError('E_RESOURCE_CONVERTER', prepared.facts.resources.reason);
+    Object.assign(preparation, {
+      ...(data.importReceipts ? {storedImportReceipts: data.importReceipts} : {}),
+      ...(resourceImports ? {resourceImports, resourceConverters: converters,
+        ...(prepared.facts.resources.status === 'available' ? {resourceTarget: prepared.facts.resources.target} : {})} : {}),
+      ...(data.importCacheObservations ? {importCacheObservations: data.importCacheObservations} : {}),
+    });
+  }
   return {plan: read.plan, environment, preparation, preparePlan,cache:options.cache??context.cache,languageService:options.languageService??context.languageService,signal:options.signal,releaseSnapshot:captured.release,artifactSet:options.artifactSetDirectory?true:undefined,
     pack: {maxBytes: MAX_ASSET_BYTES, maxFiles: 10000}};
   }catch(error){captured.release();throw error;}
 }
 
 export async function checkNodeProject(options: NodeCompileOptions) {
-  const request = await prepareNodeProject(options);
+  const request = await prepareNodeProjectInput(options, 'typecheck');
   try{
   const environment=request.environment.createTypeEnvironment(snapshotTextFiles(request.plan.snapshot));
   const diagnostics = checkProjectTypes(environment,request.languageService.use(environment));
-  return {ok: !diagnostics.some(item => item.category === 'error'), diagnostics, target: request.environment.identity};
+  return {scope: 'typecheck' as const, sourceHash: request.plan.snapshot.sourceHash,
+    ok: !diagnostics.some(item => item.category === 'error'), diagnostics, target: request.environment.identity};
   }finally{request.releaseSnapshot();}
 }
 

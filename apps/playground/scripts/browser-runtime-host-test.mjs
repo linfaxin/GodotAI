@@ -2,39 +2,43 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {createHash} from 'node:crypto';
 import {sessionExitReason} from '@godot-js/engine/session-facts';
-import {launchBrowser,withAcceptanceContext} from './browser-harness.mjs';
+import {launchBrowser,withAcceptanceContext,observedWorkerSessions,observedWorkerOutcomes} from './browser-harness.mjs';
 import {createStaticServer} from './serve.mjs';
 import {createLocalTestTls,inspectTestSite,localDeploymentEvidence} from './browser-local-tls.mjs';
+import {runReportedBrowserTest,browserTestFailureStatus,listenBrowserTestServer as listen,closeBrowserTestServer as close} from './browser-contract-report.mjs';
+
+await runReportedBrowserTest({scope:'actual-product-runtime-host',reportFile:report=>process.env.PLAYGROUND_RUNTIME_HOST_REPORT??'/tmp/godotai-runtime-host-'+(report.backend??'preflight')+'.json',run:async test=>{
 
 // Product acceptance: authored Schema 4 input, production compiler, actual
 // verified native engine and original runner/ports. Observation never changes
 // messages or handlers, and the command enters through the existing UI bridge.
 const directory=path.resolve(process.env.PLAYGROUND_TEST_DIRECTORY??fileURLToPath(new URL('../dist',import.meta.url)));
-const siteBytes=await fs.readFile(path.join(directory,'manifest.json')),site=JSON.parse(siteBytes);
-const release=JSON.parse(await fs.readFile(path.join(directory,'engine-release.json'),'utf8'));
+const {site,release,candidateId}=await test.preflight(directory);
 const execution=release.execution??release.engine?.execution;
 const backend=execution?.executionModel==='proxy-pthread'?'proxy-pthread':'dedicated-worker';
 assert(backend==='proxy-pthread'||site.runtime?.executionBackend==='worker','RuntimeHost acceptance requires a real Worker product');
-const candidateId=createHash('sha256').update(siteBytes).digest('hex');
 const prefix=site.publicAssets?'/releases/'+candidateId+'/':'/';
 const timeout=Number(process.env.PLAYGROUND_RUNTIME_HOST_TIMEOUT??180000);
 const typedDemoGuard=process.env.PLAYGROUND_TYPED_DEMO_GUARD==='1';
+const contractGroup=process.env.PLAYGROUND_CONTRACT_GROUP??'all';
+if(!['all','lifecycle','failure-recovery','entry'].includes(contractGroup))throw Error('E_TEST_CONTRACT_GROUP: '+contractGroup);
 const demoPackBytes=typedDemoGuard?(await fs.stat(path.join(directory,'demo-resources.pck'))).size:0;
 assert(Number.isSafeInteger(timeout)&&timeout>0);
 const useTls=execution?.requiresCrossOriginIsolation===true&&process.env.PLAYGROUND_TEST_TLS!=='0';
 if(useTls&&(process.env.BROWSER??'chromium')!=='chromium')throw Error('Pinned local TLS acceptance currently requires Chromium');
 const tls=useTls?await createLocalTestTls():undefined;
+test.defer(()=>tls?.dispose());
 const serverOptions={urlPrefix:prefix,publicImmutable:site.publicAssets===true,tls};
 const editor=createStaticServer(directory,serverOptions),preview=createStaticServer(directory,serverOptions);
-const listen=server=>new Promise((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve);});
-const close=server=>new Promise((resolve,reject)=>{if(!server.listening)return resolve();server.close(error=>error?reject(error):resolve());});
+test.defer(()=>close(editor));test.defer(()=>close(preview));
 let browser,context,page,deployment;
+test.defer(()=>browser?.close());test.defer(()=>context?.close());
 const pageErrors=[],checks=[],cases=[];
 const sourceObservations=[];
 let sourceObservationOverflow=0;
 let report={status:'failed',scope:'actual-product-runtime-host',backend,checks,cases};
+test.checkpoint(report);
 
 // Optional allocation regression: the original compiler bundle is imported
 // unchanged, but expanding its demo pack to a numeric array is made observable.
@@ -338,7 +342,8 @@ try{
  await Promise.all([listen(editor),listen(preview)]);
  const scheme=tls?'https':'http',editorOrigin=`${scheme}://127.0.0.1:${editor.address().port}`,previewOrigin=`${scheme}://127.0.0.1:${preview.address().port}`;
  const delivery=await inspectTestSite(editorOrigin+prefix,tls);assert.equal(delivery.status,200);deployment=localDeploymentEvidence({tls,editorOrigin,previewOrigin,headers:delivery.headers});
- browser=await launchBrowser({headless:true,args:['--no-sandbox','--enable-webgl','--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader','--disable-dev-shm-usage','--autoplay-policy=no-user-gesture-required',...(tls?['--ignore-certificate-errors-spki-list='+tls.spki]:[])]});
+ test.stage='browser';browser=await launchBrowser({headless:true,args:['--no-sandbox','--enable-webgl','--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader','--disable-dev-shm-usage','--autoplay-policy=no-user-gesture-required',...(tls?['--ignore-certificate-errors-spki-list='+tls.spki]:[])]});
+ test.stage='run';
  context=await browser.newContext({viewport:{width:1536,height:1000}});
  if(typedDemoGuard)await context.addInitScript(guardDemoArrayExpansion,{bytes:demoPackBytes});
  await context.exposeBinding('__recordRuntimeHostSource',(_source,observation)=>{if(sourceObservations.length<16384)sourceObservations.push(observation);else sourceObservationOverflow++;});
@@ -347,41 +352,60 @@ try{
  await page.goto(editorOrigin+prefix+'?project=native&benchmarkTimings=1&previewOrigin='+encodeURIComponent(previewOrigin+prefix),{waitUntil:'domcontentloaded'});
  await until(async()=>{const state=await inspect();return state?.ready&&state.engine?.state==='running';},'Initial native product did not start');
  if(execution?.requiresCrossOriginIsolation)assert.equal(await page.evaluate(()=>crossOriginIsolated),true);
- await importProject(program('RUNTIME_HOST_FIRST'));
- const first=await readyEvent('RUNTIME_HOST_FIRST'),firstRun=await roundtrip('RUNTIME_HOST_FIRST',first);
- cases.push({name:'normal-host-roundtrip',sessionId:first.sessionId,runId:firstRun,terminal:await stopClean(firstRun)});
- checks.push('Schema4 entry receives a scoped engine host before execution, mutates/readbacks a native Label, delivers an exact 25k integer array of about 50 KB through the actual workbench subscriber, then completes small-event and command roundtrips');
- await page.locator('#run').click();const restarted=await readyEvent('RUNTIME_HOST_FIRST',first.sessionId);
- assert.notEqual(restarted.sessionId,first.sessionId);const restartedRun=await roundtrip('RUNTIME_HOST_FIRST',restarted);
- cases.push({name:'stop-restart',sessionId:restarted.sessionId,runId:restartedRun,terminal:await stopClean(restartedRun)});
- checks.push('Stop reports sealed entry/host cleanup, rejects closed-entry sends and restarts into a fresh session with a fresh command handler');
- const beforeFailure=(await observation()).terminals.length;await importProject(failureProgram);
- const failure=await until(async()=>{const terminals=(await observation()).terminals.slice(beforeFailure);assert(terminals.length<=1,'Async startup failure must settle once');return terminals[0];},'Async startup rejection was not delivered as a terminal failure');
- await stopped();assert(failure.sessionFacts,'Async failure must retain terminal facts');assert.equal(failure.sessionFacts.failure?.kind,'runtime');assert.match(failure.sessionFacts.failure?.message??'',/RUNTIME_HOST_ASYNC_START_FAILURE/);
- assert.equal(failure.sessionFacts.hostCleanup,'complete');assert.notEqual(failure.runId,restartedRun);
- cases.push({name:'async-start-failure',runId:failure.runId,terminal:failure});
- checks.push('Async start rejection reaches the original session as one structured fatal with confirmed host cleanup');
- await importProject(program('RUNTIME_HOST_RECOVERED'));const recovered=await readyEvent('RUNTIME_HOST_RECOVERED'),recoveredRun=await roundtrip('RUNTIME_HOST_RECOVERED',recovered);
- assert(![first.sessionId,restarted.sessionId].includes(recovered.sessionId));assert.notEqual(recoveredRun,failure.runId);
- cases.push({name:'recovery-after-failure',sessionId:recovered.sessionId,runId:recoveredRun,terminal:await stopClean(recoveredRun)});
- checks.push('A new project runs and communicates after failed startup without stale-session contamination');
- await stopPendingStartup();await newReactTemplate();await runReactDemo();
+ let first,restartedRun,failure;
+ if(contractGroup==='all'||contractGroup==='lifecycle'){
+  await test.step('normal-host-roundtrip',async()=>{
+   await importProject(program('RUNTIME_HOST_FIRST'));
+   first=await readyEvent('RUNTIME_HOST_FIRST');const firstRun=await roundtrip('RUNTIME_HOST_FIRST',first);
+   cases.push({name:'normal-host-roundtrip',sessionId:first.sessionId,runId:firstRun,terminal:await stopClean(firstRun)});
+   checks.push('Schema4 entry mutates/readbacks a native Label and delivers exact project/command roundtrips');
+  });
+  await test.step('stop-restart',async()=>{
+   await page.locator('#run').click();const restarted=await readyEvent('RUNTIME_HOST_FIRST',first.sessionId);
+   assert.notEqual(restarted.sessionId,first.sessionId);restartedRun=await roundtrip('RUNTIME_HOST_FIRST',restarted);
+   cases.push({name:'stop-restart',sessionId:restarted.sessionId,runId:restartedRun,terminal:await stopClean(restartedRun)});
+   checks.push('Stop retains native exit and sealed entry/host cleanup; restart uses a fresh identity');
+  },{after:['normal-host-roundtrip']});
+ }
+ if(contractGroup==='all'||contractGroup==='failure-recovery'){
+  await test.step('async-start-failure',async()=>{
+   // In the independent short group the page's initial native project is
+   // still active. Retire it before observing the failing project's terminal.
+   if(await page.locator('#preview iframe').count()){await page.locator('#stop').click();await stopped();}
+   const beforeFailure=(await observation()).terminals.length;await importProject(failureProgram);
+   failure=await until(async()=>{const terminals=(await observation()).terminals.slice(beforeFailure);assert(terminals.length<=1,'Async startup failure must settle once');return terminals[0];},'Async startup rejection was not delivered as a terminal failure');
+   await stopped();assert(failure.sessionFacts,'Async failure must retain terminal facts');assert.equal(failure.sessionFacts.failure?.kind,'runtime');assert.match(failure.sessionFacts.failure?.message??'',/RUNTIME_HOST_ASYNC_START_FAILURE/);
+   assert.equal(failure.sessionFacts.hostCleanup,'complete');if(restartedRun)assert.notEqual(failure.runId,restartedRun);
+   cases.push({name:'async-start-failure',runId:failure.runId,terminal:failure});
+   checks.push('Async startup rejection retains its first fatal and confirmed host cleanup');
+  });
+  await test.step('recovery-after-failure',async()=>{
+   await importProject(program('RUNTIME_HOST_RECOVERED'));const recovered=await readyEvent('RUNTIME_HOST_RECOVERED'),recoveredRun=await roundtrip('RUNTIME_HOST_RECOVERED',recovered);
+   if(first)assert.notEqual(recovered.sessionId,first.sessionId);assert.notEqual(recoveredRun,failure.runId);
+   cases.push({name:'recovery-after-failure',sessionId:recovered.sessionId,runId:recoveredRun,terminal:await stopClean(recoveredRun)});
+   checks.push('A new project runs after failed startup without stale-session contamination');
+  },{after:['async-start-failure']});
+  await test.step('pending-startup-late-async-cleanup',stopPendingStartup,{after:['recovery-after-failure']});
+ }
+ if(contractGroup==='all'||contractGroup==='entry'){
+  await test.step('new-react-template',newReactTemplate);
+  if(contractGroup==='all')await test.step('react-shader-demo',runReactDemo,{after:['new-react-template']});
+ }
  if(typedDemoGuard){
   const guard=await page.evaluate(()=>globalThis.__typedDemoGuard);assert(guard.workers>0);assert.equal(guard.bytes,demoPackBytes);
   checks.push('The shipped shader demo compiles and runs while a compiler Worker guard rejects Array.from on its '+demoPackBytes+'-byte typed demo resource pack');
  }
  assert.deepEqual(pageErrors,[]);
  assert.equal(sourceObservationOverflow,0,'Native source observation must remain complete');
- report=await withAcceptanceContext({status:'passed',scope:'actual-product-runtime-host',engineExecuted:true,backend,checks,cases,pageErrors,deployment,execution,
-  ...(typedDemoGuard?{compilerAllocationGuard:{method:'Worker bootstrap Array.from guard; original compiler bundle imported unchanged',demoPackBytes}}:{})},{directory,browser});
+ report={status:'passed',scope:'actual-product-runtime-host',engineExecuted:true,backend,checks,cases,pageErrors,deployment,execution,contractGroup,
+  ...(typedDemoGuard?{compilerAllocationGuard:{method:'Worker bootstrap Array.from guard; original compiler bundle imported unchanged',demoPackBytes}}:{})};
+ if(test.steps.every(step=>step.status==='passed'))report=await withAcceptanceContext(report,{directory,browser});
+ else report={...report,sessions:observedWorkerSessions(browser),outcomes:observedWorkerOutcomes(browser)};
 }catch(error){
- report={...report,status:'failed',error:String(error),stack:error?.stack,pageErrors,deployment,checks,cases,
+ report={...report,status:browserTestFailureStatus(error,test.stage),error:String(error),stack:error?.stack,pageErrors,deployment,checks,cases,
   ...(page?{observed:await inspect().catch(()=>undefined),messages:await observation().catch(()=>undefined),logs:await page.locator('#logs').textContent().catch(()=>undefined)}:{})};
  process.exitCode=1;
-}finally{
- report.runtimeSources=runtimeSourceEvidence();
- const output=path.resolve(process.env.PLAYGROUND_RUNTIME_HOST_REPORT??'/tmp/godotai-runtime-host-'+backend+'.json');
- await fs.mkdir(path.dirname(output),{recursive:true});await fs.writeFile(output,JSON.stringify(report,null,2)+'\n');
- console.log(JSON.stringify({...report,reportFile:output},null,2));
- await context?.close();await browser?.close();await Promise.all([close(editor),close(preview)]);await tls?.dispose();
 }
+report.runtimeSources=runtimeSourceEvidence();
+return report;
+}});

@@ -2,6 +2,8 @@
 
 GodotJS combines a native Godot module with embedded JavaScript support code and reusable ecosystem packages in one pnpm workspace. Native module directories and embedded-script output paths stay in their existing locations to preserve SCons, CI, and upstream integration.
 
+The [engine goals and platform boundaries](engine-goals.zh-CN.md) define the long-term direction: a reusable project, build, runtime and verification foundation for AI game creation platforms, with conversation and AI orchestration owned by each platform. Target capabilities in that document are distinct from the currently implemented scope described here.
+
 ## Layout and responsibilities
 
 | Location | Responsibility |

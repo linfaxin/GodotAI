@@ -10,9 +10,11 @@ Private workspace package for engine API descriptions, execution contracts and b
 | `@godot-js/engine/session-facts` | Pure versioned runtime summaries, cleanup facts and exit-reason projection |
 | `@godot-js/engine/execution` | Browser-safe execution schema and legacy descriptor reader |
 | `@godot-js/engine/identities` | Canonical, domain-separated engine, extension, build and artifact identities |
+| `@godot-js/engine/release-assets` | Stored-byte integrity, bounded explicit decoding and host-injected raw asset readers |
 | `@godot-js/engine/browser` | Browser session, verified loader, preview runner and protocol |
 | `@godot-js/engine/browser/engine-session` | Whole-session ownership, progress, cooperative stop and forced pool teardown |
 | `@godot-js/engine/browser/verified-loader` | Hash-checked JS/WASM, worklets and auxiliary Worker assets |
+| `@godot-js/engine/browser/release-adapter` | Captured native/site descriptors to a paired Dedicated Worker release and release facts |
 | `@godot-js/engine/browser/protocol` | Versioned preview protocol |
 | `@godot-js/engine/browser/runner` | Separate-origin iframe runner |
 | `@godot-js/engine/browser/capabilities` | Fixed Wasm shared-memory-growth startup probe, with bounded Worker/Blob cleanup |
@@ -28,6 +30,8 @@ pnpm --filter @godot-js/engine test
 ```
 
 Dedicated Worker infrastructure lives under `src/browser/dedicated/`; its concrete module subpaths are also exported for the existing browser bridges and worklet build. The corresponding `@godot-js/react-browser/worker-*` modules are compatibility reexports, not separate implementations. The product compiler policy, type environment and artifact pipeline live in `project-tools`; the retained browser SDK resolver and conformance compiler remain in `react-browser`.
+
+`prepareWorkerRelease()` takes the original descriptor and site JSON bytes, a preview mirror root, allowed origins, presenter and cache policy. It validates their pairing and prepares asset URLs; the loader verifies executable bytes when consumed. A product host's additional release context remains its adapter's responsibility. `WorkerRunnerEvent` and `WorkerRunnerExit` retain all seven run fields; observed exits include native/host facts, while local fallback exits leave unobserved facts absent. The shared legacy runner types keep their existing contract.
 
 Existing `@godot-js/react-browser/engine-api`, identity, loader and session wrappers remain compatibility paths to this implementation. New neutral consumers use the engine package directly. See the [Worker engine guide](../../docs/browser-worker-engine.zh-CN.md) for build provenance, deployment requirements and current activation gates.
 

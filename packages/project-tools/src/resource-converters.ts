@@ -1,6 +1,8 @@
 import {canonicalJson,hashBytes,hashJson} from './hash.js';
 import {resourcePath} from './paths.js';
 import {ProjectToolError} from './errors.js';
+import {BINARY_RESOURCE_TARGET_ABI} from './resource-formats.js';
+export {BINARY_RESOURCE_TARGET_ABI} from './resource-formats.js';
 import {readProjectStringSetting} from './project-settings.js';
 import {createImportReceipt,assessImportReceipt,parseImportReceipt,type ImportAssessment,type ImportReceipt,type ImportTarget,type ImportOutputFormat} from './import-receipts.js';
 import {byteMap,borrowByteMap,captureBytes} from './owned-bytes.js';
@@ -12,12 +14,28 @@ import {createResourceExecutionCache,cachedResourceExecution,storeResourceExecut
 export {createResourceExecutionCache} from './resource-execution-cache.js';
 export type {ResourceExecutionCache,ResourceExecutionCacheStorage,ResourceExecutionCacheOptions} from './resource-execution-cache.js';
 export {inspectPng,validatePngData,inspectJpeg,encodeRgbaPng,encodeCompressedRgbaPng,pngCtex,pcmBinaryResource} from './resource-binary.js';
-export const BINARY_RESOURCE_TARGET_ABI='godot-4.6.1-resources-v2';
 export type ResourceOutputFormat=ImportOutputFormat;
 const deterministicProducers=new WeakMap<ResourceConverter,string>();
 const textCompatibilityProducers=new WeakMap<ResourceConverter,ResourceConverter>();
+interface ProducerDeclaration {
+ id:string;version:string;parameters:ResourceConverter['parameters'];convert:ResourceConverter['convert'];preflight:ResourceConverter['preflight'];
+ signature:string;abis:readonly string[];strict:boolean;options:Readonly<Record<string,readonly boolean[]>>;
+}
+const producerDeclarations=new WeakMap<ResourceConverter,ProducerDeclaration>();
+function describeBuiltin(converter:ResourceConverter,abis:readonly string[],strict:boolean,options:Readonly<Record<string,readonly boolean[]>>):void {
+ const capturedOptions=Object.freeze(Object.fromEntries(Object.entries(options).map(([name,values])=>[name,Object.freeze([...values])])));
+ producerDeclarations.set(converter,{id:converter.id,version:converter.version,parameters:converter.parameters,convert:converter.convert,preflight:converter.preflight,
+  signature:canonicalJson({extensions:[...converter.extensions],...(converter.output?{output:converter.output}:{})}),abis:Object.freeze([...abis]),strict,options:capturedOptions});
+}
+function producerDeclaration(converter:ResourceConverter):ProducerDeclaration|undefined {
+ const value=producerDeclarations.get(converter);
+ if(value&&value.id===converter.id&&value.version===converter.version&&value.parameters===converter.parameters&&value.convert===converter.convert&&value.preflight===converter.preflight
+  &&value.signature===canonicalJson({extensions:[...converter.extensions],...(converter.output?{output:converter.output}:{})}))return value;
+ return undefined;
+}
 function builtin<T extends ResourceConverter>(converter:T,adapterCode=''):T {
  if(converter.output)Object.freeze(converter.output);Object.freeze(converter);
+ describeBuiltin(converter,[BINARY_RESOURCE_TARGET_ABI],true,converter.parameters===noMipmaps?{mipmaps:[false]}:{});
  // Cache invalidation also binds the executable serializer implementation.
  // This fingerprint is private cache policy, not emitted project metadata.
  deterministicProducers.set(converter,canonicalJson({producer:converter.convert.toString(),preflight:converter.preflight?.toString()??'',adapterCode,
@@ -40,6 +58,11 @@ export interface ResourceConversionResult {files:ReadonlyMap<string,Uint8Array>;
 export interface ResourceExecutionHistoryOptions {maxEntries?:number;maxBytes?:number}
 export interface ResourceConverterRegistryOptions {cache?:ResourceExecutionCache;executionHistory?:ResourceExecutionHistoryOptions}
 export interface ResourceExecutionHistoryStats {readonly entries:number;readonly bytes:number;readonly maxEntries:number;readonly maxBytes:number}
+export interface ResourceConverterDescription {
+ readonly id:string;readonly version:string;readonly extensions:readonly string[];readonly output?:ResourceOutputFormat;
+ readonly target:Readonly<{resourceAbi:string;status:'supported'|'unsupported'|'unknown';reason?:string}>;
+ readonly parameters:Readonly<{status:'available';options:Readonly<Record<string,readonly boolean[]>>}|{status:'unknown'}>;
+}
 function fail(message:string):never {throw new ProjectToolError('E_RESOURCE_CONVERTER',message);}
 const jsonObject=(value:unknown):Record<string,unknown>=>{
  if(!value||typeof value!=='object'||Array.isArray(value))return fail('Converter parameters must be a JSON object');
@@ -67,6 +90,7 @@ export class ResourceConverterRegistry {
  private readonly converters=new Map<string,ResourceConverter>();
  private readonly deterministic=new Map<string,string>();
  private readonly textCompatibility=new Map<string,ResourceConverter>();
+ private readonly declarations=new WeakMap<ResourceConverter,ProducerDeclaration>();
  private readonly cache:ResourceExecutionCache;
  // Imported JSON is not an execution receipt from this registry instance.
  // Retain only bounded SHA-256 attestations, not a complete history of receipts.
@@ -106,12 +130,30 @@ export class ResourceConverterRegistry {
   const output=converter.output?Object.freeze({...converter.output}):undefined;
   if(output&&(!/^[a-z0-9]{1,16}$/.test(output.extension)||!/^[A-Za-z][A-Za-z0-9_]{0,127}$/.test(output.resourceType)||typeof output.resourceAbi!=='string'||!output.resourceAbi))fail('Invalid converter output format');
   // A caller may retain the registration object; in-flight identities stay fixed.
-  this.converters.set(id,Object.freeze({id,version,...(output?{output}:{}),extensions:Object.freeze([...converter.extensions]),parameters:(input:Readonly<Record<string,unknown>>)=>parameters.call(converter,input),...(preflight?{preflight:(context:ResourceConversionContext)=>preflight.call(converter,context)}:{}),convert:(context:ResourceConversionContext)=>convert.call(converter,context)}));
+  const captured=Object.freeze({id,version,...(output?{output}:{}),extensions:Object.freeze([...converter.extensions]),parameters:(input:Readonly<Record<string,unknown>>)=>parameters.call(converter,input),...(preflight?{preflight:(context:ResourceConversionContext)=>preflight.call(converter,context)}:{}),convert:(context:ResourceConversionContext)=>convert.call(converter,context)});
+  this.converters.set(id,captured);const declared=producerDeclaration(converter);if(declared)this.declarations.set(captured,declared);
   const identity=deterministicProducers.get(converter);if(identity)this.deterministic.set(id,identity);
-  const compatibility=textCompatibilityProducers.get(converter);if(compatibility){const legacy=compatibility,{parameters:legacyParameters,convert:legacyConvert}=legacy;this.textCompatibility.set(id,Object.freeze({id:legacy.id,version:legacy.version,extensions:Object.freeze([...legacy.extensions]),parameters:(input:Readonly<Record<string,unknown>>)=>legacyParameters.call(legacy,input),convert:(context:ResourceConversionContext)=>legacyConvert.call(legacy,context)}));}
+  const compatibility=textCompatibilityProducers.get(converter);if(compatibility){const legacy=compatibility,{parameters:legacyParameters,convert:legacyConvert}=legacy;const capturedLegacy=Object.freeze({id:legacy.id,version:legacy.version,extensions:Object.freeze([...legacy.extensions]),parameters:(input:Readonly<Record<string,unknown>>)=>legacyParameters.call(legacy,input),convert:(context:ResourceConversionContext)=>legacyConvert.call(legacy,context)});this.textCompatibility.set(id,capturedLegacy);const declaration=producerDeclaration(legacy);if(declaration)this.declarations.set(capturedLegacy,declaration);}
   return this;
  }
  get ids():ReadonlySet<string>{return new Set(this.converters.keys());}
+ private effectiveProducer(id:string,target:ImportTarget):ResourceConverter {
+  const registered=this.converters.get(id);if(!registered)return fail(`Converter is not registered: ${id}`);
+  return target.resourceAbi==='godot-4-text-resource-v1'?(this.textCompatibility.get(id)??registered):registered;
+ }
+ /** Reports captured recipes without executing any user parameters/preflight or
+  * converter callback. A matching custom name never acquires built-in facts. */
+ describe(target:ImportTarget):readonly ResourceConverterDescription[] {
+  const captured=JSON.parse(canonicalJson(target)) as ImportTarget;
+  if(!captured||typeof captured.resourceAbi!=='string'||!captured.resourceAbi||!captured.features||typeof captured.features!=='object'||Array.isArray(captured.features))fail('Invalid converter target');
+  return Object.freeze([...this.converters.keys()].map(id=>{
+   const converter=this.effectiveProducer(id,captured),declaration=this.declarations.get(converter);
+   const status=declaration?.abis.includes(captured.resourceAbi)?'supported':declaration?.strict?'unsupported':'unknown';
+   return Object.freeze({id:converter.id,version:converter.version,extensions:converter.extensions,...(converter.output?{output:converter.output}:{}),
+    target:Object.freeze({resourceAbi:captured.resourceAbi,status,...(status==='supported'?{}:{reason:declaration?'No compatible target recipe is declared':'Custom producer target support is not declared'})}),
+    parameters:declaration?Object.freeze({status:'available' as const,options:declaration.options}):Object.freeze({status:'unknown' as const})});
+  }));
+ }
  async run(requests:readonly ResourceImportRequest[],source:ReadonlyMap<string,Uint8Array>,target:ImportTarget,stored:readonly ImportReceipt[]=[],limits:ResourceConversionLimits={}):Promise<ResourceConversionResult>{
   target=JSON.parse(canonicalJson(target));stored=JSON.parse(canonicalJson(stored));
   const maxOutputBytes=limits.maxOutputBytes??64*1024*1024,maxDecodedPixels=limits.maxDecodedPixels??16*1024*1024,maxDecodedBytes=limits.maxDecodedBytes??64*1024*1024;
@@ -123,7 +165,7 @@ export class ResourceConverterRegistry {
    const registered=this.converters.get(request.converter);if(!registered)fail(`Converter is not registered: ${request.converter}`);
    // Existing text-v1 callers keep the exact old WAV producer/receipt. New
    // product hosts select resources-v2 explicitly before emitting binary bytes.
-   const converter=target.resourceAbi==='godot-4-text-resource-v1'?(this.textCompatibility.get(request.converter)??registered):registered;
+   const converter=this.effectiveProducer(request.converter,target);
    const extension=/\.([^.\/]+)$/.exec(request.resource)?.[1].toLowerCase();
    if(!converter.extensions.includes(extension??''))fail(`${converter.id} cannot read ${request.resource}`);
    const parameters=jsonObject(converter.parameters(request.parameters??{}));
@@ -216,6 +258,8 @@ export const pcmWavConverter:ResourceConverter={id:'godotjs/wav-pcm',version:'1.
  return new Map([[context.destination,resource],[context.resource+'.import',mapping]]);
 }};
 export const legacyPcmWavConverter:ResourceConverter={...pcmWavConverter,id:'godotjs/wav-pcm-base64'};
+describeBuiltin(pcmWavConverter,['godot-4-text-resource-v1',BINARY_RESOURCE_TARGET_ABI],false,{});
+describeBuiltin(legacyPcmWavConverter,['godot-4-text-resource-v1',BINARY_RESOURCE_TARGET_ABI],false,{});
 function binaryTarget(context:ResourceConversionContext):void {
  if(context.target.resourceAbi!==BINARY_RESOURCE_TARGET_ABI)throw new ProjectToolError('E_RESOURCE_ABI',`Binary producers require ${BINARY_RESOURCE_TARGET_ABI}; the legacy text resource target is not compatible`);
 }
@@ -253,7 +297,8 @@ export function jpegCtexConverter(decoder:ImageDecoder=deterministicJpegDecoder,
    const png=(compression==='stored'?encodeRgbaPng:encodeCompressedRgbaPng)(image,limit);return new Map([[context.destination,pngCtex(png,size,(context.maxOutputBytes??64*1024*1024)-mapping.byteLength)],[context.resource+'.import',mapping]]);
   },
  };
- return deterministic?builtin(converter,decode.toString()):converter;
+ if(deterministic)return builtin(converter,decode.toString());
+ describeBuiltin(converter,[BINARY_RESOURCE_TARGET_ABI],true,{mipmaps:[false]});return converter;
 }
 export function rgbaImageConverter(decoder:ImageDecoder):ResourceConverter {
  const {id,version,decode}=decoder;
@@ -261,7 +306,7 @@ export function rgbaImageConverter(decoder:ImageDecoder):ResourceConverter {
  // Keep the receiver for stateful decoder implementations, but never read a
  // replacement method or identity from the caller's registration object.
  const decodeImage=decode.bind(decoder);
- return {id:'godotjs/image-rgba',version:'1.1.0-base64/'+id+'/'+version,extensions:['png','jpg','jpeg'],parameters(input){
+ const converter:ResourceConverter={id:'godotjs/image-rgba',version:'1.1.0-base64/'+id+'/'+version,extensions:['png','jpg','jpeg'],parameters(input){
   if(Object.keys(input).some(key=>key!=='mipmaps')||input.mipmaps!==undefined&&input.mipmaps!==false)fail('Image converter supports mipmaps=false only');return {mipmaps:false};
  },async convert(context){
   const image=await decodeImage(context.files.get(context.resource)!,/\.png$/i.test(context.resource)?'image/png':'image/jpeg');
@@ -270,6 +315,7 @@ export function rgbaImageConverter(decoder:ImageDecoder):ResourceConverter {
   const resource=base64Resource('[gd_resource type="ImageTexture" load_steps=2 format=3]\n\n[sub_resource type="Image" id="image"]\ndata={"width":'+image.width+',"height":'+image.height+',"format":"RGBA8","mipmaps":false,"data":PackedByteArray("',image.rgba,'")}\n\n[resource]\nimage=SubResource("image")\n',(context.maxOutputBytes??64*1024*1024)-mapping.byteLength);
   return new Map([[context.destination,resource],[context.resource+'.import',mapping]]);
  }};
+ describeBuiltin(converter,['godot-4-text-resource-v1',BINARY_RESOURCE_TARGET_ABI],false,{mipmaps:[false]});return converter;
 }
 export function createBrowserResourceConverters(decoder?:ImageDecoder,options:ResourceConverterRegistryOptions&{jpegDecoder?:ImageDecoder}={}):ResourceConverterRegistry {
  const registry=new ResourceConverterRegistry(options).register(binaryPcmWavConverter).register(pngCtexConverter).register(legacyPcmWavConverter).register(jpegCtexConverter(options.jpegDecoder??deterministicJpegDecoder));
