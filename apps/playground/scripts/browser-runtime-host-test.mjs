@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {sessionExitReason} from '@godot-js/engine/session-facts';
-import {launchBrowser,withAcceptanceContext,observedWorkerSessions,observedWorkerOutcomes} from './browser-harness.mjs';
+import {installPassiveRecorder,launchBrowser,withAcceptanceContext,observedWorkerSessions,observedWorkerOutcomes} from './browser-harness.mjs';
 import {createStaticServer} from './serve.mjs';
 import {createLocalTestTls,inspectTestSite,localDeploymentEvidence} from './browser-local-tls.mjs';
 import {runReportedBrowserTest,browserTestFailureStatus,listenBrowserTestServer as listen,closeBrowserTestServer as close} from './browser-contract-report.mjs';
@@ -32,11 +32,12 @@ test.defer(()=>tls?.dispose());
 const serverOptions={urlPrefix:prefix,publicImmutable:site.publicAssets===true,tls};
 const editor=createStaticServer(directory,serverOptions),preview=createStaticServer(directory,serverOptions);
 test.defer(()=>close(editor));test.defer(()=>close(preview));
-let browser,context,page,deployment;
+let browser,context,page,deployment,commandRecorder;
 test.defer(()=>browser?.close());test.defer(()=>context?.close());
 const pageErrors=[],checks=[],cases=[];
 const sourceObservations=[];
-let sourceObservationOverflow=0;
+const commandTraffic=[],commandRoundtrips=[];
+let sourceObservationOverflow=0,commandTrafficOverflow=0;
 let report={status:'failed',scope:'actual-product-runtime-host',backend,checks,cases};
 test.checkpoint(report);
 
@@ -77,6 +78,28 @@ function observeRuntimeHostMessages(){
   });
   return channel;
  }});
+}
+
+function observeProjectCommandTraffic(){
+ const scope=location.pathname.endsWith('/preview.html')?'preview-host':'editor';
+ function observe(direction,packet){
+  if(!packet||![1,2].includes(packet.protocolVersion)||typeof packet.runId!=='string'||
+   !['project-command','project-command-receipt'].includes(packet.type))return;
+  const {runId,revision,generation,commandSequence,type}=packet;
+  void globalThis.__recordRuntimeHostCommand({scope,direction,runId,revision,generation,commandSequence,type,commandType:packet.data?.type});
+ }
+ const post=MessagePort.prototype.postMessage;
+ MessagePort.prototype.postMessage=function(...args){
+  const result=Reflect.apply(post,this,args);
+  try{observe('sent',args[0]);}catch{/* Observation must not change the delivery result. */}
+  return result;
+ };
+ const watch=port=>port.addEventListener('message',event=>observe('received',event.data));
+ const Channel=MessageChannel;
+ globalThis.MessageChannel=new Proxy(Channel,{construct(target,args,newTarget){
+  const channel=Reflect.construct(target,args,newTarget);watch(channel.port1);watch(channel.port2);return channel;
+ }});
+ if(scope==='preview-host')addEventListener('message',event=>{for(const port of event.ports)watch(port);});
 }
 
 function observeRuntimeSources(){
@@ -308,15 +331,44 @@ async function roundtrip(marker,ready){
  const array=await until(async()=>(await projectEvents()).find(event=>event?.type==='runtime-host-array'&&event.sessionId===ready.sessionId&&event.marker===marker),'The 25k integer array did not reach the actual workbench subscriber');
  assert.deepEqual(array.values,Array.from({length:25000},(_,index)=>index%10));
  const bytes=Buffer.byteLength(JSON.stringify(array),'utf8');assert(bytes>50000&&bytes<55000,'The ordinary integer array event should occupy about 50 KB of JSON');
- const called=await page.evaluate(()=>{const bridge=globalThis.__playgroundWorkbench;if(typeof bridge.enableNativeInputBenchmark!=='function')return false;bridge.enableNativeInputBenchmark();return true;});
- assert.equal(called,true,'Use the actual workbench → runner.command path');
- const result=await until(async()=>{const events=await projectEvents();const sync=events.find(event=>event?.type==='runtime-host-command'&&event.sessionId===ready.sessionId&&event.marker===marker),async=events.find(event=>event?.type==='runtime-host-command-async'&&event.sessionId===ready.sessionId&&event.marker===marker);return sync&&async?{sync,async}:undefined;},'Project command did not roundtrip through the real host');
- assert.equal(result.sync.commands,1);assert.equal(result.async.commands,1);assert.equal(result.sync.enabled,true);assert.equal(result.sync.nativeText,marker);
  const packets=(await observation()).messages.filter(packet=>packet.type==='project'&&packet.data?.type==='runtime-host-ready'&&packet.data.sessionId===ready.sessionId);
- assert.equal(packets.length,1);return packets[0].runId;
+ assert.equal(packets.length,1);
+ const {runId,revision,generation}=packets[0];
+ const trace={runId,revision,generation,sessionId:ready.sessionId};commandRoundtrips.push(trace);
+ function replies(events){
+  return events.filter(event=>event?.sessionId===ready.sessionId&&event.marker===marker&&
+   ['runtime-host-command','runtime-host-command-async'].includes(event.type));
+ }
+ try{
+  trace.admission=await page.evaluate(()=>{
+   const bridge=globalThis.__playgroundWorkbench,workbench=bridge.inspect();
+   const context=globalThis.godotPlaygroundDebug?.getContext();
+   const available=typeof bridge.enableNativeInputBenchmark==='function';
+   return {available,reportsAdmission:context?.ok===true,admitted:available?bridge.enableNativeInputBenchmark():undefined,editorRevision:workbench.revision,
+    activeRunId:context?.result?.activeRunId,phase:workbench.engine?.state};
+  });
+  assert.equal(trace.admission.available,true,'Use the actual workbench → runner.command path');
+  if(trace.admission.reportsAdmission||trace.admission.admitted!==undefined)
+   assert.equal(trace.admission.admitted,true,'Verify the workbench command admission receipt');
+  // Before the admission receipt was exposed, the two correlated project replies are the proof of delivery.
+  const result=await until(async()=>{
+   const events=replies(await projectEvents()),sync=events.find(event=>event.type==='runtime-host-command'),async=events.find(event=>event.type==='runtime-host-command-async');
+   return sync&&async?{sync,async}:undefined;
+  },'Project command did not roundtrip through the real host');
+  assert.equal(result.sync.commands,1);assert.equal(result.async.commands,1);assert.equal(result.sync.enabled,true);assert.equal(result.sync.nativeText,marker);
+  return runId;
+ }finally{
+  trace.workbenchEvents=replies(await projectEvents().catch(()=>[]));
+  const wire=await observation().catch(()=>undefined);
+  trace.wireEvents=wire?.messages.filter(packet=>packet.runId===runId&&packet.type==='project'&&
+   ['runtime-host-command','runtime-host-command-async'].includes(packet.data?.type))
+   .map(packet=>({projectSequence:packet.projectSequence,data:packet.data,matches:replies([packet.data]).length===1}));
+ }
 }
 async function stopClean(runId){
  await page.locator('#stop').click();await stopped();const terminal=await terminalFor(runId),facts=terminal.sessionFacts;
+ const trace=commandRoundtrips.find(item=>item.runId===runId);
+ if(trace)trace.terminal=terminal;
  assert(facts,'The terminal wire packet must carry SessionFacts');assert.equal(facts.schemaVersion,1);
  assert.equal(facts.nativeExit?.code,0);assert.equal(facts.failure,undefined);assert.equal(facts.forcedTerminationIssued,false);
  assert.equal(facts.runtimeSummary,'sealed');assert.equal(facts.entryCleanup,'complete');assert.equal(facts.hostCleanup,'complete');
@@ -347,7 +399,11 @@ try{
  context=await browser.newContext({viewport:{width:1536,height:1000}});
  if(typedDemoGuard)await context.addInitScript(guardDemoArrayExpansion,{bytes:demoPackBytes});
  await context.exposeBinding('__recordRuntimeHostSource',(_source,observation)=>{if(sourceObservations.length<16384)sourceObservations.push(observation);else sourceObservationOverflow++;});
+ commandRecorder=await installPassiveRecorder(context,'__recordRuntimeHostCommand',(_source,packet)=>{
+  if(commandTraffic.length<2048)commandTraffic.push(packet);else commandTrafficOverflow++;
+ });
  await context.addInitScript(observeRuntimeSources);await context.addInitScript(observeRuntimeHostMessages);
+ await context.addInitScript(observeProjectCommandTraffic);
  page=await context.newPage();page.setDefaultTimeout(timeout);page.on('pageerror',error=>pageErrors.push(String(error)));
  await page.goto(editorOrigin+prefix+'?project=native&benchmarkTimings=1&previewOrigin='+encodeURIComponent(previewOrigin+prefix),{waitUntil:'domcontentloaded'});
  await until(async()=>{const state=await inspect();return state?.ready&&state.engine?.state==='running';},'Initial native product did not start');
@@ -407,5 +463,8 @@ try{
  process.exitCode=1;
 }
 report.runtimeSources=runtimeSourceEvidence();
+await commandRecorder?.flush();
+report.commandTrafficOverflow=commandTrafficOverflow;
+report.commandRoundtrips=commandRoundtrips.map(trace=>({...trace,traffic:commandTraffic.filter(packet=>packet.runId===trace.runId)}));
 return report;
 }});

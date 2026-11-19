@@ -2,6 +2,7 @@ import {createWorkbench} from './workbench/workbench';
 import {createExplorer} from './workbench/explorer';
 import {createCodeEditor} from './workbench/code-editor';
 import {createFileMenu} from './workbench/file-menu';
+import {createDebugPanel} from './workbench/debug-panel';
 import {filePath,parseProject,addProjectFiles,renameProjectFile,canRenameProjectFile,MAX_PROJECT_DOCUMENT_BYTES,exportProject,projectCompileRequest,newEngineProject,type EditorProject} from './project-model';
 import {importProjectAssets} from './project-asset-import';
 import {applyCompiledImportReceipts} from './compiled-project-metadata';
@@ -16,6 +17,10 @@ import type {RunnerEvent} from '@godot-js/engine/browser/protocol';
 import {suppressBrowserSave} from './browser-shortcuts';
 import {CompilerSourceSender} from './compiler-source-sync';
 import {CompilerWorkerClient} from './compiler-worker-client';
+import {createDebugRecorder,debugFailure,type DebugApi,type DebugRelease} from './debug-api';
+
+declare global { interface Window { readonly godotPlaygroundDebug: DebugApi } }
+
 suppressBrowserSave(window);
 interface Control {key:string;label:string;min:number;max:number;step:number;value:number}
 interface Demo {id:string;name:string;subtitle:string;file:string;hint:string;source:string;controls:Control[];runtime?:'godot'|'react';actions?:{key:string;label:string}[]}
@@ -25,22 +30,35 @@ let demos:Demo[]=[],selected:Demo,current:EditorProject,ready=false,serial=0,rev
 let diagnostics:TypeDiagnostic[]=[],toastTimer:ReturnType<typeof setTimeout>,checkTimer:ReturnType<typeof setTimeout>,saveTimer:ReturnType<typeof setTimeout>;
 const projectEvents:Record<string,unknown>[]=[];
 let nativePreview:Awaited<ReturnType<typeof createEnginePreview>>|undefined,nativePreviewPending:Promise<Awaited<ReturnType<typeof createEnginePreview>>>|undefined;
-let runtimeSerial=0,activeEngineRevision=-1;
+let runtimeSerial=0,activeEngineRevision:string|number=-1;
 let siteEngineProfile='full-engine-v1',shellOnly=false,sessionReleaseContext:ReleaseContext|undefined;
 const editor=createCodeEditor({changed(path,value){if(!current)return;current.files[path]=value;changed();},position(line,column){$('position').textContent=`Ln ${line}, Col ${column}`;},query:languageQuery,run:()=>void compile(true),toggleFiles:()=>workbench.toggleFiles()});
 const workbench=createWorkbench({selectFile,focusEditor:()=>editor.focus(),toast});
+const debugRecorder=createDebugRecorder();
+Object.defineProperty(window,'godotPlaygroundDebug',{value:debugRecorder.api,enumerable:true});
+const debugPanel=createDebugPanel(debugRecorder.api);
+debugRecorder.subscribe(debugPanel.refresh);
 const fileMenu=createFileMenu({select:selectFile,rename:path=>fileForm(path),remove:deleteFile,canDelete:path=>path!==current?.entry,canRename:path=>canRenameProjectFile(current,path),toast});
 const explorer=createExplorer(path=>{workbench.filePicked();selectFile(path);editor.focus();},(path,x,y)=>fileMenu.open(path,x,y));
 function toast(message:string){clearTimeout(toastTimer);$('toast').textContent=message;$('toast').hidden=false;toastTimer=setTimeout(()=>$('toast').hidden=true,4000);}
-function log(message:string,level='log'){
+function log(message:string,level='log',shownInDebug=false){
  if(!logCount)$('logs').replaceChildren();const line=document.createElement('div');line.className='log-line '+level;line.textContent=message.slice(0,4096);$('logs').append(line);
- if(++logCount>500){$('logs').firstElementChild?.remove();logCount=500;}$('log-count').textContent=String(logCount);workbench.logAdded(level);
+ if(++logCount>500){$('logs').firstElementChild?.remove();logCount=500;}$('log-count').textContent=String(logCount);workbench.logAdded(level,shownInDebug);
 }
 function status(text:string,kind=''){$('status').textContent=text;$('run-dot').className=`status-dot ${kind}`;$('runtime-name').textContent=ready?(siteEngineProfile==='engine-2d-v1'?'Godot Web · 2D':'Godot Web · Full'):'加载运行环境';$('runtime-meta').textContent=selected?.name??'Godot WASM + React';document.querySelector('.runtime-card .status-dot')!.className=`status-dot ${kind}`;}
-function send(data:Record<string,unknown>){nativePreview?.runner.command(data);}
+function send(data:Record<string,unknown>){return nativePreview?.runner.command(data)??false;}
+function debugRelease(context:ReleaseContext,manifest?:NonNullable<typeof nativePreview>['manifest']):DebugRelease{
+ return {releaseId:context.engineReleaseId,engineProfile:context.engineProfile,descriptorSha256:context.descriptorHash,candidateId:context.candidateId,
+  engineId:manifest?.engineId,extensionId:manifest?.extensionId,
+  artifactReceiptVersion:manifest?.artifactReceiptVersion===2?2:undefined,
+  artifactSetAbi:(manifest?.execution??manifest?.engine.execution)?.artifactSetAbi===1?1:undefined};
+}
 const compilerSources=new CompilerSourceSender();
 const compiler=new CompilerWorkerClient(()=>new Worker('compiler.worker.js'),error=>{
- log(error.message,'error');status('编译器异常，请重试','error');$('run').removeAttribute('disabled');workbench.setReady();
+ const {latestBuildAttemptId}=debugRecorder.api.getContext().result;
+ const build=latestBuildAttemptId?debugRecorder.api.getBuild(latestBuildAttemptId):undefined;
+ log(error.message,'error',build?.ok&&build.result.status==='pending'&&build.result.editorRevision===revision);
+ status('编译器异常，请重试','error');$('run').removeAttribute('disabled');workbench.setReady();
 },()=>compilerSources.reset());
 function rpc(kind:string,extra:Record<string,unknown>={}):Promise<any>{
  if(current.engineProfile!==siteEngineProfile)return Promise.reject(Error('当前项目需要 '+current.engineProfile+'；原文已保留，请在匹配站点打开或另存兼容副本'));
@@ -120,7 +138,7 @@ async function restore(){
   toast('本地项目恢复失败，已暂停自动保存');log(String(error),'error');
  }
 }
-function changed(){storage.stage(selected.id,current);revision++;$('saved').textContent=persistenceBlocked?'保存失败':'正在保存';clearTimeout(saveTimer);saveTimer=setTimeout(()=>void save(),250);clearTimeout(checkTimer);checkTimer=setTimeout(()=>void check(),1100);}
+function changed(){storage.stage(selected.id,current);revision++;debugRecorder.setContext({editorRevision:revision});$('saved').textContent=persistenceBlocked?'保存失败':'正在保存';clearTimeout(saveTimer);saveTimer=setTimeout(()=>void save(),250);clearTimeout(checkTimer);checkTimer=setTimeout(()=>void check(),1100);}
 function initialProject(demo:Demo):EditorProject{return demo.id==='native'||demo.id==='react'?defaultProject(demo.runtime??'react',siteEngineProfile):demoProject(demo,siteEngineProfile);}
 
 function visibleFile(path:string){return path.split('/').at(-1)!=='package.json';}
@@ -134,20 +152,46 @@ function setDiagnostics(items:TypeDiagnostic[],reveal=false){
 }
 async function check(){if(!current)return;const key=++checking,rev=revision;try{const response=await rpc('check');if(key===checking&&rev===revision)setDiagnostics(response.diagnostics??[]);}catch(error){log(String(error),'error');}}
 async function compile(focusPreview=false){
- if(!ready||!current)return;if(current.engineProfile!==siteEngineProfile){toast('项目与当前引擎配置不匹配，原文已保留');return;}const focusOrigin=document.activeElement;clearTimeout(checkTimer);const key=++runSerial,rev=revision;checking++;$('run').setAttribute('disabled','');workbench.setBuilding();status('正在检查 TypeScript');
- try{const response=await rpc('compile');if(key!==runSerial||rev!==revision)return;setDiagnostics(response.diagnostics??[],true);
+ if(!ready||!current||!nativePreview)return;if(current.engineProfile!==siteEngineProfile){toast('项目与当前引擎配置不匹配，原文已保留');return;}
+ clearTimeout(checkTimer);const key=++runSerial,rev=revision,preview=nativePreview;checking++;$('run').setAttribute('disabled','');workbench.setBuilding();status('正在检查 TypeScript');
+ const attemptId=debugRecorder.startBuild(selected.id,rev);
+ let compileReceived=false,preparing=false;
+ try{
+  const response=await rpc('compile');
+  debugRecorder.recordCompileResponse(attemptId,response);compileReceived=true;
+  if(key!==runSerial||rev!==revision){if(preview.configuration)debugRecorder.skipPreview(attemptId);return;}
+  if(response.cancelled===true){status('已取消构建');return;}
+  setDiagnostics(response.diagnostics??[],true);
   if(diagnostics.some(d=>d.category==='error')){status('编译未通过','error');log(`TypeScript 检查未通过：${diagnostics.length} 个问题`,'warn');return;}
-  log(`✓ ${selected.name} 编译通过，正在运行`);
-  {
-   if(!(response.pack instanceof Uint8Array)&&!response.artifactSet)throw Error('原生项目编译未产生运行包');
-   if(!sessionReleaseContext)throw Error('E_RELEASE_CONTEXT_REQUIRED');
-   assertCompiledRelease(sessionReleaseContext,response.manifest);
-   if(applyCompiledImportReceipts(current,response.manifest)){storage.stage(selected.id,current);void save();}
-   activeEngineRevision=rev;await nativePreview!.run(response.pack,rev,response.manifest,response.artifactSet);
-   if(focusPreview&&key===runSerial)$('preview').querySelector('iframe')?.focus();
+  if(!(response.pack instanceof Uint8Array)&&!response.artifactSet)throw Error('原生项目编译未产生运行包');
+  log(`✓ ${selected.name} 编译通过，正在准备预览`);
+  preparing=true;
+  const configuration=preview.configuration;
+  if(configuration)debugRecorder.beginPreview(attemptId);
+  if(!sessionReleaseContext)throw Error('E_RELEASE_CONTEXT_REQUIRED');
+  assertCompiledRelease(sessionReleaseContext,response.manifest);
+  if(applyCompiledImportReceipts(current,response.manifest)){storage.stage(selected.id,current);void save();}
+  await preview.run(response.pack,rev,response.manifest,response.artifactSet,configuration?generation=>
+   debugRecorder.registerPreview(attemptId,{generation,release:debugRelease(preview.context,preview.manifest),configuration}):undefined);
+  if(key===runSerial){
+   if(focusPreview)$('preview').querySelector('iframe')?.focus();
+   workbench.runStarted();
   }
-  workbench.runStarted();
- }catch(error){if(key===runSerial){if(activeEngineRevision===rev&&nativePreview?.runner.state==='exited')return;log(String(error),'error');status('编译失败','error');}}
+ }catch(error){
+  const aborted=error instanceof DOMException&&error.name==='AbortError';
+  if(!compileReceived)debugRecorder.failBuild(attemptId,debugFailure('compile-request',error));
+  if(preparing&&preview.configuration){
+   if(aborted)debugRecorder.skipPreview(attemptId);
+   else debugRecorder.rejectPreview(attemptId,debugFailure('preview-prepare',error));
+  }
+  if(key===runSerial&&rev===revision&&!aborted){
+   const build=debugRecorder.api.getBuild(attemptId);
+   const hasSession=build.ok&&build.result.preview?.status==='session-created';
+   if(preparing&&preview.runner.state==='exited'&&(hasSession||(!preview.configuration&&activeEngineRevision===rev)))return;
+   log(String(error),'error',build.ok&&(build.result.error!==undefined||build.result.preview?.status==='rejected'));
+   status(preparing?'预览启动失败':'编译失败','error');
+  }
+ }
  finally{if(key===runSerial){$('run').removeAttribute('disabled');workbench.setReady();}}
 }
 function controls(){
@@ -159,10 +203,11 @@ function select(demo:Demo,run=true){
  if(protectedProjectIds.has(demo.id)&&!projects.has(demo.id)){const id='project-'+crypto.randomUUID(),project=initialProject(demo);projects.set(id,project);storage.stage(id,project);select(registerProjectDemo(id,project),run);return;}
  projectEvents.length=0;activeEngineRevision=-1;
  clearTimeout(checkTimer);runSerial++;checking++;revision++;selected=demo;$('current-project-label').textContent=`(当前：${demo.name})`;$('project-switcher').title=`切换项目 (当前：${demo.name})`;$('project-switcher').setAttribute('aria-label',`切换项目 (当前：${demo.name})`);current=projects.get(demo.id)??initialProject(demo);if(!projects.has(demo.id))storage.stage(demo.id,current);projects.set(demo.id,current);workbench.resetTabs();editor.reset();explorer.reset();setDiagnostics([]);selectFile(current.selected);$('export-original').hidden=!current.migration&&!current.engineDocument;controls();$<HTMLSelectElement>('mode').value=current.mode;
+ debugRecorder.setContext({projectId:demo.id,editorRevision:revision});
  for(const tab of document.querySelectorAll<HTMLElement>('[data-demo]')){const active=tab.dataset.demo===demo.id;tab.classList.toggle('active',active);tab.setAttribute('aria-checked',String(active));}
  $<HTMLSelectElement>('profile').replaceChildren(new Option(getEngineProfile(siteEngineProfile).label,siteEngineProfile));
  $('release-info').textContent='Godot 4.6.1 · '+getEngineProfile(siteEngineProfile).label;
- $('runtime-meta').textContent=demo.name;document.title=`${demo.name} · GodotAI Playground`;void save();if(current.engineProfile!==siteEngineProfile){runtimeSerial++;ready=false;void nativePreview?.stop();$('run').setAttribute('disabled','');$('check').setAttribute('disabled','');status('项目需要 '+current.engineProfile,'error');toast('已保留此项目，请在匹配的引擎站点打开或导出原文');}else{$('check').removeAttribute('disabled');void prepareRuntime(run);}
+ $('runtime-meta').textContent=demo.name;document.title=`${demo.name} · GodotAI Playground`;void save();if(current.engineProfile!==siteEngineProfile){runtimeSerial++;ready=false;debugRecorder.setContext({preview:{status:'unsupported',reason:'项目需要 '+current.engineProfile}});void nativePreview?.stop();$('run').setAttribute('disabled','');$('check').setAttribute('disabled','');status('项目需要 '+current.engineProfile,'error');toast('已保留此项目，请在匹配的引擎站点打开或导出原文');}else{$('check').removeAttribute('disabled');void prepareRuntime(run);}
 }
 function fileForm(old?:string){if(old&&!canRenameProjectFile(current,old)){toast('框架阶段暂只支持普通脚本和文本场景改名，资源与声明文件改名尚未开放');return;}const form=$<HTMLFormElement>('file-form'),input=$<HTMLInputElement>('filename');form.hidden=false;input.value=old?.slice(1)??'src/NewComponent.tsx';form.dataset.old=old??'';$('submit-file').textContent=old?'重命名':'创建';input.focus();input.select();}
 $<HTMLFormElement>('file-form').onsubmit=async event=>{event.preventDefault();try{
@@ -266,15 +311,20 @@ function onProjectEvent(data:any){
  if(data.type==='stats'){$('fps').textContent=`${data.fps} FPS`;const s=data.stats??{};if(s.kind==='city'&&s.notice!==lastCityNotice){lastCityNotice=s.notice;if(s.notice?.includes('导入')||s.notice?.startsWith('Error'))log(s.notice);}const text:Record<string,string>={city:`${s.buildings} BUILDINGS · UNDO ${s.undo}`,destruction:`${s.bodies} RIGID BODIES · ${s.spread} m`,racing:`${s.speed} km/h · LAP ${s.laps} · ${s.time} s`,match3:`SCORE ${s.score} · MOVES ${s.moves} · ${s.phase}`,dungeon:`SEED ${s.seed} · ROOMS ${s.revealed}/${s.rooms}`};$('telemetry').textContent=text[s.kind]??(current.demoId==='islands'?`COINS ${s.coins??0}/${s.total??6} · JUMPS ${s.jumps??0}`:current.demoId==='lights'?`3 LIGHTS · ${s.shadows?'SHADOWS ON':'SHADOWS OFF'}`:'3 LIVE MATERIALS · WEBGL 2');}
 }
 function onEngineEvent(event:RunnerEvent){
+ if(event.type==='state'&&event.state==='loading-frame'){
+  activeEngineRevision=event.revision;
+  $('stop').removeAttribute('disabled');
+ }
  const revision=event.type==='exit'?event.report.revision:event.revision;
  if(revision!==activeEngineRevision)return;
  if(event.type==='project'){onProjectEvent({...event.data,generation:event.generation});return;}
- if(event.type==='log'){log(event.text,event.level);return;}
+ if(event.type==='log'){log(event.text,event.level,event.level==='error'&&debugPanel.showsRun(event.runId));return;}
  if(event.type==='exit'){
   $('stop').setAttribute('disabled','');$('fps').textContent='— FPS';
-  if(event.report.diagnostic?.stack)log(event.report.diagnostic.stack,'error');
+  const shownInDebug=debugPanel.showsRun(event.report.runId);
+  if(event.report.diagnostic?.stack)log(event.report.diagnostic.stack,'error',shownInDebug);
   if(event.report.reason==='clean-exit'||event.report.reason==='forced-frame-disposal'){status('已停止');$('telemetry').textContent='场景已释放';}
-  else{status('运行错误','error');log(event.report.detail??event.report.diagnostic?.message??event.report.reason,'error');}
+  else{status('运行错误','error');log(event.report.detail??event.report.diagnostic?.message??event.report.reason,'error',shownInDebug);}
   return;
  }
  if(event.state==='running'){
@@ -287,20 +337,32 @@ function onEngineEvent(event:RunnerEvent){
 }
 async function prepareRuntime(run:boolean){
  const sequence=++runtimeSerial;ready=false;$('run').setAttribute('disabled','');
- if(shellOnly){ready=false;$('run').setAttribute('disabled','');status('仅编辑器测试模式');workbench.setReady();return;}
- if(current?.engineProfile!==siteEngineProfile){ready=false;status('项目需要其他引擎配置','error');return;}
+ if(shellOnly){debugRecorder.setContext({preview:{status:'unsupported',reason:'仅编辑器测试模式'}});status('仅编辑器测试模式');workbench.setReady();return;}
+ if(current?.engineProfile!==siteEngineProfile){debugRecorder.setContext({preview:{status:'unsupported',reason:'项目需要其他引擎配置'}});status('项目需要其他引擎配置','error');return;}
+ debugRecorder.setContext({preview:{status:'loading'}});
  try{
   await nativePreview?.stop();if(sequence!==runtimeSerial)return;
-  nativePreviewPending??=createEnginePreview($('preview'),onEngineEvent).catch(error=>{nativePreviewPending=undefined;throw error;});
+  nativePreviewPending??=createEnginePreview($('preview'),onEngineEvent,{onWorkerEvent:debugRecorder.recordRunEvent}).catch(error=>{nativePreviewPending=undefined;throw error;});
   nativePreview=await nativePreviewPending;if(sequence!==runtimeSerial)return;ready=true;
+  debugRecorder.setContext({release:{status:'available',value:debugRelease(nativePreview.context,nativePreview.manifest)},preview:nativePreview.configuration?
+   {status:'available',value:nativePreview.configuration}:{status:'unsupported',reason:'此预览后端未提供运行事件调试'}});
   $('runtime-name').textContent=siteEngineProfile==='engine-2d-v1'?'Godot Web · 2D':'Godot Web · Full';$('run').removeAttribute('disabled');workbench.setReady();
   if(run)void compile();
   if(ready)$('run').removeAttribute('disabled');
- }catch(error){if(sequence===runtimeSerial){status('加载失败','error');log(String(error),'error');$('preview-placeholder').querySelector('p')!.textContent=String(error);}}
+ }catch(error){if(sequence===runtimeSerial){debugRecorder.setContext({preview:{status:'failed',error:debugFailure('preview-initialize',error)}});status('加载失败','error');log(String(error),'error',true);$('preview-placeholder').querySelector('p')!.textContent=String(error);}}
 }
 async function start(){
- const site=await loadSiteConfiguration();siteEngineProfile=site.runtimeProfile;shellOnly=site.shellOnly;
- if(!shellOnly){sessionReleaseContext=await loadReleaseContext();if(sessionReleaseContext.engineProfile!==siteEngineProfile)throw Error('E_SITE_ENGINE_PROFILE');}
+ try{
+  const site=await loadSiteConfiguration();siteEngineProfile=site.runtimeProfile;shellOnly=site.shellOnly;
+  if(shellOnly)debugRecorder.setContext({release:{status:'unsupported',reason:'仅编辑器测试模式'},preview:{status:'unsupported',reason:'仅编辑器测试模式'}});
+  else{
+   sessionReleaseContext=await loadReleaseContext();if(sessionReleaseContext.engineProfile!==siteEngineProfile)throw Error('E_SITE_ENGINE_PROFILE');
+   debugRecorder.setContext({release:{status:'available',value:debugRelease(sessionReleaseContext)}});
+  }
+ }catch(error){
+  const failure={status:'failed' as const,error:debugFailure('release',error)};
+  debugRecorder.setContext({release:failure,preview:failure});throw error;
+ }
  await initializeProjectStorage(siteEngineProfile);
  const response=await fetch('catalog.json');if(!response.ok)throw Error('无法加载示例目录');demos=[...(['godot','react'] as const).map(runtime=>{const project=defaultProject(runtime,siteEngineProfile);return {id:project.demoId,name:runtime==='godot'?'Godot 原生项目':'React + Godot',subtitle:runtime==='godot'?'NATIVE ENGINE / TYPESCRIPT':'NATIVE ENGINE / REACT',file:project.entry.split('/').at(-1)!,hint:runtime==='godot'?'直接编写 Godot 脚本、场景与资源，使用'+getEngineProfile(siteEngineProfile).label+' API。':'使用 React 声明场景树，节点、资源和方法来自'+getEngineProfile(siteEngineProfile).label+'。',source:project.files[project.entry] as string,runtime,controls:[]};}),...(await response.json()).map((demo:Demo)=>({...demo,runtime:'react' as const}))];$('project-count').textContent=`${demos.length} 个示例`;
  for(const demo of demos)appendDemoButton(demo);
@@ -309,7 +371,11 @@ async function start(){
  if(shared&&await save()){const url=new URL(location.href);url.hash='';history.replaceState(history.state,'',url.href);}
  await prepareRuntime(true);
 }
-start().catch(error=>{status('加载失败','error');log(String(error),'error');});
+start().catch(error=>{
+ const {release,preview}=debugRecorder.api.getContext().result;
+ if(preview.status==='loading')debugRecorder.setContext({preview:{status:'unsupported',reason:'工作台加载失败，未启动预览'}});
+ status('加载失败','error');log(String(error),'error',release.status==='failed');
+});
 // Read-only diagnostics for integration tests and local debugging.
 (globalThis as any).__playgroundWorkbench={inspect:()=>({project:structuredClone(current),projectId:selected?.id,engineProfile:siteEngineProfile,storageDatabaseName:projectBlobDatabaseName(siteEngineProfile),diagnostics:structuredClone(diagnostics),ready,revision,events:structuredClone(projectEvents),engine:nativePreview?{releaseId:nativePreview.manifest.id,profile:nativePreview.manifest.runtimeProfile,state:nativePreview.runner.state}:undefined,releaseContext:structuredClone(sessionReleaseContext)})};
 if(new URL(location.href).searchParams.get('benchmarkTimings')==='1')(globalThis as any).__playgroundWorkbench.enableNativeInputBenchmark=()=>send({type:'benchmark-input',enabled:true});

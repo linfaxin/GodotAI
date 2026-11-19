@@ -1,5 +1,6 @@
 import { fileIcon, icon } from './file-icons.js';
-type DockTab = 'problems' | 'console';
+const dockTabs = ['problems', 'console', 'debug'] as const;
+type DockTab = (typeof dockTabs)[number];
 interface Preferences { sidebar: boolean; ratio: number; dockHeight: number; collapsed: boolean; tab: DockTab; }
 const preferenceKey = 'godotjs-workbench-v1';
 const defaults: Preferences = { sidebar: true, ratio: 52, dockHeight: 178, collapsed: false, tab: 'console' };
@@ -13,7 +14,7 @@ export function createWorkbench(options: { selectFile(path: string): void; focus
     ratio: typeof saved.ratio === 'number' && Number.isFinite(saved.ratio) ? clamp(saved.ratio, 28, 72) : defaults.ratio,
     dockHeight: typeof saved.dockHeight === 'number' && Number.isFinite(saved.dockHeight) ? clamp(saved.dockHeight, 120, 340) : defaults.dockHeight,
     collapsed: typeof saved.collapsed === 'boolean' ? saved.collapsed : defaults.collapsed,
-    tab: saved.tab === 'problems' ? 'problems' : 'console',
+    tab: saved.tab && dockTabs.includes(saved.tab) ? saved.tab : defaults.tab,
   };
   const mobile = matchMedia('(max-width: 900px)');
   const stacked = () => mobile.matches && !(innerWidth >= 620 && innerHeight < 560);
@@ -47,7 +48,7 @@ export function createWorkbench(options: { selectFile(path: string): void; focus
   function dock(tab: DockTab = prefs.tab, expand = false) {
     prefs.tab = tab; if (expand) prefs.collapsed = false;
     document.body.classList.toggle('dock-collapsed', prefs.collapsed);
-    for (const name of ['problems', 'console'] as const) {
+    for (const name of dockTabs) {
       $(name + '-tab').setAttribute('aria-selected', String(name === tab));
       $(name + '-tab').tabIndex = name === tab ? 0 : -1;
       $(name + '-panel').hidden = name !== tab;
@@ -56,6 +57,7 @@ export function createWorkbench(options: { selectFile(path: string): void; focus
     $('toggle-dock').setAttribute('aria-expanded', String(!prefs.collapsed));
     $('toggle-dock').setAttribute('aria-label', prefs.collapsed ? '展开底部面板' : '收起底部面板');
     $('toggle-dock').title = prefs.collapsed ? '展开面板' : '收起面板';
+    if (tab === 'debug' && !prefs.collapsed) $('debug-panel').dispatchEvent(new Event('dock-open'));
     persist();
   }
   function filterLogs() {
@@ -65,9 +67,9 @@ export function createWorkbench(options: { selectFile(path: string): void; focus
     $('no-logs').hidden = !lines.length || lines.some(line => filter === 'all' || line.classList.contains('error') || filter === 'warn' && line.classList.contains('warn'));
   }
   function follow(value: boolean) { autoscroll = value; $('auto-scroll').setAttribute('aria-pressed', String(value)); }
-  function logAdded(level: string) {
+  function logAdded(level: string, shownInDebug = false) {
     filterLogs();
-    if (level === 'error') dock('console', true);
+    if (level === 'error') dock(prefs.tab === 'debug' && shownInDebug ? 'debug' : 'console', true);
     if (autoscroll) { const panel = $('console-panel'); panel.scrollTop = panel.scrollHeight; }
   }
   function resizeVariables() {
@@ -125,8 +127,17 @@ export function createWorkbench(options: { selectFile(path: string): void; focus
   $('share-menu').onclick = () => $('share').click();
   $('close-sidebar').onclick = () => sidebar(false); $('sidebar-backdrop').onclick = () => sidebar(false);
   $('focus-preview').onclick = () => focusPreview();
-  for (const tab of ['problems', 'console'] as const) $(tab + '-tab').onclick = () => { if (prefs.tab === tab && !prefs.collapsed) { prefs.collapsed = true; dock(); } else dock(tab, true); };
-  for (const tab of ['problems', 'console'] as const) $(tab + '-tab').onkeydown = event => { if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) { event.preventDefault(); const target: DockTab = event.key === 'Home' ? 'problems' : event.key === 'End' ? 'console' : tab === 'problems' ? 'console' : 'problems'; dock(target, true); $(target + '-tab').focus(); } };
+  for (const [index, tab] of dockTabs.entries()) {
+    const button = $(tab + '-tab');
+    button.onclick = () => { if (prefs.tab === tab && !prefs.collapsed) { prefs.collapsed = true; dock(); } else dock(tab, true); };
+    button.onkeydown = event => {
+      const offset = event.key === 'ArrowLeft' ? -1 : 1;
+      const target = event.key === 'Home' ? dockTabs[0] : event.key === 'End' ? dockTabs.at(-1)! :
+        event.key === 'ArrowLeft' || event.key === 'ArrowRight' ? dockTabs[(index + offset + dockTabs.length) % dockTabs.length] : undefined;
+      if (!target) return;
+      event.preventDefault(); dock(target, true); $(target + '-tab').focus();
+    };
+  }
   $('toggle-dock').onclick = () => { prefs.collapsed = !prefs.collapsed; dock(); };
   $('log-filter').onchange = filterLogs;
   $('auto-scroll').onclick = () => { follow(!autoscroll); if (autoscroll) $('console-panel').scrollTop = $('console-panel').scrollHeight; };
@@ -167,7 +178,7 @@ export function createWorkbench(options: { selectFile(path: string): void; focus
     runStarted() { if (mobile.matches) focusPreview(true); },
     logAdded,
     clearLogs() { $('no-logs').hidden = true; },
-    showProblems() { dock('problems', true); focusPreview(false); },
+    showProblems() { dock(prefs.tab === 'debug' ? 'debug' : 'problems', true); focusPreview(false); },
     showConsole() { dock('console', true); },
     setReady() { $('run-label').textContent = $('preview').querySelector('iframe') ? '重新运行' : '运行'; $('run').setAttribute('aria-busy', 'false'); },
     setBuilding() { $('run-label').textContent = '构建中'; $('run').setAttribute('aria-busy', 'true'); $('stop').removeAttribute('disabled'); },

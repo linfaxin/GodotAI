@@ -93,13 +93,14 @@ Gate 1 使用纯脚本和真正 `@godot-js/react/engine` 的最小 PCK，不需�
 ```sh
 node apps/playground/scripts/browser-engine-profile-gate.mjs \
   --profile engine-2d-v1 \
+  --engine-report /absolute/path/reports/engine-2d-debug.json \
   --engine-js /absolute/independent/work/engine-2d-debug/bin/.web_zip/godot.js \
   --engine-wasm /absolute/independent/work/engine-2d-debug/bin/.web_zip/godot.wasm \
   --out work/playground/engine-2d-v1/gate-debug \
   --browser chromium
 ```
 
-此门槛要求最终 WASM 链接、实际 2D API 与绑定审计、约定的 3D 类缺失，以及原生/React 两种模式的启动、更新、回调、退出。snake/camel 命名分别验证。完整引擎也需要回归链接和运行，避免条件编译破坏既有功能。
+此门槛要求最终 WASM 链接、实际 2D API 与绑定审计、约定的 3D 类缺失，以及原生/React 两种模式的启动、更新、回调、退出。snake/camel 命名分别验证。报告中的执行合同用于 API 捕获，脚本会在打开浏览器前核对四份模板资产。完整引擎也需要回归链接和运行，避免条件编译破坏既有功能。
 
 旧 P0 React 原型夹具不能代替生产 React 的验证报告。完整站点联调在 Gate 1 后执行。
 

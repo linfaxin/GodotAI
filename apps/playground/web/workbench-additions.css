@@ -6,3 +6,109 @@
 /* The current project stays readable without changing the original top bar. */
 .top-navigation,.examples-menu{min-width:0}#project-switcher{min-width:0;max-width:360px}#project-switcher-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}#project-switcher>.icon{flex-shrink:0}
 @media(max-width:580px){.top-navigation{flex:1}.examples-menu{flex:1}.top-actions,.brand,#open-files{flex-shrink:0}#project-switcher{width:100%}#project-switcher-label{display:flex;flex-direction:column;align-items:flex-start;line-height:13px;white-space:normal}#current-project-label{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px;color:var(--muted)}}
+.debug-panel {
+  padding: 10px 16px 14px;
+  font-size: 12px;
+}
+.debug-panel p, .debug-panel h3, .debug-panel h4, .debug-panel dl { margin: 0; }
+.debug-panel h3, .debug-panel h4 { color: #e1e1e1; font-size: 12px; font-weight: 600; }
+.debug-context-row, .debug-card-heading, .debug-example-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.debug-context-row { justify-content: space-between; margin-bottom: 8px; }
+#debug-context { overflow-wrap: anywhere; color: var(--muted); }
+#debug-context p + p { margin-top: 2px; }
+#debug-open-docs { flex: none; color: #8ac9ff; }
+.debug-summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.debug-card, .debug-docs {
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid #383838;
+  border-radius: 4px;
+  background: #222;
+}
+.debug-card-heading { flex-wrap: wrap; }
+.debug-card-heading .debug-status { margin-left: auto; }
+.debug-linked-build { margin-top: 9px; padding-top: 8px; border-top: 1px solid var(--line); }
+.debug-status, .debug-note { color: var(--muted); font-size: 11px; }
+.debug-status[data-tone="good"] { color: var(--mint); }
+.debug-status[data-tone="error"], .debug-note[data-tone="error"] { color: #f48771; }
+.debug-status[data-tone="notice"], .debug-note[data-tone="notice"] { color: #e0c070; }
+.debug-fields {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  column-gap: 9px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.debug-fields:not(:empty), .debug-notes:not(:empty), .debug-card details { margin-top: 5px; }
+.debug-fields dd {
+  min-width: 0;
+  margin: 0;
+  color: #ccc;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+.debug-notes .debug-note { white-space: pre-wrap; overflow-wrap: anywhere; }
+.debug-notes .debug-note + .debug-note { margin-top: 3px; }
+.debug-card summary { width: fit-content; cursor: pointer; color: #a9d4f7; font-size: 11px; }
+.debug-panel pre {
+  margin: 6px 0 0;
+  padding: 7px 9px;
+  max-height: 200px;
+  overflow: auto;
+  color: #d3d3d3;
+  background: #191919;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  font: 11px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+.debug-log { margin-top: 8px; }
+.debug-log-heading { min-height: 25px; }
+.debug-log-heading select { width: auto; margin-left: auto; padding: 2px 4px; font-size: 11px; }
+.debug-log > .debug-note { margin-top: 4px; }
+#debug-events {
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+  font: 11px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+#debug-events > li {
+  display: grid;
+  grid-template-columns: 3.5em 4.5em minmax(0, 1fr);
+  gap: 7px;
+  padding: 2px 4px;
+  border-top: 1px solid var(--line);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.debug-event-index, .debug-event-level { color: var(--muted); }
+#debug-events [data-level="error"] .debug-event-level { color: #f48771; }
+#debug-events [data-level="warn"] .debug-event-level { color: #e0c070; }
+.debug-docs { margin-bottom: 8px; }
+.debug-docs p { color: var(--muted); }
+.debug-docs code { color: #b4d9fa; }
+.debug-methods {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 4px 12px;
+  padding: 8px 0;
+}
+.debug-methods dd { margin: 0; overflow-wrap: anywhere; }
+.debug-methods dd p + p { margin-top: 4px; }
+.debug-example-actions { flex-wrap: wrap; margin-top: 9px; }
+.debug-example-actions button { min-height: 25px; padding: 2px 7px; font-size: 11px; }
+@media (max-width: 620px) {
+  .debug-panel { padding: 8px 10px 12px; }
+  .debug-summary { grid-template-columns: minmax(0, 1fr); }
+  .debug-methods { grid-template-columns: minmax(0, 1fr); }
+  .debug-methods dd:not(:last-child) { margin-bottom: 5px; }
+}
+@media (max-width: 390px) {
+  .dock-toolbar { gap: 4px; }
+  .dock-tabs { gap: 8px; }
+  .dock-actions select { max-width: 70px; }
+}
