@@ -18,7 +18,7 @@ export interface DebugDiagnostics {
 }
 
 export interface DebugFailure {
-  stage: 'release' | 'preview-initialize' | 'compile-request' | 'compile' | 'preview-prepare';
+  stage: 'release' | 'preview-initialize' | 'check-request' | 'check' | 'compile-request' | 'compile' | 'preview-prepare';
   diagnostic: DebugDiagnostic;
 }
 
@@ -78,6 +78,18 @@ export interface DebugBuild {
   preview?: DebugPreview;
 }
 
+export interface DebugCheck {
+  checkId: string;
+  projectId: string;
+  editorRevision: number;
+  scope: 'typecheck';
+  status: 'completed' | 'failed';
+  sourceHash?: string;
+  compilerIdentity?: Record<string, unknown>;
+  diagnostics: DebugDiagnostics;
+  error?: DebugFailure;
+}
+
 export interface DebugExit {
   evidence: 'host-report' | 'editor-local';
   report: WorkerRunnerExit;
@@ -131,10 +143,9 @@ export interface DebugApi {
   readRunEvents(runId: string, options?: ReadRunEventsOptions): DebugResult<DebugEventPage>;
 }
 
-export type PlaygroundDebugApi = DebugApi;
-
 type PageContext = Pick<DebugContext, 'projectId' | 'editorRevision' | 'release' | 'preview'>;
-type BuildRecord = {order: number; view: DebugBuild};
+type BuildRecord = {order: number; view: DebugBuild; references: number};
+type CheckRequest = Pick<DebugCheck, 'checkId' | 'projectId' | 'editorRevision'> & {order: number};
 type PendingPreview = {
   generation: WorkerRunIdentity['generation'];
   release: DebugRelease;
@@ -387,11 +398,15 @@ export function createDebugRecorder() {
   const pageId = Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
   const context: PageContext = {projectId: null, editorRevision: null, release: {status: 'loading'}, preview: {status: 'loading'}};
   const builds: BuildRecord[] = [];
+  const retainedBuilds = new Set<BuildRecord>();
+  const checks: {order: number; view: DebugCheck}[] = [];
   const previews = new Map<WorkerRunIdentity['generation'], PendingPreview>();
   const exitedRuns: RunRecord[] = [];
+  const retainedRuns = new Map<RunRecord, number>();
   const listeners = new Set<() => void>();
   let activeRun: RunRecord | undefined;
   let order = 0;
+  let checkOrder = 0;
   let notifying = false;
 
   function notify() {
@@ -405,18 +420,23 @@ export function createDebugRecorder() {
     });
   }
 
-  const pinnedBuilds = () => [...(activeRun ? [activeRun.build] : []), ...exitedRuns.map(run => run.build)];
+  const pinnedBuilds = () => [...(activeRun ? [activeRun.build] : []), ...exitedRuns.map(run => run.build),
+    ...Array.from(retainedRuns.keys(), run => run.build)];
   const findBuild = (attemptId: string) =>
-    builds.find(build => build.view.attemptId === attemptId) ?? pinnedBuilds().find(build => build.view.attemptId === attemptId);
+    [...builds, ...retainedBuilds, ...pinnedBuilds()].find(build => build.view.attemptId === attemptId);
   const findRun = (runId: string) =>
-    activeRun?.view.runId === runId ? activeRun : exitedRuns.find(run => run.view.runId === runId);
+    activeRun?.view.runId === runId ? activeRun : [...exitedRuns, ...retainedRuns.keys()].find(run => run.view.runId === runId);
+  function latestBuild(projectId: string | null, editorRevision?: number) {
+    return [...builds, ...retainedBuilds, ...pinnedBuilds()].reduce<BuildRecord | undefined>((current, build) =>
+      build.view.projectId === projectId && (editorRevision === undefined || editorRevision === build.view.editorRevision) &&
+      (!current || current.order < build.order) ? build : current, undefined)?.view;
+  }
 
   const api: DebugApi = {
     schemaVersion: 1,
     getContext() {
-      const latest = [...builds, ...pinnedBuilds()].reduce<BuildRecord | undefined>((current, build) =>
-        build.view.projectId === context.projectId && (!current || current.order < build.order) ? build : current, undefined);
-      return ok({...context, latestBuildAttemptId: latest?.view.attemptId ?? null, activeRunId: activeRun?.view.runId ?? null,
+      const latest = latestBuild(context.projectId);
+      return ok({...context, latestBuildAttemptId: latest?.attemptId ?? null, activeRunId: activeRun?.view.runId ?? null,
         lastExitedRunId: exitedRuns.at(-1)?.view.runId ?? null});
     },
     getBuild(attemptId) {
@@ -471,6 +491,40 @@ export function createDebugRecorder() {
       listeners.add(listener);
       return () => { listeners.delete(listener); };
     },
+    getBuildForRevision(projectId: string, editorRevision: number) {
+      return structuredClone(latestBuild(projectId, editorRevision));
+    },
+    getCheck(checkId: string) {
+      return structuredClone(checks.find(check => check.view.checkId === checkId)?.view);
+    },
+    getCheckForRevision(projectId: string, editorRevision: number) {
+      let latest: (typeof checks)[number] | undefined;
+      for (const check of checks) {
+        if (check.view.projectId === projectId && check.view.editorRevision === editorRevision &&
+            (!latest || check.order > latest.order)) latest = check;
+      }
+      return structuredClone(latest?.view);
+    },
+    startCheck(projectId: string, editorRevision: number): CheckRequest {
+      return {order: ++checkOrder, checkId: 'check-' + checkOrder, projectId, editorRevision};
+    },
+    finishCheck({order, ...request}: CheckRequest, response: unknown, requestError?: DebugFailure): DebugCheck {
+      const result = record(response);
+      const diagnostics = result?.error === undefined ? buildDiagnostics(result?.diagnostics) : unknownDiagnostics();
+      const error = requestError ?? (diagnostics.observed ? undefined :
+        debugFailure('check', result?.error ?? '编译器未返回类型检查结果', result?.errorCode));
+      const compilerIdentity = compilerSnapshot(result?.compilerIdentity);
+      const view: DebugCheck = {
+        ...request, scope: 'typecheck', status: error ? 'failed' : 'completed',
+        ...(digest(result?.sourceHash) ? {sourceHash: result.sourceHash} : {}),
+        ...(compilerIdentity ? {compilerIdentity} : {}),
+        diagnostics, ...(error ? {error} : {}),
+      };
+      checks.push({order, view});
+      if (checks.length > MAX_BUILDS) checks.shift();
+      notify();
+      return structuredClone(view);
+    },
     setContext(patch: Partial<PageContext>) {
       if (patch.projectId !== undefined) context.projectId = patch.projectId;
       if (patch.editorRevision !== undefined) context.editorRevision = patch.editorRevision;
@@ -480,11 +534,36 @@ export function createDebugRecorder() {
     },
     startBuild(projectId: string, editorRevision: number): string {
       const attemptId = 'build-' + ++order;
-      builds.push({order, view: {attemptId, projectId, editorRevision, status: 'pending', diagnostics: unknownDiagnostics(),
+      builds.push({order, references: 0, view: {attemptId, projectId, editorRevision, status: 'pending', diagnostics: unknownDiagnostics(),
         ...(context.preview.status === 'unsupported' ? {} : {preview: {status: 'not-requested'}})}});
       if (builds.length > MAX_BUILDS) builds.shift();
       notify();
       return attemptId;
+    },
+    retainBuild(attemptId: string) {
+      const build = findBuild(attemptId);
+      if (!build) return undefined;
+      build.references++;
+      retainedBuilds.add(build);
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        if (--build.references === 0) retainedBuilds.delete(build);
+      };
+    },
+    retainRun(runId: string) {
+      const run = findRun(runId);
+      if (!run) return undefined;
+      retainedRuns.set(run, (retainedRuns.get(run) ?? 0) + 1);
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        const remaining = (retainedRuns.get(run) ?? 1) - 1;
+        if (remaining) retainedRuns.set(run, remaining);
+        else retainedRuns.delete(run);
+      };
     },
     recordCompileResponse(attemptId: string, response: unknown) {
       const build = findBuild(attemptId)?.view;

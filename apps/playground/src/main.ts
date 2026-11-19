@@ -13,13 +13,19 @@ import {createEnginePreview} from './engine-preview';
 import {loadReleaseContext,loadSiteConfiguration,type ReleaseContext} from './engine-assets';
 import {assertCompiledRelease} from './release-context';
 import {getEngineProfile} from '../../../scripts/release/engine-profiles.mjs';
-import type {RunnerEvent} from '@godot-js/engine/browser/protocol';
+import type {RunnerEvent,RunnerState} from '@godot-js/engine/browser/protocol';
 import {suppressBrowserSave} from './browser-shortcuts';
 import {CompilerSourceSender} from './compiler-source-sync';
 import {CompilerWorkerClient} from './compiler-worker-client';
-import {createDebugRecorder,debugFailure,type DebugApi,type DebugRelease} from './debug-api';
+import {createDebugRecorder,debugFailure,type DebugRelease} from './debug-api';
+import {createPlaygroundApi,type PlaygroundApi} from './playground-api';
+import {createAgentPanel} from './workbench/agent-panel';
 
-declare global { interface Window { readonly godotPlaygroundDebug: DebugApi } }
+declare global {
+ interface Window {
+  readonly godotPlayground: PlaygroundApi;
+ }
+}
 
 suppressBrowserSave(window);
 interface Control {key:string;label:string;min:number;max:number;step:number;value:number}
@@ -32,12 +38,22 @@ const projectEvents:Record<string,unknown>[]=[];
 let nativePreview:Awaited<ReturnType<typeof createEnginePreview>>|undefined,nativePreviewPending:Promise<Awaited<ReturnType<typeof createEnginePreview>>>|undefined;
 let runtimeSerial=0,activeEngineRevision:string|number=-1;
 let siteEngineProfile='full-engine-v1',shellOnly=false,sessionReleaseContext:ReleaseContext|undefined;
+const MAX_PENDING_OPERATIONS=16;
+let pendingChecks=0,pendingBuilds=0,playIntent:AbortController|undefined;
 const editor=createCodeEditor({changed(path,value){if(!current)return;current.files[path]=value;changed();},position(line,column){$('position').textContent=`Ln ${line}, Col ${column}`;},query:languageQuery,run:()=>void compile(true),toggleFiles:()=>workbench.toggleFiles()});
 const workbench=createWorkbench({selectFile,focusEditor:()=>editor.focus(),toast});
 const debugRecorder=createDebugRecorder();
-Object.defineProperty(window,'godotPlaygroundDebug',{value:debugRecorder.api,enumerable:true});
-const debugPanel=createDebugPanel(debugRecorder.api);
+const playground=createPlaygroundApi(debugRecorder,{
+ supportsProject:()=>current?.engineProfile===siteEngineProfile,
+ check,
+ play:()=>compile(),
+ stopRun:runId=>nativePreview?.stopRun(runId),
+});
+Object.defineProperty(window,'godotPlayground',{value:playground.api,enumerable:true});
+const debugPanel=createDebugPanel(debugRecorder.api,playground.api);
 debugRecorder.subscribe(debugPanel.refresh);
+createAgentPanel(playground);
+addEventListener('pagehide',playground.cancelWaits);
 const fileMenu=createFileMenu({select:selectFile,rename:path=>fileForm(path),remove:deleteFile,canDelete:path=>path!==current?.entry,canRename:path=>canRenameProjectFile(current,path),toast});
 const explorer=createExplorer(path=>{workbench.filePicked();selectFile(path);editor.focus();},(path,x,y)=>fileMenu.open(path,x,y));
 function toast(message:string){clearTimeout(toastTimer);$('toast').textContent=message;$('toast').hidden=false;toastTimer=setTimeout(()=>$('toast').hidden=true,4000);}
@@ -88,7 +104,7 @@ async function initializeProjectStorage(profile:string){
 }
 let persistenceBlocked=false,recoverySnapshot:unknown,retainedImport:unknown;
 const protectedProjectIds=new Set<string>();
-async function save():Promise<boolean>{
+async function save(afterCommit?:()=>void):Promise<boolean>{
  const savingSelected=selected.id;
  if(persistenceBlocked){$('saved').textContent='保存失败';return false;}
  $('saved').textContent='正在保存';
@@ -97,6 +113,7 @@ async function save():Promise<boolean>{
   if(result.conflicts.includes(selected.id)){$('saved').textContent='保存冲突';toast('另一个标签页已更新当前项目。本地修改尚未保存，请先导出本地修改，然后刷新页面。');return false;}
   if(result.invalid.has(selected.id)){$('saved').textContent='保存失败';toast('未保存当前修改：'+result.invalid.get(selected.id));return false;}
   if(storage.hasPending(selected.id)){$('saved').textContent='正在保存';return false;}
+  afterCommit?.();
   $('saved').textContent='已自动保存';void storage.collectBlobs().catch(()=>{});return true;
  }catch(error){$('saved').textContent='保存失败';toast('未保存当前修改：'+String(error));return false;}
 }
@@ -138,7 +155,8 @@ async function restore(){
   toast('本地项目恢复失败，已暂停自动保存');log(String(error),'error');
  }
 }
-function changed(){storage.stage(selected.id,current);revision++;debugRecorder.setContext({editorRevision:revision});$('saved').textContent=persistenceBlocked?'保存失败':'正在保存';clearTimeout(saveTimer);saveTimer=setTimeout(()=>void save(),250);clearTimeout(checkTimer);checkTimer=setTimeout(()=>void check(),1100);}
+function invalidatePlay(){playIntent?.abort();}
+function changed(){storage.stage(selected.id,current);invalidatePlay();revision++;debugRecorder.setContext({editorRevision:revision});$('saved').textContent=persistenceBlocked?'保存失败':'正在保存';clearTimeout(saveTimer);saveTimer=setTimeout(()=>void save(),250);clearTimeout(checkTimer);checkTimer=setTimeout(()=>void check(),1100);}
 function initialProject(demo:Demo):EditorProject{return demo.id==='native'||demo.id==='react'?defaultProject(demo.runtime??'react',siteEngineProfile):demoProject(demo,siteEngineProfile);}
 
 function visibleFile(path:string){return path.split('/').at(-1)!=='package.json';}
@@ -150,64 +168,112 @@ function setDiagnostics(items:TypeDiagnostic[],reveal=false){
  for(const item of items){const button=document.createElement('button');button.className='diagnostic-item';const code=document.createElement('code');code.textContent=`${item.file?.split('/').at(-1)??'项目'}:${item.line??0}:${item.column??0}`;const text=document.createElement('span');text.textContent=item.message;button.append(code,text);button.onclick=()=>{if(item.file&&Object.hasOwn(current.files,item.file)){selectFile(item.file);editor.reveal(item.start??0,item.length??1);}};$('diagnostics').append(button);}
  if(reveal&&items.length)workbench.showProblems();
 }
-async function check(){if(!current)return;const key=++checking,rev=revision;try{const response=await rpc('check');if(key===checking&&rev===revision)setDiagnostics(response.diagnostics??[]);}catch(error){log(String(error),'error');}}
-async function compile(focusPreview=false){
+function check(){
+ if(!current||pendingChecks>=MAX_PENDING_OPERATIONS)return;
+ const key=++checking,rev=revision,request=debugRecorder.startCheck(selected.id,rev);
+ pendingChecks++;
+ return (async()=>{
+  let response, failure;
+  try{response=await rpc('check');}
+  catch(error){failure=debugFailure('check-request',error);}
+  finally{pendingChecks--;}
+  const result=debugRecorder.finishCheck(request,response,failure);
+  if(key===checking&&rev===revision){
+   if(result.status==='completed')setDiagnostics(response.diagnostics);
+   else log(result.error?.diagnostic.message??'类型检查失败','error');
+  }
+  return result;
+ })();
+}
+const buildStatus='正在检查 TypeScript';
+function showPreviewState(state:RunnerState){
+ const labels:Record<RunnerState,string>={idle:'等待运行','loading-frame':'正在连接预览',handshaking:'正在连接预览',
+  downloading:'正在下载引擎',preloading:'正在装载项目',initializing:'正在初始化引擎',starting:'正在启动场景',
+  'waiting-ready':'等待场景就绪',running:'实时运行中',stopping:'正在停止',exited:'已停止'};
+ status(labels[state],state==='running'?'running':'');
+}
+function restorePreviewStatus(state:RunnerState){
+ // A lifecycle event may have already published a newer phase or an exit error.
+ if($('status').textContent!==buildStatus)return;
+ showPreviewState(state);
+ $('stop').toggleAttribute('disabled',state==='idle'||state==='exited');
+}
+function compile(focusPreview=false){
  if(!ready||!current||!nativePreview)return;if(current.engineProfile!==siteEngineProfile){toast('项目与当前引擎配置不匹配，原文已保留');return;}
- clearTimeout(checkTimer);const key=++runSerial,rev=revision,preview=nativePreview;checking++;$('run').setAttribute('disabled','');workbench.setBuilding();status('正在检查 TypeScript');
+ if(pendingBuilds>=MAX_PENDING_OPERATIONS)return;
+ invalidatePlay();
+ const intent=new AbortController();
+ playIntent=intent;
+ clearTimeout(checkTimer);const key=++runSerial,rev=revision,preview=nativePreview;checking++;$('run').setAttribute('disabled','');workbench.setBuilding();status(buildStatus);
  const attemptId=debugRecorder.startBuild(selected.id,rev);
- let compileReceived=false,preparing=false;
- try{
-  const response=await rpc('compile');
-  debugRecorder.recordCompileResponse(attemptId,response);compileReceived=true;
-  if(key!==runSerial||rev!==revision){if(preview.configuration)debugRecorder.skipPreview(attemptId);return;}
-  if(response.cancelled===true){status('已取消构建');return;}
-  setDiagnostics(response.diagnostics??[],true);
-  if(diagnostics.some(d=>d.category==='error')){status('编译未通过','error');log(`TypeScript 检查未通过：${diagnostics.length} 个问题`,'warn');return;}
-  if(!(response.pack instanceof Uint8Array)&&!response.artifactSet)throw Error('原生项目编译未产生运行包');
-  log(`✓ ${selected.name} 编译通过，正在准备预览`);
-  preparing=true;
-  const configuration=preview.configuration;
-  if(configuration)debugRecorder.beginPreview(attemptId);
-  if(!sessionReleaseContext)throw Error('E_RELEASE_CONTEXT_REQUIRED');
-  assertCompiledRelease(sessionReleaseContext,response.manifest);
-  if(applyCompiledImportReceipts(current,response.manifest)){storage.stage(selected.id,current);void save();}
-  await preview.run(response.pack,rev,response.manifest,response.artifactSet,configuration?generation=>
-   debugRecorder.registerPreview(attemptId,{generation,release:debugRelease(preview.context,preview.manifest),configuration}):undefined);
-  if(key===runSerial){
-   if(focusPreview)$('preview').querySelector('iframe')?.focus();
-   workbench.runStarted();
+ const releaseAttempt=debugRecorder.retainBuild(attemptId);
+ pendingBuilds++;
+ void settle();
+ return attemptId;
+
+ async function settle(){
+  let compileReceived=false,preparing=false;
+  try{
+   const response=await rpc('compile');
+   debugRecorder.recordCompileResponse(attemptId,response);compileReceived=true;
+   if(intent.signal.aborted||key!==runSerial||rev!==revision){if(preview.configuration)debugRecorder.skipPreview(attemptId);return;}
+   if(response.cancelled===true){status('已取消构建');return;}
+   setDiagnostics(response.diagnostics??[],true);
+   if(diagnostics.some(d=>d.category==='error')){status('编译未通过','error');log(`TypeScript 检查未通过：${diagnostics.length} 个问题`,'warn');return;}
+   if(!(response.pack instanceof Uint8Array)&&!response.artifactSet)throw Error('原生项目编译未产生运行包');
+   log(`✓ ${selected.name} 编译通过，正在准备预览`);
+   preparing=true;
+   const configuration=preview.configuration;
+   if(configuration)debugRecorder.beginPreview(attemptId);
+   if(!sessionReleaseContext)throw Error('E_RELEASE_CONTEXT_REQUIRED');
+   assertCompiledRelease(sessionReleaseContext,response.manifest);
+   if(applyCompiledImportReceipts(current,response.manifest)){storage.stage(selected.id,current);void save();}
+   await preview.run(response.pack,rev,response.manifest,response.artifactSet,configuration?generation=>
+    debugRecorder.registerPreview(attemptId,{generation,release:debugRelease(preview.context,preview.manifest),configuration}):undefined,intent.signal);
+   if(key===runSerial&&!intent.signal.aborted){
+    if(focusPreview)$('preview').querySelector('iframe')?.focus();
+    workbench.runStarted();
+   }
+  }catch(error){
+   const aborted=error instanceof DOMException&&error.name==='AbortError';
+   if(!compileReceived)debugRecorder.failBuild(attemptId,debugFailure('compile-request',error));
+   if(preparing&&preview.configuration){
+    if(aborted)debugRecorder.skipPreview(attemptId);
+    else debugRecorder.rejectPreview(attemptId,debugFailure('preview-prepare',error));
+   }
+   if(key===runSerial&&rev===revision&&!aborted&&!intent.signal.aborted){
+    const build=debugRecorder.api.getBuild(attemptId);
+    const hasSession=build.ok&&build.result.preview?.status==='session-created';
+    if(preparing&&preview.runner.state==='exited'&&(hasSession||(!preview.configuration&&activeEngineRevision===rev)))return;
+    log(String(error),'error',build.ok&&(build.result.error!==undefined||build.result.preview?.status==='rejected'));
+    status(preparing?'预览启动失败':'编译失败','error');
+   }
   }
- }catch(error){
-  const aborted=error instanceof DOMException&&error.name==='AbortError';
-  if(!compileReceived)debugRecorder.failBuild(attemptId,debugFailure('compile-request',error));
-  if(preparing&&preview.configuration){
-   if(aborted)debugRecorder.skipPreview(attemptId);
-   else debugRecorder.rejectPreview(attemptId,debugFailure('preview-prepare',error));
-  }
-  if(key===runSerial&&rev===revision&&!aborted){
-   const build=debugRecorder.api.getBuild(attemptId);
-   const hasSession=build.ok&&build.result.preview?.status==='session-created';
-   if(preparing&&preview.runner.state==='exited'&&(hasSession||(!preview.configuration&&activeEngineRevision===rev)))return;
-   log(String(error),'error',build.ok&&(build.result.error!==undefined||build.result.preview?.status==='rejected'));
-   status(preparing?'预览启动失败':'编译失败','error');
+  finally{
+   pendingBuilds--;
+   releaseAttempt?.();
+   if(playIntent===intent)playIntent=undefined;
+   if(key===runSerial){
+    $('run').toggleAttribute('disabled',!ready);workbench.setReady();
+    if(intent.signal.aborted)restorePreviewStatus(preview.runner.state);
+   }
   }
  }
- finally{if(key===runSerial){$('run').removeAttribute('disabled');workbench.setReady();}}
 }
 function controls(){
  $('controls').replaceChildren();$('demo-actions').replaceChildren();$('hint').textContent=selected.hint;
  for(const c of selected.controls){const div=document.createElement('div');div.className='control';const label=document.createElement('label'),name=document.createElement('span'),output=document.createElement('output'),input=document.createElement('input');name.textContent=c.label;input.type='range';input.id=`control-${c.key}`;input.min=String(c.min);input.max=String(c.max);input.step=String(c.step);input.value=String(current.controls[c.key]??c.value);output.textContent=input.value;label.htmlFor=input.id;label.append(name,output);input.oninput=()=>{current.controls[c.key]=Number(input.value);output.textContent=input.value;send({type:'controls',controls:current.controls});storage.stage(selected.id,current);void save();};div.append(label,input);$('controls').append(div);}
  for(const action of selected.actions??[]){const button=document.createElement('button');button.dataset.action=action.key;button.textContent=action.label;button.onclick=()=>action.key==='load'?importCity():send({type:'action',action:action.key});$('demo-actions').append(button);}
 }
-function select(demo:Demo,run=true){
- if(protectedProjectIds.has(demo.id)&&!projects.has(demo.id)){const id='project-'+crypto.randomUUID(),project=initialProject(demo);projects.set(id,project);storage.stage(id,project);select(registerProjectDemo(id,project),run);return;}
- projectEvents.length=0;activeEngineRevision=-1;
+function select(demo:Demo,run=true,persist=true){
+ if(protectedProjectIds.has(demo.id)&&!projects.has(demo.id)){const id='project-'+crypto.randomUUID(),project=initialProject(demo);projects.set(id,project);storage.stage(id,project);select(registerProjectDemo(id,project),run,persist);return;}
+ projectEvents.length=0;activeEngineRevision=-1;invalidatePlay();
  clearTimeout(checkTimer);runSerial++;checking++;revision++;selected=demo;$('current-project-label').textContent=`(当前：${demo.name})`;$('project-switcher').title=`切换项目 (当前：${demo.name})`;$('project-switcher').setAttribute('aria-label',`切换项目 (当前：${demo.name})`);current=projects.get(demo.id)??initialProject(demo);if(!projects.has(demo.id))storage.stage(demo.id,current);projects.set(demo.id,current);workbench.resetTabs();editor.reset();explorer.reset();setDiagnostics([]);selectFile(current.selected);$('export-original').hidden=!current.migration&&!current.engineDocument;controls();$<HTMLSelectElement>('mode').value=current.mode;
  debugRecorder.setContext({projectId:demo.id,editorRevision:revision});
  for(const tab of document.querySelectorAll<HTMLElement>('[data-demo]')){const active=tab.dataset.demo===demo.id;tab.classList.toggle('active',active);tab.setAttribute('aria-checked',String(active));}
  $<HTMLSelectElement>('profile').replaceChildren(new Option(getEngineProfile(siteEngineProfile).label,siteEngineProfile));
  $('release-info').textContent='Godot 4.6.1 · '+getEngineProfile(siteEngineProfile).label;
- $('runtime-meta').textContent=demo.name;document.title=`${demo.name} · GodotAI Playground`;void save();if(current.engineProfile!==siteEngineProfile){runtimeSerial++;ready=false;debugRecorder.setContext({preview:{status:'unsupported',reason:'项目需要 '+current.engineProfile}});void nativePreview?.stop();$('run').setAttribute('disabled','');$('check').setAttribute('disabled','');status('项目需要 '+current.engineProfile,'error');toast('已保留此项目，请在匹配的引擎站点打开或导出原文');}else{$('check').removeAttribute('disabled');void prepareRuntime(run);}
+ $('runtime-meta').textContent=demo.name;document.title=`${demo.name} · GodotAI Playground`;if(persist)void save();if(current.engineProfile!==siteEngineProfile){runtimeSerial++;ready=false;debugRecorder.setContext({preview:{status:'unsupported',reason:'项目需要 '+current.engineProfile}});void nativePreview?.stop();$('run').setAttribute('disabled','');$('check').setAttribute('disabled','');status('项目需要 '+current.engineProfile,'error');toast('已保留此项目，请在匹配的引擎站点打开或导出原文');}else{$('check').removeAttribute('disabled');void prepareRuntime(run);}
 }
 function fileForm(old?:string){if(old&&!canRenameProjectFile(current,old)){toast('框架阶段暂只支持普通脚本和文本场景改名，资源与声明文件改名尚未开放');return;}const form=$<HTMLFormElement>('file-form'),input=$<HTMLInputElement>('filename');form.hidden=false;input.value=old?.slice(1)??'src/NewComponent.tsx';form.dataset.old=old??'';$('submit-file').textContent=old?'重命名':'创建';input.focus();input.select();}
 $<HTMLFormElement>('file-form').onsubmit=async event=>{event.preventDefault();try{
@@ -293,7 +359,10 @@ $('reset').onclick=()=>{if(selected.id.startsWith('project-')){const source=demo
 $('share').onclick=async()=>{try{const json=new TextEncoder().encode(JSON.stringify(exportProject(current)));const compressed=new Uint8Array(await new Response(new Blob([json]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());if(compressed.length>24576)throw Error('项目较大，请改用导出项目 JSON');let binary='';for(const n of compressed)binary+=String.fromCharCode(n);const url=new URL(location.href);url.hash='project='+btoa(binary);await navigator.clipboard.writeText(url.href);toast('项目分享链接已复制');}catch(error){toast(String(error));}};
 async function importShared(){if(!location.hash.startsWith('#project='))return;try{const binary=atob(location.hash.slice(9).replace(/-/g,'+').replace(/_/g,'/'));if(binary.length>24576)throw Error('分享链接过大');const bytes=Uint8Array.from(binary,c=>c.charCodeAt(0));const reader=new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip')).getReader(),chunks:Uint8Array<ArrayBuffer>[]=[];let size=0;try{for(;;){const {done,value}=await reader.read();if(done)break;size+=value.byteLength;if(size>MAX_PROJECT_DOCUMENT_BYTES)throw Error('分享项目过大');chunks.push(value.slice());}}finally{await reader.cancel();}const text=await new Blob(chunks).text();return await importDocument(JSON.parse(text),{shared:true});}catch(error){toast('无法读取分享项目：'+String(error));}}
 function importCity(){const input=document.createElement('input');input.type='file';input.accept='.json,application/json';input.onchange=async()=>{const file=input.files?.[0];if(!file)return;try{if(file.size>262144)throw Error('地图文件超过 256 KB');send({type:'import-data',data:JSON.parse(await file.text())});log(`✓ 已读取 ${file.name}`);}catch(error){log(String(error),'error');}};input.click();}
-$('run').onclick=()=>void compile(true);$('check').onclick=()=>void check();$('stop').onclick=()=>{runSerial++;$('run').toggleAttribute('disabled',!ready);workbench.setReady();void nativePreview?.stop();};
+$('run').onclick=()=>void compile(true);$('check').onclick=()=>void check();$('stop').onclick=()=>{
+ invalidatePlay();runSerial++;$('run').toggleAttribute('disabled',!ready);workbench.setReady();
+ if(nativePreview){void nativePreview.stop();restorePreviewStatus(nativePreview.runner.state);}
+};
 $<HTMLSelectElement>('mode').onchange=()=>{current.mode=$<HTMLSelectElement>('mode').value==='development'?'development':'production';changed();if(ready)void compile();};
 $('clear-log').onclick=()=>{logCount=0;$('logs').replaceChildren();$('log-count').textContent='0';workbench.clearLogs();};
 $('credits-open').onclick=()=>$<HTMLDialogElement>('credits').showModal();$('credits-close').onclick=()=>$<HTMLDialogElement>('credits').close();
@@ -331,9 +400,9 @@ function onEngineEvent(event:RunnerEvent){
   // Compilation snapshots controls before the new session can accept commands.
   // Replay the current values so edits made during startup reach this session.
   send({type:'controls',controls:current.controls});
-  $('preview-placeholder').hidden=true;$('stop').removeAttribute('disabled');status('实时运行中','running');$('telemetry').textContent=getEngineProfile(siteEngineProfile).label;
+  $('preview-placeholder').hidden=true;$('stop').removeAttribute('disabled');$('telemetry').textContent=getEngineProfile(siteEngineProfile).label;
  }
- else if(event.state!=='exited')status(({downloading:'正在下载引擎',preloading:'正在装载项目',initializing:'正在初始化引擎',starting:'正在启动场景','waiting-ready':'等待场景就绪',stopping:'正在停止'} as Record<string,string>)[event.state]??'正在连接预览');
+ if(event.state!=='exited')showPreviewState(event.state);
 }
 async function prepareRuntime(run:boolean){
  const sequence=++runtimeSerial;ready=false;$('run').setAttribute('disabled','');
@@ -348,7 +417,6 @@ async function prepareRuntime(run:boolean){
    {status:'available',value:nativePreview.configuration}:{status:'unsupported',reason:'此预览后端未提供运行事件调试'}});
   $('runtime-name').textContent=siteEngineProfile==='engine-2d-v1'?'Godot Web · 2D':'Godot Web · Full';$('run').removeAttribute('disabled');workbench.setReady();
   if(run)void compile();
-  if(ready)$('run').removeAttribute('disabled');
  }catch(error){if(sequence===runtimeSerial){debugRecorder.setContext({preview:{status:'failed',error:debugFailure('preview-initialize',error)}});status('加载失败','error');log(String(error),'error',true);$('preview-placeholder').querySelector('p')!.textContent=String(error);}}
 }
 async function start(){
@@ -367,8 +435,9 @@ async function start(){
  const response=await fetch('catalog.json');if(!response.ok)throw Error('无法加载示例目录');demos=[...(['godot','react'] as const).map(runtime=>{const project=defaultProject(runtime,siteEngineProfile);return {id:project.demoId,name:runtime==='godot'?'Godot 原生项目':'React + Godot',subtitle:runtime==='godot'?'NATIVE ENGINE / TYPESCRIPT':'NATIVE ENGINE / REACT',file:project.entry.split('/').at(-1)!,hint:runtime==='godot'?'直接编写 Godot 脚本、场景与资源，使用'+getEngineProfile(siteEngineProfile).label+' API。':'使用 React 声明场景树，节点、资源和方法来自'+getEngineProfile(siteEngineProfile).label+'。',source:project.files[project.entry] as string,runtime,controls:[]};}),...(await response.json()).map((demo:Demo)=>({...demo,runtime:'react' as const}))];$('project-count').textContent=`${demos.length} 个示例`;
  for(const demo of demos)appendDemoButton(demo);
  for(const [name,version] of Object.entries({godot:'4.6.1 · '+getEngineProfile(siteEngineProfile).label,react:'19.3.1','@godot-js/react':'0.1.0','@playground/api':'内置'})){const item=document.createElement('div');item.className='dependency-item';const label=document.createElement('span');label.textContent=name;const code=document.createElement('code');code.textContent=version;item.append(label,code);$('dependencies').append(item);}
- const restored=await restore(),shared=await importShared();select(demos.find(d=>d.id===(shared??new URL(location.href).searchParams.get('project')??restored))??demos[0],false);
- if(shared&&await save()){const url=new URL(location.href);url.hash='';history.replaceState(history.state,'',url.href);}
+ const restored=await restore(),shared=await importShared();
+ select(demos.find(d=>d.id===(shared??new URL(location.href).searchParams.get('project')??restored))??demos[0],false,!shared);
+ if(shared)await save(()=>{const url=new URL(location.href);url.hash='';history.replaceState(history.state,'',url.href);});
  await prepareRuntime(true);
 }
 start().catch(error=>{

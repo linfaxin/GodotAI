@@ -342,15 +342,13 @@ async function roundtrip(marker,ready){
  try{
   trace.admission=await page.evaluate(()=>{
    const bridge=globalThis.__playgroundWorkbench,workbench=bridge.inspect();
-   const context=globalThis.godotPlaygroundDebug?.getContext();
+   const context=globalThis.godotPlayground.get_project_context().result;
    const available=typeof bridge.enableNativeInputBenchmark==='function';
-   return {available,reportsAdmission:context?.ok===true,admitted:available?bridge.enableNativeInputBenchmark():undefined,editorRevision:workbench.revision,
-    activeRunId:context?.result?.activeRunId,phase:workbench.engine?.state};
+   return {available,admitted:available?bridge.enableNativeInputBenchmark():undefined,editorRevision:workbench.revision,
+    activeRunId:context.activeRunId,phase:workbench.engine?.state};
   });
   assert.equal(trace.admission.available,true,'Use the actual workbench → runner.command path');
-  if(trace.admission.reportsAdmission||trace.admission.admitted!==undefined)
-   assert.equal(trace.admission.admitted,true,'Verify the workbench command admission receipt');
-  // Before the admission receipt was exposed, the two correlated project replies are the proof of delivery.
+  assert.equal(trace.admission.admitted,true,'Verify the workbench command admission receipt');
   const result=await until(async()=>{
    const events=replies(await projectEvents()),sync=events.find(event=>event.type==='runtime-host-command'),async=events.find(event=>event.type==='runtime-host-command-async');
    return sync&&async?{sync,async}:undefined;

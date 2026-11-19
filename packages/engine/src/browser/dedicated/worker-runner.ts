@@ -112,8 +112,10 @@ export class WorkerPreviewRunner {
     this.emit({ type: 'state', state: 'exited', ...s.identity }); this.emit({ type: 'exit', report });
     return report;
   }
-  async run(artifact: BrowserArtifact): Promise<WorkerRunResult> {
+  /** Aborting launch preparation has no effect on an already created session. */
+  async run(artifact: BrowserArtifact, {signal}: {signal?: AbortSignal} = {}): Promise<WorkerRunResult> {
     if (this.disposed) throw Error('E_RUNNER_DISPOSED');
+    if (signal?.aborted) throw new DOMException('Superseded', 'AbortError');
     if (!artifact.artifactSet&&(!(artifact.pack instanceof Uint8Array) || !artifact.pack.byteLength || artifact.pack.byteLength > 64 * 1024 * 1024)) throw Error('E_ARTIFACT_PACK');
     if (!isIdentity({ runId: 'validate', ...artifact }) || !artifact.manifest || typeof artifact.manifest !== 'object' || (artifact.manifest as { generation?: unknown }).generation !== artifact.generation) throw Error('E_ARTIFACT_GENERATION');
     const manifest = artifact.manifest as { engineReleaseId?: unknown; engineProfile?: unknown };
@@ -123,9 +125,9 @@ export class WorkerPreviewRunner {
     const snapshot = await captureBrowserArtifact(artifact,this.release,this.release.artifactReceiptVersion!==2);
     const frozen = await prepareWorkerRunConfiguration(this.options.configuration ?? {});
     // A slower, superseded hash must never stop the newer active session.
-    if (sequence !== this.sequence || this.disposed) throw new DOMException('Superseded', 'AbortError');
+    if (signal?.aborted || sequence !== this.sequence || this.disposed) throw new DOMException('Superseded', 'AbortError');
     await this.stopActive();
-    if (sequence !== this.sequence || this.disposed) throw new DOMException('Superseded', 'AbortError');
+    if (signal?.aborted || sequence !== this.sequence || this.disposed) throw new DOMException('Superseded', 'AbortError');
     const identity: WorkerRunIdentity = { runId: crypto.randomUUID(), revision: snapshot.revision, buildKey: snapshot.buildKey, generation: snapshot.generation,
       documentId: crypto.randomUUID(), workerId: crypto.randomUUID(), runConfigurationHash: frozen.hash };
     const frame = this.options.container.ownerDocument.createElement('iframe');
@@ -236,6 +238,12 @@ export class WorkerPreviewRunner {
   }
   private stopActive(): Promise<WorkerRunnerExit | undefined> { const s = this.active; if (!s) return Promise.resolve(undefined); this.beginStop(s); return s.exit; }
   async stop(): Promise<WorkerRunnerExit | undefined> { ++this.sequence; return this.stopActive(); }
+  stopRun(runId: string): Promise<WorkerRunnerExit> | undefined {
+    const session = this.active;
+    if (!session || session.identity.runId !== runId) return undefined;
+    this.beginStop(session);
+    return session.exit;
+  }
   command(data: Record<string, unknown>): boolean {
     const s = this.active; if (!s || !this.live(s) || s.state !== 'running' || !isProjectData(data)) return false;
     let snapshot:Record<string,unknown>,bytes:number;
