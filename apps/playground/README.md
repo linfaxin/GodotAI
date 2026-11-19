@@ -60,6 +60,31 @@ Old documents retain their exact original source and attachments in migration hi
 
 During framework development, rename supports ordinary scripts and text `.tscn` scenes while preserving extensions. Resource and declaration-file renames are disabled. Unsupported references and binary native resource graphs cause rejection before any project files change.
 
+## Agent tools
+
+Open **API 调试 → API 文档** to run the query example or the check and preview replay. Queries and operations are available in the current tab through `window.godotPlayground` with `schemaVersion: 1`.
+
+```js
+const api = window.godotPlayground;
+const { result: context } = api.get_project_context();
+const input = { projectId: context.projectId, expectedEditorRevision: context.editorRevision };
+const check = await api.check(input);
+if (check.ok && check.result.status === 'completed' && check.result.diagnostics.counts.error === 0) {
+  const play = api.play(input);
+  if (play.ok) {
+    const ready = await api.wait_for_event({ attemptId: play.result.attemptId, until: 'running' });
+    if (ready.ok && ready.result.outcome === 'reached') {
+      const { runId } = ready.result.run;
+      console.log(api.read_run_events({ runId, kinds: ['log'] }));
+      api.stop({ runId });
+      console.log(await api.wait_for_event({ runId, until: 'exited' }));
+    }
+  }
+}
+```
+
+`check` returns type diagnostics for the captured source. `get_diagnostics` reads retained results for a project revision, with optional `checkId`, `attemptId`, `runId` and `path` filters. `get_build` and `get_run` follow the exact build and session. A wait that times out can be repeated with the same ID. The run's exit includes the receipt source and the cleanup facts actually reported. See the [P0 contract and acceptance cases](../../docs/design/playground-agent-api-p0.zh-CN.md).
+
 ## Build and run
 
 Install dependencies with the repository's Node/pnpm versions:

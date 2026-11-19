@@ -187,6 +187,59 @@ test('invalid replacement input leaves the current running session intact',async
  }finally{await f.cleanup();}
 });
 
+test('abort during replacement validation leaves the active session running', async () => {
+ const f = fixture();
+ try {
+  const first = await f.runner.run(artifact);
+  const controller = new AbortController();
+  const pending = f.runner.run({...artifact, revision: 2}, {signal: controller.signal});
+  controller.abort();
+  await assert.rejects(pending, {name: 'AbortError'});
+  assert.equal(f.runner.state, 'running');
+  assert.equal(f.frames.length, 1);
+  assert.equal(f.messages.some(message => message.type === 'stop'), false);
+  assert.equal((await f.runner.stop()).runId, first.runId);
+ } finally { await f.cleanup(); }
+});
+
+test('abort while waiting for the old exit prevents the replacement session', async () => {
+ let releaseStop;
+ const reply = new Promise(resolve => { releaseStop = resolve; });
+ const f = fixture({stopReply: () => reply, deadlines: {stopping: 1000}});
+ try {
+  const first = await f.runner.run(artifact);
+  const controller = new AbortController();
+  const pending = f.runner.run({...artifact, revision: 2}, {signal: controller.signal});
+  await until(() => f.messages.some(message => message.type === 'stop'));
+  controller.abort();
+  releaseStop(clean);
+  await assert.rejects(pending, {name: 'AbortError'});
+  assert.equal(f.frames.length, 1);
+  assert.equal(f.events.find(event => event.type === 'exit').report.runId, first.runId);
+  assert.equal((await f.runner.run({...artifact, revision: 3})).revision, 3);
+ } finally {
+  releaseStop(clean);
+  await f.cleanup();
+ }
+});
+
+test('stopping one run shares its receipt and does not supersede a replacement', async () => {
+ const f = fixture();
+ try {
+  const first = await f.runner.run(artifact);
+  const replacement = f.runner.run({...artifact, revision: 2});
+  const stopping = f.runner.stopRun(first.runId);
+  assert(stopping);
+  assert.equal(f.runner.stopRun(first.runId), stopping);
+  assert.equal((await stopping).runId, first.runId);
+  const second = await replacement;
+  assert.notEqual(second.runId, first.runId);
+  assert.equal(f.runner.stopRun(first.runId), undefined);
+  assert.equal(f.runner.state, 'running');
+  assert.equal(f.messages.filter(message => message.type === 'stop').length, 1);
+ } finally { await f.cleanup(); }
+});
+
 test('cancelling a pre-session validation preserves its actual failure without manufacturing an exit',async()=>{
  const f=fixture();
  try{

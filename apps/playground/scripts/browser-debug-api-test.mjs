@@ -24,7 +24,7 @@ await runReportedBrowserTest({scope,reportFile:process.env.PLAYGROUND_DEBUG_API_
 
  function observeProduct(){
   if(location.pathname.endsWith('/preview.html'))return;
-  const wire=globalThis.__debugApiWire={messages:[],builds:[],rejectNext:false};
+  const wire=globalThis.__debugApiWire={messages:[],builds:[],requests:[],rejectNext:false};
   const Channel=MessageChannel;
   globalThis.MessageChannel=new Proxy(Channel,{construct(target,args,newTarget){
    const channel=Reflect.construct(target,args,newTarget);
@@ -37,7 +37,8 @@ await runReportedBrowserTest({scope,reportFile:process.env.PLAYGROUND_DEBUG_API_
   globalThis.Worker=class extends NativeWorker{
    constructor(...args){
     super(...args);
-    if(!new URL(String(args[0]),location.href).pathname.endsWith('/compiler.worker.js'))return;
+    this.isCompiler=new URL(String(args[0]),location.href).pathname.endsWith('/compiler.worker.js');
+    if(!this.isCompiler)return;
     this.addEventListener('message',({data})=>{
      if(!data?.manifest||!['single-pack','pack-set'].includes(data.variant))return;
      const {engineId,artifactId,buildKey}=data.manifest;
@@ -50,15 +51,19 @@ await runReportedBrowserTest({scope,reportFile:process.env.PLAYGROUND_DEBUG_API_
       compilerReleaseId:data.environmentFacts?.release?.releaseId,typescriptVersion:data.environmentFacts?.typescriptVersion});
     },true);
    }
+   postMessage(data,...args){
+    if(this.isCompiler&&wire.requests.length<256)wire.requests.push({kind:data.kind,revision:data.revision});
+    return super.postMessage(data,...args);
+   }
   };
   globalThis.__readDebugApi=(runId)=>{
-   const api=globalThis.godotPlaygroundDebug;
+   const api=globalThis.godotPlayground;
    if(!api)return;
-   const context=api.getContext().result;
-   const build=context.latestBuildAttemptId?api.getBuild(context.latestBuildAttemptId).result:undefined;
+   const context=api.get_project_context().result;
+   const build=context.latestBuildAttemptId?api.get_build({attemptId:context.latestBuildAttemptId}).result:undefined;
    const id=runId??build?.preview?.runId??context.activeRunId??context.lastExitedRunId;
-   const run=id?api.getRun(id).result:undefined;
-   const events=id?api.readRunEvents(id,{limit:100}).result?.items:undefined;
+   const run=id?api.get_run({runId:id}).result:undefined;
+   const events=id?api.read_run_events({runId:id,limit:100}).result?.items:undefined;
    return {context,build,run,events};
   };
  }
@@ -129,6 +134,23 @@ export async function start(){
   assert.equal(snapshot.context.lastExitedRunId,runId);
   return snapshot.run.exit;
  }
+ const invoke=(page,tool,input)=>page.evaluate(({tool,input})=>window.godotPlayground[tool](input),{tool,input});
+ function unwrap(response){
+  assert.equal(response.ok,true,JSON.stringify(response));
+  return response.result;
+ }
+ async function projectInput(page){
+  const {projectId,editorRevision}=unwrap(await invoke(page,'get_project_context'));
+  return {projectId,expectedEditorRevision:editorRevision};
+ }
+ async function editScript(page,text){
+  const previous=(await projectInput(page)).expectedEditorRevision;
+  await page.locator('#source .monaco-editor').click({position:{x:105,y:30}});
+  await page.keyboard.press('ControlOrMeta+a');
+  await page.keyboard.insertText(text);
+  await page.waitForFunction(revision=>window.godotPlayground.get_project_context().result.editorRevision>revision,previous,{timeout});
+  return projectInput(page);
+ }
 
  test.stage='browser';
  const browser=await launchBrowser({browser:'chromium',headless:true,args:['--no-sandbox','--enable-webgl','--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader','--disable-dev-shm-usage']});
@@ -174,8 +196,13 @@ export async function start(){
   await page.locator('#debug-tab').click();
   await page.locator('#debug-panel').waitFor({state:'visible'});
   await page.locator('#debug-open-docs').click();
+  assert(await page.locator('#debug-docs #agent-replay').isVisible());
+  assert.deepEqual(await page.evaluate(()=>Object.getOwnPropertyNames(window).filter(key=>key.startsWith('godotPlayground'))),['godotPlayground']);
+  assert.deepEqual((await page.evaluate(()=>Object.keys(window.godotPlayground))).sort(),[
+   'check','get_build','get_diagnostics','get_project_context','get_run','play','read_run_events','schemaVersion','stop','wait_for_event',
+  ]);
   const example=await page.locator('#debug-api-example').textContent();
-  assert(example?.includes('window.godotPlaygroundDebug'));
+  assert(example?.includes('window.godotPlayground'));
   const literal=JSON.parse(JSON.stringify(await page.evaluate(example)));
   assert.equal(literal.run.result.runId,first.run.runId);
   await page.locator('#debug-run-example').click();
@@ -184,7 +211,7 @@ export async function start(){
   assert.deepEqual(displayed.context,literal.context);
   assert.deepEqual(displayed.build,literal.build);
   assert.deepEqual(displayed.run,literal.run);
-  const log=await page.evaluate(id=>window.godotPlaygroundDebug.readRunEvents(id,{kinds:['log'],levels:['log']}),first.run.runId);
+  const log=await invoke(page,'read_run_events',{runId:first.run.runId,kinds:['log'],levels:['log']});
   assert.equal(log.ok,true);
   assert(log.result.items.some(({event})=>event.text?.includes(marker)&&event.untrusted));
   assert(log.result.items.every(({event})=>event.type==='log'&&event.level==='log'));
@@ -221,6 +248,70 @@ export async function start(){
   return {attemptId:build.attemptId,diagnostics:build.diagnostics};
  });
 
+ await browserCase('agent-check-play-and-targeted-stop',async page=>{
+  const beforeMarker='AGENT_P0_ORIGINAL_RUN';
+  await importProject(page,runProgram(beforeMarker));
+  const first=await waitForRun(page,beforeMarker);
+  const original=await projectInput(page);
+  const invalid=await editScript(page,'export function start(){ const answer: number = "not a number"; return void answer; }');
+  const bad=unwrap(await invoke(page,'check',invalid));
+  assert.equal(bad.status,'completed');
+  assert.equal(bad.scope,'typecheck');
+  assert(bad.diagnostics.items.some(item=>item.code===2322&&item.location?.file==='/src/start.ts'&&item.location.line>0));
+  assert.equal((await read(page)).context.latestBuildAttemptId,first.build.attemptId);
+  assert.equal((await read(page)).context.activeRunId,first.run.runId);
+
+  // Wait for the editor's debounced check before observing diagnostic reads.
+  await page.waitForFunction(revision=>window.__debugApiWire.requests.filter(item=>item.kind==='check'&&item.revision===revision).length>=2,
+   invalid.expectedEditorRevision,{timeout});
+  const checkRequests=(await readWire(page)).requests.filter(item=>item.kind==='check').length;
+  const diagnostic=unwrap(await invoke(page,'get_diagnostics',{projectId:invalid.projectId,editorRevision:invalid.expectedEditorRevision,
+   checkId:bad.checkId,path:'res://src/start.ts'}));
+  assert.deepEqual(diagnostic.check.diagnostics,bad.diagnostics);
+  assert.equal((await readWire(page)).requests.filter(item=>item.kind==='check').length,checkRequests);
+  assert.equal((await invoke(page,'play',original)).error.code,'revision_conflict');
+
+  const rejected=unwrap(await invoke(page,'play',invalid));
+  const failed=unwrap(await invoke(page,'wait_for_event',{...rejected,until:'running',timeoutMs:60_000}));
+  assert.equal(failed.outcome,'no_session');assert.equal(failed.build.status,'failed');
+  assert.equal(failed.build.artifact,undefined);assert.equal(failed.run,undefined);
+  assert.equal(unwrap(await invoke(page,'get_run',{runId:first.run.runId})).state,'running');
+
+  const marker='AGENT_P0_REPAIRED_RUN';
+  const repaired=await editScript(page,runProgram(marker));
+  const checked=unwrap(await invoke(page,'check',repaired));
+  assert.equal(checked.status,'completed');assert.equal(checked.diagnostics.counts.error,0);
+  assert.notEqual(checked.sourceHash,bad.sourceHash);
+
+  await page.locator('#debug-tab').click();
+  await page.locator('#debug-open-docs').click();
+  await page.locator('#debug-docs #agent-replay').click();
+  await page.waitForFunction(()=>document.getElementById('agent-status').textContent==='预览已启动',null,{timeout});
+  const trace=await page.locator('#agent-trace').textContent();
+  const second=await waitForRun(page,marker,first.run.runId);
+  assert.equal(second.build.sourceHash,checked.sourceHash);
+  assert.deepEqual(second.build.compilerIdentity,checked.compilerIdentity);
+  assert.notEqual(second.build.attemptId,rejected.attemptId);
+  assert.match(trace,/"name": "play"/);
+  assert(trace.includes(second.build.attemptId)&&trace.includes(second.run.runId));
+  const old=unwrap(await invoke(page,'stop',{runId:first.run.runId}));
+  assert.equal(old.status,'exited');
+  assert.equal(unwrap(await invoke(page,'get_run',{runId:second.run.runId})).state,'running');
+
+  await page.locator('#agent-stop').click();
+  const finished=unwrap(await invoke(page,'wait_for_event',{runId:second.run.runId,until:'exited',timeoutMs:60_000}));
+  assert.equal(finished.outcome,'reached');
+  const {exit}=finished.run;
+  assert.equal(exit.evidence,'host-report');
+  assert.equal(exit.report.sessionFacts.nativeExit.code,0);
+  assert.equal(exit.report.sessionFacts.entryCleanup,'complete');
+  assert.equal(exit.report.sessionFacts.hostCleanup,'complete');
+  const terminals=(await readWire(page)).messages.filter(packet=>packet.type==='exit-report'&&packet.runId===second.run.runId);
+  assert.equal(terminals.length,1);
+  assert.deepEqual(terminals[0].sessionFacts,exit.report.sessionFacts);
+  return {attemptIds:[rejected.attemptId,second.build.attemptId],runIds:[first.run.runId,second.run.runId],exit};
+ });
+
  await browserCase('stop-replacement-during-startup',async page=>{
   const {run:initial}=await read(page);
   await page.locator('#source .monaco-editor').click({position:{x:120,y:30}});
@@ -250,6 +341,31 @@ export async function start(){
   return {runIds:[initial.runId,replacement.runId],exit};
  });
 
+ await browserCase('agent-targeted-stop-keeps-accepted-play',async page=>{
+  const marker='AGENT_P0_SCOPED_STOP';
+  await importProject(page,runProgram(marker));
+  const first=await waitForRun(page,marker);
+  const input=await projectInput(page);
+  const runId=first.run.runId;
+  const {play,stop}=await page.evaluate(({input,runId})=>{
+   const api=window.godotPlayground;
+   return {play:api.play(input),stop:api.stop({runId})};
+  },{input,runId});
+  const {attemptId}=unwrap(play);
+  assert.equal(unwrap(stop).status,'stopping');
+  const observed=unwrap(await invoke(page,'wait_for_event',{attemptId,until:'running',timeoutMs:60_000}));
+  assert.equal(observed.outcome,'reached');
+  const second=await waitForRun(page,marker,runId);
+  assert.equal(second.run.runId,observed.run.runId);
+  assert.equal(second.run.attemptId,attemptId);
+  assert.equal(unwrap(await invoke(page,'get_run',{runId})).exit.evidence,'host-report');
+  assert.equal(unwrap(await invoke(page,'stop',{runId})).status,'exited');
+  assert.equal(unwrap(await invoke(page,'get_run',{runId:second.run.runId})).state,'running');
+  await invoke(page,'stop',{runId:second.run.runId});
+  const exit=await waitForExit(page,second.run.runId);
+  return {attemptId,runIds:[runId,second.run.runId],exit};
+ });
+
  await browserCase('catalog-failure-keeps-preview-unavailable',async page=>{
   await page.addInitScript(()=>localStorage.setItem('godotjs-workbench-v1',JSON.stringify({tab:'debug',collapsed:false})));
   await page.route(editorRoot+'catalog.json',route=>route.fulfill({status:503}));
@@ -275,8 +391,9 @@ export async function start(){
   await page.locator('#debug-tab').click();
   const frame=await page.locator('#preview iframe').elementHandle();
   await page.evaluate(()=>{globalThis.__debugApiWire.rejectNext=true;});
-  await page.locator('#run').click();
-  await page.waitForFunction(()=>globalThis.__readDebugApi().build?.preview?.status==='rejected',null,{timeout});
+  const attempt=unwrap(await invoke(page,'play',await projectInput(page)));
+  const observed=unwrap(await invoke(page,'wait_for_event',{...attempt,until:'running',timeoutMs:60_000}));
+  assert.equal(observed.outcome,'no_session');
   const {context,build}=await read(page);
   assert.equal(build.status,'succeeded');
   assert(build.artifact.artifactId);
@@ -308,7 +425,9 @@ export async function start(){
   await page.waitForFunction(()=>Boolean(globalThis.__readDebugApi().build?.preview?.runId),null,{timeout});
   const {build}=await read(page);
   const runId=build.preview.runId;
-  const exit=await waitForExit(page,runId);
+  const observed=unwrap(await invoke(page,'wait_for_event',{runId,until:'exited',timeoutMs:60_000}));
+  assert.equal(observed.outcome,'reached');
+  const exit=observed.run.exit;
   const snapshot=await read(page,runId);
   assert.equal(snapshot.run.attemptId,build.attemptId);
   assert(snapshot.events.some(({event})=>event.type==='log'&&event.text?.includes('DEBUG_API_START_FAILURE_LOG')));
@@ -318,6 +437,9 @@ export async function start(){
   assert.equal(exit.report.sessionFacts.failure.kind,'runtime');
   assert.match(exit.report.sessionFacts.failure.message,/DEBUG_API_START_FAILURE/);
   assert.deepEqual(exit.report.sessionFacts,terminal.sessionFacts);
+  const diagnostic=unwrap(await invoke(page,'get_diagnostics',{projectId:build.projectId,editorRevision:build.editorRevision,runId}));
+  assert.equal(diagnostic.run.evidence,'host-report');
+  assert.match(diagnostic.run.diagnostic.message,/DEBUG_API_START_FAILURE/);
   return {attemptId:build.attemptId,runId,exit};
  });
 
@@ -328,7 +450,9 @@ export async function start(){
   await page.bringToFront();
   assert.equal(await page.evaluate(()=>document.visibilityState),'visible');
   await page.locator('#preview iframe').evaluate(frame=>frame.remove());
-  const exit=await waitForExit(page,run.runId);
+  const observed=unwrap(await invoke(page,'wait_for_event',{runId:run.runId,until:'exited',timeoutMs:60_000}));
+  assert.equal(observed.outcome,'reached');
+  const exit=observed.run.exit;
   assert.equal(exit.evidence,'editor-local');
   assert.equal(exit.report.reason,'forced-frame-disposal');
   for(const field of ['engineOutcome','hostCleanup','sessionFacts','code'])assert.equal(exit.report[field],undefined,field);

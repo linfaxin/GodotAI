@@ -286,7 +286,7 @@ jobs:
           PLAYGROUND_PRESENTATION_BACKEND: direct
           BROWSER: chromium
         run: node apps/playground/scripts/browser-engine-contracts-test.mjs
-      - name: Verify the Playground debug API with the real Worker
+      - name: Verify the Playground debug and Agent APIs with the real Worker
         if: always() && matrix.profile == 'full-engine-v1' && matrix.target == 'template_debug'
         env:
           PLAYWRIGHT_CHROMIUM_EXECUTABLE: ${{ env.CHROMIUM }}

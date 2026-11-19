@@ -13,29 +13,29 @@ const harness = await build({
     loader: 'ts',
     contents: `
       import { createDebugRecorder, debugFailure } from './src/debug-api';
+      import { createPlaygroundApi } from './src/playground-api';
+      import { createAgentPanel } from './src/workbench/agent-panel';
       import { createDebugPanel } from './src/workbench/debug-panel';
       import { createWorkbench } from './src/workbench/workbench';
       const workbench = createWorkbench({ selectFile() {}, focusEditor() {}, toast() {} });
       const recorder = createDebugRecorder();
-      const panel = createDebugPanel(recorder.api);
-      recorder.subscribe(panel.refresh);
-      window.godotPlaygroundDebug = recorder.api;
       recorder.setContext({ release: { status: 'unsupported' }, preview: { status: 'unsupported' } });
       const release = { releaseId: 'a'.repeat(64), engineProfile: 'full-engine-v1', descriptorSha256: 'b'.repeat(64) };
       const configuration = { executionBackend: 'worker', presentationBackend: 'direct' };
       const artifact = { variant: 'single-pack', buildKey: 'c'.repeat(64), artifactId: 'd'.repeat(64) };
       let serial = 0;
       let last;
-      function buildProject(diagnostics = []) {
-        const attemptId = recorder.startBuild('fixture-project', 1);
+      let delayNextReplay = false;
+      let delayedAttempt;
+      function buildProject(diagnostics = [], attemptId = recorder.startBuild('fixture-project', 1)) {
         recorder.recordCompileResponse(attemptId, { variant: artifact.variant, manifest: artifact, pack: new Uint8Array([1]), diagnostics });
         recorder.beginPreview(attemptId);
         return attemptId;
       }
       window.debugPanelFixture = {
-        run() {
+        run(delayed) {
           recorder.setContext({ projectId: 'fixture-project', editorRevision: 1, release: { status: 'available', value: release }, preview: { status: 'available', value: configuration } });
-          const attemptId = buildProject([{ category: 'warning', code: 'W_LINKED_BUILD_FIXTURE', message: 'fixture build warning' }]), generation = ++serial;
+          const attemptId = buildProject([{ category: 'warning', code: 'W_LINKED_BUILD_FIXTURE', message: 'fixture build warning' }], delayed), generation = ++serial;
           last = { runId: 'run-' + generation, buildKey: artifact.buildKey, generation, revision: 1, documentId: 'doc-' + generation, workerId: 'worker-' + generation, runConfigurationHash: 'e'.repeat(64) };
           const releasePreview = recorder.registerPreview(attemptId, { generation, release, configuration });
           recorder.recordRunEvent({ ...last, type: 'state', state: 'loading-frame' });
@@ -43,6 +43,23 @@ const harness = await build({
           releasePreview();
           recorder.recordRunEvent({ ...last, type: 'log', level: 'log', text: 'fixture stdout ' + generation, untrusted: true });
           recorder.recordRunEvent({ ...last, type: 'log', level: 'warn', text: ${JSON.stringify(testMessage)}, untrusted: true });
+          return attemptId;
+        },
+        delayReplay() {
+          delayNextReplay = true;
+          const schedule = window.setTimeout;
+          window.setTimeout = (callback, timeout, ...args) => {
+            if (timeout === 30000) {
+              window.setTimeout = schedule;
+              timeout = 1;
+            }
+            return schedule.call(window, callback, timeout, ...args);
+          };
+        },
+        finishDelayedReplay() {
+          const attemptId = window.debugPanelFixture.run(delayedAttempt);
+          delayedAttempt = undefined;
+          return {attemptId, runId: last.runId};
         },
         rejectPreview() {
           recorder.rejectPreview(buildProject(), debugFailure('preview-prepare', new Error(${JSON.stringify(testMessage)})));
@@ -55,7 +72,7 @@ const harness = await build({
           document.querySelector('#logs').append(line);
           workbench.logAdded('error');
         },
-        showsRun: panel.showsRun,
+        showsRun: runId => panel.showsRun(runId),
         failBuild() {
           const attemptId = recorder.startBuild('fixture-project', 1);
           recorder.recordCompileResponse(attemptId, { diagnostics: [{ category: 'error', code: 2322, file: '/src/start.ts', line: 1, column: 1, message: 'fixture type error' }] });
@@ -69,6 +86,30 @@ const harness = await build({
           recorder.recordRunEvent({ ...last, type: 'log', level: 'warn', text: 'fixture retained after trim', untrusted: true });
         },
       };
+      const playground = createPlaygroundApi(recorder, {
+        supportsProject: () => true,
+        check: async () => recorder.finishCheck(recorder.startCheck('fixture-project', 1), {
+          diagnostics: [{ category: 'warning', message: ${JSON.stringify(testMessage)} }],
+        }),
+        play: () => {
+          if (delayNextReplay) {
+            delayNextReplay = false;
+            delayedAttempt = recorder.startBuild('fixture-project', 1);
+            return delayedAttempt;
+          }
+          if (recorder.api.getContext().result.activeRunId) window.debugPanelFixture.losePreview();
+          return window.debugPanelFixture.run();
+        },
+        stopRun: runId => {
+          if (last?.runId !== runId) return undefined;
+          window.debugPanelFixture.losePreview();
+          return Promise.resolve();
+        },
+      });
+      window.godotPlayground = playground.api;
+      const panel = createDebugPanel(recorder.api, playground.api);
+      recorder.subscribe(panel.refresh);
+      createAgentPanel(playground);
     `,
   },
   bundle: true,
@@ -100,6 +141,8 @@ try {
   assert.equal(await page.locator('#debug-tab').getAttribute('aria-selected'), 'true');
 
   await page.locator('#debug-open-docs').click();
+  assert(await page.locator('#debug-docs #debug-run-example').isVisible());
+  assert(await page.locator('#debug-docs #agent-replay').isVisible());
   const documented = await page.locator('#debug-docs code').allTextContents();
   for (const field of ['diagnostics.observed', 'preview.status', 'exit.evidence']) assert(documented.includes(field));
   const source = await page.locator('#debug-api-example').textContent();
@@ -113,6 +156,7 @@ try {
   }
   await assertExample();
   await page.locator('#debug-open-docs').click();
+  assert(await page.locator('#agent-replay').isHidden());
 
   await page.evaluate(() => window.debugPanelFixture.run());
   await page.locator('#debug-run[data-run-id="run-1"]').waitFor();
@@ -126,7 +170,7 @@ try {
   assert.match(await page.locator('#debug-linked-build-notes').textContent(), /W_LINKED_BUILD_FIXTURE.*fixture build warning/);
   await page.locator('#debug-linked-build-details summary').click();
   await page.waitForFunction(() => document.querySelector('#debug-linked-build-json')?.textContent.includes('build-1'));
-  const linkedBuild = await page.evaluate(() => window.godotPlaygroundDebug.getBuild('build-1').result);
+  const linkedBuild = await page.evaluate(() => window.godotPlayground.get_build({attemptId: 'build-1'}).result);
   assert.deepEqual(JSON.parse(await page.locator('#debug-linked-build-json').textContent()), linkedBuild);
   assert.match(await page.locator('#debug-events').textContent(), /fixture stdout 1/);
   assert.ok((await page.locator('#debug-events').textContent()).includes(testMessage));
@@ -177,6 +221,38 @@ try {
   await page.locator('#debug-show-current').click();
   await page.locator('#debug-run[data-run-id="run-4"]').waitFor();
   await page.locator('#debug-events li').waitFor();
+
+  await page.locator('#agent-replay').click();
+  await page.getByText('预览已启动', { exact: true }).waitFor();
+  assert.match(await page.locator('#agent-trace').textContent(), /"name": "wait_for_event"/);
+  assert.ok((await page.locator('#agent-trace').textContent()).includes(JSON.stringify(testMessage).slice(1, -1)));
+  await page.locator('#agent-stop').click();
+  await page.getByText('已取得退出回执', { exact: true }).waitFor();
+  assert.match(await page.locator('#agent-trace').textContent(), /editor-local/);
+
+  await page.evaluate(() => window.debugPanelFixture.delayReplay());
+  await page.locator('#agent-replay').click();
+  await page.getByText('等待超时，仍在跟踪本次预览', { exact: true }).waitFor();
+  assert.equal(await page.locator('#agent-stop').isDisabled(), true);
+  const late = await page.evaluate(() => window.debugPanelFixture.finishDelayedReplay());
+  await page.getByText('预览已启动', { exact: true }).waitFor();
+  assert.equal(await page.locator('#agent-stop').isEnabled(), true);
+  const crossRealmAbort = await page.evaluate(async runId => {
+    const frame = document.createElement('iframe');
+    document.body.append(frame);
+    try {
+      const controller = new frame.contentWindow.AbortController();
+      const pending = window.godotPlayground.wait_for_event({runId, until: 'exited'}, controller.signal);
+      controller.abort();
+      return await pending;
+    } finally { frame.remove(); }
+  }, late.runId);
+  assert.equal(crossRealmAbort.error.code, 'cancelled');
+  await page.locator('#agent-stop').click();
+  await page.getByText('已取得退出回执', { exact: true }).waitFor();
+  const lateRun = await page.evaluate(runId => window.godotPlayground.get_run({runId}).result, late.runId);
+  assert.equal(lateRun.attemptId, late.attemptId);
+  assert.equal(lateRun.state, 'exited');
 
   await page.setViewportSize({ width: 320, height: 720 });
   assert.equal(await page.locator('#debug-panel').evaluate(node => node.scrollWidth <= node.clientWidth), true);

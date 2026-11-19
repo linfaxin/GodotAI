@@ -18,16 +18,16 @@
 
 ## 四项查询
 
-应用提供版本化、可 JSON 序列化的只读 DTO。工作台模块初始化时在顶层页面提供 `window.godotPlaygroundDebug`，`schemaVersion` 为 `1`。查询同步读当前快照。成功返回 `{ok: true, result}`，参数错误、无可用记录和无效游标返回 `{ok: false, error: {code, message}}`，代码分别为 `invalid_input`、`not_found` 和 `invalid_cursor`。一次失败构建的详情仍是查询成功，编译失败由记录的状态表达。
+应用提供版本化、可 JSON 序列化的只读 DTO。工作台顶层页面通过 `window.godotPlayground` 提供这些查询，`schemaVersion` 为 `1`。[完整 API](playground-agent-api-p0.zh-CN.md#agent-工具合同)查询同步读当前快照。成功返回 `{ok: true, result}`，参数错误、无可用记录和无效游标返回 `{ok: false, error: {code, message}}`，代码分别为 `invalid_input`、`not_found` 和 `invalid_cursor`。一次失败构建的详情仍是查询成功，编译失败由记录的状态表达。
 
 | 方法 | 返回内容 |
 | --- | --- |
-| `getContext()` | 始终可读取页面快照。返回 `projectId` 和 `editorRevision`、已验证的 release/profile、已配对的后端和呈现配置。发布和预览可用性分别表示加载中、可用、失败或不支持，失败时附可用的诊断。提供 `latestBuildAttemptId`、`activeRunId` 和 `lastExitedRunId`。 |
-| `getBuild(attemptId)` | 项目 ID、提交时的编辑版本、构建状态、诊断、产物和 `preview`。按实际回执提供 `sourceHash`、编译事实与编译环境身份。产物生成后提供 `buildKey`、`artifactId` 和 `single-pack` / `pack-set`。会话创建后 `preview.runId` 指向该运行，准备被拒绝时 `preview.error` 给出已知阶段和诊断。 |
-| `getRun(runId)` | 完整 Worker 运行身份、可查询的 `attemptId`、当次产物和发布配置、最新运行阶段。已结算时附 `exit: {evidence, report}`，`evidence` 为 `host-report` 或 `editor-local`。`report` 保留对应来源提供的退出原因、诊断、`engineOutcome`、`hostCleanup` 和 `SessionFacts`。 |
-| `readRunEvents(runId, options?)` | 按页面接收顺序读取 `state`、`log`、`project` 和 `exit` 事件。支持 `after`、`limit`、`kinds`、`levels`。返回 `items`、`nextCursor`、`oldestAvailableSeq`、`hasMore` 和可选 `gap`。 |
+| `get_project_context()` | 始终可读取页面快照。返回 `projectId` 和 `editorRevision`、已验证的 release/profile、已配对的后端和呈现配置。发布和预览可用性分别表示加载中、可用、失败或不支持，失败时附可用的诊断。提供 `latestBuildAttemptId`、`activeRunId` 和 `lastExitedRunId`。 |
+| `get_build({attemptId})` | 项目 ID、提交时的编辑版本、构建状态、诊断、产物和 `preview`。按实际回执提供 `sourceHash`、编译事实与编译环境身份。产物生成后提供 `buildKey`、`artifactId` 和 `single-pack` / `pack-set`。会话创建后 `preview.runId` 指向该运行，准备被拒绝时 `preview.error` 给出已知阶段和诊断。 |
+| `get_run({runId})` | 完整 Worker 运行身份、可查询的 `attemptId`、当次产物和发布配置、最新运行阶段。已结算时附 `exit: {evidence, report}`，`evidence` 为 `host-report` 或 `editor-local`。`report` 保留对应来源提供的退出原因、诊断、`engineOutcome`、`hostCleanup` 和 `SessionFacts`。 |
+| `read_run_events({runId, after?, limit?, kinds?, levels?})` | 按页面接收顺序读取 `state`、`log`、`project` 和 `exit` 事件。支持 `after`、`limit`、`kinds`、`levels`。返回 `items`、`nextCursor`、`oldestAvailableSeq`、`hasMore` 和可选 `gap`。 |
 
-查询指针的范围固定。`latestBuildAttemptId` 取当前项目按发起顺序的最新保留记录。`activeRunId` 和 `lastExitedRunId` 取当前页面预览容器，切换项目时可能指向上一项目。未建立的项目、编辑版本和三个 ID 指针为 `null`，非空指针均指向可查记录。旧构建里的 `preview.runId` 是历史事实，运行淘汰后返回 `not_found`。预览初始化失败归到可用性，最新构建的准备拒绝直接由 `getBuild(latestBuildAttemptId)` 读取。
+查询指针的范围固定。`latestBuildAttemptId` 取当前项目按发起顺序的最新保留记录。`activeRunId` 和 `lastExitedRunId` 取当前页面预览容器，切换项目时可能指向上一项目。未建立的项目、编辑版本和三个 ID 指针为 `null`，非空指针均指向可查记录。旧构建里的 `preview.runId` 是历史事实，运行淘汰后返回 `not_found`。预览初始化失败归到可用性，最新构建的准备拒绝直接由 `get_build({attemptId: latestBuildAttemptId})` 读取。
 
 站点后端和呈现方式从已配对的预览适配器取得。Web 模板报告的 `executionModel: window` 可对应实际产品的 Dedicated Worker 执行。类型首批交付覆盖加载中、shell-only、初始化失败、宿主终态和页面兜底五种可序列化样例。 [产品适配](../../apps/playground/src/engine-preview.ts#L26-L58)
 
@@ -61,7 +61,7 @@ type DebugDiagnostics = {
 - 在 `rpc('compile')` 前分配 `attemptId` 并捕获项目 ID、编辑版本。构建状态为 `pending`、`succeeded`、`failed` 或 `cancelled`。以工作台收到的已结算响应记录构建。有效产物回执标记成功，Worker 明确取消才标记取消，RPC 拒绝则记录工作台请求失败及其阶段。RPC 包括快照 pin 的释放，发生拒绝时 Worker 是否完成可能未观测。先结算原尝试，再由现有 `runSerial` 和 revision 决定是否继续预览。 [现有 RPC 结算](../../apps/playground/src/compiler-worker-client.ts#L32-L48)
 - 首期记录现有生产构建，包括通过「运行」及打开项目时自动发起的 checked build。后台类型检查和补全沿用现有问题面板。诊断保留真实的文件、行列、错误码和严重级别。通信、资源和发布错误记录可观测的阶段与来源，Worker 的占位位置和错误码按未知显示。缺少诊断时显示未知，计数描述实际收到的诊断。
 - `preview.status` 初值为 `not-requested`。构建成功且被选中用于预览时，在工作台校验 manifest 前进入 `preparing`。成功构建在发起预览之前被工作台弃用，或已进入准备且在创建会话前被 runner 确认撤销时，标为 `skipped`。已发生的校验或加载失败标为 `rejected`。更新的运行意图可能先进入编译，之前仍在准备的预览应按它实际创建会话或拒绝的结果结算。
-- 产品运行路径由预览适配层统一分配 `generation`，在第一次异步准备前登记它和尝试、`buildKey`、revision 的关联。关联保留到首个 `loading-frame` 完成移交，或 `await runner.run(...)` 实际结算。适配器的 `finally` 围绕实际异步结算执行。原始事件先绑定新 `runId`，再进入时间线，构建预览状态转为 `session-created`。后续按完整运行身份接收。运行事件在工作台的 revision 过滤前记录。兼容预览路径在 `getContext()` 标记预览调试不支持，构建详情的 `preview` 可缺省。Shell-only 提供环境与空态。编译 RPC 的 `documentId` 属于项目，runner 的同名字段属于本次预览文档。
+- 产品运行路径由预览适配层统一分配 `generation`，在第一次异步准备前登记它和尝试、`buildKey`、revision 的关联。关联保留到首个 `loading-frame` 完成移交，或 `await runner.run(...)` 实际结算。适配器的 `finally` 围绕实际异步结算执行。原始事件先绑定新 `runId`，再进入时间线，构建预览状态转为 `session-created`。后续按完整运行身份接收。运行事件在工作台的 revision 过滤前记录。兼容预览路径在 `get_project_context()` 标记预览调试不支持，构建详情的 `preview` 可缺省。Shell-only 提供环境与空态。编译 RPC 的 `documentId` 属于项目，runner 的同名字段属于本次预览文档。
 - 准备拒绝只结算本次准备，之前的活跃预览可以继续运行。已经创建会话的启动失败和迟到的旧会话退出归到各自的 `runId`，只从 runner 的 `exit` 事件结算。收到 `state: exited` 仍从同次结算的 `exit` 取得报告。
 - `running` 表示引擎达到启动合同的阶段。项目就绪、首帧和业务事件分别使用相应的观测。日志中的 `error` 级别表达日志严重程度。致命故障、原生退出和清理分别取自结构化的退出事实。页面兜底退出时，未观测的原生字段保持缺失。
 
@@ -84,13 +84,13 @@ type DebugDiagnostics = {
 API 文档逐项说明参数、字段、缺失值和使用范围。正文、复制和执行引用同一份内置示例，Playwright 读取页面展示的示例并在工作台顶层执行。执行按钮运行对应的预定义只读查询，示例和运行按钮各自有明确入口。首期摘要在面板和文档示例里由四项查询组合。 [现有 Dock 与页面布局](../../apps/playground/web/index.html) · [页签和键盘交互](../../apps/playground/src/workbench/workbench.ts)
 
 ```js
-const debug = window.godotPlaygroundDebug;
-const { result: context } = debug.getContext();
+const api = window.godotPlayground;
+const { result: context } = api.get_project_context();
 const runId = context.activeRunId ?? context.lastExitedRunId;
-if (context.latestBuildAttemptId) console.log(debug.getBuild(context.latestBuildAttemptId));
+if (context.latestBuildAttemptId) console.log(api.get_build({attemptId: context.latestBuildAttemptId}));
 if (runId) {
-  console.log(debug.getRun(runId));
-  console.log(debug.readRunEvents(runId, { kinds: ["log"], limit: 30 }));
+  console.log(api.get_run({runId}));
+  console.log(api.read_run_events({runId, kinds: ["log"], limit: 30}));
 }
 ```
 

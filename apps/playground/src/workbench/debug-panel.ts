@@ -1,4 +1,5 @@
 import type { DebugApi } from '../debug-api';
+import type { PlaygroundApi } from '../playground-api';
 
 type Context = ReturnType<DebugApi['getContext']>['result'];
 type Build = Extract<ReturnType<DebugApi['getBuild']>, { ok: true }>['result'];
@@ -8,29 +9,29 @@ type BuildCard = 'build' | 'linked-build';
 type Field = [label: string, value: string | number | null | undefined];
 type Note = [text: string, tone?: 'error' | 'notice'];
 
-const exampleOptions: NonNullable<Parameters<DebugApi['readRunEvents']>[1]> = { kinds: ['log'], limit: 30 };
+const exampleOptions = { kinds: ['log'], limit: 30 } as const;
 const example = {
   source: `(() => {
-  const debug = window.godotPlaygroundDebug;
-  const { result: context } = debug.getContext();
+  const api = window.godotPlayground;
+  const { result: context } = api.get_project_context();
   const runId = context.activeRunId ?? context.lastExitedRunId;
   const attemptId = context.latestBuildAttemptId;
   return {
     context,
-    build: attemptId ? debug.getBuild(attemptId) : null,
-    run: runId ? debug.getRun(runId) : null,
-    events: runId ? debug.readRunEvents(runId, ${JSON.stringify(exampleOptions)}) : null,
+    build: attemptId ? api.get_build({ attemptId }) : null,
+    run: runId ? api.get_run({ runId }) : null,
+    events: runId ? api.read_run_events({ runId, ...${JSON.stringify(exampleOptions)} }) : null,
   };
 })()`,
-  run(debug: DebugApi) {
-    const { result: context } = debug.getContext();
+  run(api: PlaygroundApi) {
+    const { result: context } = api.get_project_context();
     const runId = context.activeRunId ?? context.lastExitedRunId;
     const attemptId = context.latestBuildAttemptId;
     return {
       context,
-      build: attemptId ? debug.getBuild(attemptId) : null,
-      run: runId ? debug.getRun(runId) : null,
-      events: runId ? debug.readRunEvents(runId, exampleOptions) : null,
+      build: attemptId ? api.get_build({ attemptId }) : null,
+      run: runId ? api.get_run({ runId }) : null,
+      events: runId ? api.read_run_events({ runId, ...exampleOptions }) : null,
     };
   },
 };
@@ -54,7 +55,7 @@ function diagnosticText(diagnostic: Build['diagnostics']['items'][number]) {
   return [position, codeLabel, message, omitted ? '正文已省略' : undefined].filter(value => value !== undefined && value !== '').join(' · ');
 }
 
-export function createDebugPanel(api: DebugApi) {
+export function createDebugPanel(api: DebugApi, playground: PlaygroundApi) {
   const element = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
   const panel = element('debug-panel');
   const runEvents = element<HTMLOListElement>('debug-events');
@@ -289,7 +290,7 @@ export function createDebugPanel(api: DebugApi) {
     }
   };
   element('debug-run-example').onclick = () => {
-    setText(exampleResult, JSON.stringify(example.run(api), null, 2));
+    setText(exampleResult, JSON.stringify(example.run(playground), null, 2));
     exampleResult.hidden = false;
   };
   previous.onclick = () => {

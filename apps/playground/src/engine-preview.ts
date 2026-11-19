@@ -61,8 +61,9 @@ export async function createEnginePreview(container:HTMLElement, listener:(event
  }
  runner.subscribe(listener);
  let operationSequence=0,disposed=false;
- return {manifest,context,runner,configuration,async run(pack:Uint8Array|undefined,revision:number,details:unknown,artifactSet?:ArtifactSet,registerDebug?:(generation:string|number)=>()=>void){
+ return {manifest,context,runner,configuration,async run(pack:Uint8Array|undefined,revision:number,details:unknown,artifactSet?:ArtifactSet,registerDebug?:(generation:string|number)=>()=>void,signal?:AbortSignal){
   if(disposed)throw Error('E_RUNNER_DISPOSED');
+  if(signal?.aborted)throw new DOMException('Superseded','AbortError');
   const compiled=structuredClone(details) as {buildKey?:unknown;generation?:unknown;packSha256?:unknown;artifactId?:string;artifactReceipt?:{buildKey?:unknown;packSha256?:unknown}};
   assertCompiledRelease(context,compiled);assertArtifactTarget(manifest,compiled);
   const operation=++operationSequence;
@@ -74,9 +75,9 @@ export async function createEnginePreview(container:HTMLElement, listener:(event
    try{
     const output=artifactSet?{variant:'pack-set' as const,artifactSet,manifest:compiled}:{variant:'single-pack' as const,pack:pack!,manifest:compiled};
     const artifact=await prepareBrowserArtifact({output,target,revision,generation});
-    if(disposed||operation!==operationSequence)throw new DOMException('Superseded','AbortError');
+    if(signal?.aborted||disposed||operation!==operationSequence)throw new DOMException('Superseded','AbortError');
     // The runner validates asynchronously before creating its first session event.
-    return await runner.run(artifact);
+    return await runner.run(artifact,{signal});
    }finally{releaseAssociation?.();}
   }
   if(artifactSet){
@@ -86,13 +87,13 @@ export async function createEnginePreview(container:HTMLElement, listener:(event
    assertArtifactTarget(manifest,captured.manifest.target);
    if(compiled.artifactId!==captured.manifest.artifactSetId)throw Error('E_ARTIFACT_IDENTITY');
    if(typeof compiled.buildKey!=='string'||!/^[a-f0-9]{64}$/i.test(compiled.buildKey))throw Error('E_ARTIFACT_BUILD_KEY');
-   if(disposed||operation!==operationSequence)throw new DOMException('Superseded','AbortError');
+   if(signal?.aborted||disposed||operation!==operationSequence)throw new DOMException('Superseded','AbortError');
    return runner.run({variant:'pack-set',revision,buildKey:compiled.buildKey,generation,artifactId:captured.manifest.artifactSetId,artifactSet:captured,manifest:{...compiled,generation}});
   }
   if(!(pack instanceof Uint8Array))throw Error('E_ARTIFACT_PACK');
   const snapshot=pack.slice();
   const bytes=new Uint8Array(await crypto.subtle.digest('SHA-256',snapshot.buffer));
-  if(disposed||operation!==operationSequence)throw new DOMException('Superseded','AbortError');
+  if(signal?.aborted||disposed||operation!==operationSequence)throw new DOMException('Superseded','AbortError');
   const packSha256=Array.from(bytes,n=>n.toString(16).padStart(2,'0')).join('');
   if(compiled.packSha256!==undefined&&compiled.packSha256!==packSha256)throw Error('E_ARTIFACT_PACK_HASH');
   if(compiled.artifactReceipt!==undefined){
@@ -101,7 +102,8 @@ export async function createEnginePreview(container:HTMLElement, listener:(event
   }
   const buildKey=typeof compiled.buildKey==='string'&&/^[a-f0-9]{64}$/i.test(compiled.buildKey)?compiled.buildKey:packSha256;
   const receipt=await assertArtifactReceipt(compiled.artifactReceipt,{pack:snapshot,buildKey,artifactId:compiled.artifactId,allowLegacy:allowLegacyArtifacts||(!manifest.artifactReceiptVersion&&!!runtime)});
-  if(disposed||operation!==operationSequence)throw new DOMException('Superseded','AbortError');
+  if(signal?.aborted||disposed||operation!==operationSequence)throw new DOMException('Superseded','AbortError');
   return runner.run({revision,buildKey,generation,packSha256,artifactId:receipt?.artifactId,pack:snapshot,manifest:{...compiled,generation}});
- },stop:()=>{++operationSequence;return runner.stop();},dispose:()=>{disposed=true;++operationSequence;return runner.dispose();}};
+ },stopRun:(runId:string)=>runner instanceof WorkerPreviewRunner?runner.stopRun(runId):undefined,
+ stop:()=>{++operationSequence;return runner.stop();},dispose:()=>{disposed=true;++operationSequence;return runner.dispose();}};
 }

@@ -30,39 +30,57 @@
     <button id="debug-open-docs" type="button" class="text-button" aria-controls="debug-docs" aria-expanded="false">API 文档</button>
   </div>
   <div id="debug-docs" class="debug-docs" hidden>
-    <p>在工作台页面的 DevTools 中调用 <code>window.godotPlaygroundDebug</code>。使用上方的「运行」和「停止」按钮产生实际记录。</p>
-    <dl class="debug-methods">
-      <dt><code>getContext()</code></dt>
-      <dd>
-        <p>返回 <code>projectId</code>、<code>editorRevision</code>、引擎发布 <code>release</code> 和预览环境 <code>preview</code>。两项环境状态均可为 <code>loading</code>、<code>available</code>、<code>failed</code> 或 <code>unsupported</code>。可用时从 <code>release.value</code> 读取发布 ID 和引擎配置，从 <code>preview.value</code> 读取执行后端和呈现方式。失败时读取 <code>error</code>。</p>
-        <p><code>latestBuildAttemptId</code> 指当前项目的最近构建。<code>activeRunId</code> 和 <code>lastExitedRunId</code> 跟随当前页面的预览，切换项目后仍可能指向先前项目。尚无记录的值为 <code>null</code>。</p>
-      </dd>
-      <dt><code>getBuild(attemptId)</code></dt>
-      <dd>
-        <p>传入构建尝试 ID，读取项目与编辑版本、<code>status</code> 和 <code>diagnostics</code>。收到相应回执时还可读取 <code>sourceHash</code>、<code>environmentFacts</code> 和 <code>compilerIdentity</code>。构建状态有 <code>pending</code>、<code>succeeded</code>、<code>failed</code>、<code>cancelled</code>。有产物时，<code>artifact</code> 给出 <code>variant</code>、<code>buildKey</code> 和 <code>artifactId</code>。</p>
-        <p><code>diagnostics.observed</code> 为 <code>true</code> 时有实测 <code>counts</code>，有效空列表的计数为零。为 <code>false</code> 时计数缺省。<code>diagnostics.items</code> 中的诊断可包含 <code>code</code> 和 <code>location</code>。<code>omittedCount</code> 表示省略的条数，单项的 <code>omitted</code> 表示正文未完整保留。构建或预览错误含 <code>stage</code> 和 <code>diagnostic</code>，已知错误码见 <code>diagnostic.code</code>。</p>
-        <p><code>preview.status</code> 可为 <code>not-requested</code>（尚未请求）、<code>preparing</code>（准备中）、<code>skipped</code>（已跳过）、<code>rejected</code>（准备失败）或 <code>session-created</code>（已创建会话）。准备失败时读取 <code>preview.error</code>，创建会话后读取 <code>preview.runId</code>。预览调试不支持时 <code>preview</code> 可缺省。</p>
-      </dd>
-      <dt><code>getRun(runId)</code></dt>
-      <dd>
-        <p>传入运行 ID，读取运行身份、产物、发布与运行配置。用 <code>attemptId</code> 查关联构建。<code>state</code> 为 <code>running</code> 表示引擎已启动，项目就绪与首帧取决于相应观测。</p>
-        <p><code>exit</code> 在收到退出回执后出现。<code>exit.evidence</code> 的 <code>host-report</code> 表示宿主回执，<code>editor-local</code> 表示页面兜底。<code>exit.report</code> 给出 <code>reason</code>，并保留来源提供的 <code>engineOutcome</code>、<code>hostCleanup</code> 和 <code>sessionFacts</code>。未观测到的原生退出码与清理字段可缺省。</p>
-      </dd>
-      <dt><code>readRunEvents(runId, options?)</code></dt>
-      <dd>
-        <p>传入运行 ID，按页面接收顺序读取 <code>items</code> 中的 <code>{seq, event}</code>。<code>kinds</code> 筛选 <code>state</code>、<code>log</code>、<code>project</code>、<code>exit</code>，<code>levels</code> 只按 <code>log</code>、<code>warn</code>、<code>error</code> 筛选日志。<code>limit</code> 为 1–100，默认 50。</p>
-        <p><code>after</code> 使用当前页面同一运行的 <code>nextCursor</code>。筛选后即使本页为空，游标也会越过已扫描记录。<code>hasMore</code> 表示当前还有未扫描记录，<code>oldestAvailableSeq</code> 为最早保留的序号，空缓冲时为 <code>null</code>。<code>gap</code> 给出已淘汰的序号范围，事件自己的 <code>omitted</code> 表示该条正文未保留。</p>
-      </dd>
-    </dl>
-    <p><code>schemaVersion</code> 为 1。查询返回 <code>{ok, result}</code> 或 <code>{ok, error}</code>。失败构建的查询仍可成功，构建结果见 <code>status</code>。<code>not_found</code> 表示记录不可用，<code>invalid_input</code> 表示参数无效，<code>invalid_cursor</code> 表示游标无效。记录保存在当前标签页内存中，刷新页面会清除记录。</p>
+    <p>在工作台的 DevTools 中通过 <code>window.godotPlayground</code> 调用查询、检查和预览操作。</p>
     <div class="debug-example-actions">
       <h3>读取当前记录</h3>
       <button id="debug-copy-example" type="button">复制示例</button>
       <button id="debug-run-example" type="button">执行查询示例</button>
       <span id="debug-example-status" class="debug-note" role="status"></span>
     </div>
-    <pre><code id="debug-api-example"></code></pre>
+    <div id="agent-tools" class="debug-example-actions">
+      <h3>Agent 工具</h3>
+      <button id="agent-replay" type="button">检查并启动预览</button>
+      <button id="agent-stop" type="button" disabled>停止本次预览</button>
+      <span id="agent-status" class="debug-note" role="status"></span>
+    </div>
     <pre id="debug-example-result" aria-label="查询结果" hidden></pre>
+    <pre id="agent-trace" aria-label="API 调用实参与返回结果" hidden></pre>
+    <pre><code id="debug-api-example"></code></pre>
+    <dl class="debug-methods">
+      <dt><code>get_project_context()</code></dt>
+      <dd>
+        <p>返回 <code>projectId</code>、<code>editorRevision</code>、引擎发布 <code>release</code> 和预览环境 <code>preview</code>。两项环境状态均可为 <code>loading</code>、<code>available</code>、<code>failed</code> 或 <code>unsupported</code>。可用时从 <code>release.value</code> 读取发布 ID 和引擎配置，从 <code>preview.value</code> 读取执行后端和呈现方式。失败时读取 <code>error</code>。</p>
+        <p><code>latestBuildAttemptId</code> 指当前项目的最近构建。<code>activeRunId</code> 和 <code>lastExitedRunId</code> 跟随当前页面的预览，切换项目后仍可能指向先前项目。尚无记录的值为 <code>null</code>。</p>
+        <p>从 <code>capabilities</code> 查看工具在当前环境中的可用性。</p>
+      </dd>
+      <dt><code>check(input)</code></dt>
+      <dd><p>传入 <code>projectId</code> 和 <code>expectedEditorRevision</code> 做类型检查。返回 <code>checkId</code>、检查状态、<code>sourceHash</code> 和诊断。<code>completed</code> 表示收到检查结果，类型错误见 <code>diagnostics</code>。</p></dd>
+      <dt><code>get_diagnostics(input)</code></dt>
+      <dd><p>传入 <code>projectId</code> 和 <code>editorRevision</code> 读取已有诊断。用 <code>checkId</code>、<code>attemptId</code> 或 <code>runId</code> 指定记录，用 <code>path</code> 筛选条目。检查、构建和运行诊断分别返回。</p></dd>
+      <dt><code>play(input)</code></dt>
+      <dd><p>传入 <code>projectId</code> 和 <code>expectedEditorRevision</code> 开始构建与预览。接纳后返回 <code>attemptId</code>，由该 ID 查询构建或等待运行。</p></dd>
+      <dt><code>get_build({attemptId})</code></dt>
+      <dd>
+        <p>传入构建尝试 ID，读取项目与编辑版本、<code>status</code> 和 <code>diagnostics</code>。收到相应回执时还可读取 <code>sourceHash</code>、<code>environmentFacts</code> 和 <code>compilerIdentity</code>。构建状态有 <code>pending</code>、<code>succeeded</code>、<code>failed</code>、<code>cancelled</code>。有产物时，<code>artifact</code> 给出 <code>variant</code>、<code>buildKey</code> 和 <code>artifactId</code>。</p>
+        <p><code>diagnostics.observed</code> 为 <code>true</code> 时有实测 <code>counts</code>，有效空列表的计数为零。为 <code>false</code> 时计数缺省。<code>diagnostics.items</code> 中的诊断可包含 <code>code</code> 和 <code>location</code>。<code>omittedCount</code> 表示省略的条数，单项的 <code>omitted</code> 表示正文未完整保留。构建或预览错误含 <code>stage</code> 和 <code>diagnostic</code>，已知错误码见 <code>diagnostic.code</code>。</p>
+        <p><code>preview.status</code> 可为 <code>not-requested</code>（尚未请求）、<code>preparing</code>（准备中）、<code>skipped</code>（已跳过）、<code>rejected</code>（准备失败）或 <code>session-created</code>（已创建会话）。准备失败时读取 <code>preview.error</code>，创建会话后读取 <code>preview.runId</code>。预览调试不支持时 <code>preview</code> 可缺省。</p>
+      </dd>
+      <dt><code>get_run({runId})</code></dt>
+      <dd>
+        <p>传入运行 ID，读取运行身份、产物、发布与运行配置。用 <code>attemptId</code> 查关联构建。<code>state</code> 为 <code>running</code> 表示引擎已启动，项目就绪与首帧取决于相应观测。</p>
+        <p><code>exit</code> 在收到退出回执后出现。<code>exit.evidence</code> 的 <code>host-report</code> 表示宿主回执，<code>editor-local</code> 表示页面兜底。<code>exit.report</code> 给出 <code>reason</code>，并保留来源提供的 <code>engineOutcome</code>、<code>hostCleanup</code> 和 <code>sessionFacts</code>。未观测到的原生退出码与清理字段可缺省。</p>
+      </dd>
+      <dt><code>read_run_events(input)</code></dt>
+      <dd>
+        <p>传入运行 ID，按页面接收顺序读取 <code>items</code> 中的 <code>{seq, event}</code>。<code>kinds</code> 筛选 <code>state</code>、<code>log</code>、<code>project</code>、<code>exit</code>，<code>levels</code> 只按 <code>log</code>、<code>warn</code>、<code>error</code> 筛选日志。<code>limit</code> 为 1–100，默认 50。</p>
+        <p><code>after</code> 使用当前页面同一运行的 <code>nextCursor</code>。筛选后即使本页为空，游标也会越过已扫描记录。<code>hasMore</code> 表示当前还有未扫描记录，<code>oldestAvailableSeq</code> 为最早保留的序号，空缓冲时为 <code>null</code>。<code>gap</code> 给出已淘汰的序号范围，事件自己的 <code>omitted</code> 表示该条正文未保留。</p>
+      </dd>
+      <dt><code>wait_for_event(input)</code></dt>
+      <dd><p>传入 <code>attemptId</code> 或 <code>runId</code> 其中之一，并用 <code>until</code> 指定 <code>running</code> 或 <code>exited</code>。可设置 <code>timeoutMs</code>，也可通过第二个参数传入 <code>AbortSignal</code> 来取消等待。等待超时后可以用同一 ID 继续查询。</p></dd>
+      <dt><code>stop({runId})</code></dt>
+      <dd><p>请求停止指定的运行。返回 <code>stopping</code> 时，可等待 <code>exited</code> 取得终态与退出回执。</p></dd>
+    </dl>
+    <p><code>schemaVersion</code> 为 1。方法返回 <code>{ok, result}</code> 或 <code>{ok, error}</code>。<code>check</code> 和 <code>wait_for_event</code> 异步返回。失败构建的查询仍可成功，构建结果见 <code>status</code>。<code>not_found</code> 表示记录不可用，<code>invalid_input</code> 表示参数无效，<code>invalid_cursor</code> 表示游标无效。记录保存在当前标签页内存中，刷新页面会清除记录。</p>
   </div>
   <div class="debug-summary">
     <section id="debug-build" class="debug-card" aria-labelledby="debug-build-heading">
