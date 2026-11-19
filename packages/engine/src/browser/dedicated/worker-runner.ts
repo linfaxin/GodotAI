@@ -8,7 +8,31 @@ import { isWorkerEngineOutcome, isWorkerHostCleanupOutcome, type WorkerEngineOut
 import { WorkerProjectCommandCredits,workerProjectCommandBytes } from './worker-project-channel.js';
 import { WorkerLogBudget } from './worker-log.js';
 import {captureBrowserArtifact,browserArtifactTransfers} from '../artifact-input.js';
+import {
+  INPUT_RECEIPT_MS, INPUT_START_MS, INTERACTION_VERSION, inputStatus, interactionError, interactionNow,
+  interactionOk, isCapturedFrame, readGesture, readInputEvidence, undispatched, validInteractionId,
+  type GameInput, type GameScreenshot, type InputEvidence, type InputReceipt, type InteractionError,
+  type InteractionResult, type ScreenshotInput, type WaitForInput,
+} from './worker-interaction.js';
+export {supportsWorkerInteraction} from './worker-interaction.js';
+export type {GameGesture, GameInput, GameScreenshot, InputReceipt, InteractionResult, ScreenshotInput, WaitForInput} from './worker-interaction.js';
 const now = () => performance.now();
+const MAX_WAIT_MS = 60_000;
+const MAX_RECEIPTS = 32;
+const MAX_INPUT_WAITERS = 16;
+const readAborted = Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'aborted')!.get!;
+
+interface InputRecord {
+  receipt: InputReceipt;
+  deadline: number;
+  timer: ReturnType<typeof setTimeout>;
+  waiters: Set<() => void>;
+}
+interface CaptureRequest {
+  id: string;
+  deadline: number;
+  finish(result: InteractionResult<GameScreenshot>): void;
+}
 
 export interface WorkerPreviewRunnerOptions {
   container: HTMLElement;
@@ -42,6 +66,10 @@ interface Session {
   beatSequence: number; resumeEpoch: number; logs: WorkerLogBudget;
   projectQueue: Array<{ data: Record<string, unknown>; projectSequence?: number }>; projectBytes: number;
   commands:WorkerProjectCommandCredits;commandSequence:number;
+  interactionVersion?: number;
+  capture?: CaptureRequest;
+  input?: InputRecord;
+  inputSequence: number;
   failure?: ReturnType<typeof previewDiagnostic>;
   timer?: ReturnType<typeof setTimeout>; watchdog?: ReturnType<typeof setInterval>;
   onVisibility?: () => void;
@@ -56,6 +84,9 @@ export class WorkerPreviewRunner {
   readonly previewOrigin: string;
   private readonly deadlines: PhaseDeadlines;
   private readonly listeners = new Set<(event: WorkerRunnerEvent) => void>();
+  private readonly inputRecords = new Map<string, InputRecord>();
+  private readonly interactionVersions = new Map<string, boolean | null>();
+  private inputWaiters = 0;
   private active?: Session;
   private sequence = 0;
   private disposed = false;
@@ -101,6 +132,8 @@ export class WorkerPreviewRunner {
   private finish(s: Session, report: WorkerRunnerExit): WorkerRunnerExit {
     if (s.report) return s.report;
     s.report = report; s.settled = true; ++s.epoch;
+    s.capture?.finish(interactionError('run_ended'));
+    if (s.input) this.settleInput(s.input, {down: 'unconfirmed', up: 'unconfirmed', reason: 'run_ended'});
     s.projectQueue.length=0;s.projectBytes=0;s.commands.clear();
     clearTimeout(s.timer); clearInterval(s.watchdog);
     if(s.onVisibility)this.options.container.ownerDocument.removeEventListener?.('visibilitychange',s.onVisibility);
@@ -151,13 +184,38 @@ export class WorkerPreviewRunner {
     const exit = new Promise<WorkerRunnerExit>(resolve => { resolveExit = resolve; });
     const s: Session = { identity, frame, port: channel.port1, peer: channel.port2, state: 'loading-frame', epoch: 0, settled: false,
       lastWorkerBeat: now(), beatSequence: -1, resumeEpoch: 0, logs: new WorkerLogBudget(frozen.configuration.budgets), projectQueue: [], projectBytes: 0,
-      commands:new WorkerProjectCommandCredits(frozen.configuration.budgets.maxProjectEvents!,frozen.configuration.budgets.maxProjectBytes!),commandSequence:0,resolveRun, rejectRun, exit, resolveExit };
+      commands:new WorkerProjectCommandCredits(frozen.configuration.budgets.maxProjectEvents!,frozen.configuration.budgets.maxProjectBytes!),commandSequence:0,
+      inputSequence: 0, resolveRun, rejectRun, exit, resolveExit };
     this.active = s;
+    this.interactionVersions.set(identity.runId, null);
+    if (this.interactionVersions.size > MAX_RECEIPTS) this.interactionVersions.delete(this.interactionVersions.keys().next().value!);
     s.onVisibility=()=>{if(this.live(s)&&this.options.container.ownerDocument.visibilityState!=='hidden')s.lastWorkerBeat=now();};
     this.options.container.ownerDocument.addEventListener?.('visibilitychange',s.onVisibility);
     s.port.onmessage = event => {
       if (!this.live(s) || !isWorkerEnvelope(event.data) || !sameWorkerRun(event.data, identity)) return;
       const m: any = event.data;
+      if (m.type === 'capture-result' && s.capture && m.requestId === s.capture.id) {
+        const current = s.capture;
+        s.capture = undefined;
+        if (s.state !== 'running') current.finish(interactionError('run_ended'));
+        else if (interactionNow() >= current.deadline) current.finish(interactionError('timeout'));
+        else if (isCapturedFrame(m.frame)) current.finish(interactionOk({...m.frame, requestId: current.id,
+          run: {...s.identity}, releaseId: this.release.releaseId}));
+        else {
+          const error: InteractionError = ['timeout', 'cancelled', 'unsupported', 'not_ready', 'busy', 'run_ended'].includes(m.error) ? m.error : 'capture_failed';
+          current.finish(interactionError(error));
+        }
+        return;
+      }
+      if (m.type === 'input-result' && s.input && m.operationId === s.input.receipt.operationId) {
+        const evidence = readInputEvidence(m.evidence);
+        if (evidence) {
+          this.expireInput(s.input);
+          this.settleInput(s.input, evidence);
+          s.input = undefined;
+        }
+        return;
+      }
       if(m.type==='project-command-receipt'&&Number.isSafeInteger(m.commandSequence)){s.commands.release(m.commandSequence);return;}
       if (m.type === 'worker-heartbeat') {
         if (!Number.isSafeInteger(m.sequence) || m.sequence < 0 || m.resumeEpoch !== s.resumeEpoch || m.sequence <= s.beatSequence) return;
@@ -175,6 +233,11 @@ export class WorkerPreviewRunner {
         this.beginStop(s, 'stopped', 'Native exit is preparing project cleanup');
       } else if (m.type === 'phase' && RUN_PHASES.includes(s.state as typeof RUN_PHASES[number])) {
         if (RUN_PHASES.indexOf(m.phase) !== RUN_PHASES.indexOf(s.state as typeof RUN_PHASES[number]) + 1) return;
+        if (m.phase === 'running') {
+          if (m.interactionVersion === INTERACTION_VERSION && frozen.configuration.presentationBackend === 'direct')
+            s.interactionVersion = INTERACTION_VERSION;
+          this.interactionVersions.set(identity.runId, s.interactionVersion === INTERACTION_VERSION);
+        }
         if (!this.transition(s, m.phase)) return;
         if (m.phase === 'running') {
           s.lastWorkerBeat = now();
@@ -232,6 +295,7 @@ export class WorkerPreviewRunner {
     if(cause!=='stopped')s.failure=previewDiagnostic(detail??cause);
     const before = s.state;
     if (!this.transition(s, 'stopping')) return;
+    s.capture?.finish(interactionError('run_ended'));
     if (before === 'loading-frame' || before === 'handshaking') { this.finishLocal(s, 'forced-frame-disposal', 'Cancelled before host connection'); return; }
     try { s.port.postMessage({ ...s.identity, protocolVersion: WORKER_PROTOCOL, type: 'stop', cause, detail }); }
     catch { this.finishLocal(s, 'forced-frame-disposal', 'Worker host stop channel unavailable'); }
@@ -243,6 +307,120 @@ export class WorkerPreviewRunner {
     if (!session || session.identity.runId !== runId) return undefined;
     this.beginStop(session);
     return session.exit;
+  }
+  interactionSupport(runId: string): 'available' | 'not_ready' | 'unsupported' | 'run_ended' | 'not_found' {
+    const s = this.active;
+    if (s?.identity.runId !== runId) return this.interactionVersions.has(runId) ? 'run_ended' : 'not_found';
+    if (s.state === 'stopping' || s.report) return 'run_ended';
+    if (s.state !== 'running') return 'not_ready';
+    return s.interactionVersion === INTERACTION_VERSION ? 'available' : 'unsupported';
+  }
+  interactionState(runId: string): {supported: boolean | null; ready: boolean} {
+    return {supported: this.interactionVersions.get(runId) ?? null, ready: this.interactionSupport(runId) === 'available'};
+  }
+  screenshot(input: ScreenshotInput, signal?: AbortSignal): Promise<InteractionResult<GameScreenshot>> {
+    const {runId, timeoutMs = 5000} = input ?? {};
+    if (!validInteractionId(runId) || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_WAIT_MS)
+      return Promise.resolve(interactionError('invalid_input'));
+    try { if (signal !== undefined && readAborted.call(signal)) return Promise.resolve(interactionError('cancelled')); }
+    catch { return Promise.resolve(interactionError('invalid_input')); }
+    const support = this.interactionSupport(runId);
+    if (support !== 'available') return Promise.resolve(interactionError(support));
+    const s = this.active!;
+    if (s.capture) return Promise.resolve(interactionError('busy'));
+    const id = crypto.randomUUID(), deadline = interactionNow() + timeoutMs;
+    return new Promise(resolve => {
+      const onAbort = () => {
+        finish(interactionError('cancelled'));
+        if (s.capture?.id !== id) return;
+        try { s.port.postMessage({...s.identity, protocolVersion: WORKER_PROTOCOL, type: 'capture-cancel', requestId: id}); }
+        catch { /* The capture deadline bounds work after a lost cancellation. */ }
+      };
+      const timer = setTimeout(() => finish(interactionError('timeout')), timeoutMs);
+      let settled = false;
+      const finish = (result: InteractionResult<GameScreenshot>) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (signal) EventTarget.prototype.removeEventListener.call(signal, 'abort', onAbort);
+        resolve(result);
+      };
+      s.capture = {id, deadline, finish};
+      if (signal) EventTarget.prototype.addEventListener.call(signal, 'abort', onAbort, {once: true});
+      try { s.port.postMessage({...s.identity, protocolVersion: WORKER_PROTOCOL, type: 'capture-request', requestId: id, deadline}); }
+      catch { s.capture = undefined; finish(interactionError('capture_failed')); }
+    });
+  }
+  gameInput(input: GameInput): InteractionResult<{operationId: string}> {
+    const gesture = readGesture(input?.gesture);
+    if (!gesture || !validInteractionId(input?.runId)) return interactionError('invalid_input');
+    const support = this.interactionSupport(input.runId);
+    if (support !== 'available') return interactionError(support);
+    const s = this.active!;
+    if (s.input) return interactionError('busy');
+    const operationId = crypto.randomUUID(), started = interactionNow();
+    const receipt: InputReceipt = {operationId, run: {...s.identity}, status: 'pending',
+      down: 'unconfirmed', up: 'unconfirmed', nativeConsumption: 'unconfirmed'};
+    const record: InputRecord = {receipt, deadline: started + INPUT_RECEIPT_MS, waiters: new Set(),
+      timer: setTimeout(() => this.expireInput(record), INPUT_RECEIPT_MS)};
+    s.input = record;
+    this.inputRecords.set(operationId, record);
+    try {
+      s.port.postMessage({...s.identity, protocolVersion: WORKER_PROTOCOL, type: 'input-request',
+        operationId, sequence: ++s.inputSequence, gesture, deadline: started + INPUT_START_MS});
+    } catch {
+      s.input = undefined;
+      this.settleInput(record, undispatched('transport'));
+    }
+    return interactionOk({operationId});
+  }
+  waitForInput(input: WaitForInput, signal?: AbortSignal): Promise<InteractionResult<{outcome: 'settled' | 'pending' | 'timeout'; operation: InputReceipt}>> {
+    const {runId, operationId, timeoutMs = 5000} = input ?? {};
+    if (!validInteractionId(runId) || !validInteractionId(operationId) || !Number.isSafeInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > MAX_WAIT_MS)
+      return Promise.resolve(interactionError('invalid_input'));
+    try { if (signal !== undefined && readAborted.call(signal)) return Promise.resolve(interactionError('cancelled')); }
+    catch { return Promise.resolve(interactionError('invalid_input')); }
+    const record = this.inputRecords.get(operationId);
+    if (!record || record.receipt.run.runId !== runId) return Promise.resolve(interactionError('not_found'));
+    this.expireInput(record);
+    const status = () => ({outcome: record.receipt.status === 'pending' ? 'pending' as const : 'settled' as const,
+      operation: {...record.receipt, run: {...record.receipt.run}}});
+    if (timeoutMs === 0 || record.receipt.status !== 'pending') return Promise.resolve(interactionOk(status()));
+    if (this.inputWaiters >= MAX_INPUT_WAITERS) return Promise.resolve(interactionError('busy'));
+    return new Promise(resolve => {
+      const finish = (result: Awaited<ReturnType<WorkerPreviewRunner['waitForInput']>>) => {
+        if (!record.waiters.delete(onSettlement)) return;
+        this.inputWaiters--;
+        clearTimeout(timer);
+        if (signal) EventTarget.prototype.removeEventListener.call(signal, 'abort', onAbort);
+        resolve(result);
+      };
+      const onSettlement = () => finish(interactionOk(status()));
+      const onAbort = () => finish(interactionError('cancelled'));
+      const timer = setTimeout(() => {
+        this.expireInput(record);
+        const snapshot = status();
+        finish(interactionOk({...snapshot, outcome: snapshot.outcome === 'pending' ? 'timeout' : 'settled'}));
+      }, timeoutMs);
+      this.inputWaiters++;
+      record.waiters.add(onSettlement);
+      if (signal) EventTarget.prototype.addEventListener.call(signal, 'abort', onAbort, {once: true});
+    });
+  }
+  private expireInput(record: InputRecord) {
+    if (interactionNow() >= record.deadline)
+      this.settleInput(record, {down: 'unconfirmed', up: 'unconfirmed'});
+  }
+  private settleInput(record: InputRecord, evidence: InputEvidence) {
+    if (record.receipt.status !== 'pending') return;
+    clearTimeout(record.timer);
+    record.receipt = {...record.receipt, ...evidence, status: inputStatus(evidence)};
+    for (const notify of record.waiters) notify();
+    while (this.inputRecords.size > MAX_RECEIPTS) {
+      const oldest = this.inputRecords.keys().next().value;
+      if (oldest === undefined) break;
+      this.inputRecords.delete(oldest);
+    }
   }
   command(data: Record<string, unknown>): boolean {
     const s = this.active; if (!s || !this.live(s) || s.state !== 'running' || !isProjectData(data)) return false;

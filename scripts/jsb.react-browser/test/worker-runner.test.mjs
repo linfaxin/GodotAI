@@ -15,7 +15,7 @@ const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 async function until(predicate){const deadline=Date.now()+2000;while(!predicate()){if(Date.now()>deadline)assert.fail('Timed out waiting for runner state');await pause(1);}}
 const clean={engineOutcome:{kind:'native-exit',code:0},hostCleanup:{status:'complete'}};
 
-function fixture({pauseAt,frameLoad=true,connect=true,heartbeat=true,stopReply=clean,deadlines={},configuration,release:descriptor=release}={}){
+function fixture({pauseAt,frameLoad=true,connect=true,heartbeat=true,stopReply=clean,deadlines={},configuration,release:descriptor=release,interactionVersion}={}){
  const frames=[],hosts=[],events=[],messages=[],intervals=[];
  const document={location:{origin:'http://editor.test'},visibilityState:'visible',createElement(){
   const frame={attributes:{},setAttribute(name,value){this.attributes[name]=value;},remove(){this.removed=true;},contentWindow:{
@@ -42,7 +42,7 @@ function fixture({pauseAt,frameLoad=true,connect=true,heartbeat=true,stopReply=c
      assert.equal(message.configuration.runtimeProtocolVersion,2);
      if(heartbeat)intervals.push(setInterval(()=>host.send({type:'worker-heartbeat',sequence:host.sequence++,resumeEpoch:host.resumeEpoch}),5));
      if(pauseAt==='downloading')return;
-     for(const phase of phases){host.send({type:'phase',phase});if(phase===pauseAt)return;}
+     for(const phase of phases){host.send({type:'phase',phase,...(phase==='running'&&interactionVersion?{interactionVersion}:{})});if(phase===pauseAt)return;}
     };
     port.start();if(connect)host.send({type:'connected'});
    },
@@ -55,6 +55,48 @@ function fixture({pauseAt,frameLoad=true,connect=true,heartbeat=true,stopReply=c
  return {runner,document,frames,hosts,events,messages,get host(){return hosts.at(-1);},
   async cleanup(){intervals.forEach(clearInterval);await runner.dispose();hosts.forEach(host=>host.port.close());}};
 }
+
+test('interaction is ready in the running callback and receipts survive independent waits and exit',async()=>{
+ const f=fixture({interactionVersion:1});
+ try{
+  let started;
+  f.runner.subscribe(event=>{
+   if(event.type==='state'&&event.state==='running')
+    started=f.runner.gameInput({runId:event.runId,gesture:{kind:'key_tap',code:'Space'}});
+  });
+  const {runId}=await f.runner.run(artifact);
+  assert.equal(started.ok,true);
+  const {operationId}=started.result;
+  const query={runId,operationId};
+  assert.equal((await f.runner.waitForInput({...query,timeoutMs:0})).result.outcome,'pending');
+  assert.equal((await f.runner.waitForInput({...query,timeoutMs:1})).result.outcome,'timeout');
+  assert.equal(f.runner.gameInput({runId,gesture:{kind:'key_tap',code:'Space'}}).error.code,'busy');
+  const controller=new AbortController(),wait=f.runner.waitForInput(query,controller.signal);
+  controller.abort();
+  assert.equal((await wait).error.code,'cancelled');
+  f.host.send({type:'input-result',operationId,evidence:{down:'dispatched',up:'dispatched'}});
+  const result=(await f.runner.waitForInput(query)).result;
+  assert.equal(result.operation.status,'dispatched');
+  f.host.send({type:'input-result',operationId,evidence:{down:'not_dispatched',up:'not_dispatched'}});
+  await f.runner.stop();
+  assert.deepEqual((await f.runner.waitForInput({...query,timeoutMs:0})).result,result);
+  assert.deepEqual(f.runner.interactionState(runId),{supported:true,ready:false});
+  assert.equal((await f.runner.screenshot({runId})).error.code,'run_ended');
+  assert.equal(f.runner.gameInput({runId,gesture:{kind:'key_tap',code:'Space'}}).error.code,'run_ended');
+  assert.equal((await f.runner.screenshot({runId:'unknown'})).error.code,'not_found');
+ }finally{await f.cleanup();}
+});
+
+test('an older Worker leaves interaction unsupported without changing run and stop',async()=>{
+ const f=fixture();
+ try{
+  const {runId}=await f.runner.run(artifact);
+  assert.deepEqual(f.runner.interactionState(runId),{supported:false,ready:false});
+  assert.equal((await f.runner.screenshot({runId})).error.code,'unsupported');
+  assert.equal(f.runner.gameInput({runId,gesture:{kind:'key_tap',code:'Space'}}).error.code,'unsupported');
+  assert.equal((await f.runner.stop()).reason,'clean-exit');
+ }finally{await f.cleanup();}
+});
 
 test('Worker runner captures and transfers only the independently verified pack set',async()=>{
  const descriptor={...release,artifactReceiptVersion:2,execution:{schemaVersion:1,executionModel:'window',wasmThreads:false,proxyToPthread:false,requiresCrossOriginIsolation:false,hostProtocolVersion:1,artifactSetAbi:1}};

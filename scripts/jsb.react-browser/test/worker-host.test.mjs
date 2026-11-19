@@ -35,8 +35,8 @@ class FakeNode {
  disconnect(){this.connections=[];}
 }
 
-async function fixture({fetchAsset,loadRuntime,moduleReady,closeReady,inputReady,ackAudio=true,managed=false,verifyRelease,budgets={}}={}){
- let now=0,timerId=0,api,connect;const timers=new Map(),listeners=new Map(),channels=[],contexts=[],worklets=[],snapshots=[],createdUrls=[],revokedUrls=[];
+async function fixture({fetchAsset,loadRuntime,moduleReady,closeReady,inputReady,ackAudio=true,managed=false,verifyRelease,budgets={},publishResizeState=false}={}){
+ let now=0,timerId=0,api,connect,width=320;const timers=new Map(),listeners=new Map(),channels=[],contexts=[],worklets=[],snapshots=[],createdUrls=[],revokedUrls=[];
  const counters={runtimeLoads:0,fetches:0,workerPosts:[],terminations:0,runtimeDisposals:0,presentationConsumes:0,presentationDisposals:0,presentationCheckpoints:[],inputCommands:0,inputDisposals:0,browserDisposals:0};
  const addTimer=(callback,delay,interval)=>{const id=++timerId;timers.set(id,{callback,due:now+Math.max(0,Number(delay)||0),interval});return id;};
  const editor={onmessage:null,sent:[],closed:false,start(){},close(){this.closed=true;},postMessage(message){this.sent.push(message);}};
@@ -71,7 +71,7 @@ async function fixture({fetchAsset,loadRuntime,moduleReady,closeReady,inputReady
  }},dispose(){counters.runtimeDisposals++;this.worker.terminate();}};
  class TestURL extends URL {static createObjectURL(){const value=`blob:host-test-${createdUrls.length}`;createdUrls.push(value);return value;}static revokeObjectURL(value){revokedUrls.push(value);}}
  const sandbox={console,URL:TestURL,Blob,ArrayBuffer,Uint8Array,Float32Array,TextEncoder,crypto,AbortController,DOMException,queueMicrotask,AudioContext:Context,AudioWorkletNode:Worklet,
-  performance:{now:()=>now},devicePixelRatio:1,location:{href:'https://preview.test/app/preview.html?run=1'},document:{hidden:false},navigator:{},
+  performance:{now:()=>now,timeOrigin:0},devicePixelRatio:1,location:{href:'https://preview.test/app/preview.html?run=1'},document:{hidden:false},navigator:{},
   MessageChannel:class{constructor(){const pair=ports();channels.push(pair);return pair;}},
   ResizeObserver:class{observe(){}disconnect(){}},
   setTimeout:(callback,delay)=>addTimer(callback,delay),clearTimeout:id=>timers.delete(id),
@@ -79,8 +79,8 @@ async function fixture({fetchAsset,loadRuntime,moduleReady,closeReady,inputReady
   addEventListener(name,callback){if(!listeners.has(name))listeners.set(name,new Set());listeners.get(name).add(callback);},removeEventListener(name,callback){listeners.get(name)?.delete(callback);},
   __fetchAsset(...args){counters.fetches++;return fetchAsset?fetchAsset(...args):Promise.resolve(new Uint8Array([1,2,3]));},
   __loadRuntime(...args){counters.runtimeLoads++;return loadRuntime?loadRuntime(runtime,...args):Promise.resolve(runtime);},
-  __presentation(options){presentationOptions=options;return{offscreen:{},resize(){},observeWorkerCheckpoint(value,sequence){counters.presentationCheckpoints.push({value,sequence});},consume(){counters.presentationConsumes++;},dispose(){counters.presentationDisposals++;}};},
-  __input(options){inputOptions=options;return{resize(){},command(){counters.inputCommands++;return true;},dispose(){counters.inputDisposals++;return inputReady;}};},
+  __presentation(options){presentationOptions=options;return{offscreen:{},geometry:options.geometry,resize(next){this.geometry=next;return true;},observeWorkerCheckpoint(value,sequence){counters.presentationCheckpoints.push({value,sequence});},consume(){counters.presentationConsumes++;},dispose(){counters.presentationDisposals++;}};},
+  __input(options){inputOptions=options;return{resize(){if(publishResizeState)options.sendState({type:'dom-state',screen:{width:1920,height:1080}});},conflictsWithGesture(){return false;},command(){counters.inputCommands++;return true;},dispose(){counters.inputDisposals++;return inputReady;}};},
   __browser(){return{dispose(){counters.browserDisposals++;}};},
  };
  const context=vm.createContext(sandbox);vm.runInContext(code,context);api=context.WorkerHostUnderTest;
@@ -88,13 +88,13 @@ async function fixture({fetchAsset,loadRuntime,moduleReady,closeReady,inputReady
  const wrap=vm.runInContext('(identity,fields)=>({...identity,protocolVersion:2,...fields})',context);
  const prepared=await api.prepareWorkerRunConfiguration(clone({budgets:{hostSetupTimeoutMs:80,cleanupTimeoutMs:20,...budgets}}));
  const identity=clone({runId:'host-run',revision:1,generation:1,buildKey:'host-build',documentId:'host-document',workerId:'host-worker',runConfigurationHash:prepared.hash});
- const host=api.startWorkerPreviewHost(identity,editor,{canvas:{getBoundingClientRect:()=>({width:320,height:200,left:0,top:0})},verifyRelease,onSnapshot:snapshot=>snapshots.push(snapshot)});
+ const host=api.startWorkerPreviewHost(identity,editor,{canvas:{getBoundingClientRect:()=>({width,height:200,left:0,top:0})},verifyRelease,onSnapshot:snapshot=>snapshots.push(snapshot)});
  const envelope=fields=>wrap(identity,fields);
  const run=()=>editor.onmessage?.({data:envelope({type:'run',configuration:prepared.configuration,stopTimeoutMs:30,cleanupTimeoutMs:20,
   release:clone({runtimeAbi:{protocolVersion:2,host:1,audio:1,presentation:1,...(managed?{lifecycle:1}:{})},runtimeWorker:{},runtimeAudioWorklet:{}}),artifact:{pack:new Uint8Array([1]),manifest:{generation:1}}})});
  async function advance(ms){const target=now+ms;await flush();for(;;){const next=[...timers].filter(([,timer])=>timer.due<=target).sort((a,b)=>a[1].due-b[1].due||a[0]-b[0])[0];if(!next)break;
    const [id,timer]=next;now=timer.due;if(timer.interval)timer.due+=timer.interval;else timers.delete(id);timer.callback();await flush();}now=target;await flush();}
- return {host,editor,identity,counters,channels,contexts,worklets,snapshots,createdUrls,revokedUrls,timers,run,advance,flush,runtime,envelope,clone,makeError:message=>vm.runInContext('new Error('+JSON.stringify(message)+')',context),
+ return {host,editor,identity,counters,channels,contexts,worklets,snapshots,createdUrls,revokedUrls,timers,run,advance,flush,runtime,envelope,clone,setWidth(value){width=value;},makeError:message=>vm.runInContext('new Error('+JSON.stringify(message)+')',context),
   get connect(){return connect;},get inputOptions(){return inputOptions;},get presentationOptions(){return presentationOptions;},get receipt(){return editor.sent.find(message=>message.type==='exit-report');},
   sendControl(fields){if(fields.type==='native-exit'&&!Object.hasOwn(fields,'runtimeSummary'))fields={...fields,runtimeSummary:clone({schemaVersion:1,epoch:'fixture-native',sealed:true,overflow:false,entries:[]})};connect.controlPort.postMessage(envelope(fields));},sendData(fields){connect.dataPort.postMessage(envelope(fields));},
   sendAudio(fields){connect.audioCommandPort.postMessage({runId:identity.runId,audioEpoch:1,...fields});},
@@ -103,6 +103,32 @@ async function fixture({fetchAsset,loadRuntime,moduleReady,closeReady,inputReady
   async cleanup(){host.stop();await advance(200);for(const timer of timers.values())if(!timer.interval)timer.callback();timers.clear();await flush();},
  };
 }
+
+test('optional screenshot and click leave geometry and the live session intact under backpressure',async()=>{
+ const f=await fixture({managed:true,publishResizeState:true,budgets:{maxInputEvents:3}});
+ try{
+  await f.ready();f.sendControl({type:'phase',phase:'running',interactionVersion:1});
+  f.inputOptions.sendInput({type:'pointer'});await f.flush();
+  const outgoing=f.connect.dataPort.peer.sent;
+  assert.equal(outgoing.length,2);
+  f.setWidth(350);
+  const send=message=>f.editor.onmessage({data:f.envelope({...message,deadline:1000})});
+  send({type:'capture-request',requestId:'blocked'});
+  send({type:'input-request',operationId:'click',sequence:1,gesture:{kind:'primary_click',geometryEpoch:1,x:.5,y:.5}});
+  assert.equal(f.editor.sent.find(m=>m.requestId==='blocked')?.error,'busy');
+  assert.equal(f.editor.sent.find(m=>m.operationId==='click')?.evidence.reason,'busy');
+  assert.equal(outgoing.length,2);
+  assert.equal(f.host.snapshot.closing,false);
+  assert.equal(f.host.snapshot.workerErrors.length,0);
+  for(const packet of outgoing.slice())f.sendData({type:'data-receipt',dataSequence:packet.dataSequence});
+  await f.flush();
+  send({type:'capture-request',requestId:'retry'});
+  assert.deepEqual(outgoing.slice(-3).map(packet=>packet.type),['host-state','geometry','capture-request']);
+  assert.equal(outgoing.at(-2).geometry.epoch,2);
+  assert.equal(outgoing.at(-2).geometry.width,350);
+  assert.equal(outgoing.at(-1).requestId,'retry');
+ }finally{await f.cleanup();}
+});
 
 test('Host accepts presentation checkpoints only from matching outstanding geometry or bitmap receipts',async()=>{
  const f=await fixture();try{

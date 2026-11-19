@@ -10,15 +10,15 @@ import {factsFromRuntimeSummary,sessionExitReason} from '@godot-js/engine/sessio
 const directory=fileURLToPath(new URL('../',import.meta.url));
 const replacements={
  'verified-loader.js':`export async function loadVerifiedWorkerEngine(release,options){globalThis.__engineOptions=options;return {Engine:globalThis.__Engine,basePath:'engine',dispose(){}};}`,
- 'worker-presentation.js':`export function createWorkerPresentation(options){let epoch=options.geometry.epoch;return {dispose(){},resize(value){epoch=Math.max(epoch,value.epoch);},ack(){globalThis.__presentationAcks=(globalThis.__presentationAcks??0)+1;},checkpoint(){return {geometryEpoch:epoch,outstanding:null};},setVisible(value){(globalThis.__visibility??=[]).push(value);},stats(){return {};}};}export function installPresentationHooks(){}`,
- 'worker-dom.js':`export function createWorkerDom(options){globalThis.__domOptions=options;return {window:{},dispose(){},revokeInput(){},resize(){},applyHostState(){}};}`,
+ 'worker-presentation.js':`import {createWorkerPresentation as createActual,installPresentationHooks as installActual} from '../../packages/engine/src/browser/dedicated/worker-presentation.ts';export function createWorkerPresentation(options){if(globalThis.__captureTest)return createActual(options);let epoch=options.geometry.epoch;return {dispose(){},resize(value){epoch=Math.max(epoch,value.epoch);},ack(){globalThis.__presentationAcks=(globalThis.__presentationAcks??0)+1;},checkpoint(){return {geometryEpoch:epoch,outstanding:null};},setVisible(value){(globalThis.__visibility??=[]).push(value);},stats(){return {};}};}export function installPresentationHooks(...args){if(globalThis.__captureTest)installActual(...args);}`,
+ 'worker-dom.js':`export function createWorkerDom(options){globalThis.__domOptions=options;return {window:{},document:{hidden:false},dispose(){},revokeInput(){},resize(){},applyHostState(){}};}`,
  'worker-audio.js':`export function createWorkerAudioBridge(){return {revoke(){globalThis.__audioRevoked=true;},beginDrain(){globalThis.__audioDraining=true;}};}`,
  'worker-xr.js':`export function createWorkerXRBridge(){return {active:false,dispose(){},snapshot(){return {};}};}`,
  'worker-browser.js':`export function installWorkerBrowserBridge(){return {dispose(){}};}`,
 };
 const code=(await build({stdin:{contents:'export {installWorkerRuntime} from "../../packages/engine/src/browser/dedicated/worker-runtime.ts";export {prepareWorkerRunConfiguration} from "../../packages/engine/src/browser/dedicated/worker-protocol.ts";export {isProjectData} from "../../packages/engine/src/browser/protocol.ts";',resolveDir:directory},bundle:true,write:false,format:'iife',globalName:'RuntimeUnderTest',platform:'browser',target:'es2022',plugins:[{name:'native-io',setup(builder){
  builder.onResolve({filter:/(verified-loader|worker-presentation|worker-dom|worker-audio|worker-xr|worker-browser)\.js$/},args=>({path:args.path.split('/').at(-1),namespace:'runtime-test'}));
- builder.onLoad({filter:/.*/,namespace:'runtime-test'},args=>({contents:replacements[args.path],loader:'js'}));
+ builder.onLoad({filter:/.*/,namespace:'runtime-test'},args=>({contents:replacements[args.path],loader:'js',resolveDir:directory}));
 }}]})).outputFiles[0].text;
 const flush=async()=>{for(let index=0;index<24;index++)await Promise.resolve();await new Promise(resolve=>setImmediate(resolve));};
 
@@ -104,7 +104,7 @@ test('slow native initialization cannot make heartbeat memory observation termin
  }
 });
 
-async function hostRuntimeFixture({onStart,onQuit,managed=false,waitPhase='running',allowFatal=false}={}){
+async function hostRuntimeFixture({onStart,onQuit,managed=false,waitPhase='running',allowFatal=false,capture}={}){
  const listeners=new Map(),consoleErrors=[],events=[],tasks=[];
  class Port{sent=[];onmessage=null;postMessage(value){this.sent.push(value);}start(){}}
  class Scope{
@@ -113,6 +113,7 @@ async function hostRuntimeFixture({onStart,onQuit,managed=false,waitPhase='runni
   close(){this.closed=true;}
  }
  const scope=new Scope();scope.WorkerGlobalScope=Scope;let engine;
+ if(capture)scope.navigator={userAgent:'Chromium/154'};
  class Engine{
   constructor(options){engine=this;this.options=options;this.config={getModuleConfig(){return {HEAPU8:new Uint8Array(64)};}};}
   async preloadFile(){}
@@ -120,13 +121,14 @@ async function hostRuntimeFixture({onStart,onQuit,managed=false,waitPhase='runni
   async start(){await onStart?.(scope,this,clone);}
   requestQuit(){events.push('quit');if(onQuit)return onQuit(scope,this);scope.__godotjsRuntimeHost.endNativeEpoch('test-native-epoch');this.options.onExit(0);}
  }
- const context=vm.createContext({console:{log(){},warn(){},error:value=>consoleErrors.push(String(value))},crypto,MessagePort:Port,ArrayBuffer,Uint8Array,TextEncoder,AbortController,DOMException,queueMicrotask,
+ const context=vm.createContext({console:{log(){},warn(){},error:value=>consoleErrors.push(String(value))},crypto,MessagePort:Port,ArrayBuffer,Uint8Array,TextEncoder,AbortController,DOMException,queueMicrotask,performance,setTimeout,clearTimeout,
+  ...(capture?{__captureTest:true,OffscreenCanvas:capture.Scratch}:{}),
   setInterval(callback){tasks.push(callback);return tasks.length;},clearInterval(){},__Engine:Engine});
  vm.runInContext(code,context);const clone=value=>vm.runInContext('('+JSON.stringify(value)+')',context);
- const prepared=await context.RuntimeUnderTest.prepareWorkerRunConfiguration(clone({}));
+ const prepared=await context.RuntimeUnderTest.prepareWorkerRunConfiguration(clone(capture?{budgets:{maxPresentationBytes:8*1024*1024}}:{}));
  const control=new Port(),data=new Port();
  const boot=Object.assign(clone({}),{protocolVersion:2,type:'worker-connect',runId:'host-runtime',revision:1,buildKey:'pack',generation:1,documentId:'doc',workerId:'worker',runConfigurationHash:prepared.hash,
-  configuration:prepared.configuration,release:{runtimeAbi:{protocolVersion:2,host:1,audio:1,presentation:1,...(managed?{lifecycle:1}:{})}},pack:new Uint8Array([1]),canvas:{},geometry:{width:1,height:1,dpr:1,epoch:0},controlPort:control,dataPort:data});
+  configuration:prepared.configuration,release:{runtimeAbi:{protocolVersion:2,host:1,audio:1,presentation:1,...(managed?{lifecycle:1}:{})},...(capture?{profile:'full-engine-v1',engineTarget:'template_debug'}:{})},pack:new Uint8Array([1]),canvas:capture?.canvas??{},geometry:capture?.geometry??{width:1,height:1,dpr:1,epoch:0},controlPort:control,dataPort:data});
  const uninstall=context.RuntimeUnderTest.installWorkerRuntime(scope);
  const connect=[...listeners.get('message')][0];connect({data:boot});
  const deadline=Date.now()+2000;while(!control.sent.some(m=>m.type==='worker-fatal'||(m.type==='phase'&&m.phase===waitPhase))){assert(Date.now()<deadline,JSON.stringify(control.sent));await flush();}
@@ -140,6 +142,40 @@ async function hostRuntimeFixture({onStart,onQuit,managed=false,waitPhase='runni
   stop(){control.onmessage?.({data:Object.assign(clone({}),boot,{type:'stop'})});},
   async cleanup(){if(!scope.closed)control.onmessage?.({data:Object.assign(clone({}),boot,{type:'stop'})});await flush();uninstall();}};
 }
+
+test('Worker defers the newest resize until a cancelled capture physically releases its budget',async()=>{
+ let releaseEncoding,scratch;
+ const encoding=new Promise(resolve=>{releaseEncoding=resolve;});
+ class Scratch {
+  constructor(width,height){this.width=width;this.height=height;scratch=this;}
+  getContext(){return {drawImage(){}};}
+  convertToBlob(){return encoding;}
+ }
+ const canvas=Object.assign(new EventTarget(),{GLctxObject:{GLctx:{isContextLost:()=>false}}});
+ const geometry={width:400,height:300,dpr:1,epoch:1};
+ const f=await hostRuntimeFixture({capture:{Scratch,canvas,geometry}});
+ try{
+  f.input({type:'capture-request',dataSequence:1,requestId:'capture',deadline:performance.timeOrigin+performance.now()+5000});
+  const module=f.engine.rtenv;
+  module.godotWorkerBeginIteration(1);module.godotWorkerCommit(1,1);module.godotWorkerEndIteration(1,1);module.postMainLoop();
+  await flush();
+  assert.equal(scratch.width,400);
+  f.input({type:'geometry',dataSequence:2,geometry:{width:825,height:840,dpr:1,epoch:2}});
+  f.input({type:'geometry',dataSequence:3,geometry:{width:830,height:840,dpr:1,epoch:3}});
+  f.input({type:'capture-cancel',dataSequence:4,requestId:'capture'});
+  const receipt=seq=>f.data.sent.find(m=>m.type==='data-receipt'&&m.dataSequence===seq);
+  assert(receipt(2));
+  assert.equal(receipt(3),undefined);
+  assert.equal(canvas.width,400);
+  assert.equal(f.control.sent.some(m=>m.type==='capture-result'),false);
+  releaseEncoding(new Blob());await flush();
+  assert.equal(scratch.width,0);
+  assert.equal(canvas.width,830);
+  assert.equal(receipt(3).presentationCheckpoint.geometryEpoch,3);
+  assert.equal(f.control.sent.find(m=>m.type==='capture-result')?.error,'cancelled');
+  assert.equal(f.control.sent.some(m=>m.type==='worker-fatal'),false);
+ }finally{releaseEncoding(new Blob());await f.cleanup();}
+});
 
 test('default Worker installs a scoped RuntimeHost before the first project statement and drains queued commands once',async()=>{
  let entry,received=[];

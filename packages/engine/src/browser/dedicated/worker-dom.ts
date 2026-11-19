@@ -97,7 +97,9 @@ export function createWorkerDom(options: WorkerDomOptions) {
   const canvasOriginal = new Map<string, PropertyDescriptor | undefined>();
   let activeDrop:number|undefined,dropTimer:ReturnType<typeof setTimeout>|undefined;
   let dispatchingInput:{target:string;event:string}|undefined;
+  let dispatchingGesture = false;
   function send(operation: string, target?: string, name?: string, value?: unknown, requestId?: number): void {
+    if (dispatchingGesture && operation === 'focus') return;
     if (!closed&&(!inputRevoked||isDomCleanupOperation(operation))) options.sendHostCommand({ type: 'dom-command', operation, target, name, value, requestId });
   }
   function request(operation: string, value?: unknown): Promise<unknown> {
@@ -247,6 +249,23 @@ export function createWorkerDom(options: WorkerDomOptions) {
   }
   return {
     window, document, revokeInput,
+    dispatchGesture(gesture: import('./worker-interaction.js').GameGesture, down: boolean): boolean {
+      if (closed || inputRevoked) return false;
+      dispatchingGesture = true;
+      try {
+        const modifiers = {shiftKey: false, ctrlKey: false, altKey: false, metaKey: false};
+        if (gesture.kind === 'key_tap') {
+          dispatch(canvas, down ? 'keydown' : 'keyup', {...modifiers, code: gesture.code,
+            key: gesture.code === 'Space' ? ' ' : gesture.code, repeat: false, isComposing: false});
+        } else {
+          if (gesture.geometryEpoch !== geometry.epoch) return false;
+          dispatch(down ? canvas : window, down ? 'mousedown' : 'mouseup', {...modifiers, button: 0, buttons: down ? 1 : 0,
+            clientX: (geometry.left ?? 0) + gesture.x * geometry.width,
+            clientY: (geometry.top ?? 0) + gesture.y * geometry.height});
+        }
+        return true;
+      } finally { dispatchingGesture = false; }
+    },
     resize(next: CanvasGeometry): void {
       drawingBufferSize(next); if (next.epoch <= geometry.epoch) return; geometry = { ...next };
       Object.assign(window, { innerWidth: next.width, innerHeight: next.height, devicePixelRatio: next.dpr });

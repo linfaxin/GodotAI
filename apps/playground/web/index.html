@@ -40,11 +40,13 @@
     <div id="agent-tools" class="debug-example-actions">
       <h3>Agent 工具</h3>
       <button id="agent-replay" type="button">检查并启动预览</button>
+      <button id="agent-playtest" type="button" hidden>试玩验证</button>
       <button id="agent-stop" type="button" disabled>停止本次预览</button>
       <span id="agent-status" class="debug-note" role="status"></span>
     </div>
     <pre id="debug-example-result" aria-label="查询结果" hidden></pre>
     <pre id="agent-trace" aria-label="API 调用实参与返回结果" hidden></pre>
+    <div id="agent-observations" aria-label="试玩验证画面" hidden></div>
     <pre><code id="debug-api-example"></code></pre>
     <dl class="debug-methods">
       <dt><code>get_project_context()</code></dt>
@@ -79,6 +81,12 @@
       <dd><p>传入 <code>attemptId</code> 或 <code>runId</code> 其中之一，并用 <code>until</code> 指定 <code>running</code> 或 <code>exited</code>。可设置 <code>timeoutMs</code>，也可通过第二个参数传入 <code>AbortSignal</code> 来取消等待。等待超时后可以用同一 ID 继续查询。</p></dd>
       <dt><code>stop({runId})</code></dt>
       <dd><p>请求停止指定的运行。返回 <code>stopping</code> 时，可等待 <code>exited</code> 取得终态与退出回执。</p></dd>
+      <dt><code>screenshot({runId, timeoutMs?})</code></dt>
+      <dd><p>等待指定运行的新渲染提交，返回 PNG 字节、提交序号、采样几何与尺寸。Direct Worker 的支持状态见 <code>get_run</code> 的 <code>interaction</code>。</p></dd>
+      <dt><code>game_input({runId, gesture})</code></dt>
+      <dd><p>提交一次 <code>key_tap</code>（Space 或方向键）或 <code>primary_click</code>。点击坐标 <code>x</code>、<code>y</code> 以完整画布归一化到 [0, 1)，并传入截图的 <code>geometry.epoch</code> 作为 <code>geometryEpoch</code>。</p></dd>
+      <dt><code>wait_for_input({runId, operationId, timeoutMs?})</code></dt>
+      <dd><p>按操作 ID 读取按下和释放的分发事实。<code>timeoutMs: 0</code> 读取快照。等待超时可用同一 ID 再查。</p></dd>
     </dl>
     <p><code>schemaVersion</code> 为 1。方法返回 <code>{ok, result}</code> 或 <code>{ok, error}</code>。<code>check</code> 和 <code>wait_for_event</code> 异步返回。失败构建的查询仍可成功，构建结果见 <code>status</code>。<code>not_found</code> 表示记录不可用，<code>invalid_input</code> 表示参数无效，<code>invalid_cursor</code> 表示游标无效。记录保存在当前标签页内存中，刷新页面会清除记录。</p>
   </div>

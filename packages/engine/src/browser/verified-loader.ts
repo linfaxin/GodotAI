@@ -19,6 +19,8 @@ export interface VerifiedRelease {
   artifactReceiptVersion?:2;
   releaseId: string;
   profile: string;
+  /** Target from the verified site manifest, when available. */
+  engineTarget?: 'template_debug' | 'template_release';
   engineJs: VerifiedAsset;
   engineWasm: VerifiedAsset;
   worklets?: Array<VerifiedAsset & { name?: string }>;

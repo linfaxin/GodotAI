@@ -96,9 +96,34 @@ test('direct context loss closes commit observation and cleanup preserves a late
   const nextOwner=()=>{};module.godotWorkerCommit=nextOwner;restore();assert.equal(module.godotWorkerCommit,nextOwner);
   assert.equal(module.godotWorkerBeginIteration,undefined);assert.equal(module.godotWorkerEndIteration,undefined);assert.equal(module.godotWorkerDrawAllowed,undefined);assert.equal(module.postMainLoop,undefined);
 });
+test('direct screenshot only observes one completed native commit in its own post hook',()=>{
+  const {presentation}=worker({mode:'direct'}),frames=[];
+  let insidePost;
+  const module={postMainLoop:()=>insidePost?.()};
+  const restore=installPresentationHooks(module,presentation,(id,serial)=>frames.push([id,serial]));
+  const begin=id=>module.godotWorkerBeginIteration(id);
+  const commit=(id,serial)=>module.godotWorkerCommit(serial,id);
+  const end=(id,serial)=>module.godotWorkerEndIteration(id,serial);
+  const post=()=>module.postMainLoop();
+  begin(1);commit(1,1);end(1,1);post();
+  end(1,1);post();
+  begin(1);commit(1,2);end(1,2);post();
+  begin(2);end(2,1);post();
+  begin(3);commit(3,3);end(3,3);
+  insidePost=()=>{begin(4);commit(4,4);end(4,4);};
+  post();
+  assert.deepEqual(frames,[[1,1]]);
+  insidePost=undefined;
+  post();post();
+  assert.deepEqual(frames,[[1,1],[4,4]]);
+  restore();presentation.dispose();
+});
 test('real canvas event methods stay native and context loss ends run exactly once',()=>{
   const canvas=new Canvas(),add=canvas.addEventListener,{presentation:p,errors}=worker({canvas});
-  assert.equal(canvas.addEventListener,add);canvas.dispatchEvent(new Event('webglcontextlost',{cancelable:true}));
+  let nativeAlert=0;canvas.addEventListener('webglcontextlost',()=>nativeAlert++,{once:true});
+  const lost=new Event('webglcontextlost',{cancelable:true});
+  assert.equal(canvas.addEventListener,add);canvas.dispatchEvent(lost);
+  assert.equal(lost.defaultPrevented,true);assert.equal(nativeAlert,0);
   canvas.dispatchEvent(new Event('webglcontextlost'));render(p,1);assert.equal(errors.length,1);assert.equal(canvas.captures,0);
 });
 test('direct is immutable default; visibility and zero size pause bitmap only',()=>{
@@ -140,6 +165,17 @@ test('unacknowledged Host geometry reservations are bounded and released by actu
  const host=createPresentationHost({runId:'run',canvas,geometry:g,mode:'bitmap',createOffscreen:()=>new Canvas(),sendAck(){},onFatal:assert.fail});
  for(let epoch=1;epoch<1024;epoch++)host.resize({...g,epoch});assert.throws(()=>host.resize({...g,epoch:1024}),/RESIZE_BACKPRESSURE/);assert.equal(host.geometry.epoch,1023);
  assert.equal(host.observeWorkerCheckpoint({geometryEpoch:1023,outstanding:null},1),true);assert.equal(host.stats().pendingGeometryReservations,1);assert.equal(host.resize({...g,epoch:1024}),true);host.dispose();
+});
+test('direct Host retains no old bitmap reservations while a Worker delays geometry checkpoints',()=>{
+ const g={width:1,height:1,dpr:1,epoch:0};
+ const canvas={width:0,height:0,transferControlToOffscreen:()=>new Canvas()};
+ const host=createPresentationHost({runId:'run',canvas,geometry:g,mode:'direct',sendAck:assert.fail,onFatal:assert.fail});
+ for(let epoch=1;epoch<=1025;epoch++)assert.equal(host.resize({...g,epoch}),true);
+ assert.equal(host.stats().pendingGeometryReservations,0);
+ assert.equal(host.observeWorkerCheckpoint({geometryEpoch:1025,outstanding:null},1),true);
+ assert.equal(host.stats().workerGeometryEpoch,1025);
+ assert.equal(host.observeWorkerCheckpoint({geometryEpoch:1024,outstanding:null},2),false);
+ host.dispose();
 });
 test('a size admitted for a hidden canvas without capture does not invent an impossible bitmap reservation',()=>{
  const g={width:10,height:10,dpr:1,epoch:0},canvas={width:0,height:0,getContext:()=>({transferFromImageBitmap(){}})};
