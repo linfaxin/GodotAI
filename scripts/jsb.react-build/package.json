@@ -1,6 +1,6 @@
 {
   "name": "@godot-js/react-build",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "TypeScript, template and publication toolchain for the GodotJS React renderer",
   "type": "module",
   "main": "dist/index.js",

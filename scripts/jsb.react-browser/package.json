@@ -1,6 +1,6 @@
 {
   "name": "@godot-js/react-browser",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "Browser compiler, package resolution and preview integration for GodotJS React",
