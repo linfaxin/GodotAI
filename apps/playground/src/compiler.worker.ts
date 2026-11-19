@@ -120,6 +120,13 @@ self.onmessage=async(event:MessageEvent<Request>)=>{
     const pack=result.pack.slice();publish({...payload,pack},[pack.buffer]);
    }
   }finally{captured.release();}
- }catch(error){const details=(error as any)?.diagnostics;publish({id,code:'',diagnostics:Array.isArray(details)?details.map(d=>({...d,file:d.file?.startsWith('res://')?'/'+d.file.slice(6):d.file})):[{message:String(error),line:0,column:0,code:0,category:'error'}],error:String(error),...(String(error).includes('E_SOURCE_SYNC')?{sourceSyncReset:true}:{})});}
+ }catch(error){
+  const details=(error as {diagnostics?:unknown})?.diagnostics;
+  const message=String(error),errorCode=error instanceof ProjectToolError?error.code:undefined;
+  const diagnostics=Array.isArray(details)
+   ?details.map(d=>({...d,file:d.file?.startsWith('res://')?'/'+d.file.slice(6):d.file}))
+   :[{message,line:0,column:0,code:errorCode??0,category:'error'}];
+  publish({id,code:'',diagnostics,error:message,...(errorCode?{errorCode}:{}),...(message.includes('E_SOURCE_SYNC')?{sourceSyncReset:true}:{})});
+ }
  finally{if(aborter&&activeBuild===aborter)activeBuild=undefined;}
 };

@@ -1,5 +1,5 @@
 import {PreviewRunner} from '@godot-js/engine/browser/runner';
-import {WorkerPreviewRunner} from '@godot-js/engine/browser/dedicated/worker-runner';
+import {WorkerPreviewRunner,type WorkerRunnerEvent} from '@godot-js/engine/browser/dedicated/worker-runner';
 import type {RunnerEvent} from '@godot-js/engine/browser/protocol';
 import type {VerifiedRelease} from '@godot-js/engine/browser/verified-loader';
 import {prepareWorkerRelease} from '@godot-js/engine/browser/release-adapter';
@@ -9,9 +9,10 @@ import {loadEngineRelease,loadReleaseContext,loadReleaseInputs,loadRuntimeCandid
 import {assertCompiledRelease,assertArtifactTarget} from './release-context';
 import {assertArtifactReceipt} from '@godot-js/engine/identities';
 import {assertArtifactSet,type ArtifactSet} from '@godot-js/engine/artifact-set';
+import type {DebugPreviewConfiguration} from './debug-api';
 
 /** A fresh cross-origin preview consumes the editor's pinned release tuple. */
-export async function createEnginePreview(container:HTMLElement, listener:(event:RunnerEvent)=>void,options:{allowLegacyArtifacts?:boolean}={}) {
+export async function createEnginePreview(container:HTMLElement, listener:(event:RunnerEvent)=>void,options:{allowLegacyArtifacts?:boolean;onWorkerEvent?:(event:WorkerRunnerEvent)=>void}={}) {
  const manifest=await loadEngineRelease(),context=Object.freeze({...await loadReleaseContext()});
  let configured:string|undefined;
  const config=await fetch('./preview-config.json',{cache:'no-cache'});
@@ -34,6 +35,7 @@ export async function createEnginePreview(container:HTMLElement, listener:(event
  const allowLegacyArtifacts=options.allowLegacyArtifacts===true&&manifest.artifactReceiptVersion!==2;
  const runtime=(manifest.execution??manifest.engine.execution)?.executionModel==='proxy-pthread'?undefined:await loadRuntimeCandidate();
  let target:ReleaseFacts|undefined;
+ let configuration:DebugPreviewConfiguration|undefined;
  let runner:PreviewRunner|WorkerPreviewRunner;
  if(runtime?.executionBackend==='worker'){
   const inputs=await loadReleaseInputs();
@@ -43,7 +45,9 @@ export async function createEnginePreview(container:HTMLElement, listener:(event
   if(prepared.facts.descriptorSha256!==context.descriptorHash||prepared.facts.candidateId!==context.candidateId)throw Error('E_PREVIEW_RELEASE_CONTEXT');
   target=prepared.facts;release={...prepared.release,releaseContext:context};
   const benchmark=requested.get('benchmarkTimings')==='1';
-  runner=new WorkerPreviewRunner({container,previewUrl:preview.href,release,deadlines:{initializing:120_000,starting:60_000,downloading:120_000},configuration:{presentationBackend:presentationBackend as 'direct'|'bitmap',...(benchmark?{budgets:{benchmarkTimingSamples:512}}:{})}});
+  configuration={executionBackend:'worker',presentationBackend:presentationBackend as 'direct'|'bitmap'};
+  runner=new WorkerPreviewRunner({container,previewUrl:preview.href,release,deadlines:{initializing:120_000,starting:60_000,downloading:120_000},configuration:{presentationBackend:configuration.presentationBackend,...(benchmark?{budgets:{benchmarkTimingSamples:512}}:{})}});
+  if(options.onWorkerEvent)runner.subscribe(options.onWorkerEvent);
  }else{
   if(manifest.runtimeAbi)throw Error('E_WORKER_CANDIDATE_ABI');
   const resolve=(asset:import('./engine-assets').ReleaseAsset)=>({...asset,url:new URL(asset.path,previewRoot).href});
@@ -57,18 +61,23 @@ export async function createEnginePreview(container:HTMLElement, listener:(event
  }
  runner.subscribe(listener);
  let operationSequence=0,disposed=false;
- return {manifest,context,runner,async run(pack:Uint8Array|undefined,revision:number,details:unknown,artifactSet?:ArtifactSet){
+ return {manifest,context,runner,configuration,async run(pack:Uint8Array|undefined,revision:number,details:unknown,artifactSet?:ArtifactSet,registerDebug?:(generation:string|number)=>()=>void){
   if(disposed)throw Error('E_RUNNER_DISPOSED');
   const compiled=structuredClone(details) as {buildKey?:unknown;generation?:unknown;packSha256?:unknown;artifactId?:string;artifactReceipt?:{buildKey?:unknown;packSha256?:unknown}};
   assertCompiledRelease(context,compiled);assertArtifactTarget(manifest,compiled);
   const operation=++operationSequence;
+  if(registerDebug&&compiled.generation!==undefined)throw Error('E_ARTIFACT_GENERATION');
   const generation=compiled.generation??crypto.randomUUID();
   if(!(typeof generation==='string'&&generation.length>0&&generation.length<=256)&&!(typeof generation==='number'&&Number.isSafeInteger(generation)&&generation>=0))throw Error('E_ARTIFACT_GENERATION');
   if(target){
-   const output=artifactSet?{variant:'pack-set' as const,artifactSet,manifest:compiled}:{variant:'single-pack' as const,pack:pack!,manifest:compiled};
-   const artifact=await prepareBrowserArtifact({output,target,revision,generation});
-   if(disposed||operation!==operationSequence)throw new DOMException('Superseded','AbortError');
-   return runner.run(artifact);
+   const releaseAssociation=registerDebug?.(generation);
+   try{
+    const output=artifactSet?{variant:'pack-set' as const,artifactSet,manifest:compiled}:{variant:'single-pack' as const,pack:pack!,manifest:compiled};
+    const artifact=await prepareBrowserArtifact({output,target,revision,generation});
+    if(disposed||operation!==operationSequence)throw new DOMException('Superseded','AbortError');
+    // The runner validates asynchronously before creating its first session event.
+    return await runner.run(artifact);
+   }finally{releaseAssociation?.();}
   }
   if(artifactSet){
    const captured=await assertArtifactSet(artifactSet);

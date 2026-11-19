@@ -128,6 +128,15 @@ test('Worker type errors retain source and final environment association without
  assert.equal(query.error,undefined);assert(query.result);
 });
 
+test('Worker replies retain the structured code when the resource target cannot compile',async()=>{
+ const {request}=await workerFixture();
+ const result=await request({kind:'compile',files:{'/start.ts':'export function start(){}'},
+  resourceImports:[{resource:'res://asset.png',converter:'fixture'}]});
+ assert.equal(result.errorCode,'E_RESOURCE_CONVERTER_TARGET');
+ assert.equal(result.diagnostics[0].code,result.errorCode);
+ assert.equal(result.pack,undefined);
+});
+
 test('a superseded pending Worker environment cannot cancel or poison a newer request',async()=>{
  const {fixture,request}=await workerFixture(),files={'/start.ts':'export function start(){}'};
  let entered,resume;

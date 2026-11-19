@@ -23,7 +23,80 @@
 <div id="panel-resizer" class="resize-handle panel-resizer" role="separator" tabindex="0" aria-label="调整编辑器与预览宽度" aria-orientation="vertical" aria-valuemin="28" aria-valuemax="72" aria-valuenow="52" title="拖动调整宽度，双击恢复默认"><span></span></div>
 <section id="preview-panel" class="preview-panel" aria-label="Godot 场景预览"><div class="panel-toolbar"><div class="preview-heading"><span class="status-dot" id="run-dot"></span><strong>场景预览</strong><span class="preview-tech">Godot · WebGL2</span></div><div class="preview-tools"><span id="fps">— FPS</span><span id="preview-size">640 × 360</span><button id="focus-preview" class="icon-button" title="专注预览 · Esc 返回" aria-label="专注预览" aria-pressed="false"><svg class="icon"><use href="#i-expand"/></svg></button></div></div><div id="preview-body" class="preview-body"><div id="preview-placeholder" role="status" aria-live="polite"><div class="preview-symbol"><svg class="icon"><use href="#i-play"/></svg><span class="loading-ring"></span></div><h1>正在准备场景</h1><p>运行环境就绪后，自动启动当前项目。</p><p class="hint">首次加载需要下载编译器与引擎，请稍候。</p><progress id="progress" max="1" value="0"></progress><a id="preview-login" class="button" target="_blank" rel="noopener noreferrer" hidden>登录预览站点</a></div><div id="preview"></div></div><div class="preview-status"><span id="status">正在加载编译器和类型声明…</span><span id="build-info"><span id="telemetry"></span></span></div></section>
 </div><div id="dock-resizer" class="resize-handle dock-resizer" role="separator" tabindex="0" aria-label="调整底部面板高度" aria-orientation="horizontal" aria-valuemin="120" aria-valuemax="340" aria-valuenow="178" title="拖动调整底部面板高度"><span></span></div>
-<section id="dock" class="dock" aria-label="问题与控制台"><div class="dock-toolbar"><div class="dock-tabs" role="tablist" aria-label="输出面板"><button id="problems-tab" role="tab" aria-selected="false" aria-controls="problems-panel">问题<span id="problem-count" class="count">0</span></button><button id="console-tab" role="tab" aria-selected="true" aria-controls="console-panel">控制台<span id="log-count" class="count">0</span></button></div><div class="dock-actions"><div id="console-actions"><select id="log-filter" aria-label="筛选控制台输出"><option value="all">全部输出</option><option value="error">仅错误</option><option value="warn">警告与错误</option></select><button id="auto-scroll" class="text-button" aria-pressed="true" title="自动滚动到最新输出">跟随输出</button><button id="copy-log" class="icon-button" title="复制可见输出" aria-label="复制控制台输出"><svg class="icon"><use href="#i-copy"/></svg></button><button id="clear-log" class="text-button">清空</button></div><button id="toggle-dock" class="icon-button" title="收起面板" aria-label="收起底部面板" aria-controls="dock" aria-expanded="true"><svg class="icon"><use href="#i-chevron"/></svg></button></div></div><div id="problems-panel" class="dock-content diagnostics-panel" role="tabpanel" aria-labelledby="problems-tab" hidden><div id="diagnostics"><p class="empty">诊断将在这里显示</p></div></div><div id="console-panel" class="dock-content console-panel" role="tabpanel" aria-labelledby="console-tab"><div id="logs" role="log" aria-live="polite"><p class="empty">运行输出将在这里显示</p></div><p id="no-logs" class="empty" hidden>没有匹配的输出</p></div></section>
+<section id="dock" class="dock" aria-label="底部输出面板"><div class="dock-toolbar"><div class="dock-tabs" role="tablist" aria-label="输出面板"><button id="problems-tab" role="tab" aria-selected="false" aria-controls="problems-panel">问题<span id="problem-count" class="count">0</span></button><button id="console-tab" role="tab" aria-selected="true" aria-controls="console-panel">控制台<span id="log-count" class="count">0</span></button><button id="debug-tab" role="tab" aria-selected="false" aria-controls="debug-panel" tabindex="-1">API 调试</button></div><div class="dock-actions"><div id="console-actions"><select id="log-filter" aria-label="筛选控制台输出"><option value="all">全部输出</option><option value="error">仅错误</option><option value="warn">警告与错误</option></select><button id="auto-scroll" class="text-button" aria-pressed="true" title="自动滚动到最新输出">跟随输出</button><button id="copy-log" class="icon-button" title="复制可见输出" aria-label="复制控制台输出"><svg class="icon"><use href="#i-copy"/></svg></button><button id="clear-log" class="text-button">清空</button></div><button id="toggle-dock" class="icon-button" title="收起面板" aria-label="收起底部面板" aria-controls="dock" aria-expanded="true"><svg class="icon"><use href="#i-chevron"/></svg></button></div></div><div id="problems-panel" class="dock-content diagnostics-panel" role="tabpanel" aria-labelledby="problems-tab" hidden><div id="diagnostics"><p class="empty">诊断将在这里显示</p></div></div><div id="console-panel" class="dock-content console-panel" role="tabpanel" aria-labelledby="console-tab"><div id="logs" role="log" aria-live="polite"><p class="empty">运行输出将在这里显示</p></div><p id="no-logs" class="empty" hidden>没有匹配的输出</p></div>
+<section id="debug-panel" class="dock-content debug-panel" role="tabpanel" aria-labelledby="debug-tab" tabindex="0" hidden>
+  <div class="debug-context-row">
+    <div id="debug-context" aria-label="运行环境"><p>正在读取运行环境</p></div>
+    <button id="debug-open-docs" type="button" class="text-button" aria-controls="debug-docs" aria-expanded="false">API 文档</button>
+  </div>
+  <div id="debug-docs" class="debug-docs" hidden>
+    <p>在工作台页面的 DevTools 中调用 <code>window.godotPlaygroundDebug</code>。使用上方的「运行」和「停止」按钮产生实际记录。</p>
+    <dl class="debug-methods">
+      <dt><code>getContext()</code></dt>
+      <dd>
+        <p>返回 <code>projectId</code>、<code>editorRevision</code>、引擎发布 <code>release</code> 和预览环境 <code>preview</code>。两项环境状态均可为 <code>loading</code>、<code>available</code>、<code>failed</code> 或 <code>unsupported</code>。可用时从 <code>release.value</code> 读取发布 ID 和引擎配置，从 <code>preview.value</code> 读取执行后端和呈现方式。失败时读取 <code>error</code>。</p>
+        <p><code>latestBuildAttemptId</code> 指当前项目的最近构建。<code>activeRunId</code> 和 <code>lastExitedRunId</code> 跟随当前页面的预览，切换项目后仍可能指向先前项目。尚无记录的值为 <code>null</code>。</p>
+      </dd>
+      <dt><code>getBuild(attemptId)</code></dt>
+      <dd>
+        <p>传入构建尝试 ID，读取项目与编辑版本、<code>status</code> 和 <code>diagnostics</code>。收到相应回执时还可读取 <code>sourceHash</code>、<code>environmentFacts</code> 和 <code>compilerIdentity</code>。构建状态有 <code>pending</code>、<code>succeeded</code>、<code>failed</code>、<code>cancelled</code>。有产物时，<code>artifact</code> 给出 <code>variant</code>、<code>buildKey</code> 和 <code>artifactId</code>。</p>
+        <p><code>diagnostics.observed</code> 为 <code>true</code> 时有实测 <code>counts</code>，有效空列表的计数为零。为 <code>false</code> 时计数缺省。<code>diagnostics.items</code> 中的诊断可包含 <code>code</code> 和 <code>location</code>。<code>omittedCount</code> 表示省略的条数，单项的 <code>omitted</code> 表示正文未完整保留。构建或预览错误含 <code>stage</code> 和 <code>diagnostic</code>，已知错误码见 <code>diagnostic.code</code>。</p>
+        <p><code>preview.status</code> 可为 <code>not-requested</code>（尚未请求）、<code>preparing</code>（准备中）、<code>skipped</code>（已跳过）、<code>rejected</code>（准备失败）或 <code>session-created</code>（已创建会话）。准备失败时读取 <code>preview.error</code>，创建会话后读取 <code>preview.runId</code>。预览调试不支持时 <code>preview</code> 可缺省。</p>
+      </dd>
+      <dt><code>getRun(runId)</code></dt>
+      <dd>
+        <p>传入运行 ID，读取运行身份、产物、发布与运行配置。用 <code>attemptId</code> 查关联构建。<code>state</code> 为 <code>running</code> 表示引擎已启动，项目就绪与首帧取决于相应观测。</p>
+        <p><code>exit</code> 在收到退出回执后出现。<code>exit.evidence</code> 的 <code>host-report</code> 表示宿主回执，<code>editor-local</code> 表示页面兜底。<code>exit.report</code> 给出 <code>reason</code>，并保留来源提供的 <code>engineOutcome</code>、<code>hostCleanup</code> 和 <code>sessionFacts</code>。未观测到的原生退出码与清理字段可缺省。</p>
+      </dd>
+      <dt><code>readRunEvents(runId, options?)</code></dt>
+      <dd>
+        <p>传入运行 ID，按页面接收顺序读取 <code>items</code> 中的 <code>{seq, event}</code>。<code>kinds</code> 筛选 <code>state</code>、<code>log</code>、<code>project</code>、<code>exit</code>，<code>levels</code> 只按 <code>log</code>、<code>warn</code>、<code>error</code> 筛选日志。<code>limit</code> 为 1–100，默认 50。</p>
+        <p><code>after</code> 使用当前页面同一运行的 <code>nextCursor</code>。筛选后即使本页为空，游标也会越过已扫描记录。<code>hasMore</code> 表示当前还有未扫描记录，<code>oldestAvailableSeq</code> 为最早保留的序号，空缓冲时为 <code>null</code>。<code>gap</code> 给出已淘汰的序号范围，事件自己的 <code>omitted</code> 表示该条正文未保留。</p>
+      </dd>
+    </dl>
+    <p><code>schemaVersion</code> 为 1。查询返回 <code>{ok, result}</code> 或 <code>{ok, error}</code>。失败构建的查询仍可成功，构建结果见 <code>status</code>。<code>not_found</code> 表示记录不可用，<code>invalid_input</code> 表示参数无效，<code>invalid_cursor</code> 表示游标无效。记录保存在当前标签页内存中，刷新页面会清除记录。</p>
+    <div class="debug-example-actions">
+      <h3>读取当前记录</h3>
+      <button id="debug-copy-example" type="button">复制示例</button>
+      <button id="debug-run-example" type="button">执行查询示例</button>
+      <span id="debug-example-status" class="debug-note" role="status"></span>
+    </div>
+    <pre><code id="debug-api-example"></code></pre>
+    <pre id="debug-example-result" aria-label="查询结果" hidden></pre>
+  </div>
+  <div class="debug-summary">
+    <section id="debug-build" class="debug-card" aria-labelledby="debug-build-heading">
+      <div class="debug-card-heading"><h3 id="debug-build-heading">最新构建</h3><span id="debug-build-status" class="debug-status" role="status">尚无构建</span></div>
+      <dl id="debug-build-fields" class="debug-fields"></dl>
+      <div id="debug-build-notes" class="debug-notes"></div>
+      <details id="debug-build-details" hidden><summary>构建 JSON</summary><pre id="debug-build-json"></pre></details>
+    </section>
+    <section id="debug-run" class="debug-card" aria-labelledby="debug-run-heading">
+      <div class="debug-card-heading"><h3 id="debug-run-heading">当前运行</h3><span id="debug-run-status" class="debug-status" role="status">尚无运行</span></div>
+      <dl id="debug-run-fields" class="debug-fields"></dl>
+      <div id="debug-run-notes" class="debug-notes"></div>
+      <details id="debug-run-details" hidden><summary>运行 JSON</summary><pre id="debug-run-json"></pre></details>
+      <section id="debug-linked-build" class="debug-linked-build" aria-labelledby="debug-linked-build-heading" hidden>
+        <div class="debug-card-heading"><h4 id="debug-linked-build-heading">此运行的构建</h4><span id="debug-linked-build-status" class="debug-status" role="status"></span></div>
+        <dl id="debug-linked-build-fields" class="debug-fields"></dl>
+        <div id="debug-linked-build-notes" class="debug-notes"></div>
+        <details id="debug-linked-build-details" hidden><summary>关联构建 JSON</summary><pre id="debug-linked-build-json"></pre></details>
+      </section>
+    </section>
+  </div>
+  <section class="debug-log" aria-labelledby="debug-events-heading">
+    <div class="debug-card-heading debug-log-heading">
+      <h3 id="debug-events-heading" tabindex="-1">运行日志</h3>
+      <button id="debug-show-current" class="text-button" type="button" hidden>回到当前运行</button>
+      <button id="debug-show-previous" class="text-button" type="button" hidden>查看最近退出</button>
+      <select id="debug-log-filter" aria-label="筛选运行日志"><option value="all">全部日志</option><option value="warn">警告与错误</option><option value="error">仅错误</option></select>
+    </div>
+    <p id="debug-events-gap" class="debug-note" role="status" hidden></p>
+    <p id="debug-events-empty" class="debug-note">尚无运行日志</p>
+    <ol id="debug-events" aria-label="运行日志条目"></ol>
+  </section>
+</section>
+</section>
 </section></main>
 <footer><span class="footer-environment"><span class="status-dot"></span>纯浏览器运行<span class="footer-separator">/</span><span id="release-info">Godot 4.6.1 · 完整引擎</span></span><span class="footer-details"><span class="save-state"><svg class="icon"><use href="#i-check"/></svg><span id="saved">本地项目</span></span><span id="type-status">等待检查</span><span id="position">Ln 1, Col 1</span><button id="credits-open">开源鸣谢</button><button id="shortcuts" title="查看快捷键">快捷键 <kbd>?</kbd></button></span></footer>
 <dialog id="shortcuts-dialog"><div class="dialog-heading"><h2>让操作更顺手</h2><button id="close-shortcuts" class="icon-button" aria-label="关闭快捷键说明"><svg class="icon"><use href="#i-close"/></svg></button></div><p class="dialog-description">编辑、运行、调试，都在当前工作区完成。</p><dl class="shortcut-list"><div><dt>运行项目</dt><dd><kbd>Ctrl / ⌘</kbd><kbd>Enter</kbd></dd></div><div><dt>代码补全</dt><dd><kbd>Ctrl</kbd><kbd>Space</kbd></dd></div><div><dt>切换项目面板</dt><dd><kbd>Ctrl / ⌘</kbd><kbd>B</kbd></dd></div><div><dt>退出专注预览</dt><dd><kbd>Esc</kbd></dd></div></dl><p class="dialog-footnote">分隔条支持拖动，也可聚焦后使用方向键调整。</p></dialog>

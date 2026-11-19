@@ -96,6 +96,7 @@ jobs:
           node apps/playground/scripts/browser-project-isolation-test.mjs
           node apps/playground/scripts/browser-project-blob-storage-test.mjs
           node apps/playground/scripts/browser-release-context-test.mjs
+          pnpm --filter @godot-js/playground test:browser:debug-panel
       - name: Release provenance, integrity, npm-pack consumer and failure gates
         run: |
           pnpm test:browser:unit
@@ -217,6 +218,7 @@ jobs:
           PLAYWRIGHT_CHROMIUM_EXECUTABLE: ${{ env.CHROMIUM }}
         run: >-
           node apps/playground/scripts/browser-engine-profile-gate.mjs
+          --engine-report "$RUNNER_TEMP/browser-engine-report.json"
           --engine-js "$RUNNER_TEMP/godot-browser-build/bin/.web_zip/godot.js"
           --engine-wasm "$RUNNER_TEMP/godot-browser-build/bin/.web_zip/godot.wasm"
           --profile "${{ matrix.profile }}"
@@ -284,6 +286,14 @@ jobs:
           PLAYGROUND_PRESENTATION_BACKEND: direct
           BROWSER: chromium
         run: node apps/playground/scripts/browser-engine-contracts-test.mjs
+      - name: Verify the Playground debug API with the real Worker
+        if: always() && matrix.profile == 'full-engine-v1' && matrix.target == 'template_debug'
+        env:
+          PLAYWRIGHT_CHROMIUM_EXECUTABLE: ${{ env.CHROMIUM }}
+          PLAYGROUND_TEST_DIRECTORY: ${{ runner.temp }}/default-playground-site
+          PLAYGROUND_DEBUG_API_REPORT: ${{ runner.temp }}/debug-api.json
+          BROWSER: chromium
+        run: node apps/playground/scripts/browser-debug-api-test.mjs
       - name: Verify the actual product remains usable when persistence is unavailable
         env:
           PLAYWRIGHT_CHROMIUM_EXECUTABLE: ${{ env.CHROMIUM }}
@@ -366,6 +376,7 @@ jobs:
             ${{ runner.temp }}/binary-resource-probe/
             ${{ runner.temp }}/storage-degradation.json
             ${{ runner.temp }}/engine-contracts
+            ${{ runner.temp }}/debug-api.json
             ${{ runner.temp }}/browser-engine-measurement.json
             ${{ runner.temp }}/browser-engine-performance.legacy.json
             ${{ runner.temp }}/browser-engine-performance.worker-direct.json
