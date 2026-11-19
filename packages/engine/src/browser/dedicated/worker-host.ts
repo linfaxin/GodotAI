@@ -11,6 +11,8 @@ import { createWorkerXRHost } from './worker-xr-host.js';
 import { WorkerProjectCommandCredits,workerProjectCommandBytes } from './worker-project-channel.js';
 import {assertArtifactSet,artifactSetTransfers} from '../../artifact-set.js';
 import {assertArtifactSetTarget} from '../artifact-input.js';
+import {INTERACTION_VERSION, interactionNow, isCapturedFrame, readGesture, readInputEvidence, undispatched,
+  validInteractionId, validInteractionSequence} from './worker-interaction.js';
 
 export interface WorkerPreviewHostOptions {
   canvas: HTMLCanvasElement;
@@ -26,6 +28,8 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
   const heartbeat = new WorkerHeartbeat(performance.now());
   let started = false, ending = false, finalized = false, running = false;
   let managedClose = false;
+  let interactionReady = false;
+  let captureRequest: string | undefined, inputOperation: string | undefined;
   let configuration: Readonly<WorkerRunConfiguration> | undefined;
   let runtime: Awaited<ReturnType<typeof loadVerifiedRuntimeWorker>> | undefined;
   let control: MessagePort | undefined, data: MessagePort | undefined;
@@ -60,18 +64,24 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
     void xrCleanup.catch(error=>{cleanupFault??=error;});
   };
   const ownedPorts = new Set<MessagePort>();
-  const post = (fields: object) => { if (!finalized) editorPort.postMessage({ ...identity, protocolVersion: WORKER_PROTOCOL, ...fields }); };
+  const post = (fields: object, transfer: Transferable[] = []) => {
+    if (!finalized) editorPort.postMessage({ ...identity, protocolVersion: WORKER_PROTOCOL, ...fields }, transfer);
+  };
   const toWorker = (fields: object) => control?.postMessage({ ...identity, protocolVersion: WORKER_PROTOCOL, ...fields });
-  const toData = (fields: object) => {
+  const toData = (fields: object, optional = false): boolean => {
     const packet=fields as {type?:string;state?:{requestId?:unknown}};
     const cleanup=managedClose&&ending&&(['host-command-receipt','present-ack'].includes(packet.type??'')||(packet.type==='host-state'&&packet.state?.requestId!==undefined));
-    if ((!lease.active&&!cleanup) || !data || finalized) return;
+    if ((!lease.active&&!cleanup) || !data || finalized) return false;
     const pending=cleanup?pendingCleanupData.size:pendingData.size-pendingCleanupData.size;
-    if (pending >= (configuration?.budgets.maxInputEvents ?? 1024)) { workerFailure(Error(cleanup?'E_WORKER_CLEANUP_BACKPRESSURE':'E_WORKER_INPUT_BACKPRESSURE')); return; }
+    if (pending >= (configuration?.budgets.maxInputEvents ?? 1024)) {
+      if (!optional) workerFailure(Error(cleanup?'E_WORKER_CLEANUP_BACKPRESSURE':'E_WORKER_INPUT_BACKPRESSURE'));
+      return false;
+    }
     const sequence = ++dataSequence; pendingData.add(sequence);if(cleanup)pendingCleanupData.add(sequence);
     const type=(fields as {type?:unknown}).type;if(type==='geometry'||type==='present-ack')pendingPresentationData.add(sequence);
     try{data.postMessage({ ...identity, protocolVersion: WORKER_PROTOCOL, dataSequence: sequence, ...fields });}
     catch(error){pendingData.delete(sequence);pendingCleanupData.delete(sequence);pendingPresentationData.delete(sequence);throw error;}
+    return true;
   };
   function publish(): void {
     snapshot = Object.freeze({ schemaVersion: 1, ...identity, executionBackend: 'worker', presentationBackend: configuration?.presentationBackend ?? null,
@@ -82,15 +92,34 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
       xr: xr?.snapshot() ?? null, exit: terminalReport ?? ledger.report ?? null });
     try { options.onSnapshot?.(snapshot); } catch { /* Observers do not own lifecycle control. */ }
   }
-  function geometry(): CanvasGeometry {
+  function geometry(refresh = false): CanvasGeometry {
     const rect = (options.canvas.parentElement ?? options.canvas).getBoundingClientRect();
     const dpr = Math.min(devicePixelRatio || 1, configuration?.budgets.maxDpr ?? 4);
-    return { width: Math.max(0, rect.width), height: Math.max(0, rect.height), left: rect.left, top: rect.top, dpr, epoch: ++geometryEpoch };
+    const current = presentation?.geometry;
+    if (refresh && current && current.width === rect.width && current.height === rect.height &&
+        current.left === rect.left && current.top === rect.top && current.dpr === dpr) return current;
+    return { width: Math.max(0, rect.width), height: Math.max(0, rect.height), left: rect.left, top: rect.top, dpr, epoch: geometryEpoch + 1 };
   }
-  function resize(): void {
-    if (!lease.active || !presentation || xr?.active) return;
-    try { const next = geometry(); presentation.resize(next); input?.resize(next); toData({ type: 'geometry', geometry: next }); }
+  function applyGeometry(next: CanvasGeometry): void {
+    if (!presentation) return;
+    try {
+      if (!presentation.resize(next)) return;
+      geometryEpoch = next.epoch;
+      input?.resize(next);
+      toData({type: 'geometry', geometry: next});
+    }
     catch (error) { fail(error); }
+  }
+  const resize = () => { if (lease.active && presentation && !xr?.active) applyGeometry(geometry()); };
+  function refreshInteractionGeometry(): boolean {
+    if (!lease.active || !data || !presentation || xr?.active) return false;
+    const next = geometry(true);
+    const changed = next.epoch !== presentation.geometry.epoch;
+    // A resize publishes a screen state and a geometry packet before the interaction.
+    const required = changed ? (input ? 3 : 2) : 1;
+    if (pendingData.size + required > (configuration?.budgets.maxInputEvents ?? 1024)) return false;
+    if (changed) applyGeometry(next);
+    return lease.active;
   }
   function fail(error: unknown): void {
     if (finalized || ending) return;
@@ -189,6 +218,45 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
     const m: any = raw;
     if (m.type === 'stop') { stop(m.cause, m.detail); return; }
     if(m.type==='project-receipt'&&Number.isSafeInteger(m.projectSequence)){if(!finalized)toWorker({type:'project-receipt',projectSequence:m.projectSequence});return;}
+    if (m.type === 'capture-request' && validInteractionId(m.requestId)) {
+      const requestId = m.requestId;
+      const error = !lease.active ? 'run_ended' : !interactionReady ? 'unsupported' :
+        xr?.active || document.hidden ? 'not_ready' : captureRequest ? 'busy' :
+        !Number.isFinite(m.deadline) || m.deadline <= interactionNow() ? 'timeout' : undefined;
+      if (error) { post({type: 'capture-result', requestId, error}); return; }
+      if (!refreshInteractionGeometry()) { post({type: 'capture-result', requestId, error: 'busy'}); return; }
+      try {
+        if (toData({type: m.type, requestId, deadline: m.deadline}, true)) { captureRequest = requestId; return; }
+      } catch { /* A failed send has no Worker side effects. */ }
+      post({type: 'capture-result', requestId, error: 'busy'});
+      return;
+    }
+    if (m.type === 'capture-cancel' && captureRequest && m.requestId === captureRequest) {
+      try { toData({type: m.type, requestId: captureRequest}, true); } catch { /* Worker deadline releases the request. */ }
+      return;
+    }
+    if (m.type === 'input-request' && validInteractionId(m.operationId)) {
+      const operationId = m.operationId, gesture = readGesture(m.gesture);
+      const reason = !lease.active ? 'run_ended' : !interactionReady || xr?.active || document.hidden ||
+        !gesture || !validInteractionSequence(m.sequence) ? 'not_ready' :
+        !Number.isFinite(m.deadline) || m.deadline <= interactionNow() ? 'expired' :
+        inputOperation ? 'busy' :
+        input?.conflictsWithGesture(gesture) ? 'input_conflict' : undefined;
+      if (reason) { post({type: 'input-result', operationId, evidence: undispatched(reason)}); return; }
+      if (gesture?.kind === 'primary_click') {
+        const rejection = !refreshInteractionGeometry() ? 'busy' :
+          gesture.geometryEpoch !== presentation?.geometry.epoch ? 'geometry_conflict' : undefined;
+        if (rejection) { post({type: 'input-result', operationId, evidence: undispatched(rejection)}); return; }
+      }
+      try {
+        if (toData({type: m.type, operationId, gesture, sequence: m.sequence, deadline: m.deadline}, true)) {
+          inputOperation = operationId;
+          return;
+        }
+      } catch { /* A failed send has no Worker side effects. */ }
+      post({type: 'input-result', operationId, evidence: undispatched('busy')});
+      return;
+    }
     if (!lease.active) return;
     if (m.type === 'project-command' && running && isProjectData(m.data)) {
       if(!projectCommands?.reserve(m.commandSequence,workerProjectCommandBytes(m.data))){fail(Error('E_WORKER_PROJECT_COMMAND_BACKPRESSURE'));return;}
@@ -224,6 +292,7 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
       for (const channel of channels) { ownedPorts.add(channel.port1); ownedPorts.add(channel.port2); }
       control = channels[0].port1; data = channels[1].port1;
       const initial = geometry();
+      geometryEpoch = initial.epoch;
       presentation = createPresentationHost({ runId: identity.runId, canvas: options.canvas, geometry: initial, mode: configuration.presentationBackend,
         limits: { maxDimension: configuration.budgets.maxCanvasDimension, maxPixels: configuration.budgets.maxCanvasPixels, maxAggregateBytes: configuration.budgets.maxPresentationBytes },
         sendAck: ack => toData(ack), onFatal: fail,benchmarkTimings:configuration.budgets.benchmarkTimingSamples>0 });
@@ -241,6 +310,18 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
         const raw = event.data;
         if (!isWorkerEnvelope(raw) || !sameWorkerRun(raw, identity) || finalized) return;
         const m: any = raw;
+        if (m.type === 'input-result' && inputOperation && m.operationId === inputOperation) {
+          const evidence = readInputEvidence(m.evidence);
+          if (evidence) { inputOperation = undefined; post({type: m.type, operationId: m.operationId, evidence}); }
+          return;
+        }
+        if (m.type === 'capture-result' && captureRequest && m.requestId === captureRequest) {
+          captureRequest = undefined;
+          const frame = lease.active && isCapturedFrame(m.frame) ? m.frame : undefined;
+          post({type: m.type, requestId: m.requestId, frame, error: frame ? undefined :
+            !lease.active ? 'run_ended' : ['timeout', 'cancelled', 'busy', 'not_ready', 'run_ended'].includes(m.error) ? m.error : 'capture_failed'}, frame ? [frame.bytes] : []);
+          return;
+        }
         if(m.type==='project-command-receipt'&&Number.isSafeInteger(m.commandSequence)){
           if(projectCommands?.release(m.commandSequence)){post({type:'project-command-receipt',commandSequence:m.commandSequence});publish();}return;
         }
@@ -278,7 +359,14 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
           const accepted = m.type === 'worker-resume-ack' ? heartbeat.acknowledgeResume(m, performance.now()) : heartbeat.accept(m, performance.now());
           if (accepted) { memory = m.memory ?? memory; post({ type: 'worker-heartbeat', sequence: m.sequence, resumeEpoch: m.resumeEpoch }); publish(); }
         } else if (m.type === 'worker-metrics') { memory = m.memory; publish(); }
-        else if (m.type === 'phase') { if (m.phase === 'running') { running = true; workerState = 'running'; } post(m); publish(); }
+        else if (m.type === 'phase') {
+          if (m.phase === 'running') {
+            running = true; workerState = 'running';
+            interactionReady = configuration?.presentationBackend === 'direct' && m.interactionVersion === INTERACTION_VERSION;
+          }
+          post({type: 'phase', phase: m.phase, ...(interactionReady ? {interactionVersion: INTERACTION_VERSION} : {})});
+          publish();
+        }
       };
       data.onmessage = event => {
         const raw = event.data;

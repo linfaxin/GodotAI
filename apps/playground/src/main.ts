@@ -20,6 +20,7 @@ import {CompilerWorkerClient} from './compiler-worker-client';
 import {createDebugRecorder,debugFailure,type DebugRelease} from './debug-api';
 import {createPlaygroundApi,type PlaygroundApi} from './playground-api';
 import {createAgentPanel} from './workbench/agent-panel';
+import {createInteractionDemo, INTERACTION_DEMO_ID, matchesInteractionDemo} from './interaction-demo';
 
 declare global {
  interface Window {
@@ -39,7 +40,8 @@ let nativePreview:Awaited<ReturnType<typeof createEnginePreview>>|undefined,nati
 let runtimeSerial=0,activeEngineRevision:string|number=-1;
 let siteEngineProfile='full-engine-v1',shellOnly=false,sessionReleaseContext:ReleaseContext|undefined;
 const MAX_PENDING_OPERATIONS=16;
-let pendingChecks=0,pendingBuilds=0,playIntent:AbortController|undefined;
+type PlayIntent={attemptId?:string;controller:AbortController};
+let pendingChecks=0,pendingBuilds=0,playIntent:PlayIntent|undefined;
 const editor=createCodeEditor({changed(path,value){if(!current)return;current.files[path]=value;changed();},position(line,column){$('position').textContent=`Ln ${line}, Col ${column}`;},query:languageQuery,run:()=>void compile(true),toggleFiles:()=>workbench.toggleFiles()});
 const workbench=createWorkbench({selectFile,focusEditor:()=>editor.focus(),toast});
 const debugRecorder=createDebugRecorder();
@@ -48,11 +50,33 @@ const playground=createPlaygroundApi(debugRecorder,{
  check,
  play:()=>compile(),
  stopRun:runId=>nativePreview?.stopRun(runId),
+ interaction:()=>nativePreview?.interaction,
 });
 Object.defineProperty(window,'godotPlayground',{value:playground.api,enumerable:true});
 const debugPanel=createDebugPanel(debugRecorder.api,playground.api);
 debugRecorder.subscribe(debugPanel.refresh);
-createAgentPanel(playground);
+createAgentPanel(playground, {
+ unavailable() {
+  const runId=debugRecorder.api.getContext().result.activeRunId;
+  if (!nativePreview?.supportsPlaytest || runId&&nativePreview.interaction?.interactionState(runId).supported===false) {
+   return '试玩验证需要 Chromium 上的 Full Engine Worker Direct 调试预览';
+  }
+  if (!ready) return '预览正在准备，请稍后重试';
+ },
+ async open() {
+  const project=createInteractionDemo(siteEngineProfile);
+  let demo=demos.find(({id})=>{const candidate=projects.get(id);return candidate&&matchesInteractionDemo(candidate,project);});
+  if (!demo) {
+   const id='project-'+crypto.randomUUID();
+   projects.set(id,project);storage.stage(id,project);demo=registerProjectDemo(id,project);
+  }
+  await select(demo,false);
+  return demo.id;
+ },
+ cancelLaunch(attemptId) {
+  if (playIntent?.attemptId===attemptId) invalidatePlay();
+ },
+});
 addEventListener('pagehide',playground.cancelWaits);
 const fileMenu=createFileMenu({select:selectFile,rename:path=>fileForm(path),remove:deleteFile,canDelete:path=>path!==current?.entry,canRename:path=>canRenameProjectFile(current,path),toast});
 const explorer=createExplorer(path=>{workbench.filePicked();selectFile(path);editor.focus();},(path,x,y)=>fileMenu.open(path,x,y));
@@ -129,7 +153,10 @@ function appendDemoButton(demo:Demo){
 function registerProjectDemo(id:string,project:EditorProject):Demo{
  const existing=demos.find(d=>d.id===id);if(existing)return existing;
  const source=demos.find(d=>d.id===project.demoId),file=(project.entry||project.selected).split('/').at(-1)!;
- const demo:Demo=source?{...source,id,name:source.name+' · 副本'}:{id,name:'导入项目 · '+file,subtitle:project.engineProfile,file,hint:project.engineProfile===siteEngineProfile?'独立项目，修改会单独保存。':'此项目需要 '+project.engineProfile+'；可查看与导出原文。',source:typeof project.files[project.entry]==='string'?project.files[project.entry] as string:'',runtime:project.runtime,controls:[]};
+ const playtest=project.demoId===INTERACTION_DEMO_ID;
+ const demo:Demo=source?{...source,id,name:source.name+' · 副本'}:{id,name:playtest?'试玩验证':'导入项目 · '+file,subtitle:playtest?'Godot 原生示例':project.engineProfile,file,
+  hint:playtest?'按 Space 改变背景颜色，也可点击左上色块。':project.engineProfile===siteEngineProfile?'独立项目，修改会单独保存。':'此项目需要 '+project.engineProfile+'；可查看与导出原文。',
+  source:typeof project.files[project.entry]==='string'?project.files[project.entry] as string:'',runtime:project.runtime,controls:[]};
  demos.push(demo);appendDemoButton(demo);return demo;
 }
 async function restore(){
@@ -155,7 +182,7 @@ async function restore(){
   toast('本地项目恢复失败，已暂停自动保存');log(String(error),'error');
  }
 }
-function invalidatePlay(){playIntent?.abort();}
+function invalidatePlay(){playIntent?.controller.abort();}
 function changed(){storage.stage(selected.id,current);invalidatePlay();revision++;debugRecorder.setContext({editorRevision:revision});$('saved').textContent=persistenceBlocked?'保存失败':'正在保存';clearTimeout(saveTimer);saveTimer=setTimeout(()=>void save(),250);clearTimeout(checkTimer);checkTimer=setTimeout(()=>void check(),1100);}
 function initialProject(demo:Demo):EditorProject{return demo.id==='native'||demo.id==='react'?defaultProject(demo.runtime??'react',siteEngineProfile):demoProject(demo,siteEngineProfile);}
 
@@ -203,9 +230,11 @@ function compile(focusPreview=false){
  if(pendingBuilds>=MAX_PENDING_OPERATIONS)return;
  invalidatePlay();
  const intent=new AbortController();
- playIntent=intent;
+ const play:PlayIntent={controller:intent};
+ playIntent=play;
  clearTimeout(checkTimer);const key=++runSerial,rev=revision,preview=nativePreview;checking++;$('run').setAttribute('disabled','');workbench.setBuilding();status(buildStatus);
  const attemptId=debugRecorder.startBuild(selected.id,rev);
+ play.attemptId=attemptId;
  const releaseAttempt=debugRecorder.retainBuild(attemptId);
  pendingBuilds++;
  void settle();
@@ -252,7 +281,7 @@ function compile(focusPreview=false){
   finally{
    pendingBuilds--;
    releaseAttempt?.();
-   if(playIntent===intent)playIntent=undefined;
+   if(playIntent===play)playIntent=undefined;
    if(key===runSerial){
     $('run').toggleAttribute('disabled',!ready);workbench.setReady();
     if(intent.signal.aborted)restorePreviewStatus(preview.runner.state);
@@ -273,7 +302,7 @@ function select(demo:Demo,run=true,persist=true){
  for(const tab of document.querySelectorAll<HTMLElement>('[data-demo]')){const active=tab.dataset.demo===demo.id;tab.classList.toggle('active',active);tab.setAttribute('aria-checked',String(active));}
  $<HTMLSelectElement>('profile').replaceChildren(new Option(getEngineProfile(siteEngineProfile).label,siteEngineProfile));
  $('release-info').textContent='Godot 4.6.1 · '+getEngineProfile(siteEngineProfile).label;
- $('runtime-meta').textContent=demo.name;document.title=`${demo.name} · GodotAI Playground`;if(persist)void save();if(current.engineProfile!==siteEngineProfile){runtimeSerial++;ready=false;debugRecorder.setContext({preview:{status:'unsupported',reason:'项目需要 '+current.engineProfile}});void nativePreview?.stop();$('run').setAttribute('disabled','');$('check').setAttribute('disabled','');status('项目需要 '+current.engineProfile,'error');toast('已保留此项目，请在匹配的引擎站点打开或导出原文');}else{$('check').removeAttribute('disabled');void prepareRuntime(run);}
+ $('runtime-meta').textContent=demo.name;document.title=`${demo.name} · GodotAI Playground`;if(persist)void save();if(current.engineProfile!==siteEngineProfile){runtimeSerial++;ready=false;debugRecorder.setContext({preview:{status:'unsupported',reason:'项目需要 '+current.engineProfile}});void nativePreview?.stop();$('run').setAttribute('disabled','');$('check').setAttribute('disabled','');status('项目需要 '+current.engineProfile,'error');toast('已保留此项目，请在匹配的引擎站点打开或导出原文');}else{$('check').removeAttribute('disabled');return prepareRuntime(run);}
 }
 function fileForm(old?:string){if(old&&!canRenameProjectFile(current,old)){toast('框架阶段暂只支持普通脚本和文本场景改名，资源与声明文件改名尚未开放');return;}const form=$<HTMLFormElement>('file-form'),input=$<HTMLInputElement>('filename');form.hidden=false;input.value=old?.slice(1)??'src/NewComponent.tsx';form.dataset.old=old??'';$('submit-file').textContent=old?'重命名':'创建';input.focus();input.select();}
 $<HTMLFormElement>('file-form').onsubmit=async event=>{event.preventDefault();try{

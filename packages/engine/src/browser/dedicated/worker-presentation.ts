@@ -91,8 +91,10 @@ export function createWorkerPresentation(options: WorkerPresentationOptions) {
   let commitSerial = 0, frameSerial = 0, iteration = 0, outstanding: FrameTicket | undefined;
   const counters: PresentationStats = { committed: 0, captured: 0, acknowledged: 0, skipped: 0, outstanding: 0, peakOutstanding: 0 };
   const lost = (event: Event) => {
-    event.preventDefault();
     if (closed) return;
+    event.preventDefault();
+    // The Worker owns shutdown. The window-oriented native listener only opens an alert.
+    event.stopImmediatePropagation();
     dispose(); options.onFatal(Error('E_WORKER_WEBGL_CONTEXT_LOST'));
   };
   // Keep the real OffscreenCanvas event target. DOM input has a separate bridge.
@@ -160,10 +162,11 @@ export function createWorkerPresentation(options: WorkerPresentationOptions) {
       // A resize does not invalidate the outstanding ticket's release receipt.
       outstanding = undefined; inFlightSize = undefined; counters.outstanding = 0; counters.acknowledged++; return true;
     },
-    resize(next: CanvasGeometry): boolean {
+    resize(next: CanvasGeometry, captureBytes = 0): boolean {
       if (closed || next.epoch <= geometry.epoch) return false;
       const nextSize = drawingBufferSize(next, limits);
       assertBudget(nextSize);
+      if (captureBytes && nextSize.width * nextSize.height * 12 + (inFlightSize?.estimatedBytes ?? 0) + captureBytes > aggregateLimit) return false;
       geometry = { ...next }; size = nextSize; committedThisIteration = false;
       if (canvas.width !== size.width) canvas.width = size.width;
       if (canvas.height !== size.height) canvas.height = size.height;
@@ -206,7 +209,10 @@ export function createPresentationHost(options: PresentationHostOptions) {
   if (!runId) throw Error('E_WORKER_PRESENTATION_ID');
   let geometry = { ...options.geometry }, size = drawingBufferSize(geometry, limits), closed = false, lastFrame = 0;
   const aggregateLimit=presentationByteLimit(limits);assertPresentationBytes(size,aggregateLimit);
-  const geometries=new Map<number,number>([[geometry.epoch,size.width*size.height*4]]);
+  const initialEpoch=geometry.epoch;
+  // Only bitmap tickets can retain buffers from earlier geometry epochs.
+  const geometries=new Map<number,number>();
+  if(mode==='bitmap')geometries.set(initialEpoch,size.width*size.height*4);
   let checkpointSequence=-1,workerGeometryEpoch:number|null=null;
   function reservedBitmapBytes():number{
     if(mode!=='bitmap'||closed)return 0;let maximum=0;
@@ -253,9 +259,10 @@ export function createPresentationHost(options: PresentationHostOptions) {
       if (closed || next.epoch <= geometry.epoch) return false;
       const nextSize = drawingBufferSize(next, limits);
       assertPresentationBytes(nextSize,aggregateLimit,reservedBitmapBytes());
-      if(geometries.size>=1024)throw Error('E_WORKER_PRESENTATION_RESIZE_BACKPRESSURE');
-      geometry = { ...next }; size = nextSize;geometries.set(next.epoch,size.width*size.height*4);
+      if(mode==='bitmap'&&geometries.size>=1024)throw Error('E_WORKER_PRESENTATION_RESIZE_BACKPRESSURE');
+      geometry = { ...next }; size = nextSize;
       if (mode === 'bitmap') {
+        geometries.set(next.epoch,size.width*size.height*4);
         // Assigning even an unchanged canvas attribute clears its backing
         // image. A duplicate geometry epoch must keep the last valid picture.
         const clears=canvas.width!==size.width||canvas.height!==size.height;
@@ -268,8 +275,9 @@ export function createPresentationHost(options: PresentationHostOptions) {
     observeWorkerCheckpoint(value:unknown,sequence:number):boolean{
       if(closed||!Number.isSafeInteger(sequence)||sequence<=checkpointSequence)return false;
       const state=value as PresentationCheckpoint;
-      if(!state||!Number.isSafeInteger(state.geometryEpoch)||state.geometryEpoch>(geometry.epoch)||state.geometryEpoch<(workerGeometryEpoch??-1)||!geometries.has(state.geometryEpoch))return false;
+      if(!state||!Number.isSafeInteger(state.geometryEpoch)||state.geometryEpoch>geometry.epoch||state.geometryEpoch<(workerGeometryEpoch??initialEpoch))return false;
       const ticket=state.outstanding;
+      if(mode==='direct'?ticket!==null:!geometries.has(state.geometryEpoch))return false;
       if(ticket!==null&&(!isFrameTicket(ticket)||ticket.runId!==runId||ticket.resizeEpoch>state.geometryEpoch||!Number.isSafeInteger(ticket.estimatedBytes)||ticket.estimatedBytes<1||!geometries.has(ticket.resizeEpoch)||ticket.estimatedBytes!==geometries.get(ticket.resizeEpoch)))return false;
       checkpointSequence=sequence;workerGeometryEpoch=state.geometryEpoch;
       for(const epoch of geometries.keys())if(epoch<state.geometryEpoch&&epoch!==ticket?.resizeEpoch)geometries.delete(epoch);
@@ -303,16 +311,53 @@ export interface PresentationModuleHooks {
 }
 /** Bitmap capture follows native completion and the existing GL/FBO parking
  * post hook in the same iteration. Direct observes only actual native commits. */
-export function installPresentationHooks(module: PresentationModuleHooks, presenter: ReturnType<typeof createWorkerPresentation>): () => void {
+export function installPresentationHooks(
+  module: PresentationModuleHooks,
+  presenter: ReturnType<typeof createWorkerPresentation>,
+  capture?: (iteration: number, serial: number, geometry: CanvasGeometry) => void,
+): () => void {
   const previous = { post: module.postMainLoop, begin: module.godotWorkerBeginIteration,
     commit: module.godotWorkerCommit, end: module.godotWorkerEndIteration, draw: module.godotWorkerDrawAllowed };
   const commit = (serial: number, iteration: number) => { presenter.commit(serial, iteration); previous.commit?.(serial, iteration); };
-  if (presenter.mode === 'direct') {
-    // Direct rendering owns no bitmap lifecycle or frame credit. Keep the
-    // existing GL/FBO and other components' hooks intact, and observe only
-    // actual native commits without creating a completion ticket each frame.
+  if (presenter.mode === 'direct' && !capture) {
     module.godotWorkerCommit = commit;
     return () => { if (module.godotWorkerCommit === commit) module.godotWorkerCommit = previous.commit; };
+  }
+  if (presenter.mode === 'direct' && capture) {
+    let iteration = 0, committed = 0, serial = 0, iterating = false, completed = false;
+    const begin = (id: number) => {
+      if (Number.isSafeInteger(id) && id > iteration) {
+        iteration = id; committed = 0; iterating = true; completed = false;
+      }
+      previous.begin?.(id);
+    };
+    const observe = (next: number, id: number) => {
+      commit(next, id);
+      if (iterating && id === iteration && Number.isSafeInteger(next) && next > serial) serial = committed = next;
+    };
+    const end = (id: number, next: number) => {
+      if (iterating && id === iteration) {
+        iterating = false;
+        completed = committed !== 0 && committed === next;
+      }
+      previous.end?.(id, next);
+    };
+    const post = (...args: unknown[]) => {
+      const id = iteration, frame = completed ? committed : 0;
+      completed = false;
+      const result = previous.post?.apply(module, args);
+      if (frame && id === iteration) capture(id, frame, presenter.geometry);
+      return result;
+    };
+    module.godotWorkerBeginIteration = begin; module.godotWorkerCommit = observe;
+    module.godotWorkerEndIteration = end; module.postMainLoop = post;
+    return () => {
+      if (module.godotWorkerBeginIteration === begin) module.godotWorkerBeginIteration = previous.begin;
+      if (module.godotWorkerCommit === observe) module.godotWorkerCommit = previous.commit;
+      if (module.godotWorkerEndIteration === end) module.godotWorkerEndIteration = previous.end;
+      if (module.postMainLoop === post) module.postMainLoop = previous.post;
+      iterating = completed = false;
+    };
   }
   let completed: { iteration: number; serial: number } | undefined;
   const begin = (iteration: number) => { completed = undefined; presenter.beginIteration(iteration); previous.begin?.(iteration); };

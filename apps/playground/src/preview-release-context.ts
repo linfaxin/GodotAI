@@ -70,6 +70,7 @@ export async function verifyPreviewReleaseContext(expected:ReleaseContext,option
   };
   if(JSON.stringify(release.runtimeAbi)!==JSON.stringify(descriptor.value.runtimeAbi)||JSON.stringify(release.runtimeAbi)!==JSON.stringify(site?.value.runtime?.abi))throw Error('E_PREVIEW_RUNTIME_ABI');
   if(site?.value.schemaVersion!==3||site.value.runtime?.executionBackend!=='worker')throw Error('E_PREVIEW_RUNTIME_CANDIDATE');
+  if(release.profile!==actual.engineProfile||release.engineTarget!==undefined&&release.engineTarget!==site.value.engineTarget)throw Error('E_PREVIEW_RUNTIME_TARGET');
   sameAsset(release.engineJs,descriptor.value.engine.javascript);sameAsset(release.engineWasm,descriptor.value.engine.wasm);
   const runtime=site.value.runtime;
   sameAsset(release.runtimeWorker,runtime.assets?.[runtime.entry],runtime.entry);

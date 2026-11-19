@@ -85,6 +85,10 @@ if (check.ok && check.result.status === 'completed' && check.result.diagnostics.
 
 `check` returns type diagnostics for the captured source. `get_diagnostics` reads retained results for a project revision, with optional `checkId`, `attemptId`, `runId` and `path` filters. `get_build` and `get_run` follow the exact build and session. A wait that times out can be repeated with the same ID. The run's exit includes the receipt source and the cleanup facts actually reported. See the [P0 contract and acceptance cases](../../docs/design/playground-agent-api-p0.zh-CN.md).
 
+**试玩验证** opens a standalone sample, captures its red starting frame, sends one Space gesture, waits for the green frame, and stops that run. Repeated playtests reuse an unedited sample and preserve any edited copies. The two thumbnails and the input and exit receipts appear in the Agent panel.
+
+On a Chromium Dedicated Worker Direct run of `full-engine-v1/template_debug`, `get_run({runId}).result.interaction` reports support and readiness. `screenshot({runId, timeoutMs?}, signal?)` awaits a new render submission and returns PNG bytes, run identity, render serial, and sampling geometry. A capture can return `busy` while a previous encode drains after cancellation. `game_input({runId, gesture})` assigns an operation ID to a single gesture. Use `{kind: 'key_tap', code: 'Space'}` (also supports the four arrow keys) or `{kind: 'primary_click', x, y, geometryEpoch}`, where the coordinates are normalized across the full canvas and the epoch comes from the frame. Screenshot and gesture requests for a retained ended run return `run_ended`. `wait_for_input({runId, operationId, timeoutMs}, signal?)` reads dispatch evidence for each edge. Use a zero timeout for a snapshot. Timing out or cancelling the wait leaves the input operation in place. The project effect can be checked with a subsequent capture.
+
 ## Build and run
 
 Install dependencies with the repository's Node/pnpm versions:

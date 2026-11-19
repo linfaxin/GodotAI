@@ -1,6 +1,8 @@
 import type {
   createDebugRecorder, DebugBuild, DebugCheck, DebugRun, ReadRunEventsOptions,
 } from './debug-api';
+import type {GameInput, GameScreenshot, InteractionResult, ScreenshotInput, WaitForInput,
+  WorkerPreviewRunner} from '@godot-js/engine/browser/dedicated/worker-runner';
 
 type Recorder = ReturnType<typeof createDebugRecorder>;
 type ErrorCode = 'invalid_input' | 'not_found' | 'invalid_cursor' | 'revision_conflict' |
@@ -24,6 +26,7 @@ interface Actions {
   check(): Promise<DebugCheck> | undefined;
   play(): string | undefined;
   stopRun(runId: string): Promise<unknown> | undefined;
+  interaction?(): Pick<WorkerPreviewRunner, 'interactionState' | 'screenshot' | 'gameInput' | 'waitForInput'> | undefined;
 }
 
 export interface PlaygroundApiCall {
@@ -52,7 +55,8 @@ export function createPlaygroundApi(recorder: Recorder, actions: Actions) {
     }
   }
 
-  function tool<Args extends unknown[], Result>(name: string, execute: (...args: Args) => Result) {
+  function tool<Args extends unknown[], Result>(name: string, execute: (...args: Args) => Result,
+    projectResult?: (value: Awaited<Result>) => unknown) {
     return (...args: Args): Result => {
       const result = execute(...args);
       if (observers.size) {
@@ -62,8 +66,9 @@ export function createPlaygroundApi(recorder: Recorder, actions: Actions) {
           const json = JSON.stringify(args[0]);
           input = json === undefined ? {} : json.length <= 4096 ? JSON.parse(json) : {omitted: true};
         } catch { input = {omitted: true}; }
-        if (result instanceof Promise) void result.then(value => publish(name, input, value), () => {});
-        else publish(name, input, result);
+        const observed = (value: Awaited<Result>) => publish(name, input, projectResult ? projectResult(value) : value);
+        if (result instanceof Promise) void result.then(observed, () => {});
+        else observed(result as Awaited<Result>);
       }
       return result;
     };
@@ -223,11 +228,24 @@ export function createPlaygroundApi(recorder: Recorder, actions: Actions) {
         ok({status: 'stopping' as const, runId: input.runId});
     }),
     get_build: tool('get_build', (input: {attemptId: string}) => debug.getBuild(input?.attemptId)),
-    get_run: tool('get_run', (input: {runId: string}) => debug.getRun(input?.runId)),
+    get_run: tool('get_run', (input: {runId: string}) => {
+      const run = debug.getRun(input?.runId);
+      return run.ok ? ok({...run.result, interaction: actions.interaction?.()?.interactionState(input.runId) ?? {supported: false, ready: false}}) : run;
+    }),
     read_run_events: tool('read_run_events', (input: {runId: string} & ReadRunEventsOptions) => {
       const {runId, ...options} = input ?? {};
       return debug.readRunEvents(runId, options);
     }),
+    screenshot: tool('screenshot', (input: ScreenshotInput, signal?: AbortSignal): Promise<InteractionResult<GameScreenshot>> =>
+      actions.interaction?.()?.screenshot(input, signal) ?? Promise.resolve({ok: false, error: {code: 'unsupported', message: '当前预览不支持截图'}}), result => {
+      if (!result.ok) return result;
+      const {bytes, ...metadata} = result.result;
+      return ok({...metadata, byteLength: bytes.byteLength});
+    }),
+    game_input: tool('game_input', (input: GameInput) =>
+      actions.interaction?.()?.gameInput(input) ?? fail('unsupported', '当前预览不支持自动输入')),
+    wait_for_input: tool('wait_for_input', (input: WaitForInput, signal?: AbortSignal) =>
+      actions.interaction?.()?.waitForInput(input, signal) ?? Promise.resolve(fail('unsupported', '当前预览不支持输入回执'))),
   });
 
   return {

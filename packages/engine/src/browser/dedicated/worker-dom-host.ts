@@ -239,6 +239,9 @@ export function createInputHost(options: InputHostOptions) {
     clipboard:{write:typeof window.navigator.clipboard?.writeText==='function',read:typeof window.navigator.clipboard?.readText==='function'},
     screen:{width:window.screen.width,height:window.screen.height}});
   return {
+    conflictsWithGesture(gesture: import('./worker-interaction.js').GameGesture): boolean {
+      return gesture.kind === 'key_tap' ? pressedKeys.has(gesture.code) : mouseButtons.has(0) || pointerButtons.size > 0;
+    },
     beginDrain(): void { if (closed || draining) return; releaseHeld(); draining = true; clearInterval(gamepadTimer); },
     resize(next: CanvasGeometry): void { drawingBufferSize(next); if (next.epoch > geometry.epoch) { geometry = {...next};sendState({screen:{width:window.screen.width,height:window.screen.height}}); } },
     command(command: DomHostCommand): boolean {

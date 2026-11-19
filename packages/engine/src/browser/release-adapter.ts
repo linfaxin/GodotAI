@@ -149,6 +149,7 @@ export async function prepareWorkerRelease(input: PrepareWorkerReleaseOptions): 
   if (!Array.isArray(worklets)) fail('E_WORKER_RELEASE_ASSET', 'Invalid native worklets');
   const release: VerifiedRelease = {
     releaseId: descriptor.id as string, profile: descriptor.runtimeProfile,
+    ...(site.engineTarget === 'template_debug' || site.engineTarget === 'template_release' ? {engineTarget: site.engineTarget} : {}),
     engineJs: nativeAsset(engine.javascript), engineWasm: nativeAsset(engine.wasm),
     worklets: worklets.map(named),
     workerAssets: workers.map(reference => ({...named(reference), ...(record(reference) && typeof reference.role === 'string' ? {role: reference.role} : {})})),

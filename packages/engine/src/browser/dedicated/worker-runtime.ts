@@ -13,6 +13,8 @@ import { WorkerLogBudget } from './worker-log.js';
 import {installNativeLifecycleGate, type NativeLifecycleGate, type NativeLifecycleModule} from '../lifecycle-gate.js';
 import {assertArtifactSet,type ArtifactSet} from '../../artifact-set.js';
 import {assertArtifactSetTarget,preloadArtifactSet} from '../artifact-input.js';
+import {createWorkerCapture, createWorkerGesture} from './worker-observation.js';
+import {INTERACTION_VERSION, readGesture, supportsWorkerInteraction, undispatched, validInteractionId, validInteractionSequence} from './worker-interaction.js';
 
 interface RuntimeScope {
   __godotjsRuntimeHost?: RuntimeBinding;
@@ -61,6 +63,21 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
   let memoryPeak = 0, heapPeak = 0;
   const post = (fields: object, transfer: Transferable[] = []) => control.postMessage({ ...identity, protocolVersion: WORKER_PROTOCOL, ...fields }, transfer);
   const dataPost = (fields: object, transfer: Transferable[] = []) => data.postMessage({ ...identity, protocolVersion: WORKER_PROTOCOL, ...fields }, transfer);
+  const supportsInteraction = supportsWorkerInteraction(boot.release, boot.configuration.presentationBackend, scope.navigator?.userAgent ?? '');
+  let interactionReady = false;
+  const interactionRejection = () => !lease.active || stopping || closed || nativeExited ? 'run_ended' :
+    !interactionReady || xr?.active || dom?.document.hidden ? 'not_ready' : undefined;
+  const capture = createWorkerCapture(boot.canvas, () => !interactionRejection(),
+    (requestId, frame, error) => post({type: 'capture-result', requestId, frame, error}, frame ? [frame.bytes] : []),
+    estimated => !!presentation && (presentation.stats().aggregateEstimatedBytes ?? Infinity) + estimated <=
+      (boot.configuration.budgets.maxPresentationBytes ?? 0),
+    () => { try { applyLatestGeometry(); } catch (error) { fatal(error); } });
+  const gestures = createWorkerGesture(
+    (operationId, evidence) => post({type: 'input-result', operationId, evidence}),
+    gesture => interactionRejection() ??
+      (gesture.kind === 'primary_click' && gesture.geometryEpoch !== presentation?.geometry.epoch ? 'geometry_conflict' : undefined),
+    (gesture, down) => dom?.dispatchGesture(gesture, down) ?? false,
+  );
   const text = (args: unknown[]) => args.slice(0, 20).map(value => typeof value === 'string' ? value.slice(0, 4096) : value === null || ['undefined', 'number', 'boolean', 'bigint'].includes(typeof value) ? String(value) : '[object]').join(' ').slice(0, 4096);
   const logs = new WorkerLogBudget(boot.configuration?.budgets??{});
   const log = (level: 'log' | 'warn' | 'error', args: unknown[]) => {
@@ -73,7 +90,10 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
     Object.defineProperty(forward,'__godotjsConsoleForwarded',{value:true});console[level]=forward;
   }
   const assertStarting = () => { lease.assertActive(); if(stopping||closed||nativeExited)throw new DOMException('Worker startup cancelled','AbortError'); };
-  const phase = (value: RunPhase) => { assertStarting(); post({ type: 'phase', phase: value }); };
+  const phase = (value: RunPhase) => {
+    assertStarting();
+    post({type: 'phase', phase: value, ...(value === 'running' && supportsInteraction ? {interactionVersion: INTERACTION_VERSION} : {})});
+  };
   let presentation: ReturnType<typeof createWorkerPresentation> | undefined;
   let dom: ReturnType<typeof createWorkerDom> | undefined;
   let audio: ReturnType<typeof createWorkerAudioBridge> | undefined;
@@ -84,7 +104,22 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
   const pendingHostCommands = new Set<number>();
   const pendingCleanupHostCommands = new Set<number>();
   const receiveHostCommandReceipt=(sequence:number)=>{if(pendingHostCommands.delete(sequence))pendingCleanupHostCommands.delete(sequence);};
-  let commandSequence = 0, latestGeometry: CanvasGeometry | undefined;
+  let commandSequence = 0, latestGeometry: CanvasGeometry | undefined, deferredGeometrySequence: number | undefined;
+  function acknowledgeData(dataSequence: number, withCheckpoint = false) {
+    dataPost({type: 'data-receipt', dataSequence,
+      ...(withCheckpoint && presentation ? {presentationCheckpoint: presentation.checkpoint()} : {})});
+  }
+  function applyLatestGeometry() {
+    if (!latestGeometry || !presentation || !dom || !lease.active || stopping || xr?.active) return;
+    if (presentation.resize(latestGeometry, capture.reservedBytes) === false && capture.reservedBytes) return;
+    dom.resize(latestGeometry);
+    latestGeometry = undefined;
+    if (deferredGeometrySequence !== undefined) {
+      const sequence = deferredGeometrySequence;
+      deferredGeometrySequence = undefined;
+      acknowledgeData(sequence, true);
+    }
+  }
   let projectSequence = 0, pendingProjectBytes = 0, droppedProjectMessages = 0;
   const pendingProjects = new Map<number, number>();
   const cancelNativeStart = () => { try { module?.godotWorkerCancelStart?.(); } catch { /* The host owns hard termination. */ } };
@@ -165,6 +200,7 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
   function beginStopping(reason:string,requestQuit=true):void {
     if(stopping||closed||nativeExited)return;
     stopping=true;
+    capture.stop();
     const attempt=(cleanup:()=>void)=>{try{cleanup();}catch(error){try{fatal(error);}catch{/* A lost diagnostic channel cannot block the remaining cleanup. */}}};
     if(canCooperativelyClose()){
       attempt(()=>binding?.beginClose(reason));attempt(()=>dom?.revokeInput());attempt(()=>audio?.beginDrain());
@@ -197,6 +233,11 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
   data.onmessage = event => {
     if (!isWorkerEnvelope(event.data) || !sameWorkerRun(event.data, identity) || closed) return;
     const m: any = event.data;
+    const rejection = m.type === 'capture-request' || m.type === 'input-request' ? interactionRejection() : undefined;
+    if (rejection) {
+      if (m.type === 'capture-request' && validInteractionId(m.requestId)) post({type: 'capture-result', requestId: m.requestId, error: rejection});
+      if (m.type === 'input-request' && validInteractionId(m.operationId)) post({type: 'input-result', operationId: m.operationId, evidence: undispatched(rejection)});
+    }
     const cleanupPacket=['host-command-receipt','present-ack','host-result'].includes(m.type)||(m.type==='host-state'&&m.state?.requestId!==undefined);
     if((stopping&&!cleanupPacket)||(binding?.snapshotSummary().sealed&&m.type!=='host-command-receipt')){
       if(Number.isSafeInteger(m.dataSequence))dataPost({type:'data-receipt',dataSequence:m.dataSequence});return;
@@ -206,11 +247,32 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
       if(Number.isSafeInteger(m.dataSequence))dataPost({type:'data-receipt',dataSequence:m.dataSequence});
       return;
     }
+    let deferReceipt = false;
     try {
       if (m.type === 'host-command-receipt') { receiveHostCommandReceipt(m.commandSequence); }
       else if (m.type === 'present-ack') presentation?.ack(m as any);
       else if (m.type === 'input') { benchmark?.inputReceived(m.packet);const accepted=dom?.dispatchInput(m.packet as any)??false;benchmark?.inputDispatched(m.packet.sequence,accepted); }
-      else if (m.type === 'geometry') { if (presentation && dom && !xr?.active) { presentation.resize(m.geometry); dom.resize(m.geometry); } else latestGeometry = m.geometry; }
+      else if (m.type === 'geometry') {
+        if (deferredGeometrySequence !== undefined) acknowledgeData(deferredGeometrySequence);
+        deferredGeometrySequence = undefined;
+        latestGeometry = m.geometry;
+        applyLatestGeometry();
+        // Keep one receipt for the newest deferred resize so the Host retires
+        // its geometry reservations only after the Worker applies that size.
+        if (latestGeometry && capture.reservedBytes && Number.isSafeInteger(m.dataSequence)) {
+          deferredGeometrySequence = m.dataSequence;
+          deferReceipt = true;
+        }
+      }
+      else if (m.type === 'capture-request' && !rejection && validInteractionId(m.requestId) && Number.isFinite(m.deadline)) {
+        capture.request(m.requestId, m.deadline);
+      }
+      else if (m.type === 'capture-cancel' && validInteractionId(m.requestId)) capture.cancel(m.requestId);
+      else if (m.type === 'input-request' && !rejection && validInteractionId(m.operationId) &&
+        validInteractionSequence(m.sequence) && Number.isFinite(m.deadline)) {
+        const gesture = readGesture(m.gesture);
+        if (gesture) gestures.perform(m.operationId, m.sequence, m.deadline, gesture);
+      }
       else if (m.type === 'host-state') {
         if (dom) dom.applyHostState(m.state);
         else if (pendingHostStates.length < 32) pendingHostStates.push(m.state);
@@ -219,8 +281,9 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
       }
       else if (m.type === 'host-result') dom?.applyHostState(m as any);
     } catch (error) { fatal(error); }
-    finally { if (Number.isSafeInteger(m.dataSequence)) dataPost({ type: 'data-receipt', dataSequence: m.dataSequence,
-      ...((m.type==='geometry'||m.type==='present-ack')&&presentation?{presentationCheckpoint:presentation.checkpoint()}:{}) }); }
+    finally {
+      if (!deferReceipt && Number.isSafeInteger(m.dataSequence)) acknowledgeData(m.dataSequence, m.type === 'geometry' || m.type === 'present-ack');
+    }
   };
   control.start(); data.start();
   try {
@@ -241,7 +304,7 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
       onActiveChange: active => {
         if(!lease.active||stopping)return;
         presentation?.setVisible(!active && scope.document?.visibilityState !== 'hidden');
-        if(!active && latestGeometry){presentation?.resize(latestGeometry);dom?.resize(latestGeometry);latestGeometry=undefined;}
+        if(!active)applyLatestGeometry();
       }, onError: fatal });
     scope.__godotWorkerXR = xr;
     dom = createWorkerDom({ canvas: boot.canvas, geometry: boot.geometry, baseUrl: boot.documentUrl, scope, sendHostCommand: command => {
@@ -254,7 +317,7 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
       try{dataPost({ type: 'host-command', command, commandSequence: sequence });}
       catch(error){receiveHostCommandReceipt(sequence);throw error;}
     } });
-    if (latestGeometry && !xr.active) { presentation.resize(latestGeometry); dom.resize(latestGeometry); latestGeometry=undefined; }
+    applyLatestGeometry();
     for (const state of pendingHostStates.splice(0)) dom.applyHostState(state);
     audio = createWorkerAudioBridge(boot.audioCommandPort, boot.audioPcmPort, { runId: identity.runId, audioEpoch: 1, onError: fatal });
     scope.__godotWorkerAudio = audio;
@@ -310,14 +373,21 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
     engine = new loaded.Engine({ canvas: boot.canvas, executable: loaded.basePath, persistentPaths: [], persistentDrops: false,
       serviceWorker: '', focusCanvas: false, canvasResizePolicy: 0,
       onPrint: (...args: unknown[]) => log('log', args), onPrintError: (...args: unknown[]) => log('error', args),
-      onExit: (code: number) => { if (nativeExited) return; nativeExited = true; post({ type: 'native-exit', code, memory: metrics(),runtimeSummary:binding?.snapshotSummary() }); release(); scope.close?.(); },
+      onExit: (code: number) => {
+        if (nativeExited) return;
+        nativeExited = true;
+        gestures.exit();
+        capture.stop();
+        post({type: 'native-exit', code, memory: metrics(), runtimeSummary: binding?.snapshotSummary()});
+        release(); scope.close?.();
+      },
     });
     const config = (engine as any).config;
     if (!config || typeof config.getModuleConfig !== 'function') throw Error('E_WORKER_MODULE_CONFIG');
     const original = config.getModuleConfig;
     config.getModuleConfig = function (...args: unknown[]) {
       const value = original.apply(this, args);
-      module = value; installPresentationHooks(value, presentation!);
+      module = value; installPresentationHooks(value, presentation!, supportsInteraction ? capture.frame : undefined);
       value.onRuntimeInitialized = (() => { const before = value.onRuntimeInitialized; return function (this: unknown, ...values: unknown[]) { if (typeof before === 'function') before.apply(this, values); }; })();
       return value;
     };
@@ -333,7 +403,7 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
     if(managedClose&&!lifecycleGate)throw Error('E_NATIVE_LIFECYCLE_ABI: matching native hook was not installed');
     if(stopping)return;
     // Engine.start resolves only after native resume/setup2/start, not callMain.
-    phase('waiting-ready'); await Promise.resolve(); assertStarting(); phase('running');
+    phase('waiting-ready'); await Promise.resolve(); assertStarting(); interactionReady = supportsInteraction; phase('running');
     post({ type: 'worker-metrics', memory: metrics() });
   } catch (error) {
     if(closed||nativeExited)return;
