@@ -51,6 +51,7 @@ const playground=createPlaygroundApi(debugRecorder,{
  play:()=>compile(),
  stopRun:runId=>nativePreview?.stopRun(runId),
  interaction:()=>nativePreview?.interaction,
+ observation:()=>nativePreview?.observation,
 });
 Object.defineProperty(window,'godotPlayground',{value:playground.api,enumerable:true});
 const debugPanel=createDebugPanel(debugRecorder.api,playground.api);
@@ -63,6 +64,7 @@ createAgentPanel(playground, {
   }
   if (!ready) return '预览正在准备，请稍后重试';
  },
+ supportsRuntimeObservation:()=>nativePreview?.supportsObservation===true,
  async open() {
   const project=createInteractionDemo(siteEngineProfile);
   let demo=demos.find(({id})=>{const candidate=projects.get(id);return candidate&&matchesInteractionDemo(candidate,project);});
@@ -155,7 +157,7 @@ function registerProjectDemo(id:string,project:EditorProject):Demo{
  const source=demos.find(d=>d.id===project.demoId),file=(project.entry||project.selected).split('/').at(-1)!;
  const playtest=project.demoId===INTERACTION_DEMO_ID;
  const demo:Demo=source?{...source,id,name:source.name+' · 副本'}:{id,name:playtest?'试玩验证':'导入项目 · '+file,subtitle:playtest?'Godot 原生示例':project.engineProfile,file,
-  hint:playtest?'按 Space 改变背景颜色，也可点击左上色块。':project.engineProfile===siteEngineProfile?'独立项目，修改会单独保存。':'此项目需要 '+project.engineProfile+'；可查看与导出原文。',
+  hint:playtest?'按右箭头移动 Player，按左箭头移除 Player。':project.engineProfile===siteEngineProfile?'独立项目，修改会单独保存。':'此项目需要 '+project.engineProfile+'；可查看与导出原文。',
   source:typeof project.files[project.entry]==='string'?project.files[project.entry] as string:'',runtime:project.runtime,controls:[]};
  demos.push(demo);appendDemoButton(demo);return demo;
 }

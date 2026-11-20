@@ -14,7 +14,7 @@ const unwrap = response => {
   return response.result;
 };
 
-function fixture(beforeCheck = () => {}) {
+function fixture(beforeCheck = () => {}, observation) {
   const recorder = createDebugRecorder();
   const calls = {check: 0, play: 0, stop: []};
   const agent = createPlaygroundApi(recorder, {
@@ -33,6 +33,7 @@ function fixture(beforeCheck = () => {}) {
       calls.stop.push(id);
       return Promise.resolve();
     },
+    observation: () => observation,
   });
   recorder.setContext({projectId, editorRevision, release: {status: 'available', value: release},
     preview: {status: 'available', value: configuration}});
@@ -182,4 +183,51 @@ test('wait timeouts and cancellation leave operations alone, and stopping checks
   assert.equal(unwrap(api.stop({runId})).status, 'exited');
   assert.deepEqual(calls.stop, [runId]);
   assert.equal(unwrap(api.get_run({runId: next.identity.runId})).state, 'running');
+});
+
+test('runtime observation validates input before abort and checks retained ownership before dispatch', async () => {
+  const observed = [];
+  const {api, start} = fixture(undefined, {
+    observationState: () => ({supported: true, ready: true, version: 1}),
+    async getRuntimeTree(input) {
+      observed.push(input.runId);
+      return {ok: true, result: {nodes: []}};
+    },
+    async inspectRuntimeNode(input) {
+      observed.push(input.runId);
+      return {ok: false, error: {code: 'node_not_found', message: 'missing node'}};
+    },
+  });
+  const first = start();
+  first.state('running');
+  const {runId} = first.identity;
+  const node = {runId, path: '/root/Main/Player', properties: ['position']};
+  const cancelled = AbortSignal.abort();
+  assert.equal((await api.get_runtime_tree({runId: 'unknown', depth: -1}, cancelled)).error.code, 'invalid_input');
+  assert.equal((await api.get_runtime_tree({runId: 'unknown'}, cancelled)).error.code, 'cancelled');
+  assert.equal((await api.get_runtime_tree({runId: 'unknown'})).error.code, 'not_found');
+  assert.equal((await api.inspect_runtime_node({...node, properties: ['script']})).error.code, 'invalid_input');
+  assert.deepEqual(observed, []);
+
+  const run = unwrap(api.get_run({runId}));
+  assert.deepEqual(run.observation, {supported: true, ready: true, version: 1});
+  assert.deepEqual(run.interaction, {supported: false, ready: false});
+  assert.deepEqual(unwrap(await api.get_runtime_tree({runId})), {nodes: []});
+  assert.equal((await api.inspect_runtime_node(node)).error.code, 'node_not_found');
+  first.state('stopping');
+  assert.equal((await api.inspect_runtime_node(node)).error.code, 'run_ended');
+  first.exit();
+  assert.equal((await api.get_runtime_tree({runId})).error.code, 'run_ended');
+  for (let index = 0; index < 4; index++) start().exit();
+  assert.equal((await api.get_runtime_tree({runId})).error.code, 'not_found');
+  assert.deepEqual(observed, [runId, runId]);
+});
+
+test('runtime observation reports unsupported for a known run without an observation backend', async () => {
+  const {api, start} = fixture();
+  const run = start();
+  run.state('running');
+  const {runId} = run.identity;
+  assert.deepEqual(unwrap(api.get_run({runId})).observation, {supported: false, ready: false});
+  assert.equal((await api.get_runtime_tree({runId})).error.code, 'unsupported');
 });

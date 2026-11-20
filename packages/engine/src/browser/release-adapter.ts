@@ -51,7 +51,9 @@ function asset(value: unknown): asserts value is AssetIntegrity & {bytes: number
 }
 function abi(value: unknown): asserts value is RuntimeAbi {
   if (!record(value) || value.protocolVersion !== WORKER_PROTOCOL || value.host !== 1 || value.audio !== 1 || value.presentation !== 1 ||
-      value.lifecycle !== undefined && value.lifecycle !== 1 || Object.keys(value).some(key => !['protocolVersion', 'host', 'audio', 'presentation', 'lifecycle'].includes(key)))
+      value.lifecycle !== undefined && value.lifecycle !== 1 ||
+      value.observation !== undefined && (value.observation !== 1 || value.lifecycle !== 1) ||
+      Object.keys(value).some(key => !['protocolVersion', 'host', 'audio', 'presentation', 'lifecycle', 'observation'].includes(key)))
     fail('E_WORKER_RELEASE_ABI', 'Unsupported Worker runtime ABI');
 }
 function root(value: string): URL {

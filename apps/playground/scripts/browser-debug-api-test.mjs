@@ -1,13 +1,19 @@
 import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
+import {mkdir,writeFile} from 'node:fs/promises';
 import path from 'node:path';
 import {defaultTestDirectory,launchBrowser,withAcceptanceContext} from './browser-harness.mjs';
 import {createStaticServer} from './serve.mjs';
 import {runReportedBrowserTest,listenBrowserTestServer as listen,closeBrowserTestServer as close} from './browser-contract-report.mjs';
 
-const scope='actual-product-debug-api';
+const selectedCase=process.env.PLAYGROUND_DEBUG_API_CASE;
+const scope=selectedCase?'actual-product-debug-api-case':'actual-product-debug-api';
+const observationCase='runtime-tree-node-and-png';
 await runReportedBrowserTest({scope,reportFile:process.env.PLAYGROUND_DEBUG_API_REPORT,run:async test=>{
  const directory=path.resolve(defaultTestDirectory());
  const {site,release,candidateId,descriptorHash}=await test.preflight(directory,{worker:true});
+ const observationDeclared=release.runtimeAbi?.observation===1;
+ if(selectedCase===observationCase&&!observationDeclared)throw Error('E_TEST_RUNTIME_OBSERVATION_REQUIRED: this case requires runtime observation ABI 1');
  const prefix=site.publicAssets?'/releases/'+candidateId+'/':'/';
  const options={urlPrefix:prefix,publicImmutable:site.publicAssets===true};
  const editor=createStaticServer(directory,options),preview=createStaticServer(directory,options);
@@ -168,6 +174,7 @@ export async function start(){
  test.defer(()=>browser.close());
  test.stage='run';
  async function browserCase(name,run,{waitForInitialRun=true,deviceScaleFactor=1,presentationBackend='direct'}={}){
+  if(selectedCase&&name!==selectedCase)return;
   await test.step(name,async()=>{
    const context=await browser.newContext({viewport:{width:1536,height:1000},deviceScaleFactor});
    const errors=[];
@@ -209,7 +216,7 @@ export async function start(){
   assert(await page.locator('#debug-docs #agent-replay').isVisible());
   assert.deepEqual(await page.evaluate(()=>Object.getOwnPropertyNames(window).filter(key=>key.startsWith('godotPlayground'))),['godotPlayground']);
   assert.deepEqual((await page.evaluate(()=>Object.keys(window.godotPlayground))).sort(),[
-   'check','game_input','get_build','get_diagnostics','get_project_context','get_run','play','read_run_events','schemaVersion',
+   'check','game_input','get_build','get_diagnostics','get_project_context','get_run','get_runtime_tree','inspect_runtime_node','play','read_run_events','schemaVersion',
    'screenshot','stop','wait_for_event','wait_for_input',
   ]);
   const example=await page.locator('#debug-api-example').textContent();
@@ -623,6 +630,164 @@ export async function start(){
   return {runId,newRunId,input:pressed,click,renderSerials:[initialSerial,after.renderSerial,before.renderSerial],exit};
  },{deviceScaleFactor:2});
 
+ if(!observationDeclared)await browserCase('legacy-observation-unsupported',async page=>{
+  const {run}=await read(page);
+  assert.deepEqual(run.observation,{supported:false,ready:false});
+  assert.equal(run.interaction.ready,true);
+  assert.equal((await invoke(page,'get_runtime_tree',{runId:run.runId})).error.code,'unsupported');
+  await page.locator('#debug-tab').click();
+  await page.locator('#debug-open-docs').click();
+  await page.locator('#agent-playtest').click();
+  await page.waitForFunction(()=>!document.querySelector('#agent-playtest')?.disabled,null,{timeout});
+  assert.equal(await page.locator('#agent-status').textContent(),'已验证画面变化并取得退出回执');
+  assert.deepEqual(await page.locator('#agent-observations figcaption').allTextContents(),['输入前','输入后']);
+  return {observation:run.observation,legacyPlaytest:true};
+ });
+
+ if(observationDeclared)await browserCase(observationCase, async page=>{
+  await page.locator('#debug-tab').click();
+  await page.locator('#debug-open-docs').click();
+  await page.locator('#agent-playtest').click();
+  await page.waitForFunction(()=>!document.querySelector('#agent-playtest')?.disabled,null,{timeout});
+  assert.equal(await page.locator('#agent-status').textContent(),'已验证画面变化并取得退出回执');
+  const captions=await page.locator('#agent-observations figcaption').allTextContents();
+  assert.equal(captions.length,2);
+  assert.match(captions[0],/Player x=64 · 状态 #\d+ · 画面 #\d+/);
+  assert.match(captions[1],/Player x=128 · 状态 #\d+ · 画面 #\d+/);
+  const trace=await page.locator('#agent-trace').textContent();
+  assert.match(trace,/"name": "inspect_runtime_node"/);
+  assert.match(trace,/"evidence": "host-report"/);
+
+  const play=async()=>{
+   const {attemptId}=unwrap(await invoke(page,'play',await projectInput(page)));
+   return (await waitForRun(page,'试玩示例已就绪',attemptId)).run;
+  };
+  const run=await play();
+  const {runId}=run;
+  assert.deepEqual(run.observation,{supported:true,ready:true,version:1});
+  assert.equal(run.release.candidateId,candidateId);
+  assert.equal(run.interaction.ready,true);
+  const identity=Object.fromEntries(['runId','revision','buildKey','generation','documentId','workerId','runConfigurationHash'].map(field=>[field,run[field]]));
+  const matched=sample=>{
+   assert.deepEqual(sample.run,identity);
+   assert.equal(sample.releaseId,release.id);
+   assert.equal(typeof sample.requestId,'string');
+   assert(sample.requestId.length>0);
+   return sample;
+  };
+  const tree=matched(unwrap(await invoke(page,'get_runtime_tree',{runId,depth:3})));
+  const player=tree.nodes.find(node=>node.name==='Player');
+  assert(player);
+  assert.equal(player.type,'Node2D');
+  assert.match(player.path,/^\/root\/.+\/Player$/);
+  assert(tree.nodes.some(node=>node.path===player.parentPath));
+  assert.equal(tree.truncated,false);
+  const query={runId,path:player.path,properties:['position','visible','rotation']};
+  const inspect=async()=>matched(unwrap(await invoke(page,'inspect_runtime_node',query)));
+  const position=sample=>sample.properties.find(property=>property.name==='position')?.value;
+  const before=await inspect();
+  assert.deepEqual(before.node,player);
+  assert.deepEqual(position(before),{x:64,y:256});
+  assert.equal(before.properties.find(property=>property.name==='visible')?.value,true);
+  assert.equal(before.properties.find(property=>property.name==='rotation')?.value,0);
+  assert(before.sampleSeq>tree.sampleSeq);
+
+  const capture=async()=>{
+   const frame=matched(unwrap(await page.evaluate(async runId=>{
+    const captured=await window.godotPlayground.screenshot({runId});
+    if(!captured.ok)return captured;
+    const {bytes,...frame}=captured.result;
+    const image=await createImageBitmap(new Blob([bytes],{type:frame.mimeType}));
+    try{
+     const canvas=new OffscreenCanvas(image.width,image.height),ctx=canvas.getContext('2d');
+     ctx.drawImage(image,0,0);
+     const sourceY=256*frame.sourceHeight/640;
+     const samples=[64,128].map(x=>{
+      const sourceX=x*frame.sourceWidth/960;
+      const pixelX=Math.floor(sourceX*image.width/frame.sourceWidth);
+      const pixelY=Math.floor(sourceY*image.height/frame.sourceHeight);
+      return {sourceX,sourceY,pixelX,pixelY,rgba:Array.from(ctx.getImageData(pixelX,pixelY,1,1).data)};
+     });
+     return {ok:true,result:{...frame,decodedWidth:image.width,decodedHeight:image.height,samples,bytes:Array.from(new Uint8Array(bytes))}};
+    }finally{image.close();}
+   },runId)));
+   const {bytes,...metadata}=frame;
+   const png=Buffer.from(bytes);
+   assert.equal(frame.mimeType,'image/png');
+   assert.equal(png.subarray(0,8).toString('hex'),'89504e470d0a1a0a');
+   assert.equal(frame.decodedWidth,frame.width);
+   assert.equal(frame.decodedHeight,frame.height);
+   assert(frame.width<frame.sourceWidth||frame.height<frame.sourceHeight,'high-DPR capture exercised PNG downscaling');
+   return {png,metadata:{...metadata,sha256:createHash('sha256').update(png).digest('hex'),byteLength:png.length}};
+  };
+  const red=[255,0,0,255],white=[255,255,255,255];
+  const pixels=frame=>frame.metadata.samples.map(sample=>sample.rgba);
+  const beforeFrame=await capture();
+  assert.deepEqual(pixels(beforeFrame),[white,red]);
+  const tap=async code=>{
+   const {operationId}=unwrap(await invoke(page,'game_input',{runId,gesture:{kind:'key_tap',code}}));
+   const receipt=unwrap(await invoke(page,'wait_for_input',{runId,operationId}));
+   assert.equal(receipt.operation.status,'dispatched');
+   assert.deepEqual(receipt.operation.run,identity);
+   return receipt.operation;
+  };
+  const move=await tap('ArrowRight');
+  await page.waitForFunction(async query=>{
+   const sample=await window.godotPlayground.inspect_runtime_node(query);
+   return sample.ok&&sample.result.properties.find(property=>property.name==='position')?.value?.x===128;
+  },query,{timeout});
+  const after=await inspect();
+  assert.deepEqual(after.node,before.node);
+  assert.deepEqual(position(after),{x:128,y:256});
+  assert(after.sampleSeq>before.sampleSeq);
+  assert.notEqual(before.requestId,after.requestId);
+  const pixelDeadline=Date.now()+5000;
+  let afterFrame;
+  do { afterFrame=await capture(); }
+  while(pixels(afterFrame)[1][1]!==255&&Date.now()<pixelDeadline);
+  assert.deepEqual(pixels(afterFrame),[red,white]);
+  assert(afterFrame.metadata.renderSerial>beforeFrame.metadata.renderSerial);
+
+  const remove=await tap('ArrowLeft');
+  await page.waitForFunction(async query=>{
+   const sample=await window.godotPlayground.inspect_runtime_node(query);
+   return !sample.ok&&sample.error.code==='node_not_found';
+  },query,{timeout});
+  const removed=await invoke(page,'inspect_runtime_node',query);
+  assert.equal(removed.error.code,'node_not_found');
+  const afterRemoval=matched(unwrap(await invoke(page,'get_runtime_tree',{runId,depth:3})));
+  assert(!afterRemoval.nodes.some(node=>node.path===player.path));
+  assert(afterRemoval.sampleSeq>after.sampleSeq);
+
+  unwrap(await invoke(page,'stop',{runId}));
+  const exit=await waitForExit(page,runId);
+  assert.equal(exit.evidence,'host-report');
+  assert.equal(exit.report.reason,'clean-exit');
+  assert.equal(exit.report.sessionFacts.nativeExit.code,0);
+  const restarted=await play();
+  assert.notEqual(restarted.runId,runId);
+  assert.equal((await invoke(page,'inspect_runtime_node',query)).error.code,'run_ended');
+  const reset=unwrap(await invoke(page,'inspect_runtime_node',{...query,runId:restarted.runId}));
+  assert.equal(reset.run.runId,restarted.runId);
+  assert.deepEqual(position(reset),{x:64,y:256});
+  unwrap(await invoke(page,'stop',{runId:restarted.runId}));
+  const restartedExit=await waitForExit(page,restarted.runId);
+  assert.equal(restartedExit.evidence,'host-report');
+
+  for(const [label,frame] of [['before',beforeFrame],['after',afterFrame]]){
+   if(process.env.PLAYGROUND_DEBUG_API_REPORT){
+    const directory=path.dirname(path.resolve(process.env.PLAYGROUND_DEBUG_API_REPORT));
+    const filename=path.basename(process.env.PLAYGROUND_DEBUG_API_REPORT,'.json')+'.runtime-observation-'+label+'.png';
+    await mkdir(directory,{recursive:true});
+    await writeFile(path.join(directory,filename),frame.png);
+    frame.metadata.png=filename;
+   }
+  }
+  return {candidateId,descriptorHash,releaseId:release.id,run:identity,observation:run.observation,tree:{requestId:tree.requestId,sampleSeq:tree.sampleSeq,player},
+   before,after,beforeFrame:beforeFrame.metadata,afterFrame:afterFrame.metadata,move,remove,removed:removed.error,
+   afterRemoval:{requestId:afterRemoval.requestId,sampleSeq:afterRemoval.sampleSeq},exit,reset,restartedExit};
+ },{deviceScaleFactor:2});
+
  await browserCase('interaction-quit-and-fatal-during-dispatch', async page=>{
   const results=[];
   for(const fatal of [false,true]){
@@ -731,16 +896,18 @@ export function start(ctx: {mount: Node; host: EngineRuntimeHost}) {
     return result;
    };
   });
-  const attemptId=await importProject(page,`import {Callable, Color, ColorRect, InputEvent, InputEventKey, JavaScriptBridge, Key, Node, RenderingServer, Vector2, print} from 'godot';
+  const attemptId=await importProject(page,`import {Callable, Color, ColorRect, InputEvent, InputEventKey, JavaScriptBridge, Key, Node, Node2D, RenderingServer, Vector2, print} from 'godot';
 export function start(ctx: {mount: Node}) {
   const root=ctx.mount.get_window()!;
   root.transparent_bg=true;
   const rect=new ColorRect(); rect.color=new Color(1,0,0,1); rect.size=new Vector2(4096,4096); ctx.mount.add_child(rect);
+  const probe=new Node2D(); probe.set_name('StateProbe'); probe.position=new Vector2(12,34); ctx.mount.add_child(probe);
   const input=Callable.create((event: InputEvent)=>{
     if (!(event instanceof InputEventKey) || !event.pressed) return;
     if (event.physical_keycode===Key.KEY_SPACE) {rect.hide();print('INTERACTION_ALPHA_HIDDEN');}
     if (event.physical_keycode===Key.KEY_RIGHT) {
       RenderingServer.render_loop_enabled=false;
+      probe.position=new Vector2(23,34);
       print('INTERACTION_RENDER_PAUSED');
     }
     if (event.physical_keycode===Key.KEY_LEFT) {
@@ -772,8 +939,24 @@ export function start(ctx: {mount: Node}) {
   await tap('Space');
   await page.waitForFunction(id=>window.godotPlayground.read_run_events({runId:id,limit:100}).result.items.some(x=>x.event.text?.includes('INTERACTION_ALPHA_HIDDEN')),runId,{timeout});
   assert.deepEqual(await rgba(),[0,0,0,0]);
+  let probeQuery,beforePause,whilePaused;
+  if(observationDeclared){
+   const tree=unwrap(await invoke(page,'get_runtime_tree',{runId,depth:4}));
+   const probe=tree.nodes.find(node=>node.name==='StateProbe');
+   assert(probe);
+   probeQuery={runId,path:probe.path,properties:['position']};
+   beforePause=unwrap(await invoke(page,'inspect_runtime_node',probeQuery));
+   assert.deepEqual(beforePause.properties,[{name:'position',value:{x:12,y:34}}]);
+  }
   await tap('ArrowRight');
   await page.waitForFunction(id=>window.godotPlayground.read_run_events({runId:id,limit:100}).result.items.some(x=>x.event.text?.includes('INTERACTION_RENDER_PAUSED')),runId,{timeout});
+  if(probeQuery){
+   whilePaused=unwrap(await invoke(page,'inspect_runtime_node',probeQuery));
+   assert.deepEqual(whilePaused.run,beforePause.run);
+   assert.equal(whilePaused.node.instanceId,beforePause.node.instanceId);
+   assert(whilePaused.sampleSeq>beforePause.sampleSeq);
+   assert.deepEqual(whilePaused.properties,[{name:'position',value:{x:23,y:34}}]);
+  }
   const duringLoss=await page.evaluate(async runId=>{
    const api=window.godotPlayground;
    const capture=api.screenshot({runId,timeoutMs:7000});
@@ -786,8 +969,9 @@ export function start(ctx: {mount: Node}) {
   const exit=await waitForExit(page,runId);
   assert.equal(exit.evidence,'host-report');
   assert.match(exit.report.diagnostic?.message??'',/E_WORKER_WEBGL_CONTEXT_LOST/);
-  return {runId,capture:duringLoss.capture.error.code,exit};
+  return {runId,beforePause,whilePaused,capture:duringLoss.capture.error.code,exit};
  });
 
- return withAcceptanceContext({status:'passed',scope,engineExecuted,cases,failures,profile:release.runtimeProfile,releaseId:release.id,descriptorHash,candidateId},{directory,browser});
+ if(selectedCase&&!test.steps.some(step=>step.name===selectedCase))throw Error('Unknown Playground debug API case: '+selectedCase);
+ return withAcceptanceContext({status:'passed',scope,engineExecuted,cases,failures,...(selectedCase?{selectedCase}:{}),profile:release.runtimeProfile,releaseId:release.id,descriptorHash,candidateId},{directory,browser});
 }});

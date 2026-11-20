@@ -14,8 +14,17 @@ import {
   type GameInput, type GameScreenshot, type InputEvidence, type InputReceipt, type InteractionError,
   type InteractionResult, type ScreenshotInput, type WaitForInput,
 } from './worker-interaction.js';
+import {
+  RUNTIME_OBSERVATION_VERSION, observationError, observationOk, prepareRuntimeObservation, readRuntimeObservationReply,
+  supportsWorkerObservation, type ObservationResult, type RuntimeNodeInput, type RuntimeNodeSnapshot,
+  type RuntimeObservationQuery, type RuntimeObservationState, type RuntimeTreeInput, type RuntimeTreeSnapshot,
+} from './worker-runtime-observation.js';
 export {supportsWorkerInteraction} from './worker-interaction.js';
 export type {GameGesture, GameInput, GameScreenshot, InputReceipt, InteractionResult, ScreenshotInput, WaitForInput} from './worker-interaction.js';
+export {prepareRuntimeObservation, supportsWorkerObservation} from './worker-runtime-observation.js';
+export type {ObservationError, ObservationResult, PreparedRuntimeObservation, RuntimeNodeInput, RuntimeNodeSnapshot,
+  RuntimeObservationState, RuntimeObservedNode, RuntimeObservedProperty, RuntimePropertySample,
+  RuntimeTreeInput, RuntimeTreeSnapshot} from './worker-runtime-observation.js';
 const now = () => performance.now();
 const MAX_WAIT_MS = 60_000;
 const MAX_RECEIPTS = 32;
@@ -32,6 +41,13 @@ interface CaptureRequest {
   id: string;
   deadline: number;
   finish(result: InteractionResult<GameScreenshot>): void;
+}
+type ObservationSnapshot = RuntimeTreeSnapshot | RuntimeNodeSnapshot;
+interface ObservationRequest {
+  id: string;
+  deadline: number;
+  query: RuntimeObservationQuery;
+  finish(result: ObservationResult<ObservationSnapshot>): boolean;
 }
 
 export interface WorkerPreviewRunnerOptions {
@@ -68,6 +84,8 @@ interface Session {
   commands:WorkerProjectCommandCredits;commandSequence:number;
   interactionVersion?: number;
   capture?: CaptureRequest;
+  observation?: ObservationRequest;
+  observationSampleSeq: number;
   input?: InputRecord;
   inputSequence: number;
   failure?: ReturnType<typeof previewDiagnostic>;
@@ -86,6 +104,7 @@ export class WorkerPreviewRunner {
   private readonly listeners = new Set<(event: WorkerRunnerEvent) => void>();
   private readonly inputRecords = new Map<string, InputRecord>();
   private readonly interactionVersions = new Map<string, boolean | null>();
+  private readonly observationVersions = new Map<string, boolean | null>();
   private inputWaiters = 0;
   private active?: Session;
   private sequence = 0;
@@ -133,6 +152,7 @@ export class WorkerPreviewRunner {
     if (s.report) return s.report;
     s.report = report; s.settled = true; ++s.epoch;
     s.capture?.finish(interactionError('run_ended'));
+    s.observation?.finish(observationError('run_ended'));
     if (s.input) this.settleInput(s.input, {down: 'unconfirmed', up: 'unconfirmed', reason: 'run_ended'});
     s.projectQueue.length=0;s.projectBytes=0;s.commands.clear();
     clearTimeout(s.timer); clearInterval(s.watchdog);
@@ -185,15 +205,32 @@ export class WorkerPreviewRunner {
     const s: Session = { identity, frame, port: channel.port1, peer: channel.port2, state: 'loading-frame', epoch: 0, settled: false,
       lastWorkerBeat: now(), beatSequence: -1, resumeEpoch: 0, logs: new WorkerLogBudget(frozen.configuration.budgets), projectQueue: [], projectBytes: 0,
       commands:new WorkerProjectCommandCredits(frozen.configuration.budgets.maxProjectEvents!,frozen.configuration.budgets.maxProjectBytes!),commandSequence:0,
-      inputSequence: 0, resolveRun, rejectRun, exit, resolveExit };
+      inputSequence: 0, observationSampleSeq: 0, resolveRun, rejectRun, exit, resolveExit };
     this.active = s;
     this.interactionVersions.set(identity.runId, null);
     if (this.interactionVersions.size > MAX_RECEIPTS) this.interactionVersions.delete(this.interactionVersions.keys().next().value!);
+    this.observationVersions.set(identity.runId, null);
+    if (this.observationVersions.size > MAX_RECEIPTS) this.observationVersions.delete(this.observationVersions.keys().next().value!);
     s.onVisibility=()=>{if(this.live(s)&&this.options.container.ownerDocument.visibilityState!=='hidden')s.lastWorkerBeat=now();};
     this.options.container.ownerDocument.addEventListener?.('visibilitychange',s.onVisibility);
     s.port.onmessage = event => {
       if (!this.live(s) || !isWorkerEnvelope(event.data) || !sameWorkerRun(event.data, identity)) return;
       const m: any = event.data;
+      if (m.type === 'runtime-observation-result') {
+        const current = s.observation;
+        if (!current || m.requestId !== current.id) return;
+        if (s.state !== 'running') { current.finish(observationError('run_ended')); return; }
+        if (interactionNow() >= current.deadline) { current.finish(observationError('timeout')); return; }
+        const response = readRuntimeObservationReply(current.query, m);
+        if (!response.ok) { current.finish(response); return; }
+        if (response.result.sampleSeq <= s.observationSampleSeq) {
+          current.finish(observationError('observation_failed'));
+          return;
+        }
+        s.observationSampleSeq = response.result.sampleSeq;
+        current.finish(observationOk({...response.result, requestId: current.id, run: {...s.identity}, releaseId: this.release.releaseId}));
+        return;
+      }
       if (m.type === 'capture-result' && s.capture && m.requestId === s.capture.id) {
         const current = s.capture;
         s.capture = undefined;
@@ -234,6 +271,12 @@ export class WorkerPreviewRunner {
       } else if (m.type === 'phase' && RUN_PHASES.includes(s.state as typeof RUN_PHASES[number])) {
         if (RUN_PHASES.indexOf(m.phase) !== RUN_PHASES.indexOf(s.state as typeof RUN_PHASES[number]) + 1) return;
         if (m.phase === 'running') {
+          const observationVersion = supportsWorkerObservation(this.release) ? RUNTIME_OBSERVATION_VERSION : undefined;
+          if (m.observationVersion !== observationVersion) {
+            this.beginStop(s, 'runtime-failed', 'Runtime observation ABI does not match the release');
+            return;
+          }
+          this.observationVersions.set(identity.runId, observationVersion !== undefined);
           if (m.interactionVersion === INTERACTION_VERSION && frozen.configuration.presentationBackend === 'direct')
             s.interactionVersion = INTERACTION_VERSION;
           this.interactionVersions.set(identity.runId, s.interactionVersion === INTERACTION_VERSION);
@@ -294,6 +337,7 @@ export class WorkerPreviewRunner {
     if (!this.live(s) || s.state === 'stopping') return;
     if(cause!=='stopped')s.failure=previewDiagnostic(detail??cause);
     const before = s.state;
+    s.observation?.finish(observationError('run_ended'));
     if (!this.transition(s, 'stopping')) return;
     s.capture?.finish(interactionError('run_ended'));
     if (before === 'loading-frame' || before === 'handshaking') { this.finishLocal(s, 'forced-frame-disposal', 'Cancelled before host connection'); return; }
@@ -317,6 +361,58 @@ export class WorkerPreviewRunner {
   }
   interactionState(runId: string): {supported: boolean | null; ready: boolean} {
     return {supported: this.interactionVersions.get(runId) ?? null, ready: this.interactionSupport(runId) === 'available'};
+  }
+  private observationSupport(runId: string): 'available' | 'not_ready' | 'unsupported' | 'run_ended' | 'not_found' {
+    const session = this.active;
+    if (session?.identity.runId !== runId) return this.observationVersions.has(runId) ? 'run_ended' : 'not_found';
+    if (session.state === 'stopping' || session.settled) return 'run_ended';
+    if (session.state !== 'running') return 'not_ready';
+    return this.observationVersions.get(runId) === true ? 'available' : 'unsupported';
+  }
+  observationState(runId: string): RuntimeObservationState {
+    const supported = this.observationVersions.get(runId) ?? null;
+    return {supported, ready: this.observationSupport(runId) === 'available',
+      ...(supported ? {version: RUNTIME_OBSERVATION_VERSION} : {})};
+  }
+  getRuntimeTree(input: RuntimeTreeInput, signal?: AbortSignal): Promise<ObservationResult<RuntimeTreeSnapshot>> {
+    return this.observeRuntime('tree', input, signal);
+  }
+  inspectRuntimeNode(input: RuntimeNodeInput, signal?: AbortSignal): Promise<ObservationResult<RuntimeNodeSnapshot>> {
+    return this.observeRuntime('node', input, signal);
+  }
+  private observeRuntime(kind: 'tree', input: RuntimeTreeInput, signal?: AbortSignal): Promise<ObservationResult<RuntimeTreeSnapshot>>;
+  private observeRuntime(kind: 'node', input: RuntimeNodeInput, signal?: AbortSignal): Promise<ObservationResult<RuntimeNodeSnapshot>>;
+  private observeRuntime(kind: RuntimeObservationQuery['kind'], input: RuntimeTreeInput | RuntimeNodeInput, signal?: AbortSignal):
+    Promise<ObservationResult<ObservationSnapshot>> {
+    const prepared = prepareRuntimeObservation(kind, input, signal);
+    if (!prepared.ok) return Promise.resolve(prepared);
+    const {runId, query, timeoutMs} = prepared.result;
+    const support = this.observationSupport(runId);
+    if (support !== 'available') return Promise.resolve(observationError(support));
+    const session = this.active!;
+    if (session.observation) return Promise.resolve(observationError('busy'));
+    const id = crypto.randomUUID(), deadline = interactionNow() + timeoutMs;
+    const envelope = {...session.identity, protocolVersion: WORKER_PROTOCOL, requestId: id};
+    return new Promise(resolve => {
+      const finish = (result: ObservationResult<ObservationSnapshot>): boolean => {
+        if (session.observation?.id !== id) return false;
+        session.observation = undefined;
+        clearTimeout(timer);
+        if (signal) EventTarget.prototype.removeEventListener.call(signal, 'abort', onAbort);
+        resolve(result);
+        return true;
+      };
+      const onAbort = () => {
+        if (!finish(observationError('cancelled'))) return;
+        try { session.port.postMessage({...envelope, type: 'runtime-observation-cancel'}); }
+        catch { /* Host and Worker still retire the expired request independently. */ }
+      };
+      const timer = setTimeout(() => finish(observationError('timeout')), timeoutMs);
+      session.observation = {id, deadline, query, finish};
+      if (signal) EventTarget.prototype.addEventListener.call(signal, 'abort', onAbort, {once: true});
+      try { session.port.postMessage({...envelope, type: 'runtime-observation-request', query, deadline}); }
+      catch { finish(observationError('observation_failed')); }
+    });
   }
   screenshot(input: ScreenshotInput, signal?: AbortSignal): Promise<InteractionResult<GameScreenshot>> {
     const {runId, timeoutMs = 5000} = input ?? {};

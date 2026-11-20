@@ -15,6 +15,10 @@ import {assertArtifactSet,type ArtifactSet} from '../../artifact-set.js';
 import {assertArtifactSetTarget,preloadArtifactSet} from '../artifact-input.js';
 import {createWorkerCapture, createWorkerGesture} from './worker-observation.js';
 import {INTERACTION_VERSION, readGesture, supportsWorkerInteraction, undispatched, validInteractionId, validInteractionSequence} from './worker-interaction.js';
+import {createNativeRuntimeSampler, installRuntimeObservationHooks, observationError,
+  RUNTIME_OBSERVATION_VERSION, supportsWorkerObservation, type ObservationError} from './worker-runtime-observation.js';
+import {createWorkerObservationRequests, readRuntimeObservationRequest,
+  type RuntimeObservationReply} from './worker-runtime-observation-transport.js';
 
 interface RuntimeScope {
   __godotjsRuntimeHost?: RuntimeBinding;
@@ -64,6 +68,19 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
   const post = (fields: object, transfer: Transferable[] = []) => control.postMessage({ ...identity, protocolVersion: WORKER_PROTOCOL, ...fields }, transfer);
   const dataPost = (fields: object, transfer: Transferable[] = []) => data.postMessage({ ...identity, protocolVersion: WORKER_PROTOCOL, ...fields }, transfer);
   const supportsInteraction = supportsWorkerInteraction(boot.release, boot.configuration.presentationBackend, scope.navigator?.userAgent ?? '');
+  const declaresObservation = supportsWorkerObservation(boot.release);
+  let sampleNativeObservation: ReturnType<typeof createNativeRuntimeSampler> | undefined;
+  let removeObservationHooks: (() => void) | undefined;
+  const observationRejection = (): ObservationError | undefined => !lease.active || stopping || closed || nativeExited ? 'run_ended' :
+    !nativeStarted ? 'not_ready' : sampleNativeObservation ? undefined : 'unsupported';
+  const postObservation = (response: RuntimeObservationReply) => {
+    try { post({type: 'runtime-observation-result', ...response}); }
+    catch { /* A lost observer is retired by the Host deadline or run close. */ }
+  };
+  const observation = createWorkerObservationRequests(query => {
+    const rejection = observationRejection();
+    return rejection ? observationError(rejection) : sampleNativeObservation!(query);
+  }, postObservation);
   let interactionReady = false;
   const interactionRejection = () => !lease.active || stopping || closed || nativeExited ? 'run_ended' :
     !interactionReady || xr?.active || dom?.document.hidden ? 'not_ready' : undefined;
@@ -92,7 +109,8 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
   const assertStarting = () => { lease.assertActive(); if(stopping||closed||nativeExited)throw new DOMException('Worker startup cancelled','AbortError'); };
   const phase = (value: RunPhase) => {
     assertStarting();
-    post({type: 'phase', phase: value, ...(value === 'running' && supportsInteraction ? {interactionVersion: INTERACTION_VERSION} : {})});
+    post({type: 'phase', phase: value, ...(value === 'running' && supportsInteraction ? {interactionVersion: INTERACTION_VERSION} : {}),
+      ...(value === 'running' && sampleNativeObservation ? {observationVersion: RUNTIME_OBSERVATION_VERSION} : {})});
   };
   let presentation: ReturnType<typeof createWorkerPresentation> | undefined;
   let dom: ReturnType<typeof createWorkerDom> | undefined;
@@ -135,6 +153,7 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
   const canCooperativelyClose = () => managedClose&&(nativeStarted||!!(lifecycleGate&&binding?.snapshotSummary().entries.length));
   const release = () => {
     if (closed) return; closed = true; lease.cancel(); lifecycleGate?.dispose();binding?.settle();uninstallHost?.();clearInterval(heartbeat);
+    removeObservationHooks?.();
     presentation?.dispose(); dom?.dispose(); browser?.dispose(); xr?.dispose(); loaded?.dispose();
     pendingHostCommands.clear();pendingCleanupHostCommands.clear();
     scope.removeEventListener('error', onError); scope.removeEventListener('unhandledrejection', onRejection);
@@ -202,6 +221,7 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
     stopping=true;
     capture.stop();
     const attempt=(cleanup:()=>void)=>{try{cleanup();}catch(error){try{fatal(error);}catch{/* A lost diagnostic channel cannot block the remaining cleanup. */}}};
+    attempt(()=>observation.stop());
     if(canCooperativelyClose()){
       attempt(()=>binding?.beginClose(reason));attempt(()=>dom?.revokeInput());attempt(()=>audio?.beginDrain());
       attempt(()=>browser?.beginDrain?.());attempt(()=>presentation?.setVisible(false));attempt(()=>lifecycleGate?.beginClose(reason));
@@ -233,6 +253,19 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
   data.onmessage = event => {
     if (!isWorkerEnvelope(event.data) || !sameWorkerRun(event.data, identity) || closed) return;
     const m: any = event.data;
+    if (m.type === 'runtime-observation-request' || m.type === 'runtime-observation-cancel') {
+      if (validInteractionId(m.requestId)) {
+        if (m.type === 'runtime-observation-cancel') observation.cancel(m.requestId);
+        else {
+          const request = readRuntimeObservationRequest(m);
+          const rejection = observationRejection();
+          if (request && !rejection) observation.request(request);
+          else postObservation({requestId: m.requestId, result: observationError(!request ? 'invalid_input' : rejection!)});
+        }
+      }
+      if (Number.isSafeInteger(m.dataSequence)) acknowledgeData(m.dataSequence);
+      return;
+    }
     const rejection = m.type === 'capture-request' || m.type === 'input-request' ? interactionRejection() : undefined;
     if (rejection) {
       if (m.type === 'capture-request' && validInteractionId(m.requestId)) post({type: 'capture-result', requestId: m.requestId, error: rejection});
@@ -378,6 +411,7 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
         nativeExited = true;
         gestures.exit();
         capture.stop();
+        observation.stop();
         post({type: 'native-exit', code, memory: metrics(), runtimeSummary: binding?.snapshotSummary()});
         release(); scope.close?.();
       },
@@ -388,6 +422,10 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
     config.getModuleConfig = function (...args: unknown[]) {
       const value = original.apply(this, args);
       module = value; installPresentationHooks(value, presentation!, supportsInteraction ? capture.frame : undefined);
+      if (declaresObservation) {
+        removeObservationHooks?.();
+        removeObservationHooks = installRuntimeObservationHooks(value, observation.observe);
+      }
       value.onRuntimeInitialized = (() => { const before = value.onRuntimeInitialized; return function (this: unknown, ...values: unknown[]) { if (typeof before === 'function') before.apply(this, values); }; })();
       return value;
     };
@@ -398,6 +436,10 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
     phase('initializing'); await engine.init(); assertStarting();
     module = (engine as any).rtenv ?? module;
     if(managedClose&&typeof module?._godotjs_release_exit!=='function')throw Error('E_NATIVE_LIFECYCLE_ABI: native pre-exit export is missing');
+    if (declaresObservation) {
+      if (!module || !removeObservationHooks) throw Error('E_RUNTIME_OBSERVATION_ABI');
+      sampleNativeObservation = createNativeRuntimeSampler(module);
+    }
     phase('starting'); await engine.start({ args: ['--main-pack', '/application.pck', '--rendering-method', 'gl_compatibility'] }); assertStarting();
     nativeStarted=true;
     if(managedClose&&!lifecycleGate)throw Error('E_NATIVE_LIFECYCLE_ABI: matching native hook was not installed');

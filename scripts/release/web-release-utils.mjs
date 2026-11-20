@@ -15,6 +15,32 @@ export function canonical(value) {
   return JSON.stringify(value);
 }
 export function fail(code, message) { throw Object.assign(new Error(`${code}: ${message}`), { code }); }
+export const OBSERVATION_READER_SOURCE = 'bridge/jsb_runtime_observation.cpp';
+export const OBSERVATION_SOURCE_PATHS = [
+  OBSERVATION_READER_SOURCE,
+  'bridge/jsb_runtime_observation.h',
+  'SCsub',
+];
+export const OBSERVATION_EXPORTS = [
+  '_godotjs_runtime_observation_abi',
+  '_godotjs_runtime_observation_buffer',
+  '_godotjs_runtime_observation_sample',
+];
+
+export function assertRuntimeObservationBuildProof(report, wasmSha256 = report.template?.assets?.find(asset => asset.path === 'godot.wasm')?.sha256) {
+  const proof = report.runtimeObservation;
+  if (report.runtimeAbi?.observation === undefined && proof === undefined) return;
+  const hash = /^[a-f0-9]{64}$/;
+  if (report.runtimeAbi?.observation !== 1 || report.runtimeAbi?.lifecycle !== 1 || proof?.abi !== 1 ||
+      !hash.test(proof.wasmSha256) || proof.wasmSha256 !== wasmSha256 ||
+      canonical(proof.exports) !== canonical(OBSERVATION_EXPORTS) ||
+      !report.source?.inputs || digest(canonical(report.source.inputs)) !== report.source.snapshotHash ||
+      Object.keys(proof.sources ?? {}).length !== OBSERVATION_SOURCE_PATHS.length ||
+      OBSERVATION_SOURCE_PATHS.some(path => !hash.test(proof.sources[path]) || proof.sources[path] !== report.source.inputs[path])) {
+    throw Error('E_RUNTIME_OBSERVATION_BUILD_PROOF');
+  }
+}
+
 /** Ordered checked patches may compose on one source file. Only the last
  * output is in the compiled snapshot; every intermediate edge must connect. */
 export function assertSourcePatchChains(report) {
@@ -134,6 +160,8 @@ export async function inspectRelease(directory, { requireCertified = false } = {
   if (attestation.schemaVersion !== 1 || attestation.kind !== 'godot-js-web-release-attestation') fail('E_RELEASE_ATTESTATION', 'Unsupported release attestation');
   if (digest(canonical(attestation.recipe)) !== attestation.recipeSha256) fail('E_RELEASE_RECIPE', 'Attestation recipe was changed');
   assertSourcePatchChains(attestation);
+  const wasm = descriptor.files.find(file => file.kind === 'engine-wasm');
+  assertRuntimeObservationBuildProof(attestation, wasm?.decodedSha256 ?? wasm?.sha256);
   if (descriptor.sourceCertified) {
     if (attestation.status !== 'built') fail('E_RELEASE_SOURCE', 'Source certification requires an actual successful build');
     assertCommit(attestation.source?.commit, 'GodotJS commit'); assertHash(attestation.source?.snapshotHash, 'GodotJS snapshot');

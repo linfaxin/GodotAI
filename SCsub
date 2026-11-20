@@ -589,6 +589,14 @@ if is_defined("JSB_WITH_WEB"):
 
     env_jsb.add_source_files(module_obj, "impl/web/*.cpp")
 
+    if not env["threads"] and not env["dlink_enabled"]:
+        # KEEPALIVE retains symbols only after the linker extracts their archive member.
+        env["EXPORTED_FUNCTIONS"] += [
+            "_godotjs_runtime_observation_abi",
+            "_godotjs_runtime_observation_buffer",
+            "_godotjs_runtime_observation_sample",
+        ]
+
     # this script is compiled from impl/web/bridge typescript source
     env.AddJSPre([ "impl/web/js/jsbb.impl.js" ])
     env.AddJSLibraries([ "impl/web/js/library_godotjs_jsbi.js" ])

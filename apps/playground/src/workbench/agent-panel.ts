@@ -1,9 +1,118 @@
-import type {PlaygroundApiCall, createPlaygroundApi} from '../playground-api';
+import type {GameScreenshot} from '@godot-js/engine/browser/dedicated/worker-runner';
+import type {PlaygroundApi, PlaygroundApiCall, createPlaygroundApi} from '../playground-api';
+import {INTERACTION_DEMO_PLAYER} from '../interaction-demo';
 
 interface PlaytestActions {
   unavailable(): string | undefined;
+  supportsRuntimeObservation(): boolean;
   open(): Promise<string>;
   cancelLaunch(attemptId: string): void;
+}
+
+type CapturedPng = {png: Blob; frame: GameScreenshot};
+
+async function readPixels(png: Blob, points: readonly (readonly [number, number])[]) {
+  const image = await createImageBitmap(png);
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = points.length;
+    canvas.height = 1;
+    const context = canvas.getContext('2d')!;
+    points.forEach(([x, y], index) => context.drawImage(image, x, y, 1, 1, index, 0, 1, 1));
+    const colors = context.getImageData(0, 0, points.length, 1).data;
+    return points.map((_, index) => colors.slice(index * 4, index * 4 + 4));
+  } finally { image.close(); }
+}
+
+function matchesColor(color: Uint8ClampedArray, red: number, green: number, blue: number) {
+  return color[0] === red && color[1] === green && color[2] === blue && color[3] === 255;
+}
+
+function untilDeadline(message: string) {
+  const deadline = performance.now() + 5000;
+  return () => {
+    const milliseconds = Math.ceil(deadline - performance.now());
+    if (milliseconds < 1) throw Error(message);
+    return milliseconds;
+  };
+}
+
+async function collectPlaytest(api: PlaygroundApi, runId: string, signal: AbortSignal, status: HTMLElement, observePlayer: boolean) {
+  const capture = async (timeoutMs = 5000): Promise<CapturedPng> => {
+    const result = await api.screenshot({runId, timeoutMs}, signal);
+    if (!result.ok) throw Error(result.error.message);
+    const frame = result.result;
+    return {png: new Blob([frame.bytes], {type: frame.mimeType}), frame};
+  };
+  const tap = async (code: 'Space' | 'ArrowRight') => {
+    const input = api.game_input({runId, gesture: {kind: 'key_tap', code}});
+    if (!input.ok) throw Error(input.error.message);
+    const receipt = await api.wait_for_input({runId, operationId: input.result.operationId}, signal);
+    if (!receipt.ok || receipt.result.operation.status !== 'dispatched') throw Error(`${code} 的按下和释放未全部确认分发`);
+  };
+
+  if (!observePlayer) {
+    const readCenter = async ({png, frame}: CapturedPng) => (await readPixels(png, [[frame.width >> 1, frame.height >> 1]]))[0];
+    status.textContent = '正在采集输入前画面';
+    const before = await capture();
+    if (!matchesColor(await readCenter(before), 255, 0, 0)) throw Error('输入前画面未显示示例的红色背景');
+    await tap('Space');
+    status.textContent = '正在观察输入后画面';
+    const remaining = untilDeadline('未观察到示例的绿色背景');
+    let after: CapturedPng;
+    do { after = await capture(remaining()); } while (!matchesColor(await readCenter(after), 0, 255, 0));
+    return [{caption: '输入前', png: before.png}, {caption: '输入后', png: after.png}];
+  }
+
+  const {name, startX, endX, y, viewportWidth, viewportHeight} = INTERACTION_DEMO_PLAYER;
+  status.textContent = '正在读取运行时节点';
+  const tree = await api.get_runtime_tree({runId, depth: 3}, signal);
+  if (!tree.ok) throw Error(tree.error.message);
+  const player = tree.result.nodes.find(node => node.name === name && node.type === 'Node2D');
+  if (!player) throw Error('运行时节点树中没有 Player');
+  const inspect = async (timeoutMs = 5000) => {
+    const snapshot = await api.inspect_runtime_node({runId, path: player.path, properties: ['position'], timeoutMs}, signal);
+    if (!snapshot.ok) throw Error(snapshot.error.message);
+    const position = snapshot.result.properties.find(property => property.name === 'position');
+    if (!position || !('value' in position) || typeof position.value !== 'object') throw Error('无法读取 Player 的 position');
+    if (snapshot.result.node.instanceId !== player.instanceId) throw Error('Player 实例已经更换');
+    return {sampleSeq: snapshot.result.sampleSeq, position: position.value};
+  };
+  const readMarker = ({png, frame}: CapturedPng) => {
+    const pngCoordinate = (coordinate: number, viewport: number, source: number, output: number) => {
+      const sourceCoordinate = coordinate * source / viewport;
+      return Math.floor(sourceCoordinate * (output / source));
+    };
+    const py = pngCoordinate(y, viewportHeight, frame.sourceHeight, frame.height);
+    return readPixels(png, [startX, endX].map(x => [pngCoordinate(x, viewportWidth, frame.sourceWidth, frame.width), py]));
+  };
+  const red = (color: Uint8ClampedArray) => matchesColor(color, 255, 0, 0);
+  const white = (color: Uint8ClampedArray) => matchesColor(color, 255, 255, 255);
+
+  const initial = await inspect();
+  if (initial.position.x !== startX || initial.position.y !== y) throw Error('Player 初始位置与示例不符');
+  status.textContent = '正在采集输入前画面';
+  const before = await capture();
+  const [oldPixel, newPixel] = await readMarker(before);
+  if (!white(oldPixel) || !red(newPixel)) throw Error('输入前画面未显示白色色块位于 Player 初始位置');
+
+  await tap('ArrowRight');
+  status.textContent = '正在验证 Player 的位置和画面';
+  const remaining = untilDeadline('未观察到 Player 完成移动');
+  let moved = await inspect(remaining());
+  while (moved.position.x !== endX || moved.position.y !== y) moved = await inspect(remaining());
+  if (moved.sampleSeq <= initial.sampleSeq) throw Error('Player 位置采样没有更新');
+  let after: CapturedPng;
+  for (;;) {
+    after = await capture(remaining());
+    const [oldPixel, newPixel] = await readMarker(after);
+    if (red(oldPixel) && white(newPixel) && after.frame.renderSerial > before.frame.renderSerial) break;
+  }
+  const frames = [['输入前', before, initial], ['输入后', after, moved]] as const;
+  return frames.map(([label, frame, sample]) => ({
+    caption: `${label} · Player x=${sample.position.x} · 状态 #${sample.sampleSeq} · 画面 #${frame.frame.renderSerial}`,
+    png: frame.png,
+  }));
 }
 
 export function createAgentPanel(playground: ReturnType<typeof createPlaygroundApi>, demo?: PlaytestActions) {
@@ -145,46 +254,13 @@ export function createAgentPanel(playground: ReturnType<typeof createPlaygroundA
         const ready = await api.wait_for_event({attemptId, until: 'running'}, controller.signal);
         target = ready.ok ? ready.result.run?.runId : undefined;
         if (!ready.ok || ready.result.outcome !== 'reached' || !target) throw Error('试玩示例未进入运行状态');
-        const capture = async (timeoutMs = 5000) => {
-          const frame = await api.screenshot({runId: target!, timeoutMs}, controller.signal);
-          if (!frame.ok) throw Error(frame.error.message);
-          return new Blob([frame.result.bytes], {type: frame.result.mimeType});
-        };
-        status.textContent = '正在采集输入前画面';
-        const before = await capture();
-        const input = api.game_input({runId: target, gesture: {kind: 'key_tap', code: 'Space'}});
-        if (!input.ok) throw Error(input.error.message);
-        const receipt = await api.wait_for_input({runId: target, operationId: input.result.operationId}, controller.signal);
-        if (!receipt.ok || receipt.result.operation.status !== 'dispatched') throw Error('Space 的按下和释放未全部确认分发');
-        status.textContent = '正在观察输入后画面';
-        const sample = async (frame: Blob) => {
-          const image = await createImageBitmap(frame);
-          try {
-            const canvas = document.createElement('canvas');
-            canvas.width = canvas.height = 1;
-            const pixel = canvas.getContext('2d')!;
-            pixel.drawImage(image, image.width >> 1, image.height >> 1, 1, 1, 0, 0, 1, 1);
-            const [r, g] = pixel.getImageData(0, 0, 1, 1).data;
-            return {r, g};
-          } finally { image.close(); }
-        };
-        const initial = await sample(before);
-        if (initial.r < 200 || initial.g > 40) throw Error('输入前画面未显示示例的红色背景');
-        const deadline = performance.now() + 5000;
-        let after: Blob;
-        for (;;) {
-          const remaining = Math.ceil(deadline - performance.now());
-          if (remaining < 1) throw Error('未观察到示例的绿色背景');
-          after = await capture(remaining);
-          const color = await sample(after);
-          if (color.g > 200 && color.r < 40) break;
-        }
-        for (const [label, frame] of [['输入前', before], ['输入后', after]] as const) {
+        const samples = await collectPlaytest(api, target, controller.signal, status, demo.supportsRuntimeObservation());
+        for (const sample of samples) {
           const figure = document.createElement('figure'), caption = document.createElement('figcaption');
-          const image = document.createElement('img'), url = URL.createObjectURL(frame);
+          const image = document.createElement('img'), url = URL.createObjectURL(sample.png);
           imageUrls.push(url);
-          caption.textContent = label;
-          image.alt = label + '的游戏画面'; image.src = url;
+          caption.textContent = sample.caption;
+          image.alt = sample.caption + '的游戏画面'; image.src = url;
           figure.append(caption, image); images.append(figure);
         }
         images.hidden = false;
