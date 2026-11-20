@@ -15,6 +15,10 @@ Apply this review standard until the framework explicitly enters stabilization o
 
 Problems that break ordinary development or core execution, corrupt data, or undermine the chosen architecture still need to be addressed promptly.
 
+## Local verification
+
+This repository uses local verification. Continuous integration (CI) is unnecessary for future work. Keep build and test commands runnable locally and leave CI workflows and required CI status checks out of the contribution process. Run the checks relevant to your change and include the results in the PR.
+
 ## Installation
 
 - Clone the source code of [godot](https://github.com/godotengine/godot):
@@ -56,6 +60,8 @@ Run these commands from the GodotJS module directory:
 | `pnpm test` | The existing engine runtime matrix; requires its Godot build environment |
 | `pnpm test:react` | React renderer contracts and build-tool tests |
 | `pnpm test:engine` | Neutral engine and project-tools packages |
+| `pnpm test:project /path/to/godot` | Generate types and run the native smoke project with a local Godot build |
+| `pnpm test:playground` | Playground type checks and tests |
 | `pnpm test:browser:unit` | Bridge, browser SDK, execution identities, release and evidence validators |
 | `pnpm browser:engine:worker` | Build the opt-in complete-engine `proxy-pthread` candidate |
 | `pnpm test:browser:worker --engine-report /path/report.json --out /path/results` | Real isolated HTTPS Worker runtime probe; requires a prepared Web toolchain and browser |
@@ -102,9 +108,11 @@ Before submitting your PR add a [Changeset](https://github.com/changesets/change
 - From the root, run `pnpm run changeset` and follow the CLI instructions
 - You can add a full description of your change in Markdown format
 
-## Pre-release as maintainer
+## Releases
 
-If you want to create a pre-release to test build targets you need to [draft a new release](https://github.com/godotjs/GodotJS/releases/new):
+Run `pnpm release:version` to apply Changesets and update the native version header. Build release targets locally and attach their verified artifacts to the [release draft](https://github.com/godotjs/GodotJS/releases/new) before publishing.
+
+For a pre-release to test build targets:
 
 - Create a new tag like `v1.2.3-test-xyz` and use the same name for the release title.
 - Next you can select a target branch - you don't have to pick `main`.

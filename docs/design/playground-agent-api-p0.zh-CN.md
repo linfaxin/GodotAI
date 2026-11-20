@@ -67,7 +67,7 @@ runner 在完成产物和配置校验后、向旧会话发出停止前检查意�
 | Playground 控制入口 | 收敛 `main.ts` 和 `engine-preview.ts` 中的检查与启动入口，捕获输入并传递运行意图。 | 可开工。以共享接口接入工具层和 runner。 |
 | Worker runner | 检查替换边界，增加按 ID 停止，用受控异步准备和退出测试竞争。 | 可开工。与 Playground 共享预览意图信号及停止入口签名。 |
 | 页面与验收 | 在现有调试面板显示工具实参和结果。保留同入口回放，复用双 origin 真浏览器脚手架。 | 可开工。页面和受控测试可先接合同，真实用例等待前三包合入。 |
-| 浏览器站点与 CI | 核验可用原生模板，重新构建匹配 SDK 和站点，同时处理 CI 前置基线。 | 可开工。已有原生候选可用于准备，匹配站点通过预检后方可验收。 |
+| 浏览器站点与本地验收 | 核验可用原生模板，重新构建匹配 SDK 和站点。 | 可开工。已有原生候选可用于准备，匹配站点通过预检后方可验收。 |
 
 合入顺序为工具与 runner 小接口、工作台接入、页面与真实用例。工作包共享文件时以控制入口和记录层的边界拆分。P0 的编程接口和浏览器回放可先交付。产品演示的模型工具选择与自动改源码分别接入宿主提供的能力。
 
@@ -83,13 +83,13 @@ runner 在完成产物和配置校验后、向旧会话发出停止前检查意�
 | 等待与保留 | 覆盖订阅前条件已达成、先退出、构建失败、超时、取消、记录淘汰与同版本的两次运行。所有结算释放等待资源。 |
 | 真浏览器故障 | 预览校验拒绝能关联到构建而无新会话。启动异常的宿主回执和宿主失联的页面兜底分别保留实际来源。 |
 
-真实门禁使用 `full-engine-v1 / template_debug`、Dedicated Worker、`direct` 和 Chromium。测试通过公开工具入口触发，使用被动 Worker 观测独立核对阶段、日志、退出与清理事实。报告记录 `releaseId`、`candidateId`、构建与运行身份。缺少候选、关键用例未执行或身份不符时，门禁不能通过。[现有双 origin 真浏览器回归](../../apps/playground/scripts/browser-debug-api-test.mjs) · [CI 门禁](../../.github/workflows/browser-playground.yml)
+真实门禁使用 `full-engine-v1 / template_debug`、Dedicated Worker、`direct` 和 Chromium。测试通过公开工具入口触发，使用被动 Worker 观测独立核对阶段、日志、退出与清理事实。报告记录 `releaseId`、`candidateId`、构建与运行身份。缺少候选、关键用例未执行或身份不符时，门禁不能通过。[现有双 origin 真浏览器回归](../../apps/playground/scripts/browser-debug-api-test.mjs)
 
 ## 当前验收条件
 
 开工前的类型检查、18 项定向测试和受控 Chromium 面板回归通过。`cf32cc2` 的 Browser Playground CI 在分享链接的 shell 回归失败后跳过了原生产品任务，因此该次运行没有产出匹配站点。[CI 失败作业](https://github.com/linfaxin/GodotAI/actions/runs/44476727957/job/135398965481)
 
-真实站点准备可以核验历史 full/debug 候选里的原生模板及报告，或在修复 shell 基线后由 CI 重新构建。按 ID 停止改动会更新 SDK，集成验收需重新构建 SDK 与站点并校验新身份。历史站点只能作为材料来源，前端刷新路径会校验冻结的 SDK 证明。[历史原生候选](https://github.com/linfaxin/GodotAI/actions/runs/44233390118/artifacts/14397399010) · [站点构建和校验](../../apps/playground/README.md#build-and-run)
+真实站点准备可以核验历史 full/debug 候选里的原生模板及报告，或在本地重新构建匹配的模板。按 ID 停止改动会更新 SDK，集成验收需重新构建 SDK 与站点并校验新身份。历史站点只能作为材料来源，前端刷新路径会校验冻结的 SDK 证明。[历史原生候选](https://github.com/linfaxin/GodotAI/actions/runs/44233390118/artifacts/14397399010) · [站点构建和校验](../../apps/playground/README.md#build-and-run)
 
 ## 实现入口
 
@@ -105,7 +105,7 @@ runner 在完成产物和配置校验后、向旧会话发出停止前检查意�
 | --- | --- |
 | Playground 类型检查和定向测试 | 类型检查通过。23 项工具、编译合同、调试记录和工作台竞争测试通过。 |
 | 浏览器单元测试 | 663 项通过，2 项跳过，零失败。其中包含严格停止与两处异步替换检查的 runner 回归。 |
-| Chromium shell | 五项 CI shell 回归通过，覆盖分享链接、项目隔离、资源持久化、release 上下文与受控工具回放。 |
+| Chromium shell | 当时的五项 CI shell 回归通过，覆盖分享链接、项目隔离、资源持久化、release 上下文与受控工具回放。 |
 | 真实 Worker 公开 API | 九个场景通过，核对唯一全局入口与完整方法清单。类型检查与失败构建独立结算，修正后的预览有实际 Worker 日志，两项 Agent 运行场景均取得 `host-report`、原生退出码 `0` 和完整清理回执。 |
 | 真实引擎合同 | `preflight`、`lifecycle`、`failure-recovery`、`replacement`、`entry-resources` 全部通过。 |
 

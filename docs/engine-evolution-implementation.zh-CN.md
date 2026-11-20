@@ -1,6 +1,6 @@
 # 引擎执行与构建主链：本轮实现
 
-本轮保留完整 Godot、默认 Dedicated Worker，以及同一 engine realm 内的 GodotJS 和可选 React。主链统一为原生 World/claim、显式 Entry、直接 engine renderer、共享编译与二进制资源，再接单 PCK 或独立 ArtifactSet。pthread 仍是显式候选。本轮源码和 CI 配置不等于已发布站点、npm 包或新的默认执行后端。
+本轮保留完整 Godot、默认 Dedicated Worker，以及同一 engine realm 内的 GodotJS 和可选 React。主链统一为原生 World/claim、显式 Entry、直接 engine renderer、共享编译与二进制资源，再接单 PCK 或独立 ArtifactSet。pthread 仍是显式候选。本轮记录的是源码实现和本地验收入口。
 
 ## 原生 World 与能力边界
 
@@ -151,23 +151,23 @@ restore 在提交前保留规范化后的完整项目快照，返回结果不依
 
 拒绝访问 IndexedDB、可识别的持久化故障或配额耗尽时，已拥有的内存项目仍能编辑、检查、编译、运行和导出；持久化 pin 的写入或释放失败不覆盖已经成功的编译结果。保存仍明确显示失败，迁移失败也不删除旧库或把导入文档宣称为已保存。编码、项目校验和普通逻辑错误继续失败，不被降级路径吞掉。实际产品故障注入覆盖启动拒绝、运行后配额不足和迁移期间配额不足。
 
-## 构建与 CI 边界
+## 本地构建与验证
 
-原生 Linux、Windows、macOS、Android、iOS workflow 在请求版本恰为 4.6.1 时，先安装 Node.js 24，再执行：
+准备 Godot 4.6.1 的原生构建时，在 Godot 源码根目录使用 Node.js 24。
 
 ```sh
 node modules/GodotJS/scripts/test/prepare-native-engine.mjs --godot-source . --out native-integration.json
 ```
 
-这些 job 的根目录是 Godot checkout，GodotJS 在 `modules/GodotJS`；本地 `./.github/actions/godot-build` 等 action 来自上游 Godot checkout。prepare 脚本没有 npm 依赖，先验证全部锁定源码再写入 observer、native lifecycle、early mount、managed shutdown queue 补丁并生成 proof。不支持的源码拒绝应用，其它 Godot 版本不被标成 ABI 1。原生构建显式使用 `enable_legacy_react=no`，报告单独上传。
+将 GodotJS 放在 Godot checkout 的 `modules/GodotJS` 下。prepare 脚本会验证锁定源码、应用原生补丁并生成 proof。匹配的原生构建使用 `enable_legacy_react=no`，构建后保存报告。
 
 本地原生 producer 的源码指纹覆盖实际使用的 `.inc`、嵌套 `SCsub`、根头文件、代码模板和嵌入预置脚本，并绑定最终 Godot 核心补丁及构建配方；派生的 `.gen.h/.gen.cpp` 不作为源输入。验收在首尾检查源码指纹、构建报告和实际二进制 SHA-256，不能用 Git commit 或报告生成时间替代。
 
 完整原生构建身份还独立绑定当前 backend、平台和架构实际使用的第三方 include 目录与静态库清单，以及选用的编译、链接、归档、SCons 和 Python 工具身份；构建前后重新检查这些输入。旧报告可以保留普通模块源码身份，但标记为 `legacy-unattested`，不能作为依赖完整冻结的证明。工具身份记录不等于完整操作系统、系统库或编译器运行时支持文件的可复现性认证。
 
-`build-browser-engine.mjs` 自行执行完整、按 execution model 选择的 Web patch 链。Browser Playground 的 Dedicated 产品和显式 pthread Worker 产品均使用自己的匹配 build report；通用 `build_web.yml` 的 browser/QJS/thread/dlink 模板矩阵不应用 Dedicated 产品补丁。同一 Web-patched 源树编出的 headless 资源导出 editor 不用来认证 native lifecycle ABI 1。
+`build-browser-engine.mjs` 按 execution model 应用完整 Web 补丁链。Dedicated 产品与显式 pthread Worker 产品分别消费匹配的 build report。headless 资源导出 editor 不用于认证 native lifecycle ABI 1。
 
-新 CI 定义把以下实际探针接入 matching 4.6.1 Linux QJS/V8 runtime artifact；JavaScriptCore 保留普通 runtime 测试，排除异步原生退出认证。下面是模块根目录的复现方式，路径须指向已应用对应补丁的真实 engine：
+使用匹配的 4.6.1 Linux QJS/V8 原生引擎运行以下探针。JavaScriptCore 运行普通 runtime 测试。命令从 GodotJS 模块根目录执行。
 
 ```sh
 pnpm build
@@ -180,7 +180,7 @@ node scripts/test/engine-host-operations-probe.mjs --godot /path/to/godot --out 
 node scripts/test/artifact-set-native.mjs --godot /path/to/godot --out work/probes/artifact-set
 ```
 
-matching Web 产品的 owner-realm checkpoint 与 lifecycle 探针也已接入各自 workflow：
+使用对应 Web 引擎报告运行 owner-realm checkpoint 与 lifecycle 探针。
 
 ```sh
 node scripts/test/native-web-checkpoint-probe.mjs --report /path/to/matching-engine-report.json --out work/probes/web-checkpoint
@@ -188,11 +188,11 @@ BROWSER_EXECUTABLE=/path/to/chromium node scripts/test/browser-web-lifecycle.mjs
 node scripts/test/native-web-checkpoint-probe.mjs --report /path/to/matching-pthread-report.json --out work/probes/child-lifetime --child-barrier --cleanup-jobs 18000000
 ```
 
-包级验证使用 `pnpm test:engine`、`pnpm test:react`、`pnpm test:browser:unit`、`pnpm test:playground`。真实 IndexedDB blob migration/conflict/pin/recovery 脚本加入 browser shell job；二进制资源的 Node/浏览器 producer parity、跨 Worker cache 及 native PCK load 由 `runBinaryResourceProbe()` 单独记录。
+包级验证使用 `pnpm test:engine`、`pnpm test:react`、`pnpm test:browser:unit`、`pnpm test:playground`。可在本地运行 browser shell 用例验证 IndexedDB blob 迁移、冲突、pin 和恢复。二进制资源的 Node/浏览器 producer parity、跨 Worker cache 及 native PCK load 由 `runBinaryResourceProbe()` 单独记录。
 
-CI 配置完成只表示已接入检查，不表示这些远端 job 已执行或通过。每次认证以该次退出码、二进制/模板 hash 和上传报告为准。源码补丁或单模板 owner-realm 探针不能替代整套 matching 站点的 Dedicated/pthread 交互、停止重启、音频和呈现验收；WebKit 既有限制、真实设备和生产部署继续按各自证据范围记录。
+以实际退出码、二进制或模板哈希及本地报告为验收依据。对 Dedicated 和 pthread 站点分别验证交互、停止重启、音频与呈现。将 WebKit 限制、真实设备和生产部署分别按实测范围记录。
 
-Node CLI 最低版本为 22.14.0，仓库构建/CI 使用 Node.js 24。Schema 1–4 JSON 和目录均可读取，普通 script/main scene 及可选 React startup adapter 共享准备主链：
+Node CLI 最低版本为 22.14.0，仓库构建使用 Node.js 24。Schema 1–4 JSON 和目录均可读取，普通 script/main scene 及可选 React startup adapter 共享准备主链：
 
 ```sh
 node packages/project-tools/dist/node/cli.js check --project project.json --release /path/to/engine-release.json

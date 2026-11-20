@@ -10,6 +10,7 @@ import {DEFAULT_AUDIO_LIMITS} from '../dist/worker-audio-protocol.js';
 import {WorkerSessionLease} from '../dist/worker-session.js';
 import {isWorkerEnvelope,sameWorkerRun} from '../dist/worker-protocol.js';
 import {previewDiagnostic} from '../dist/protocol.js';
+import {createWorkerCapture} from '../../../packages/engine/dist/browser/dedicated/worker-observation.js';
 import {patchWorkerRuntimeFile,WORKER_RUNTIME_PATHS,WORKER_RUNTIME_ABI} from '../../release/patch-web-worker-runtime.mjs';
 
 const original=await readFile(new URL('./fixtures/godot-4.6.1-audio-driver-web.cpp',import.meta.url),'utf8');
@@ -42,6 +43,7 @@ function runtimeStop(f,{managed=false,nativeStarted=true,entryCount=0}={}){
  const control=new Port(),events=[],calls={quit:0,cancel:0,beginClose:0,gateClose:0},lease=new WorkerSessionLease();
  const scope={control,data:{},identity,isWorkerEnvelope,sameWorkerRun,lease,audio:f.bridge,DOMException,
   dom:{revokeInput(){}},aborter:new AbortController(),presentation:{dispose(){},setVisible(){}},xr:{dispose(){}},
+  capture:createWorkerCapture({},()=>false,()=>{}),
   cancelNativeStart(){calls.cancel++;},module:{},post:value=>events.push(value),text:values=>values.join(' '),
   closed:false,nativeExited:false,failed:false,previewDiagnostic,binding:undefined,
   managedClose:managed,nativeStarted,stopping:false,quitScheduled:false,browser:undefined,

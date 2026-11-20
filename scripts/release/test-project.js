@@ -5,7 +5,7 @@ import { fileURLToPath } from "url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const rootPath = join(__dirname, "../../../..");
-// This is for local testing - the pipeline would pass in the correct path
+// Use the local Godot build unless the caller supplies a binary path.
 const defaultBin =
     process.platform === "win32"
         ? join(rootPath, "bin/godot.windows.editor.dev.x86_64.console.exe")

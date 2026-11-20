@@ -2,7 +2,7 @@
 
 The Node toolchain and `godot-react` CLI require Node.js 22.14.0 or later,
 matching their shared `@godot-js/project-tools` dependency. Repository builds
-and CI use Node.js 24 or later.
+use Node.js 24 or later.
 
 Full-engine Web projects use the shared `prepareEngineProject({files, runtime, ...})` API from `@godot-js/react-build/core`. It returns project bytes, a manifest and diagnostics for the browser PCK adapter or Node tooling. Native main scenes, autoloads, UID metadata and imported resource caches are preserved; the browser does not run Godot editor importers.
 

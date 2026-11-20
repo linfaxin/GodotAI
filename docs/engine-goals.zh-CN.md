@@ -87,7 +87,7 @@
 | `packages/project-tools/` | 源快照、项目与启动模型、共享编译、资源处理和产物生成 |
 | `scripts/jsb.react/`、`scripts/jsb.react-build/` | 可选 React 编程层与相关构建适配 |
 | `apps/playground/` | 参考平台、工作台、存储和集成验证 |
-| `tests/`、包内测试与 CI | 各层合同、真实运行和交付验证 |
+| `tests/`、包内测试与本地验收 | 各层合同、真实运行和交付验证 |
 
 新通用能力应复用已经存在的中立实现，按实际职责和接入需求抽取。Playground 的界面、数据库布局、示例选择和产品策略不能成为其它平台接入引擎的前提。
 

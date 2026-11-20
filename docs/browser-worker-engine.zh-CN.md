@@ -152,7 +152,7 @@ execution schema 记录 `executionModel`、`wasmThreads`、`proxyToPthread`、�
 
 ## 验证与启用门槛
 
-Linux CI 的固定工具链、Firefox Xvfb/PulseAudio 环境、执行命令和 WebKit WK-01 阻塞见[浏览器 Worker CI 说明](browser-worker-ci.zh-CN.md)。
+在 Linux 上本地验收时，可查阅工具链、Firefox 的 Xvfb/PulseAudio 环境和 WebKit WK-01 记录。[浏览器 Worker 本地验收](browser-worker-linux.zh-CN.md)
 
 ```sh
 pnpm test:engine

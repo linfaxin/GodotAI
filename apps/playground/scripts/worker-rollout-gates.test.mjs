@@ -1,6 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {assessWorkerRollout} from './worker-rollout-gates.mjs';
+import {mkdtemp,readFile,rm,writeFile} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import path from 'node:path';
+import {assessWorkerRollout,assertWorkerPerformanceEvidence} from './worker-rollout-gates.mjs';
+import {createWorkerRegressionBudget,assessPerformanceBudget} from './performance-acceptance.mjs';
+import {digest,siteIdentity,performanceComparisonInputs} from './site-evidence.mjs';
+import {performanceSiteFixture} from './fixtures/performance-site.mjs';
 import {WORKER_CAPABILITY_LEDGER,assessWorkerCapabilityEvidence,assessWorkerCapabilityCase,assertOriginalPlatformProbeReport,assertWorkerCapabilityProbeReport} from './worker-capability-ledger.mjs';
 
 test('engineering GO cannot become a default-switch GO without every supported profile and target',async()=>{
@@ -46,4 +52,62 @@ test('a broad demo report cannot stand in for a capability-specific real Worker 
 test('versioned execution contract requires removed legacy entry while preserving the synchronous DOM boundary',()=>{
  const item={capability:'legacy-contract',classification:'versioned-change',status:'passed',executionBackend:'worker',presentationBackend:'direct',sdkMode:'production',naming:'snake',browser:{name:'chromium',version:'test',platform:'linux',settingsTier:'default'},sessions:[{runId:'run',documentId:'document',workerId:'worker',runConfigurationHash:'a'.repeat(64)}],probe:{path:'worker-only.json',sha256:'b'.repeat(64)},evidence:[{path:'worker-only.raw.json',sha256:'c'.repeat(64)}],change:{hostAbiVersion:1,legacyExecution:'removed',workerSynchronousDom:'explicit-unsupported',documentation:{path:'contract.md',sha256:'d'.repeat(64)}}};
  assert.equal(assessWorkerCapabilityCase({},item),true);assert.equal(assessWorkerCapabilityCase({},{...item,change:{...item.change,legacyExecution:'explicit-preserved'}}),false);
+});
+
+test('public rollout gate blocks the obsolete single-report performance contract',async()=>{
+ await assert.rejects(assertWorkerPerformanceEvidence({},'passing-direct.json'),/Both direct and bitmap/);
+ await assert.rejects(assertWorkerPerformanceEvidence({},undefined),/Both direct and bitmap/);
+});
+
+test('local rollout verification requires valid performance evidence for both presenters',async t=>{
+ const directory=await mkdtemp(path.join(tmpdir(),'worker-rollout-'));
+ t.after(()=>rm(directory,{recursive:true,force:true}));
+ const save=(filename,value)=>writeFile(filename,JSON.stringify(value,null,2)+'\n');
+ const site=path.join(directory,'site');
+ await performanceSiteFixture(site);
+ const {payloads,...identity}=await siteIdentity(site),comparisonInputs=await performanceComparisonInputs(site,{demos:['scene']});
+ const sources=Object.fromEntries(['browser-engine-performance.mjs','performance-acceptance.mjs','browser-harness.mjs','site-evidence.mjs'].map(name=>['apps/playground/scripts/'+name,'proof']));
+ const producer={schemaVersion:1,kind:'worker-performance-tool',sources};
+ const parameters={demos:['scene'],samplesPerDemo:3,thresholds:'No budget'};
+ const hardware={platform:'linux',arch:'x64',node:'24',kernel:'unit-kernel',cpuModels:['cpu'],logicalCPUs:2,availableParallelism:2,totalMemoryBytes:4096,cgroupCpuMax:'200000 100000',cgroupMemoryMax:'4096',loadAverageStart:[1,1,1],loadAverageEnd:[2,2,2]};
+ const baseline={schemaVersion:2,kind:'godotjs-browser-engine-performance',measurementStatus:'completed',measurementBatchId:'baseline-batch',identity:{...identity,releaseId:digest('historical release'),descriptorHash:digest('historical descriptor'),candidateId:digest('historical baseline'),siteHash:digest('historical site')},comparisonInputs,producer,parameters,hardware,measurementScope:{profile:identity.profile,executionBackend:'legacy',presentationBackend:'legacy',browser:'chromium',settingsTier:'default'},engine:{templateTarget:'template_debug'},scenarios:[{browser:{name:'chromium',version:'154',settingsTier:'default'}}],summary:{demos:{scene:{navigationToRunningMs:{p95:100},wasmMemoryCapacityPeakBytes:{max:1000},stopMs:{max:100},perSampleMedianTelemetryFPS:{median:60}}}}};
+ const receipt={...identity,testSources:sources};
+ const baselinePath=path.join(directory,'browser-engine-performance.legacy.json');await save(baselinePath,baseline);
+ const baselineSha256=digest(await readFile(baselinePath));
+ const files={baseline:baselinePath};
+ const verify=()=>assertWorkerPerformanceEvidence(receipt,files,{target:'template_debug',site});
+ let directBudget;
+ for(const presentationBackend of ['direct','bitmap']){
+  const budget=createWorkerRegressionBudget(baseline,{baselineSha256,presentationBackend});
+  const report={...baseline,identity,measurementScope:budget.scope,parameters:{...parameters,thresholds:{budgetId:budget.id}},hardware:{...hardware,loadAverageStart:[3,3,3],loadAverageEnd:[4,4,4]}};
+  report.performanceAcceptance=assessPerformanceBudget(report,budget);
+  files[presentationBackend]={budget:path.join(directory,presentationBackend+'-budget.json'),report:path.join(directory,presentationBackend+'-report.json')};
+  await save(files[presentationBackend].budget,budget);
+  await save(files[presentationBackend].report,report);
+  if(presentationBackend==='direct')directBudget=budget;
+ }
+ const valid=await verify();
+ assert.equal(valid.direct.status,'passed');
+ assert.equal(valid.bitmap.status,'passed');
+ const directFile=files.direct.report, originalDirect=JSON.parse(await readFile(directFile));
+ for(const [name,change,pattern]of [
+  ['material',value=>{value.comparisonInputs.sdk.sourceSnapshotHash=digest('different SDK');},/E_PERFORMANCE_BASELINE_MATERIAL/],
+  ['candidate',value=>{value.identity.candidateId=digest('other candidate');},/Performance identity differs/],
+  ['producer',value=>{value.producer.sources['apps/playground/scripts/site-evidence.mjs']='old-tool';},/Performance tool sources differ/],
+  ['hardware',value=>{value.hardware.logicalCPUs++;},/Performance hardware differs/],
+  ['parameters',value=>{value.parameters.samplesPerDemo++;},/Performance parameters differ/],
+  ['browser version',value=>{value.scenarios[0].browser.version='other-build';},/browser version differs/],
+ ]){
+  const altered=structuredClone(originalDirect);change(altered);await save(directFile,altered);
+  await assert.rejects(verify,pattern,name);
+ }
+ await save(directFile,originalDirect);
+ directBudget.metrics[0].value=999999;
+ await save(files.direct.budget,directBudget);
+ await assert.rejects(verify,/Fixed regression budget differs: direct/);
+ await save(files.direct.budget,createWorkerRegressionBudget(baseline,{baselineSha256,presentationBackend:'direct'}));
+ const bitmap=JSON.parse(await readFile(files.bitmap.report));
+ bitmap.summary.demos.scene.perSampleMedianTelemetryFPS.median=7;
+ await save(files.bitmap.report,bitmap);
+ await assert.rejects(verify,/Fixed Worker regression budget failed: bitmap/);
 });

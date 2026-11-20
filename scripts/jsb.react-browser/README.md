@@ -1,6 +1,6 @@
 # Browser compiler and assets
 
-这个包在浏览器 Worker 中解析 npm 原文件、编译 TSX、检查锁定的声明图，并生成真实 Godot WASM 可读取的 PCK。开发和 CI 可以使用 Node；页面运行不依赖 Node 服务或 WebContainers。
+这个包在浏览器 Worker 中解析 npm 原文件、编译 TSX、检查锁定的声明图，并生成真实 Godot WASM 可读取的 PCK。开发与本地验证可以使用 Node；页面运行不依赖 Node 服务或 WebContainers。
 
 ## 当前模板边界
 
@@ -39,7 +39,7 @@ pnpm --dir scripts/jsb.react-browser test
 # 显式在线 smoke；Node 24 的代理环境可加 --use-env-proxy。
 node --use-env-proxy scripts/jsb.react-browser/test/resolver.cdn.mjs --out /tmp/npm-cdn-report.json
 
-# 开发/CI 编排在 Node；图片解码、资源编译、PCK 和原生加载在浏览器。
+# 开发与测试编排在 Node；图片解码、资源编译、PCK 和原生加载在浏览器。
 PLAYWRIGHT_MODULE=/path/to/playwright-core/index.mjs \
 node scripts/jsb.react-browser/test/assets.browser.mjs \
   --engine-dir /path/to/godot-assets --out /tmp/assets-native-report.json

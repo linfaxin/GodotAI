@@ -29,7 +29,7 @@
 
 ## 安装与共享 SDK 构建
 
-使用仓库的 Node 24 和锁定的 pnpm 版本，并固定 Godot 4.6.1 Git 源码、Emscripten 4.0.11 及 CI 指定的 SCons 版本。Emscripten、SCons 通过当前 shell 的 PATH 提供。
+使用仓库的 Node 24 和锁定的 pnpm 版本，并固定 Godot 4.6.1 Git 源码、Emscripten 4.0.11 及 SCons 4.9.1。Emscripten、SCons 通过当前 shell 的 PATH 提供。
 
 ```sh
 pnpm install --frozen-lockfile
@@ -42,7 +42,7 @@ Godot 源码目录、模块仓库和引擎构建目录必须彼此独立。expor
 
 ## 构建 Web 模板
 
-本地 wrapper 和 CI 使用同一套参数生成器：
+使用本地 Web 构建入口。
 
 ```sh
 GODOT_SOURCE=/absolute/path/godot-4.6.1 \
@@ -78,7 +78,7 @@ node scripts/test/build-browser-engine.mjs \
 
 报告保留 requestedArgs，并由独立构建树中的 SCons 记录实际解析后的功能和优化选项。最终模块来自生成的模块头。上游源码、模块源码、补丁、native bundle、工具链、模板和证据都绑定到构建报告。源码归档缺少 Git commit 时仍可用于本地实验，但不能因此获得正式源码认证。
 
-本地和 CI 共用经过检查的源码补丁。既有七项补丁包括：GLES3 Alpha Hash、小 CanvasGroup backbuffer、私有 tooltip、可选 PWA、音频退出、无线程 group wait，以及第七项 WebKit presentation boundary。第七项在 `platform/web/js/engine/config.js` 的模块 pre/post loop 钩子中保存和恢复独立的 READ/DRAW framebuffer；帧间绑定默认 framebuffer，供 WebKit/iOS WebKit compositor 提交。它同时处理上下文失效、canvas 所有权变更和退出清理，不读取或吞掉 GL error。此修改位于 JS wrapper 链路，构建前后仍逐样本核对 WASM 哈希，不能只凭“仅改 JS”推定字节相同。新的 Worker ABI 在同一 checked pipeline 另加入原生启动两阶段、绘制提交、Worker OS/音频宿主和 sample 分配前检查；回执按文件和补丁链绑定源码快照，不能复用历史七项补丁模板来声明支持 Worker。
+本地 Web 构建使用经过检查的源码补丁。既有七项补丁包括：GLES3 Alpha Hash、小 CanvasGroup backbuffer、私有 tooltip、可选 PWA、音频退出、无线程 group wait，以及第七项 WebKit presentation boundary。第七项在 `platform/web/js/engine/config.js` 的模块 pre/post loop 钩子中保存和恢复独立的 READ/DRAW framebuffer；帧间绑定默认 framebuffer，供 WebKit/iOS WebKit compositor 提交。它同时处理上下文失效、canvas 所有权变更和退出清理，不读取或吞掉 GL error。此修改位于 JS wrapper 链路，构建前后仍逐样本核对 WASM 哈希，不能只凭“仅改 JS”推定字节相同。新的 Worker ABI 在同一 checked pipeline 另加入原生启动两阶段、绘制提交、Worker OS/音频宿主和 sample 分配前检查；回执按文件和补丁链绑定源码快照，不能复用历史七项补丁模板来声明支持 Worker。
 
 公开原生 API 不新增“必须调度进 process/physics”的限制。独立真实探针已通过 `JavaScriptBridge.create_callback` 与 `window.setTimeout` 在帧外调用 viewport 图像读回、`ImageTexture.create_from_image`、Sprite 纹理和位置更新，并验证实际目标像素。该证据覆盖这些公开 callback 路径；宿主自行混入 raw WebGL 绘制仍须尊重引擎 context 的所有权。探针结论不代替源码补丁集成后的完整候选验收。
 
@@ -192,9 +192,9 @@ baseline 和 explicit 两种模块模式均执行这三个关闭选项，新构�
 
 `browser-basic-text-test.mjs --site <候选目录> --out <结果目录> --expect-fallback` 在实际引擎中检查 primary text interface、中文及 ASCII 字形、原生 viewport 像素、富文本和混合换行，再通过真实浏览器事件驱动 LineEdit/TextEdit 的中文组合提交、英文输入、选区、换行及光标。覆盖 snake/camel 两种命名。它使用 Chromium CDP 组合事件，不验证操作系统输入法候选窗口，也不代表完整多语言验收。测试字体是带许可与固定来源哈希的 Noto 子集，只包含固定测试文本及基本 ASCII。
 
-CI 的 2D 分支单独运行这组基本文字验收，并归档 `basic-text-results`；这份附加报告独立于原有十三套站点验收封印。
+2D 基本文字验收可单独运行并保存 `basic-text-results`。这份附加报告独立于原有十三套站点验收封印。
 
-评审修复后，基本文字验收在加载前固定 profile、releaseId、descriptorHash、candidateId 和 siteHash，加载的 JS/WASM/worklet 字节同时核对初始站点快照；结束时重新校验身份。本地没有 CI context 时也会拒绝目录替换。普通和富文本各有独立的纯中文采样控件，四个采样控件均须位于 viewport 内；混合区域的英文像素不能满足中文断言。新增回归测试覆盖版本替换、相同版本 ID 下的字节变化、中文区域无像素、控件越界和非中文替换。
+评审修复后，基本文字验收在加载前固定 profile、releaseId、descriptorHash、candidateId 和 siteHash，加载的 JS/WASM/worklet 字节同时核对初始站点快照；结束时重新校验身份。本地验收会拒绝目录替换。普通和富文本各有独立的纯中文采样控件，四个采样控件均须位于 viewport 内；混合区域的英文像素不能满足中文断言。新增回归测试覆盖版本替换、相同版本 ID 下的字节变化、中文区域无像素、控件越界和非中文替换。
 
 本地调试候选已重建，测量如下（十进制 MB）：
 
@@ -224,11 +224,11 @@ node scripts/test/measure-browser-engine.mjs \
 
 `--baseline` 可比较同一工具链控制组；`--performance` 附带独立性能测试 JSON 及其哈希。测量通过只说明测量和回验成功，不代表浏览器产品验收或正式发布认证。
 
-Browser Playground CI 对每个已完成的引擎构建报告都执行该测量，并将 `browser-engine-measurement.json` 与源码报告一起归档；即使后续产品验收失败，已完成模板的体积证据仍会保留。未完成构建时明确跳过。CI 将 `EMCC_CORES=4`、`BINARYEN_CORES=4` 固定并写入构建证据，ThinLTO 的链接并行数也固定为 4。
+可对每个已完成的构建报告单独执行测量，将 `browser-engine-measurement.json` 与源码报告一起保存。复现旧对照时使用 `EMCC_CORES=4`、`BINARYEN_CORES=4` 和 ThinLTO 链接并行数 4。
 
 按顺序比较：完整 debug 控制组 → 仅关闭 3D → 显式模块清单 → release/no LTO → release/ThinLTO。debug/release 的模板与 export mode 一致。每次只改变一组条件，分别记录启动、WASM 编译、内存与场景表现。字体极限裁剪单独评估。
 
-历史本地全量样本为原始 35,794,141 B、gzip 9,944,425 B、Brotli 6,957,877 B；其源码未通过正式 CI 认证，只作参考。`gzip ≤7 MB / Brotli ≤5 MB` 是初期探索预算，不能代替功能验收，也不能写成已达到的结果。实际 HTTP 主机的压缩级别可能与离线实验不同。
+历史本地全量样本为原始 35,794,141 B、gzip 9,944,425 B、Brotli 6,957,877 B；其源码未获正式认证，仅作参考。`gzip ≤7 MB / Brotli ≤5 MB` 是初期探索预算，不能代替功能验收，也不能写成已达到的结果。实际 HTTP 主机的压缩级别可能与离线实验不同。
 
 ## 本地实测记录
 
@@ -348,7 +348,7 @@ Chromium 另保留 CDP page-target 的 `JSHeapUsedSize` 定期采样，覆盖编
 
 所有 UI 启动采样完成后，工具再使用另一些全新浏览器进程，获取并校验相同 WASM 字节，单独测量 `WebAssembly.compile`。下载、HTTP 解码和哈希时间单列，未提前预编译污染 UI 启动样本。输出 `completed` 仅表示采样完成，不代表达到性能预算，也不是正式产品验收报告。
 
-CI 的手动 `workflow_dispatch` 提供 `measure_performance` 布尔选项，默认关闭，避免每个 PR 都执行完整性能采样。启用后，各 profile 在产品候选完成验收和封印复核之后，以相同 Chromium 参数对四个公共示例各采样 3 次，归档 `browser-engine-performance.json`。常规 CI 的功能通过不表示已经运行性能实验；需要对照时应同时保留 full/2D 的这两份报告，比较相同 target、LTO、模块模式和采样条件。
+需要对比性能时，按上述本地命令以相同 Chromium 参数为各 profile 的四个公共示例各采样 3 次，并保留两份报告。对照使用相同 target、LTO、模块模式和采样条件。
 
 ## HTTP 压缩、候选冻结和浏览器验收
 
@@ -373,11 +373,11 @@ Chromium 执行完整产品测试；2D 还需要 `BROWSER=firefox`、`BROWSER=we
 
 封印器还逐项验证 runtime 报告内容：Chromium 至少 50 轮额外生命周期，Firefox/WebKit 各至少 2 轮；须保留 13 个基础场景和每轮独立 iframe、原生/React 两种模式、真实音频事件、匹配的两个 worklet 哈希、每个 AudioContext 唯一关闭以及每轮压力运行的非零音频输出。errors/warnings 必须存在且为空。循环声明、空帧列表、未关闭音频或非空错误都不能仅凭 `status=passed` 获得封印。生产者默认采用相同最低循环数；调小循环数的探测报告不满足正式封印要求。`sourceCertified=false` 或缺少来源标记的站点在冻结前即被拒绝。
 
-CI 还会在 Firefox 和 WebKit 分别执行真实 `browser-2d-features-test.mjs --sessions 1 --require-cjk`；默认 snake/camel 两种命名各运行一次，覆盖物理、导航、文本、输入和音频等特性。顶层报告分别为 `features.firefox.json`、`features.webkit.json`，截图等附属文件放在 `features-firefox/`、`features-webkit/`，不会覆盖 Chromium 的证据。它们补充产品启动报告，测试失败会阻止后续封印。
+完整发布验收在 Firefox 和 WebKit 分别运行真实 `browser-2d-features-test.mjs --sessions 1 --require-cjk`；默认 snake/camel 两种命名各运行一次，覆盖物理、导航、文本、输入和音频等特性。顶层报告分别为 `features.firefox.json`、`features.webkit.json`，截图等附属文件放在 `features-firefox/`、`features-webkit/`，不会覆盖 Chromium 的证据。它们补充产品启动报告，测试失败会阻止后续封印。
 
 每个实际特性 case 都独立记录 `consoleErrors` 并要求为空，包含浏览器直接报告的 WebGL validation error；同时要求原生错误、生命周期泄漏警告、像素和音频断言通过。旧版 harness 曾可能在原生断言通过时漏计浏览器控制台错误，这类旧报告不能复用。第七项补丁改变 wrapper、模板归档和发布身份后，即使 WASM 哈希不变，也必须重新捕获实际 API、生成站点候选并完成其对应浏览器验收。性能表仅在新候选空闲采样后填入观察值，不从补丁或体积变化预写性能通过结论。
 
-Linux 的 Firefox/WebKit 像素与真实 worklet 验收需要可用的图形和音频设备。CI 安装 Xvfb、Mesa、`pulseaudio` 和 `pulseaudio-utils`，在浏览器运行前启动或复用用户 PulseAudio server；新启动的 server 使用 `--exit-idle-time=-1`。它只加载一个名为 `godotjs_browser`、48 kHz 双声道的 `module-null-sink`，设为默认输出，并用 `pactl info` 与实际 sink 参数确认设备存在，不结束已有 server。
+Linux 的 Firefox/WebKit 像素与真实 worklet 验收需要可用的图形和音频设备。安装 Xvfb、Mesa、`pulseaudio` 和 `pulseaudio-utils`，在浏览器运行前启动或复用用户 PulseAudio server。新启动的 server 使用 `--exit-idle-time=-1`。它只加载一个名为 `godotjs_browser`、48 kHz 双声道的 `module-null-sink`，设为默认输出，并用 `pactl info` 与实际 sink 参数确认设备存在，不结束已有 server。
 
 Firefox/WebKit 测试使用 `xvfb-run`、`BROWSER_HEADLESS=0` 和 `LIBGL_ALWAYS_SOFTWARE=1`。Firefox 在缺少图形环境的 headless 模式下可能选择 Godot Dummy renderer；此时不能把节点创建成功当作绘制通过，中文与 TileMap 等断言仍必须读取真实 viewport 像素。Pulse null sink 提供实际的音频混音设备，浏览器和 Godot 的 worklet 仍真实运行，测试通过 analyser 验证非零输出、停止后静音、恢复播放和退出关闭；它没有物理扬声器，不是替换 Web Audio 的 mock。仅有 Godot `playing` 状态或 worklet 加载成功不足以证明真实音频输出。
 
@@ -399,13 +399,13 @@ node apps/playground/scripts/seal-site-acceptance.mjs /absolute/path/site /absol
 
 公开长期缓存仅用于明确声明的不可变 `/releases/<id>/...` 资源路径，并同步调整客户端请求策略。开发服务器默认保持私有/no-cache 策略；明确采用公共不可变路径时才设置 `PLAYGROUND_PUBLIC_IMMUTABLE=1`。HTML、入口指针与私有资产不能统一设置公共永久缓存。
 
-## CI、本地验证与后续发布规则
+## 本地验证与发布
 
-CI 先构建共享 SDK，再按 profile/target/recipe 隔离任务、缓存、artifact 和报告。先修复 shell-only 前置构建，再开展实际模板与产品验收。源码认证、最小 Gate、产品站点验收和体积测量各有独立证据。
+本地先构建共享 SDK，再按 profile、target 和 recipe 分开保存构建产物与报告。先修复 shell-only 前置构建，再开展实际模板与产品验收。源码认证、最小 Gate、产品站点验收和体积测量各有独立证据。
 
-CI 额外打包并验证 `browser-engine-artifact/`，同时归档精确的模板 ZIP、原始 `engine-report.original.json`、可迁移的 `engine-report.json`、`build.log` 和 `artifact.json`。原始报告逐字节保留；便携报告仅将 `template.path` 改为同目录的 `engine-template.zip`，清单记录两份报告及所有文件的 SHA-256，并校验除路径外的语义一致性。已有产品描述符引用的原报告 SHA 不会被回填修改。
+使用 `package-browser-engine-artifact.mjs` 打包并验证 `browser-engine-artifact/`，保存精确的模板 ZIP、原始 `engine-report.original.json`、可迁移的 `engine-report.json`、`build.log` 和 `artifact.json`。原始报告逐字节保留；便携报告仅将 `template.path` 改为同目录的 `engine-template.zip`，清单记录两份报告及所有文件的 SHA-256，并校验除路径外的语义一致性。已有产品描述符引用的原报告 SHA 不会被回填修改。
 
-下载 artifact 到任意新目录后，可在原构建树不存在的情况下验证并复测：
+便携归档可在任意目录验证和复测。
 
 ```sh
 node scripts/test/package-browser-engine-artifact.mjs \

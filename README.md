@@ -12,7 +12,6 @@
 </p>
 
 <p align="center">
-    <a href="https://github.com/godotjs/GodotJS/actions"><img src="https://github.com/godotjs/GodotJS/actions/workflows/runner.yml/badge.svg?branch=main" alt="Build Status"></a>
     <a href="https://github.com/godotjs/GodotJS/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="MIT License"></a>
 </p>
 
@@ -31,6 +30,8 @@ The [browser Worker engine guide](docs/browser-worker-engine.zh-CN.md) describes
 ## Repository development
 
 This repository uses a pnpm workspace for embedded engine scripts and ecosystem packages. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and build commands, [the architecture guide](docs/architecture.md) for module boundaries, and [packages/README.md](packages/README.md) for package conventions.
+
+Run the relevant checks locally when contributing. CI is no longer needed for this repository. [Local verification policy](CONTRIBUTING.md#local-verification)
 
 The [TSX package](packages/tsx/README.md) currently contains a private buildable foundation, separate from the existing React renderer. The [playground](apps/playground/README.md) provides a static Monaco workbench, browser TSX compilation and isolated Godot WASM execution with fixed built-in dependencies.
 
@@ -59,7 +60,7 @@ The default Playground in [`apps/playground`](apps/playground) contains eight in
 
 The native Playground runs Godot, GodotJS and scene React together in an ordinary Worker using transferable ArrayBuffers. Normal build/dev/test commands use Worker; legacy preview pages, build/dev commands and execution switches have been removed. Both 2D and full profiles support direct presentation by default and explicit bitmap presentation. Browser compatibility, capability and performance evidence still gate publication; see the [Worker delivery contract](docs/browser-worker-runtime.zh-CN.md).
 
-The browser SDK conformance workbench is also retained in that directory for the release and browser CI gates. It builds separately with `pnpm --filter @godot-js/playground build:conformance` into `dist-conformance/`.
+The browser SDK conformance workbench is also available in that directory for local browser and release verification. It builds separately with `pnpm --filter @godot-js/playground build:conformance` into `dist-conformance/`.
 It compiles and type-checks projects in browser Workers and runs the generated
 PCK in actual Godot WASM. See the [implementation and local verification guide](docs/browser-playground.zh-CN.md)
 and [engine release workflow](scripts/release/README.web.md).
