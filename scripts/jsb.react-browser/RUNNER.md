@@ -1,6 +1,6 @@
 # PreviewRunner
 
-页面运行只需要静态文件和浏览器 API，不需要运行时 Node 服务或 WebContainers。Node 用于构建、发布和 CI 编排。esbuild-wasm 编译和 TypeScript 检查使用各自 Worker；Godot 引擎与用户 JavaScript 当前仍在预览 iframe 主线程运行。
+页面运行只需要静态文件和浏览器 API，不需要运行时 Node 服务或 WebContainers。Node 用于构建、发布和本地测试。esbuild-wasm 编译和 TypeScript 检查使用各自 Worker；Godot 引擎与用户 JavaScript 当前仍在预览 iframe 主线程运行。
 
 ## 接入
 
@@ -88,7 +88,7 @@ BROWSER=webkit node scripts/test/browser-playground.mjs --site /path/to/site --o
 node scripts/test/browser-playground.mjs --authenticated-gate --site /path/to/site --out /path/to/auth-report
 ```
 
-`BROWSER_EXECUTABLE` 可指定浏览器入口；`BROWSER_HEADLESS=0` 适用于有 DISPLAY/Xvfb 的 CI。代理环境需为浏览器正确安装受信 CA，不能通过关闭 TLS 校验换取通过。Linux Playwright WebKit 是单独的测试目标，不能据此声称 macOS/iOS Safari 已认证。
+`BROWSER_EXECUTABLE` 可指定浏览器入口；`BROWSER_HEADLESS=0` 适用于提供 DISPLAY 或 Xvfb 的环境。代理环境需为浏览器正确安装受信 CA，不能通过关闭 TLS 校验换取通过。Linux Playwright WebKit 是单独的测试目标，不能据此声称 macOS/iOS Safari 已认证。
 
 隔离报告记录真实 origin、浏览器版本、编码/解码字节、网络请求、退出、坏摘要和同步循环结果。音频报告记录真实激活状态、context 状态、node/port 计数、错误及 JS/WASM/worklet 摘要。完整应用报告另绑定 runtime release 和全部静态模板 hash。支持结论只覆盖实际测试的版本、字节、模式和 profile。
 

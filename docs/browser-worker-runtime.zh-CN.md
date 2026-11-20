@@ -97,11 +97,11 @@ node apps/playground/scripts/worker-acceptance-matrix.mjs --site /absolute/site-
 
 浏览器版本、平台和实际启动参数进入报告。SwiftShader、软件 GL 环境变量、native hook、修改浏览器特性的参数及 fake media/XR test 参数属于 `environment-override`，可用于工程定位，不能混作默认浏览器设置的封印。环境只记录白名单标志；`LD_PRELOAD` 等只记录存在布尔，不输出任意路径或完整环境变量。Xvfb/显示服务与 Pulse null sink 单独作为环境元数据记录。`PLAYGROUND_BROWSER_DEFAULT_SETTINGS=1` 移除测试预设的 SwiftShader/自动播放参数；平台仍必须提供真实可用的图形/音频环境。Linux Playwright WebKit 证据只证明该构建，不证明 Safari、iOS 或所有 WebKit 产品。
 
-`.github/workflows/browser-playground.yml` 的默认原生 CI 是两个 profile × `template_debug`/`template_release` 共四目标，分别构建、交付、执行完整矩阵并保存独立 artifact。手动 dispatch 可选择单 target 诊断；该诊断缺失的目标仍使四目标 rollout 汇总保持 blocked。默认产品验收不设置 `LIBGL_ALWAYS_SOFTWARE`，不加入自动播放绕过参数；旧 compatibility conformance 的显式软件 GL 测试保持独立，不能替新产品默认设置作证。不可用的浏览器或图形环境产生失败证据，matrix runner 继续收集其余项，不能跳过后宣布通过。
+本地按改动选择 profile、`template_debug` 或 `template_release` 和 presenter。收集完整发布证据时，分别构建两个 profile 的 debug/release 四个目标，执行完整矩阵并保留独立报告。默认浏览器验收使用浏览器的默认图形与自动播放设置。旧 compatibility conformance 的显式软件 GL 测试提供独立的环境覆盖证据。图形环境不可用时，matrix runner 记录失败并继续收集其余项。
 
-手动启用 `measure_performance` 后，每个目标可通过 `performance_baseline_run_id` 下载独立冻结的历史站点，再用当前测量工具采集 legacy 基线，再分别生成并执行 direct/bitmap 的固定回归预算；缺少独立旧站点时只测量两种 Worker 呈现，回归验收保持 not-evaluated，direct 失败仍采集 bitmap。四目标 `rollout-summary` job 无论上游成败均尝试汇总 artifact，重新验证封印、能力 ledger/probe、基线原始哈希、两套预算及性能身份。预算的采样参数和硬件约束必须一致，运行负载观察保留为事实，不伪装成恒定值。缺 artifact、能力证据、性能或目标时输出明确 blocked 的 `worker-rollout-summary-<commit>` artifact。默认不运行性能因而不能得到发布 GO；该汇总 job 不执行发布，也不会把工程默认 Worker 等同于产品发布批准。
+需要性能对照时，从独立冻结的历史站点采集 legacy 基线，再分别生成并执行 direct 和 bitmap 的固定回归预算。缺少旧站点时只测量两种 Worker 呈现，回归验收记为 `not-evaluated`。记录真实运行负载，保持采样参数和硬件约束一致。使用本页的四目标本地汇总命令复核候选封印、能力探针、基线哈希和两套预算。
 
-验收日志使用单向被动 recorder：页面同步 `console.debug` 发送私有 nonce 和有界 JSON，Node 仅读取 console 文本，不通过 Playwright binding/evaluate 回复页面。原先 `exposeBinding` 的返回路径会给 Chromium 制造用户激活，不能用于证明自动播放/XR 的无点击边界。独立真实浏览器测试在多次 top/iframe 记录后用 `userGesture:false` 的 CDP 观察确认激活仍为 false，真实点击后才变为 true；CI 也执行该测试。常规产品交互测试中的 Playwright 求值不自动成为无手势负例证明，需使用独立被动观察测试。
+验收日志使用单向被动 recorder：页面同步 `console.debug` 发送私有 nonce 和有界 JSON，Node 仅读取 console 文本，不通过 Playwright binding/evaluate 回复页面。原先 `exposeBinding` 的返回路径会给 Chromium 制造用户激活，不能用于证明自动播放/XR 的无点击边界。独立真实浏览器测试在多次 top/iframe 记录后用 `userGesture:false` 的 CDP 观察确认激活仍为 false，真实点击后才变为 true。常规产品交互测试中的 Playwright 求值不自动成为无手势负例证明，需使用独立被动观察测试。
 
 ## 能力 ledger 与 GO gates
 
@@ -174,7 +174,7 @@ sample 的公开 position 保留既有 Web 后端语义：`playback offset + 已
 
 音频 logical registry 与保留额度分别计账。注册先预留 transfer 副本和 Host AudioBuffer 两份字节；register ACK 只归还传输部分，精确 unregister ACK 才归还 Host 部分与样本数量额度。Native preflight 还计入解码与 planar staging 的临时峰值。注销立即反映到 Native 查询，旧 ACK、重复 ACK 及局部 revoke 不归还新注册额度。Host 的真实停止/关闭回执才可退休整代资源。这里记录资源所有权预算，不冒充 GC 或 RSS 测量。
 
-普通构建、服务和无显式配置的预览保持 legacy；Worker 候选使用显式入口，Worker 内仍默认 direct、bitmap 显式选择，无自动回退。CI 显式构建 Worker 并在核心矩阵后生成同批 `worker-capabilities.json`。专用 probe 的原始字节、producer、身份与浏览器范围均复核；失败的 runtime 依赖和尚无 producer 的能力写入 blocked，不补造通过证据。
+这一阶段仍以 legacy 为普通构建和预览入口，Worker 候选使用显式入口。核心矩阵和同批 `worker-capabilities.json` 使用专用 probe 的原始字节、producer、身份与浏览器范围进行核对。缺少 runtime 依赖或 producer 的能力记为 blocked。当前默认入口见下方 C28 记录。
 
 `benchmarkTimings=1` 是显式测量开关，进入运行配置哈希，普通运行的 `benchmarkTimingSamples` 为 0。记录有界的 Host 捕获/发送、Worker 接收/分派、真实 Native `_input` 消费，以及 bitmap 捕获、Host 消费/释放和 ACK 时间。Native 消费由测试项目真实输入回调报告，不能由 DOM 接收或 ACK 代替。跨 realm 使用各自 `performance.timeOrigin + performance.now()`；负值或无效顺序不可用，不夹成 0。捕获耗时和 ACK RTT 使用同一个 Worker 时钟，释放回执与实际消费分别记录。这些数据不证明物理输入到屏幕延迟。输入 probe 在固定 FPS 窗口后执行，不预热冷启动；不新增生产 WebGL/首帧探针。
 
@@ -286,7 +286,7 @@ C27 复用未修改且认证与哈希一致的 Native v6 模板，独立构建 f
 
 普通输出为 `dist`、`dist-2d-debug`、`dist-2d-release` 和 `dist-full-release`。`:worker` 命令及 `--worker-execution` 仅作同义入口，不再追加目录后缀。旧非 Worker 发布目录不能只刷新前端，必须完整重建。生成的新项目和示例说明已同步；demo 浏览器测试逐个断言真实 Worker 会话，覆盖完整 profile 的 8 个 demo、2D 的 4 个 demo、两种呈现、控件与原生输入、城市 JSON 下载、停止重跑及运行前后组件挂载。
 
-性能对照不再依赖当前产品中的旧入口。CI 可通过 `performance_baseline_run_id` 下载独立冻结的历史站点，用当前测量工具重新采集 legacy 基线，再按原固定预算验证当前 Worker。两个站点保留各自真实 releaseId/descriptorHash/candidateId/siteHash；可比性由重新读取实际文件生成的 `godotjs-performance-material-v1` 记录核对引擎、SDK、API、资源和场景执行输入，不再要求提交元数据相同。target、浏览器构建、工具、硬件和采样参数仍须一致。旧测量报告缺少该记录时必须用当前工具重新测量，不能补写身份冒充新证据。缺少旧站点时仅采集 Worker 指标，回归验收保持 not-evaluated。门禁中保留的 `defaultSwitch` 是历史兼容的验收评估字段，不再决定当前产品执行后端；实际策略固定为 Worker-only，发布验收仍独立受阻。
+性能对照使用独立冻结的历史站点。用当前测量工具重新采集其 legacy 基线，再按固定预算验证当前 Worker。两个站点分别保留真实 releaseId、descriptorHash、candidateId 和 siteHash。`godotjs-performance-material-v1` 通过实际文件核对引擎、SDK、API、资源和场景输入。target、浏览器构建、工具、硬件和采样参数也须匹配。缺少旧站点时仅采集 Worker 指标，回归验收记为 `not-evaluated`。`defaultSwitch` 是历史兼容字段，实际执行后端已固定为 Worker。
 
 C28 四个候选均由不带执行后端和输出目录参数的普通构建生成，复用哈希一致的 Native v6 与未改动的 SDK。293 项 Playground/发布/服务器测试、严格 TypeScript 与 CI YAML 解析通过。full/2D × direct/bitmap 的 demo 及专门回归全部通过，共 28 次 demo 运行、40 个真实 Worker 会话。默认开发服务在不提供执行参数及 previewOrigin 的情况下自动发现独立预览 origin，真实 React shader 场景以 Worker/direct 运行并可停止。旧页面 404、旧参数拒绝、主线程 runner 未打包均已检查。
 

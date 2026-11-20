@@ -179,7 +179,7 @@ trusted converter execution.
 
 The Node entry and `godotjs` CLI require Node.js 22.14.0 or later, including
 `node:module.findPackageJSON()` for import-only startup adapter resolution.
-Repository builds and CI use Node.js 24 or later.
+Repository builds use Node.js 24 or later.
 
 The separate `@godot-js/project-tools/node` entry reads local files and a matching
 `engine-release.json`, validates descriptor and asset bytes, then calls the shared

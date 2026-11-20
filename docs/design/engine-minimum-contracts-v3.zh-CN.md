@@ -1,5 +1,7 @@
 # 引擎最小合同与核心回归实施方案 V3
 
+> 此版本保留当时的设计和验证计划。后续开发使用[本地验证约定](../../CONTRIBUTING.md#local-verification)。
+
 状态：历史评审稿，已由[第三轮评审汇总的 V4](engine-minimum-contracts-v4.zh-CN.md)替代，尚未实施。日期：2026 年 11 月 17 日。源码基线：`a518dab`。本版在当时替代 [V2](engine-minimum-contracts-v2.zh-CN.md)；[初版](engine-minimum-contracts.zh-CN.md)保留供追溯。
 
 ## 开工结论
@@ -558,7 +560,7 @@ PLAYGROUND_TEST_DIRECTORY=/absolute/matching-site BROWSER=chromium PLAYGROUND_RE
 
 报告增加 requiredGroups、每组 status、case 的 passed/failed/blocked、blockedBy、未执行原因和总结果。required 组未执行或 blocked 时总结果不能为 passed，存在 required failed/blocked 时进程非零退出。汇总所有已取得的失败；某个独立组失败不终止其它组。无法运行真实引擎时不能以 mock、跳过或仅包级通过代替。
 
-复用 `.github/workflows/misc_packages.yml` 以及已有浏览器工作流的匹配站点构建、`test:engine` 和失败上传能力，加入该短入口及报告；不复制一套全量矩阵。站点的 source/SDK proof 变化按真实资产闭包重建，不能复用不匹配的旧报告。
+原计划复用当时工作流的匹配站点构建、`test:engine` 和失败上传能力，加入该短入口及报告；不复制一套全量矩阵。站点的 source/SDK proof 变化按真实资产闭包重建，不能复用不匹配的旧报告。
 
 本轮只要求明确选定范围内的相关包测试和核心真实回归通过。其余浏览器、设备、压力、性能和发布门禁维持原范围，后续影响到它们时再执行。
 

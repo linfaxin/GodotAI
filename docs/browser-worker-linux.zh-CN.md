@@ -1,12 +1,12 @@
-# 完整 Worker 引擎的 Linux CI
+# 完整 Worker 引擎的 Linux 本地验收
 
-`.github/workflows/browser-worker.yml` 的 PR 和 main 分支先运行 Chromium 原生压力测试，再运行正式 Worker 产品验收；二者都保持 100 次重复会话。正式路径使用生产编译 Worker、校验加载器、共享内存启动检查、RuntimeHost 和 PreviewRunner。随后独立 Firefox job 下载同一份封印候选，执行完整产品用例和两次额外音频循环。手动任务也可选择 Firefox 或 WebKit，结果只证明报告中的浏览器版本和操作系统。当前固定的 Playwright 1.57.0 对应 Chromium 143、Firefox 144 和 Linux WebKit 26。
+需要验证完整 pthread Worker 时，可先运行 Chromium 原生压力测试，再运行正式 Worker 产品验收。完整 Chromium 样本各运行 100 次重复会话。Firefox 使用同一份封印候选执行完整产品用例和两次额外音频循环。结果以报告中的浏览器版本和操作系统为准。Playwright 1.57.0 对应 Chromium 143、Firefox 144 和 Linux WebKit 26。
 
 构建使用 `.node-version` 的 Node、`package.json` 的 pnpm 10.11.0、Emscripten 4.0.11、SCons 4.10.0、Python 3.12 和 Godot 源码提交 `14d19694e0c88a3f9e82d899a0400f27a24c176e`。Emscripten 的 JS 构建宿主也绑定到选定 Node。上游 Godot checkout 会先移出模块仓库，再执行源快照和构建；不会把嵌套上游源码作为 GodotJS 输入复制。
 
 ## 图形与音频环境
 
-CI 使用 Ubuntu 24.04，安装 `xvfb`、`x11-utils`、`pulseaudio`、`pulseaudio-utils`、`libasound2-plugins` 和 `libgl1-mesa-dri`。Playwright 的浏览器及其系统依赖由锁定的工作区包安装，不假定系统存在 `/usr/bin/chromium`。
+参考环境使用 Ubuntu 24.04，安装 `xvfb`、`x11-utils`、`pulseaudio`、`pulseaudio-utils`、`libasound2-plugins` 和 `libgl1-mesa-dri`。浏览器及其系统依赖可通过工作区固定版本的 Playwright 安装。
 
 `scripts/test/run-browser-worker-linux.sh` 为每次运行启动私有 PulseAudio 服务，加载 48 kHz、双声道的 `module-null-sink`，使用 Unix socket 和 cookie/用户身份认证。浏览器连接真实音频服务，实际执行 Godot generator → WebAudio → AnalyserNode 的非零采样检查。null sink 不代表物理扬声器或麦克风验收，也不是 Godot 的 Dummy Audio driver。
 
@@ -19,11 +19,11 @@ Firefox 使用 `Xvfb` 的 `1280x960x24` 屏幕、`BROWSER_HEADLESS=0` 和 Mesa �
 - Firefox 的 `environment/xvfb.log`、`xvfb-display.txt` 和 `x11-info.txt`。
 - `runtime.log`、`environment/command-status.json` 和原始 `worker-integration.json`。
 
-任务失败仍上传证据，包装脚本原样传播测试退出码。源构建、单元测试、Linux 环境设置成功都不能替代完整浏览器运行通过。
+验收失败时保留本地报告。包装脚本传播测试退出码。完整浏览器结果以实际运行报告为准。
 
 ## 正式产品与作者源码验收
 
-CI 使用经固定 SHA-256 验证的官方 Godot 4.6.1 资源导入/导出工具，把认证的完整 pthread Web 模板装入正式站点。官方工具只处理资源；实际运行的 JS/WASM 仍来自当前构建报告。生产引擎的 snake/camel API 由真实浏览器采集，SDK、宿主 JS、SRI、engineId、extensionId 和站点 payload 在构建中一起封印。
+准备产品候选时使用经固定 SHA-256 验证的官方 Godot 4.6.1 资源导入和导出工具。实际运行的 JS/WASM 来自当前构建报告。生产引擎的 snake/camel API 由真实浏览器采集，SDK、宿主 JS、SRI、engineId、extensionId 和站点 payload 在构建中一起封印。
 
 `browser-worker-product-suite.mjs` 逐项调用以下真实验收脚本，并检查每份报告的 candidateId。`current-context.json` 还固定 descriptorHash、siteHash、releaseId 和验收 runId；站点字节漂移会直接失败。
 
@@ -40,11 +40,11 @@ Schema4 编辑用例通过 Monaco 的真实查找框定位两处短 ASCII 标记
 
 ### 回退 fixture 的范围
 
-CI 初次运行也必须覆盖整组回退，因此 `browser-prepare-worker-products.mjs` 会完整构建两个真实站点：前一个使用明确标注的 `-worker-ci.previous` SDK 版本，后一个使用仓库原版本。两者都执行实际 API 采集、SDK 构建、资源导出和完整封印，不能只改 manifest 或伪造 ID。
+本地回退测试可用 `browser-prepare-worker-products.mjs` 完整构建两个站点。前一个使用带 `-worker-ci.previous` 后缀的 fixture 版本，后一个使用仓库原版本。两者都执行实际 API 采集、SDK 构建、资源导出和完整封印。
 
 临时版本修改保存 package.json 的完整原始字节，在成功、异常和正常中断路径中恢复；正式 current 候选只在恢复后重新构建 SDK。工具验证原始字节、实际 SDK 版本、两个扩展/发布身份，以及不随 SDK 版本改变的原生引擎身份。该机械 fixture 不冒充历史已部署版本。本地最终修复验收仍使用保留的真实旧候选做回退。
 
-回退脚本验证 A→B→A、旧标签页继续固定 A，以及故意混入另一组 descriptor 时在引擎请求前拒绝。Firefox job 使用上传的相同候选字节，不在下载后重建或改写站点。
+回退脚本验证 A→B→A、旧标签页继续固定 A，以及故意混入另一组 descriptor 时在引擎请求前拒绝。Firefox 使用 Chromium 验收过的同一份候选字节。
 
 ## 本地执行
 
@@ -65,7 +65,7 @@ bash scripts/test/run-browser-worker-linux.sh firefox /tmp/worker-firefox -- \
   --out /tmp/worker-firefox --browser firefox --loops 3
 ```
 
-Chromium 把两处 `firefox` 参数改为 `chromium`，并先安装相应的 Playwright 浏览器。正式 PR gate 的 `--loops 100` 不变；小规模命令用于本地定位。浏览器报告还会记录实际 executable path、Playwright 版本、headless/display/audio-server 环境和每个真实 case。
+Chromium 把两处 `firefox` 参数改为 `chromium`，并先安装相应的 Playwright 浏览器。用 `--loops 100` 运行完整压力样本，小规模命令可用于定位问题。浏览器报告记录实际 executable path、Playwright 版本、headless/display/audio-server 环境和用例结果。
 
 准备并验证正式产品路径：
 

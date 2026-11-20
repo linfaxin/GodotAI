@@ -1,6 +1,6 @@
 # Repository architecture
 
-GodotJS combines a native Godot module with embedded JavaScript support code and reusable ecosystem packages in one pnpm workspace. Native module directories and embedded-script output paths stay in their existing locations to preserve SCons, CI, and upstream integration.
+GodotJS combines a native Godot module with embedded JavaScript support code and reusable ecosystem packages in one pnpm workspace. Native module directories and embedded-script output paths stay in their existing locations to preserve SCons and upstream integration.
 
 The [engine goals and platform boundaries](engine-goals.zh-CN.md) define the long-term direction: a reusable project, build, runtime and verification foundation for AI game creation platforms, with conversation and AI orchestration owned by each platform. Target capabilities in that document are distinct from the currently implemented scope described here.
 
@@ -62,7 +62,7 @@ impl/web/js/library_godotjs_jsbi.js
 
 The runtime and editor bundles retain AMD output. SCons embeds them into generated native source; the browser bridge is supplied to Emscripten as pre-JS and a JS library. Changes to these internal sources still require rebuilding the corresponding engine artifacts.
 
-`skip_js_runtime=yes` continues to consume previously built or downloaded files. The CI environment job builds only the embedded-script packages and uploads the same directories before native engine compilation; runtime-matrix setup builds these scripts and builds the reusable packages for matching QJS/V8 architecture probes. A separate ecosystem job builds reusable packages, checks new package types, and runs the existing React tests in parallel. The final `builds-done` gate requires both the runtime matrix and ecosystem checks, so package failures block the final checks and releases without blocking engine artifact production or native build execution.
+`skip_js_runtime=yes` consumes previously built or downloaded embedded scripts. Run `pnpm build:engine-js` to prepare those outputs before native compilation. Use `pnpm build:packages` and the relevant package tests for changes to reusable packages. [Local verification policy](../CONTRIBUTING.md#local-verification)
 
 There is no engine-only dependency installation profile at present. A full explicit workspace install prepares all active packages. If applications later add substantial dependencies, validate a dedicated preparation profile before promising filtered installation; a filtered build alone does not isolate installation.
 
@@ -144,11 +144,11 @@ Native platform workflows run `node modules/GodotJS/scripts/test/prepare-native-
 
 Local native source attestations bind included `.inc` implementations, nested SCons files, root headers, code templates and embedded preset inputs, plus final core patch leaves and the build recipe. Generated headers/sources are excluded as derived outputs; validation checks the source and actual binary identity around execution.
 
-The runtime matrix now schedules cleanup, explicit Entry/no-legacy, template/local-resource, NativeInterface (raw and typed), host-operation/audio/signal and early ArtifactSet probes for the matching Linux QJS/V8 artifacts. JavaScriptCore keeps its ordinary runtime tests and is excluded from async native-cleanup certification. Browser Playground and pthread Worker jobs schedule checkpoint and exit probes against their exact `build-browser-engine.mjs` reports. These are CI definitions; a passing CI result requires the actual run and uploaded reports. The generic `build_web.yml` browser/QJS/thread/dlink matrix is not the sealed product builder and does not receive the Dedicated product patch recipe.
+Local Linux QJS/V8 builds can run the cleanup, explicit Entry/no-legacy, template/local-resource, NativeInterface, host-operation and early ArtifactSet probes. JavaScriptCore has its ordinary runtime tests. Run browser checkpoint and exit probes against the exact `build-browser-engine.mjs` reports for Dedicated Worker or pthread Worker. [Native and Web probe commands](engine-evolution-implementation.zh-CN.md#本地构建与验证)
 
 The current foundation is verified through embedded-script builds, the ecosystem build and type check, and package-entry checks. Before public package releases, add isolated tarball consumers to verify declarations, exports, dependencies, and supported hosts. Workspace source resolution alone is not publication verification.
 
-The root package version continues to drive the existing engine version header and GitHub release flow. Private foundations are excluded from Changesets release planning. Public ecosystem packages will need independent semver and npm publication checks when enabled; do not repurpose the engine release predicate for them.
+The root package version drives the engine version header. Run `pnpm release:version` when preparing a manual release. Private foundations stay outside Changesets release planning.
 
 The P0 blocker assessment uses Schema 2 evidence receipts: the candidate engine hashes, validation batch and frozen producer/source hashes must match fresh nonempty required cases. `blockers-cleared` with `engineeringStart: go` authorizes dependent engineering. It explicitly leaves `defaultReleaseReady: false`; production API/declaration certification, deployment and migration/recovery acceptance are separate release work. Building a full-engine descriptor and passing local browser checks does not by itself establish external deployment or public package publication.
 
@@ -160,8 +160,8 @@ The [Playground](../apps/playground/README.md) compiles user programs, checks ta
 
 The default product uses the Dedicated Worker runtime introduced on main, with the full threadless Web binary and host/audio/presentation bridges. The historical native execution value `window` identifies that binary recipe; a schema-3 site and `runtimeAbi` select its Dedicated Worker host. The separately selected pthread candidate uses `proxy-pthread`, built with actual `threads=yes proxy_to_pthread=yes dlink_enabled=no`. The engine main loop, business JS and optional React execute in the engine Worker realm. The separate-origin iframe remains the browser host for DOM, input, audio and platform proxies. A user script Worker has an explicit different role. WebGL context ownership is measured; upstream host GL proxying must not be described as Worker-owned OffscreenCanvas rendering.
 
-The product CI builds this default application and runs its full-engine, editor,
-bridge failure/value, migration and legacy-demo acceptance against one directory.
+Run full-engine, editor, bridge failure/value, migration and legacy-demo
+checks locally against the built default application.
 A start receipt hashes the site before testing, and the final receipt binds those
 same bytes to the reports. The older conformance workbench has a separate artifact;
 it cannot stand in for the default application's acceptance.

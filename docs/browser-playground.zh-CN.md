@@ -1,6 +1,6 @@
 # 纯浏览器 TSX Playground
 
-运行时不依赖 Node.js、WebContainers 或编译服务。Node.js 只用于开发、准备静态发布文件和 CI。页面源码位于 `apps/playground`，浏览器实现位于 `scripts/jsb.react-browser`。
+运行时不依赖 Node.js、WebContainers 或编译服务。Node.js 用于开发、本地验收和准备静态发布文件。页面源码位于 `apps/playground`，浏览器实现位于 `scripts/jsb.react-browser`。
 
 ## 已实现的链路
 
@@ -104,7 +104,7 @@ PLAYWRIGHT_MODULE=/path/to/playwright-core/index.mjs CHROMIUM=/path/to/chromium 
 
 压力测试记录每次运行与退出，区分正常退出和强制移除。父页 JS heap 和 DOM 只是观测值，不证明完整 WASM/native allocator 零泄漏。源码映射专项位于 `tests/browser-preflight/verify-source-maps.mjs`。
 
-`.github/workflows/browser-playground.yml` 包含源码构建、旧预验证、完整 Playground、压力验证及 npm-pack 外部消费者检查。可通过 `BROWSER` 选择共享测试驱动支持的浏览器；是否通过以实际报告为准。
+源码构建、浏览器回归、压力验证和 npm 包消费者检查按需在本地运行。可通过 `BROWSER` 选择测试驱动支持的浏览器，结果以实际报告为准。[本地验证约定](../CONTRIBUTING.md#local-verification)
 
 ## 静态托管与 npm 交付
 

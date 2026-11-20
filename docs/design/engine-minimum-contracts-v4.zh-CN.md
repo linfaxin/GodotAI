@@ -19,7 +19,7 @@
 | API 与依赖 | AssetIntegrity/StoredAsset 分层、原始 JSON 身份、命名与 SDK 闭包、最终环境组合、资源 target 与 DTO 归属 | 无新增 P0/P1；接口可直接落码 |
 | 构建与资源 | 组合快照和最终环境进入 checked build，诊断与 pin 单一归属，资源预算和单包/集合映射 | 无新的前置选型；W4 同批迁移调用链，并捕获原释放回调 |
 | 运行与预览 | 完整 site 输入、镜像/context、复用已分发宿主、七字段、observed/local 终态与取消时序 | 无新增 P0/P1；无需新增宿主体系或原生 ABI |
-| 交付与依赖 | W0 打包类型 fixture、单一文件 owner、pnpm pack 双包安装、动态 SDK proof 和既有 CI | 依赖顺序可实施；无需增加工作包或 publisher |
+| 交付与依赖 | W0 打包类型 fixture、单一文件 owner、pnpm pack 双包安装、动态 SDK proof 和本地回归 | 依赖顺序可实施；无需增加工作包或 publisher |
 | QA 与环境 | 独立组、required/blocked、无 session 报告、失败仍清理和真实引擎判定 | 可开始测试与环境准备；真实验收仍依赖匹配资产及运行预检 |
 
 前两轮提出的公共解码签名、纯类型入口检查、consumer 宿主适配、同输入 checked build 和报告清理规则均已落码。实现后又完成独立集成复核，没有未解决的本轮阻塞项；各项完成结果见交付记录。
@@ -44,7 +44,7 @@
 | 可消费的运行事件、错误、取消和退出事实 | 将事实关联到用户、会话、轮次，展示给用户和 AI |
 | 相关包测试及真实 Worker 核心回归 | 公共截图、输入自动化、场景 inspector、帧步进与玩法判断 |
 
-主验收目标选当前默认 Dedicated Worker、direct 呈现、`full-engine-v1` 和一套明确记录版本的 Chromium，覆盖普通场景、显式 `start(ctx)` 及按需 React。bitmap、2D profile、pthread、其他浏览器与设备沿用各自范围；它们不作为本轮所有改动的先决条件。CI 采用已有固定 Playwright 浏览器，本地系统 Chromium 的工程结果单独记录版本与启动设置。
+主验收目标选当前默认 Dedicated Worker、direct 呈现、`full-engine-v1` 和一套明确记录版本的 Chromium，覆盖普通场景、显式 `start(ctx)` 及按需 React。bitmap、2D profile、pthread、其他浏览器与设备沿用各自范围；它们不作为本轮所有改动的先决条件。本地验收记录 Chromium 的实际版本与启动设置。
 
 ## 当前基础与需要补齐的部分
 
@@ -465,7 +465,7 @@ Playground 可以据此维护有界反馈记录，再关联到 AI task/turn。�
 | `packages/project-tools/src/compiler.ts` 与对应测试 | W4：仅补 compileProject 原释放回调的入口捕获，保持单一释放语义；其余编译机制复用 |
 | `apps/playground/src/compiler.worker.ts`、`engine-project.ts`、demo 组合调用、`engine-assets.ts`、`engine-preview.ts`、预览验证与 Node adapter | W4 独占调用方统一切换、checked build 和局部 consumer context 适配；保留产品上下文与 IO，移除旧通用实现 |
 | 两个 package.json、最终 reexports、Playground package scripts | W0 仅增加已经落地的共享类型入口；W4 汇总其余实际 exports 与入口，其他包提交清单而不抢写 |
-| `apps/playground/scripts/browser-*-test.mjs`、短回归汇总器、CI 对应步骤 | W5：报告预检、core 分组、独立失败收集与匹配站点验收 |
+| `apps/playground/scripts/browser-*-test.mjs`、短回归汇总器和本地验证入口 | W5：报告预检、core 分组、独立失败收集与匹配站点验收 |
 | `apps/playground/scripts/full-engine-release.mjs`、`seal-site-acceptance.mjs`、`scripts/release/build-web-release.mjs` | W4：完整传递原报告的各 ABI 证明；W5 通过既有严格验证器检查，保留缺失及篡改拒绝回归 |
 
 函数跨包需要复用时增加实际 package export 和声明；不让调用者导入其它包的 src。纯 DTO 与环境投影保持无 DOM 运行时依赖，浏览器入口显式承担 DOM 类型与能力。
@@ -537,7 +537,7 @@ pnpm test:playground
 PLAYGROUND_TEST_DIRECTORY=/absolute/matching-site BROWSER=chromium PLAYGROUND_ENGINE_CONTRACT_REPORT=/workspace/work/engine-minimum-contracts/contracts.json pnpm --filter @godot-js/playground test:browser:contracts
 ```
 
-本地显式选系统 Chromium 时设置现有 harness 支持的 `PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium`。CI 继续采用其固定 Playwright 浏览器，报告实际路径、版本与 flags；不混用其它脚本的 `BROWSER_EXECUTABLE`。
+本地显式选系统 Chromium 时设置现有 harness 支持的 `PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium`。报告记录实际路径、版本与启动参数。
 
 真实运行宿主核心回归：
 
@@ -554,9 +554,9 @@ PLAYGROUND_TEST_DIRECTORY=/absolute/matching-site BROWSER=chromium PLAYGROUND_RE
 
 这些脚本的实际浏览器参数、软件 GL 或其它覆盖继续如实进入结果范围。需要验证默认设置时使用对应现有产品回归，不能将工程覆盖结果改写为默认设备认证。
 
-### 报告与 CI
+### 本地验收报告
 
-沿用包检查、已有 matching browser job 与 always 上传。报告至少保留：实际源码与构建来源、站点与 release/资产身份、浏览器版本和启动设置、执行后端与 presenter、每个 case 的输入版本及结果、原始诊断、run identity、退出与清理事实。
+本地运行相关包检查和匹配站点的浏览器回归，保留失败与成功报告。报告记录实际源码与构建来源、站点与 release/资产身份、浏览器版本和启动设置、执行后端与 presenter、每个 case 的输入版本及结果、原始诊断、run identity、退出与清理事实。
 
 当前三个专项脚本在报告保护边界之前读取 manifest/release，缺站点时可能没有 JSON。本轮将预检移入报告保护边界，先建立报告，再做文件读取、资产校验、浏览器启动。缺文件、缺可运行浏览器等前提不足标记 blocked；提供的资产格式损坏、hash/身份错误以及合同断言失败标记 failed，不以“环境问题”掩盖实际失败。报告写入本身不可用时保留 stderr 与非零退出。
 
@@ -568,7 +568,7 @@ PLAYGROUND_TEST_DIRECTORY=/absolute/matching-site BROWSER=chromium PLAYGROUND_RE
 
 汇总器逐份核对子报告的 profile、releaseId、descriptorHash、candidateId 与预检身份。本轮各进程级 case 必须同时提供 engineExecuted 为 true 和完整身份的 Worker/direct session；其中纯输入拒绝或 session 前取消的单独步骤仍可没有 session。缺字段和身份不一致均不能通过，原始 failed/blocked 报告继续保留。执行标志只在原生运行断言成立后记录。
 
-复用 `.github/workflows/misc_packages.yml` 以及已有浏览器工作流的匹配站点构建、`test:engine` 和失败上传能力，加入该短入口及报告；不复制一套全量矩阵。站点的 source/SDK proof 变化按真实资产闭包重建，不能复用不匹配的旧报告。
+使用本地 `pnpm test:engine` 和匹配站点构建命令，按改动范围运行相关浏览器回归。站点的 source/SDK proof 变化按真实资产闭包重建，不能复用不匹配的旧报告。
 
 本轮只要求明确选定范围内的相关包测试和核心真实回归通过。其余浏览器、设备、压力、性能和发布门禁维持原范围，后续影响到它们时再执行。
 
@@ -581,11 +581,11 @@ PLAYGROUND_TEST_DIRECTORY=/absolute/matching-site BROWSER=chromium PLAYGROUND_RE
 | W2 Worker 发布与事件 | release-adapter、dedicated runner 的完整身份、observed/local 终态与对应测试 | W0 共享合同落码 | 完整站点封印与 target 拒绝、镜像/context 保留、run/ready/取消/替换/唯一终态合同通过 |
 | W3 产物衔接 | project-tools/browser 的 prepareBrowserArtifact 与对应测试 | W0 共享合同落码 | 实际编译响应数据可映射；expected target、单包收据、集合闭包、字节拥有权正确 |
 | W4 调用方与分发 | 独占 Playground、Node adapter 切换、checked build、原释放回调捕获，汇总 exports 与隔离 consumer/context 适配 | W1/W2/W3 接口已有实现；迁移清单可先准备 | 公共基础装配与同输入检查构建生效；pin 仅原 owner 释放；旧重复实现移除；demo/历史适配及隔离消费者通过 |
-| W5 核心回归与环境 | 独占浏览器测试脚本、短汇总、CI 报告；准备匹配站点 | 资产定位、报告/preflight/fixture 可立即开始；最终执行等 W4 和匹配站点 | 指定 Chromium、默认 Worker/direct、full-engine-v1 的 required 核心组真实通过，报告与失败上传完整 |
+| W5 核心回归与环境 | 独占浏览器测试脚本、短汇总、本地报告；准备匹配站点 | 资产定位、报告/preflight/fixture 可立即开始；最终执行等 W4 和匹配站点 | 指定 Chromium、默认 Worker/direct、full-engine-v1 的 required 核心组真实通过，保留完整报告 |
 
 依赖为 **W0 → W1/W2/W3 并行 → W4 → W5 最终验收**。W5 的环境准备和报告改造可先行，不等于可以提前完成真实引擎验收。W0 负责形状与已落地的类型入口，W1 随后独占公共实现文件，W2 独占 Worker 终态实现；共同文件的后续改动交 owner 合并。
 
-每个工作包增加与其合同有关的最小必要测试。W4 统一修改两个 package.json 与 Playground 调用方；W5 提交 scripts/CI 需求由 W4 合并，避免共享文件争用。build:packages、共享 dist/站点生成串行执行；并行测试需要独立输出目录，不能让多个任务覆写同一产物或冻结报告。
+每个工作包增加与其合同有关的最小必要测试。W4 统一修改两个 package.json 与 Playground 调用方；W5 的本地脚本需求由 W4 合并，避免共享文件争用。build:packages、共享 dist/站点生成串行执行；并行测试需要独立输出目录，不能让多个任务覆写同一产物或冻结报告。
 
 ### 从开工到验收的四个检查点
 

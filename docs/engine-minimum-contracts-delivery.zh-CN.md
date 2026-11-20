@@ -50,7 +50,7 @@ pnpm test:playground
 PLAYGROUND_TEST_DIRECTORY=/absolute/matching-site BROWSER=chromium PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium PLAYGROUND_ENGINE_CONTRACT_REPORT=/absolute/reports/contracts.json pnpm --filter @godot-js/playground test:browser:contracts
 ```
 
-五个 required 组为 preflight、lifecycle、failure-recovery、replacement、entry-resources。独立组执行后汇总，依赖失败前提的步骤标记 blockedBy；required 失败、阻塞或未执行均不能通过。无 session 的负例不伪造事实，报告写失败仍释放资源。CI 在匹配站点后调用该入口，并始终上传报告。
+五个 required 组为 preflight、lifecycle、failure-recovery、replacement、entry-resources。独立组执行后汇总，依赖失败前提的步骤标记 blockedBy；required 失败、阻塞或未执行均不能通过。无 session 的负例不伪造事实，报告写失败仍释放资源。在本地指向匹配站点运行该入口并保留报告。
 
 汇总器校验每份子报告与预检的 profile/releaseId/descriptorHash/candidateId 一致，并要求各真实运行 case 提供 engineExecuted 和完整 Worker/direct 运行身份。Schema 4 与资源专项在原生运行断言成立后记录执行标志，摘要直接保留报告值。身份不符、执行标志缺失或无实际 session 均会使门禁失败。
 

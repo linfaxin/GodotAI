@@ -510,7 +510,7 @@ cleaner 共享 staging/journal、sealed/active 与运行持有代的产物归属
 
 selected-scenes 模式必要时使用独立 export-hub.tscn 作为扫描根，引用 resource hub。export hub 不运行、不进入应用树。把 `.tres` 直接放进仅选 scenes 的列表，不保证它会成为有效根。
 
-SDK 自动提供 BootVerificationReportV1，含 entryId/generation/认证 tuple、首个 LayoutPublished、树审计、已请求的必要资源与未预期错误；业务无需自行打印测试 sentinel。它只证明框架启动与已覆盖资源，不自动证明游戏玩法或未执行分支。持续运行/交互/网络项目通过专门验证入口或 CI 用例完成业务断言，未配置时报告明确标记 boot-smoke 范围。
+SDK 自动提供 BootVerificationReportV1，含 entryId/generation/认证 tuple、首个 LayoutPublished、树审计、已请求的必要资源与未预期错误；业务无需自行打印测试 sentinel。它只证明框架启动与已覆盖资源，不自动证明游戏玩法或未执行分支。持续运行/交互/网络项目通过专门的本地验证入口完成业务断言，未配置时报告明确标记 boot-smoke 范围。
 
 测试 fixture 仍使用明确成功标识配合行为断言；正式工具检查 SDK 报告、模块/资源日志、包目录和项目验证结果。出口码 0 不能单独证明发布成功。动态资源路径必须来自可分析导入或登记目录，未知字符串路径给诊断。
 
@@ -667,7 +667,7 @@ core 的行为 gate 包括真正的引擎 GUI 输入路由到 Button、React 状
 | `round14-ownership` | tree/order 信号可审计入树/部分离树修改；直接释放存在盲区 | 不能证明全来源 veto；原生桥尚待实现 |
 | `round14-ownership` shutdown | launcher `_exit_tree` 正常 unmount/passive/free，cleanup 时对象有效，children 清零 | 仅证明正常 App 退出；不覆盖任意业务 child 外部 free |
 | `round14-build` | 当前 source-map C++ 原算法的四个标准 fixture 不符 | 独立算法测试，不是完整 Godot debugger 测试 |
-| `round15-qa` | 隔离复制后独立重编译、真实 QJS、selected-PCK/空 cwd 与负例复跑通过；8 业务节点、6 次审计、511,132 B；原报告/source hash 未变；正向日志无 runtime 错误 | 不认证目标 HEAD；发现原型 passed 未纳入 scriptErrors 的判定缺口，正式 CI 已列加强要求 |
+| `round15-qa` | 隔离复制后独立重编译、真实 QJS、selected-PCK/空 cwd 与负例复跑通过；8 业务节点、6 次审计、511,132 B；原报告/source hash 未变；正向日志无 runtime 错误 | 不认证目标 HEAD；发现原型 passed 未纳入 scriptErrors 的判定缺口，该轮评审已记录加强要求 |
 | `round15-runtime` | 真实 QJS 同时将 scheduler host 与 sync microtask 纳入 process_frame pump；layout 读取已更新 native；用户 timers 不变 | 仅最小 adapter spike；未证明预算、timeout、多引擎、原生 guard/失效桥 |
 | `round15-api` | TS6 证明 void 可擦除 async，JS 模型证明 dispatchToken 过期后不能借后续 tick 写入 | 类型/能力模型，不是已实现原生权限桥 |
 | `round15-build` | Node CJS 复现覆盖稳定入口仍用旧缓存；只读一次 ticket 与不可变 generation 路径可 pin 实例 | Node 缓存模型与源码核对，不是 Godot/跨平台原子发布认证 |

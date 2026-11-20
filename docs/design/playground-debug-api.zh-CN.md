@@ -14,7 +14,7 @@
 | --- | --- |
 | API 和执行语义 | 预览关联必须活到首个运行事件或异步请求结算。固定查询空值、诊断可用性、运行引用的构建记录以及事件过滤和省略的返回形状。 |
 | Playground 接入 | 已在真实站点验证目标拒绝夹具。补全启动日志标记、宿主失联前台条件、可执行文档样例和独立的调试产品回归入口。 |
-| 环境与验收 | 单独跟踪项目命令往返的间歇失败、CI 捕获参数和 React 关闭进度。保留失败与复跑通过的报告，应用工作可并行。 |
+| 环境与验收 | 单独跟踪项目命令往返的间歇失败、独立准入捕获参数和 React 关闭进度。保留失败与复跑通过的报告，应用工作可并行。 |
 
 ## 四项查询
 
@@ -102,7 +102,7 @@ if (runId) {
 | B 采集与页面接入 | 负责 `main.ts` 和 `engine-preview.ts` 的接缝与公共查询对象挂载。在 UI 投影前采集，处理编译通信错误、迟到响应、准备拒绝和实际退出。 | A 的类型约定就绪后开工，独立验证采集接缝。 |
 | C API 文档与调试页签 | 负责 `web/index.html`、Dock 页签、独立调试面板和文档示例。消费 A 的查询对象，由 B 接入入口。 | 用 A 的受控记录与 B 并行，先验收渲染、空态和键盘交互。 |
 | D 浏览器样例与断言 | 新增 `browser-debug-api-test.mjs` 和 `test:browser:debug-api`，报告路径由 `PLAYGROUND_DEBUG_API_REPORT` 指定。复用双 origin、Schema 4 项目与被动运行观察。 | 用例脚手架可立即开工，端到端验收使用 A–C 的实现和匹配站点。 |
-| E 产品基线与 CI 独立准入 | E1 维护匹配站点，诊断项目命令往返并复跑核心合同。E2 修复 profile gate，验证双命名捕获和原生/React 四用例。 | E1 和 E2 并行。E1 如需修改 `main.ts`，由 B 的接入负责人一并处理。若修复触及 SDK，重建匹配站点后复验。 |
+| E 产品基线与独立准入 | E1 维护匹配站点，诊断项目命令往返并复跑核心合同。E2 修复 profile gate，验证双命名捕获和原生/React 四用例。 | E1 和 E2 并行。E1 如需修改 `main.ts`，由 B 的接入负责人一并处理。若修复触及 SDK，重建匹配站点后复验。 |
 
 ## 验收
 
@@ -125,15 +125,15 @@ if (runId) {
 
 以同一候选站点重跑 `lifecycle` 和核心合同，在失败步骤内保留关联的运行 ID、工作台本地命令受理结果、编辑器和宿主的命令序号、匹配回执、项目同步与异步事件及当前 revision/generation。派发回执确认通道处理进度，业务接收由项目事件确认。使用旧站点的无返回值命令入口时，由匹配的同步与异步项目回包证明往返。停止回执随同一次命令记录保存。复验覆盖该组单跑和整套顺序，出现失败时用同一批证据定位在哪一层中断。 [工作台命令派发](../../apps/playground/src/main.ts#L49) · [核心生命周期步骤与失败收集](../../apps/playground/scripts/browser-runtime-host-test.mjs#L330)
 
-### E2 CI 独立准入
+### E2 独立准入
 
-在 CI 的 `browser-engine-profile-gate.mjs` 调用中通过 `--engine-report` 传入同一个原生构建报告。准入脚本启动 Chromium 前用 `executionFromReport` 核对 profile 及实际 JS、WASM 和两份 worklet 与报告中的资产摘要，再将保留 `hostResourceAbi` 的完整执行配置传给 snake 和 camel API 捕获。`window` 执行的 `workerAssets` 可以为空，四份模板资产应单独核对。生产站点使用实际导出后的 `exportedExecution`。
+本地运行 `browser-engine-profile-gate.mjs` 时通过 `--engine-report` 传入同一个原生构建报告。准入脚本启动 Chromium 前用 `executionFromReport` 核对 profile 及实际 JS、WASM 和两份 worklet 与报告中的资产摘要，再将保留 `hostResourceAbi` 的完整执行配置传给 snake 和 camel API 捕获。`window` 执行的 `workerAssets` 可以为空，四份模板资产应单独核对。生产站点使用实际导出后的 `exportedExecution`。
 
-独立准入还包含原生和 React 各两种命名的四个实际运行用例。React fixture 在有界的引擎帧内等待真实引用和属性提交，检查信号和更新。关闭时逐帧调用 `getCloseProgress()` 推进已释放节点的回收，等 `close()` 报告完成、待释放数和原生子节点数均为零，再启动下一棵树并再次验证清理。报告逐项记录两次 API 捕获和四次真实运行。前置失败时注明后续哪些用例阻塞。 [CI 准入调用](../../.github/workflows/browser-playground.yml#L215-L223) · [准入 fixture 与矩阵](../../apps/playground/scripts/browser-engine-profile-gate.mjs#L19-L111) · [React 关闭与进度查询](../../scripts/jsb.react/src/engine.ts#L1128-L1161)
+独立准入还包含原生和 React 各两种命名的四个实际运行用例。React fixture 在有界的引擎帧内等待真实引用和属性提交，检查信号和更新。关闭时逐帧调用 `getCloseProgress()` 推进已释放节点的回收，等 `close()` 报告完成、待释放数和原生子节点数均为零，再启动下一棵树并再次验证清理。报告逐项记录两次 API 捕获和四次真实运行。前置失败时注明后续哪些用例阻塞。 [准入 fixture 与矩阵](../../apps/playground/scripts/browser-engine-profile-gate.mjs#L19-L111) · [React 关闭与进度查询](../../scripts/jsb.react/src/engine.ts#L1128-L1161)
 
 ## 评审基线与验收条件
 
-合并验收要求新调试用例通过、核心合同五组通过、CI 独立准入两次捕获和四次真实运行通过。发布按现有设备、呈现和批准门禁执行。 [现有交付](../engine-minimum-contracts-delivery.zh-CN.md) · [浏览器发布门槛](../browser-worker-runtime.zh-CN.md#能力-ledger-与-go-gates)
+合并验收要求新调试用例通过、核心合同五组通过、本地独立准入两次捕获和四次真实运行通过。发布按现有设备、呈现和批准门禁执行。 [现有交付](../engine-minimum-contracts-delivery.zh-CN.md) · [浏览器发布门槛](../browser-worker-runtime.zh-CN.md#能力-ledger-与-go-gates)
 
 - 已将当前提交和上一版交付使用的两个 full/debug 候选 ZIP 下载到评审临时目录，分别核对 GitHub 摘要，并对内部 portable 模板、原始报告和证明运行 `package-browser-engine-artifact.mjs --verify`，均通过。当前提交的候选包提供可信模板和诊断记录。 [当前候选](https://github.com/linfaxin/GodotAI/actions/runs/44233390118/artifacts/14397399010) · [交付使用的候选](https://github.com/linfaxin/GodotAI/actions/runs/44046900983/artifacts/14314188455)
 - 当前提交 CI 的 full/debug 准入在 `captureEngineApi` 等待退出时超时，默认产品站点随后未生成。合同汇总因缺少 `manifest.json` 在 preflight 处阻塞，五组均未执行到真实引擎。 [CI 工作日志](https://github.com/linfaxin/GodotAI/actions/runs/44233390118/job/134565383006)
@@ -159,7 +159,7 @@ if (runId) {
 
 完整 Playground 本机测试为 372/373 通过。剩余的历史失败为 headless React fixture 缺少 `ENGINE_PROJECT_REACT_CLEANUP` 标记，记录在 `unit-final.log`。 [本机 fixture](../../apps/playground/scripts/engine-project.test.mjs#L349)
 
-GitHub Actions 已接入受控 UI 和真实产品调试 API 回归，并向独立准入传入模板构建报告。验收表记录的是工作区对同一流程的运行。 [回归工作流](../../.github/workflows/browser-playground.yml)
+验收表记录工作区的本地运行结果。受控 UI、真实产品调试 API 回归和独立引擎准入均可在本地复跑。[本地构建与回归入口](../engine-minimum-contracts-delivery.zh-CN.md#构建与回归入口)
 
 复核修正后的候选 `33537e082349ef9e3da3392091c96e9114b45b39f24ab4667b371acddb08ee12` 通过调试 API 五个场景和核心合同五组。真实预览拒绝用例核对 `diagnostic.code`、原运行和关联构建 JSON，受控 Chromium 用例核对淘汰后清除日志和恢复当前运行。工作区报告位于 `/workspace/scratch/playground-debug-audit-fix/`。 [真实预览拒绝回归](../../apps/playground/scripts/browser-debug-api-test.mjs#L221) · [面板回归](../../apps/playground/scripts/browser-debug-panel-test.mjs)
 
