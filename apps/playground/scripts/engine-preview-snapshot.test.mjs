@@ -15,7 +15,7 @@ const app=fileURLToPath(new URL('../',import.meta.url));
 const output=await build({entryPoints:[path.join(app,'src/engine-preview.ts')],bundle:true,write:false,format:'iife',globalName:'PreviewModule',platform:'browser',target:'es2022',plugins:[{name:'snapshot-boundaries',setup(builder){
  builder.onResolve({filter:/^@godot-js\/engine\/browser\/(?:dedicated\/worker-)?runner$/},()=>({path:'runner',namespace:'snapshot'}));
  builder.onResolve({filter:/^\.\/engine-assets$/},()=>({path:'assets',namespace:'snapshot'}));
- builder.onLoad({filter:/.*/,namespace:'snapshot'},({path})=>({loader:'js',resolveDir:app,contents:path==='runner'?`export{supportsWorkerInteraction}from '../../packages/engine/src/browser/dedicated/worker-interaction.ts';class Runner {constructor(options){globalThis.__runnerOptions=options;}subscribe(){}run(artifact){globalThis.__artifact=artifact;return Promise.resolve(artifact);}stop(){}dispose(){}}class Legacy extends Runner {constructor(options){super(options);globalThis.__backend='legacy';}}class Worker extends Runner {constructor(options){super(options);globalThis.__backend='worker';}}export{Legacy as PreviewRunner,Worker as WorkerPreviewRunner};`:`export async function loadEngineRelease(){return globalThis.__manifest;}export async function loadReleaseContext(){return globalThis.__context;}export async function loadRuntimeCandidate(){return globalThis.__candidate;}export async function loadReleaseInputs(){return {descriptorBytes:globalThis.__descriptorBytes.slice(),siteManifestBytes:globalThis.__siteBytes.slice()};}`}));
+ builder.onLoad({filter:/.*/,namespace:'snapshot'},({path})=>({loader:'js',resolveDir:app,contents:path==='runner'?`export{supportsWorkerInteraction}from '../../packages/engine/src/browser/dedicated/worker-interaction.ts';export{supportsWorkerObservation}from '../../packages/engine/src/browser/dedicated/worker-runtime-observation.ts';class Runner {constructor(options){globalThis.__runnerOptions=options;}subscribe(){}run(artifact){globalThis.__artifact=artifact;return Promise.resolve(artifact);}stop(){}dispose(){}}class Legacy extends Runner {constructor(options){super(options);globalThis.__backend='legacy';}}class Worker extends Runner {constructor(options){super(options);globalThis.__backend='worker';}}export{Legacy as PreviewRunner,Worker as WorkerPreviewRunner};`:`export async function loadEngineRelease(){return globalThis.__manifest;}export async function loadReleaseContext(){return globalThis.__context;}export async function loadRuntimeCandidate(){return globalThis.__candidate;}export async function loadReleaseInputs(){return {descriptorBytes:globalThis.__descriptorBytes.slice(),siteManifestBytes:globalThis.__siteBytes.slice()};}`}));
 }}]});
 
 async function fixture(digest,query='',defaultBackend){
@@ -32,7 +32,7 @@ async function fixture(digest,query='',defaultBackend){
   payloads:{...manifest.payloads,'engine-release.json':{sha256:hash(descriptorBytes),bytes:descriptorBytes.length}}};
  const siteBytes=new TextEncoder().encode(JSON.stringify(site));
  const context={engineProfile:manifest.runtimeProfile,engineReleaseId:manifest.id,descriptorHash:hash(descriptorBytes),candidateId:hash(siteBytes),releaseRoot:'http://editor.test/'};
- const scope={URL,Uint8Array,TextEncoder,TextDecoder,DOMException,location:{href:'http://editor.test/'+query},
+ const scope={URL,Uint8Array,TextEncoder,TextDecoder,DOMException,AbortSignal,location:{href:'http://editor.test/'+query},
   ...(defaultBackend?{__PLAYGROUND_EXECUTION_BACKEND__:defaultBackend}:{}),
   __context:context,__manifest:manifest,__candidate:candidate,__descriptorBytes:descriptorBytes,__siteBytes:siteBytes,
   fetch:async()=>({ok:true,json:async()=>({previewOrigin:'http://preview.test/'})}),
@@ -92,6 +92,7 @@ test('out-of-order pack digests keep only the latest requested project',async()=
 test('ordinary preview is Worker-only with direct presentation and opt-in benchmark timings',async()=>{
  const hash=(algorithm,input)=>webcrypto.subtle.digest(algorithm,input);
  const normal=await fixture(hash);assert.equal(normal.scope.__backend,'worker');assert.equal(normal.scope.__runnerOptions.previewUrl,'http://preview.test/preview.html');assert.equal(normal.scope.__runnerOptions.configuration.presentationBackend,'direct');assert.equal(normal.scope.__runnerOptions.configuration.budgets,undefined);
+ assert.equal(normal.preview.supportsObservation,false);
  const bitmap=await fixture(hash,'?presentationBackend=bitmap');assert.equal(bitmap.scope.__runnerOptions.configuration.presentationBackend,'bitmap');
  const benchmark=await fixture(hash,'?benchmarkTimings=1');assert.equal(benchmark.scope.__runnerOptions.configuration.budgets.benchmarkTimingSamples,512);
  const compatible=await fixture(hash,'?executionBackend=worker');assert.equal(compatible.scope.__backend,'worker');

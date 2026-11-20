@@ -4,7 +4,8 @@ import {mkdtemp,writeFile,rm} from 'node:fs/promises';
 import path from 'node:path';
 import {tmpdir} from 'node:os';
 import {canonical,digest,sitePayloads} from './site-evidence.mjs';
-import {WORKER_RUNTIME_ABI} from '../../../scripts/release/engine-profiles.mjs';
+import {WORKER_RUNTIME_ABI,assertWorkerRuntimeAbi} from '../../../scripts/release/engine-profiles.mjs';
+import {OBSERVATION_EXPORTS,OBSERVATION_SOURCE_PATHS,assertRuntimeObservationBuildProof} from '../../../scripts/release/web-release-utils.mjs';
 import {WORKER_CANDIDATE_ASSETS,WORKER_NATIVE_PATCH_FILES,assertWorkerBuildProof,describeWorkerCandidate,assertWorkerCandidate,runConfigurationHash,workerAcceptancePlan} from './worker-candidate.mjs';
 import {assertWorkerSessionEvidence} from './runtime-evidence.mjs';
 import {workerRuntimeBuildProof} from '../../../scripts/release/patch-web-worker-runtime.mjs';
@@ -97,4 +98,30 @@ test('candidate uses the actual historical ABI and refuses an unbuilt lifecycle 
 test('a worker patch alone cannot certify the new lifecycle capability',()=>{
  const report=buildProof();report.runtimeAbi.lifecycle=1;
  assert.throws(()=>assertWorkerBuildProof(report),/lifecycle/);
+});
+
+test('runtime observation is optional and bound to both the snapshotted reader and exact executable',()=>{
+ const report=buildProof();
+ assert.doesNotThrow(()=>assertRuntimeObservationBuildProof(report));
+ assert.throws(()=>assertWorkerRuntimeAbi({...report.runtimeAbi,observation:1}),/E_WORKER_RUNTIME_ABI/);
+ report.runtimeAbi={...WORKER_RUNTIME_ABI,observation:1};
+ assert.doesNotThrow(()=>assertWorkerRuntimeAbi(report.runtimeAbi));
+ assert.throws(()=>assertRuntimeObservationBuildProof(report),/E_RUNTIME_OBSERVATION_BUILD_PROOF/);
+ const sources=Object.fromEntries(OBSERVATION_SOURCE_PATHS.map(path=>[path,digest(path)]));
+ const inputs={...sources,'README.md':digest('other module input')};
+ const wasmSha256=digest('matching wasm');
+ report.source={inputs,snapshotHash:digest(canonical(inputs))};
+ report.template={assets:[{path:'godot.wasm',sha256:wasmSha256}]};
+ report.runtimeObservation={abi:1,sources,exports:[...OBSERVATION_EXPORTS],wasmSha256};
+ assert.doesNotThrow(()=>assertRuntimeObservationBuildProof(report));
+ assert.throws(()=>assertRuntimeObservationBuildProof(report,digest('other wasm')),/E_RUNTIME_OBSERVATION_BUILD_PROOF/);
+ for(const mutate of [
+  value=>delete value.runtimeAbi.observation,
+  value=>value.runtimeObservation.exports.pop(),
+  value=>value.runtimeObservation.sources[OBSERVATION_SOURCE_PATHS[0]]=digest('other reader'),
+  value=>value.source.inputs.SCsub=digest('changed rules'),
+ ]){
+  const changed=structuredClone(report);mutate(changed);
+  assert.throws(()=>assertRuntimeObservationBuildProof(changed),/E_RUNTIME_OBSERVATION_BUILD_PROOF/);
+ }
 });

@@ -102,12 +102,12 @@ export function assembleFullEngineRelease({engine,ir,capture,irBytes,declaration
  if(engine.host&&(!/^[a-f0-9]{64}$/.test(engine.host.sha256??'')||!Number.isSafeInteger(engine.host.bytes)||engine.host.bytes<=0||!engine.host.path||engine.host.path.startsWith('/')||engine.host.path.split('/').some(part=>!part||part==='.'||part==='..')))throw Error('E_FULL_ENGINE_HOST: Invalid browser host asset');
 
  if(runtimeAbi){
-  assertWorkerRuntimeAbi(runtimeAbi);assertWorkerBuildProof(engineBuildReport);assertWorkerSdkProof(build.sdkBuild);
+  assertWorkerRuntimeAbi(runtimeAbi);assertWorkerBuildProof(engineBuildReport,engine.wasm.decodedSha256??engine.wasm.sha256);assertWorkerSdkProof(build.sdkBuild);
   if(canonical(runtimeAbi)!==canonical(engineBuildReport.runtimeAbi))throw Error('E_WORKER_BUILD_ABI');
   build={...build,workerPatch:engineBuildReport.workerPatch,engineRecipe:engineBuildReport.recipe};
   // Keep the original receipts with every declared native capability. The
   // site verifier reconstructs this same report from the sealed release.
-  for(const field of ['lifecycleAbi','lifecyclePatch','artifactSetAbi','artifactSetPatch','observerAbi','nativeObserverPatch','hostResourceAbi','hostResourcePatch','shutdownQueueAbi','shutdownQueuePatch'])if(engineBuildReport[field]!==undefined)build[field]=engineBuildReport[field];
+  for(const field of ['lifecycleAbi','lifecyclePatch','artifactSetAbi','artifactSetPatch','observerAbi','nativeObserverPatch','hostResourceAbi','hostResourcePatch','shutdownQueueAbi','shutdownQueuePatch','runtimeObservation'])if(engineBuildReport[field]!==undefined)build[field]=engineBuildReport[field];
  }
  const definition=getEngineProfile(runtimeProfile);
  const profiles={snake:{ir,capture,irBytes,declarations,namingVersion,codegenVersion,typeSnapshot,strictTypechecks,actualAPIHash:build.actualAPIHash},camel:namingProfiles?.camel};

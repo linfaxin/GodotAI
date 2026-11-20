@@ -1,5 +1,5 @@
 import {PreviewRunner} from '@godot-js/engine/browser/runner';
-import {WorkerPreviewRunner,supportsWorkerInteraction,type WorkerRunnerEvent} from '@godot-js/engine/browser/dedicated/worker-runner';
+import {WorkerPreviewRunner,supportsWorkerInteraction,supportsWorkerObservation,type WorkerRunnerEvent} from '@godot-js/engine/browser/dedicated/worker-runner';
 import type {RunnerEvent} from '@godot-js/engine/browser/protocol';
 import type {VerifiedRelease} from '@godot-js/engine/browser/verified-loader';
 import {prepareWorkerRelease} from '@godot-js/engine/browser/release-adapter';
@@ -62,7 +62,8 @@ export async function createEnginePreview(container:HTMLElement, listener:(event
  runner.subscribe(listener);
  let operationSequence=0,disposed=false;
  const supportsPlaytest=supportsWorkerInteraction(release,configuration?.presentationBackend,globalThis.navigator?.userAgent??'');
- return {manifest,context,runner,configuration,supportsPlaytest,async run(pack:Uint8Array|undefined,revision:number,details:unknown,artifactSet?:ArtifactSet,registerDebug?:(generation:string|number)=>()=>void,signal?:AbortSignal){
+ const supportsObservation=supportsWorkerObservation(release);
+ return {manifest,context,runner,configuration,supportsPlaytest,supportsObservation,async run(pack:Uint8Array|undefined,revision:number,details:unknown,artifactSet?:ArtifactSet,registerDebug?:(generation:string|number)=>()=>void,signal?:AbortSignal){
   if(disposed)throw Error('E_RUNNER_DISPOSED');
   if(signal?.aborted)throw new DOMException('Superseded','AbortError');
   const compiled=structuredClone(details) as {buildKey?:unknown;generation?:unknown;packSha256?:unknown;artifactId?:string;artifactReceipt?:{buildKey?:unknown;packSha256?:unknown}};
@@ -107,5 +108,6 @@ export async function createEnginePreview(container:HTMLElement, listener:(event
   return runner.run({revision,buildKey,generation,packSha256,artifactId:receipt?.artifactId,pack:snapshot,manifest:{...compiled,generation}});
  },stopRun:(runId:string)=>runner instanceof WorkerPreviewRunner?runner.stopRun(runId):undefined,
  interaction:runner instanceof WorkerPreviewRunner ? runner : undefined,
+ observation:runner instanceof WorkerPreviewRunner ? runner : undefined,
  stop:()=>{++operationSequence;return runner.stop();},dispose:()=>{disposed=true;++operationSequence;return runner.dispose();}};
 }

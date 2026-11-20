@@ -1,8 +1,9 @@
 import type {
   createDebugRecorder, DebugBuild, DebugCheck, DebugRun, ReadRunEventsOptions,
 } from './debug-api';
-import type {GameInput, GameScreenshot, InteractionResult, ScreenshotInput, WaitForInput,
-  WorkerPreviewRunner} from '@godot-js/engine/browser/dedicated/worker-runner';
+import {prepareRuntimeObservation, type GameInput, type GameScreenshot, type InteractionResult,
+  type ObservationResult, type PreparedRuntimeObservation, type RuntimeNodeInput, type RuntimeTreeInput, type ScreenshotInput,
+  type WaitForInput, type WorkerPreviewRunner} from '@godot-js/engine/browser/dedicated/worker-runner';
 
 type Recorder = ReturnType<typeof createDebugRecorder>;
 type ErrorCode = 'invalid_input' | 'not_found' | 'invalid_cursor' | 'revision_conflict' |
@@ -20,6 +21,10 @@ type WaitResult = {
   run?: DebugRun;
 };
 type Capability = 'available' | 'not_ready' | 'unsupported';
+type Observation = Pick<WorkerPreviewRunner, 'observationState' | 'getRuntimeTree' | 'inspectRuntimeNode'>;
+type ObservationKind = PreparedRuntimeObservation['query']['kind'];
+type ObservationInput<Kind extends ObservationKind> = Pick<PreparedRuntimeObservation, 'runId' | 'timeoutMs'> &
+  Extract<PreparedRuntimeObservation['query'], {kind: Kind}>;
 
 interface Actions {
   supportsProject(): boolean;
@@ -27,6 +32,7 @@ interface Actions {
   play(): string | undefined;
   stopRun(runId: string): Promise<unknown> | undefined;
   interaction?(): Pick<WorkerPreviewRunner, 'interactionState' | 'screenshot' | 'gameInput' | 'waitForInput'> | undefined;
+  observation?(): Observation | undefined;
 }
 
 export interface PlaygroundApiCall {
@@ -201,6 +207,21 @@ export function createPlaygroundApi(recorder: Recorder, actions: Actions) {
     });
   }
 
+  async function observeRuntime<Kind extends ObservationKind, Result>(kind: Kind, input: unknown, signal: AbortSignal | undefined,
+    read: (runner: Observation, request: ObservationInput<Kind>) => Promise<ObservationResult<Result>>): Promise<ObservationResult<Result>> {
+    const prepared = prepareRuntimeObservation(kind, input, signal);
+    if (!prepared.ok) return prepared;
+    const {runId, timeoutMs, query} = prepared.result;
+    const run = debug.getRun(runId);
+    if (!run.ok) return {ok: false, error: {code: 'not_found', message: run.error.message}};
+    if (run.result.exit || run.result.state === 'stopping' || run.result.state === 'exited') {
+      return {ok: false, error: {code: 'run_ended', message: '指定运行已结束或正在停止'}};
+    }
+    const runner = actions.observation?.();
+    return runner ? read(runner, {runId, timeoutMs, ...query} as ObservationInput<Kind>) :
+      {ok: false, error: {code: 'unsupported', message: '当前预览不支持运行时观察'}};
+  }
+
   const api = Object.freeze({
     schemaVersion: 1 as const,
     get_project_context: tool('get_project_context', getProjectContext),
@@ -230,7 +251,12 @@ export function createPlaygroundApi(recorder: Recorder, actions: Actions) {
     get_build: tool('get_build', (input: {attemptId: string}) => debug.getBuild(input?.attemptId)),
     get_run: tool('get_run', (input: {runId: string}) => {
       const run = debug.getRun(input?.runId);
-      return run.ok ? ok({...run.result, interaction: actions.interaction?.()?.interactionState(input.runId) ?? {supported: false, ready: false}}) : run;
+      if (!run.ok) return run;
+      const {runId} = run.result;
+      return ok({...run.result,
+        interaction: actions.interaction?.()?.interactionState(runId) ?? {supported: false, ready: false},
+        observation: actions.observation?.()?.observationState(runId) ?? {supported: false, ready: false},
+      });
     }),
     read_run_events: tool('read_run_events', (input: {runId: string} & ReadRunEventsOptions) => {
       const {runId, ...options} = input ?? {};
@@ -246,6 +272,10 @@ export function createPlaygroundApi(recorder: Recorder, actions: Actions) {
       actions.interaction?.()?.gameInput(input) ?? fail('unsupported', '当前预览不支持自动输入')),
     wait_for_input: tool('wait_for_input', (input: WaitForInput, signal?: AbortSignal) =>
       actions.interaction?.()?.waitForInput(input, signal) ?? Promise.resolve(fail('unsupported', '当前预览不支持输入回执'))),
+    get_runtime_tree: tool('get_runtime_tree', (input: RuntimeTreeInput, signal?: AbortSignal) =>
+      observeRuntime('tree', input, signal, (runner, request) => runner.getRuntimeTree(request, signal))),
+    inspect_runtime_node: tool('inspect_runtime_node', (input: RuntimeNodeInput, signal?: AbortSignal) =>
+      observeRuntime('node', input, signal, (runner, request) => runner.inspectRuntimeNode(request, signal))),
   });
 
   return {

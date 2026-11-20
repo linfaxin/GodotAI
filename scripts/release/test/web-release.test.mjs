@@ -61,6 +61,23 @@ test('existing template stays development and cannot become certified by a flag'
   await assert.rejects(buildBrowserEngine({ 'existing-template': f.report.template.path, out: recorded }), /E_BROWSER_UNCERTIFIED/);
 });
 
+test('static release verification requires the evidence for an advertised observation ABI', async t => {
+  const f = await fixture(t, true);
+  await buildRelease(f.configuration);
+  const descriptorPath = resolve(f.dir, 'release.json');
+  const descriptor = await json(descriptorPath);
+  const attestationPath = resolve(f.dir, descriptor.attestation);
+  const attestation = await json(attestationPath);
+  attestation.runtimeAbi = {protocolVersion: 2, host: 1, audio: 1, presentation: 1, lifecycle: 1, observation: 1};
+  await writeJson(attestationPath, attestation);
+  const bytes = await readFile(attestationPath);
+  const file = descriptor.files.find(item => item.path === descriptor.attestation);
+  Object.assign(file, {bytes: bytes.length, sha256: digest(bytes)});
+  descriptor.id = descriptor.runtimeRelease = identity(descriptor);
+  await writeJson(descriptorPath, descriptor);
+  await assert.rejects(inspectRelease(f.dir), /E_RUNTIME_OBSERVATION_BUILD_PROOF/);
+});
+
 test('native source snapshot includes SCsub preset bundles while excluding unrelated generated outputs', async t => {
   const root = await mkdtemp(resolve(tmpdir(), 'browser-source-inputs-'));
   t.after(() => rm(root, { recursive: true, force: true }));

@@ -27,6 +27,7 @@ const harness = await build({
       let last;
       let delayNextReplay = false;
       let delayedAttempt;
+      let legacyColor = 'red';
       function buildProject(diagnostics = [], attemptId = recorder.startBuild('fixture-project', 1)) {
         recorder.recordCompileResponse(attemptId, { variant: artifact.variant, manifest: artifact, pack: new Uint8Array([1]), diagnostics });
         recorder.beginPreview(attemptId);
@@ -105,11 +106,34 @@ const harness = await build({
           window.debugPanelFixture.losePreview();
           return Promise.resolve();
         },
+        interaction: () => ({
+          interactionState: () => ({supported: true, ready: true}),
+          async screenshot() {
+            const canvas = new OffscreenCanvas(1, 1), context = canvas.getContext('2d');
+            context.fillStyle = legacyColor;
+            context.fillRect(0, 0, 1, 1);
+            const png = await canvas.convertToBlob({type: 'image/png'});
+            return {ok: true, result: {width: 1, height: 1, mimeType: png.type, bytes: await png.arrayBuffer()}};
+          },
+          gameInput({gesture}) {
+            if (gesture.code !== 'Space') throw Error('Legacy replay must use Space');
+            legacyColor = 'lime';
+            return {ok: true, result: {operationId: 'legacy-input'}};
+          },
+          async waitForInput() {
+            return {ok: true, result: {operation: {status: 'dispatched'}}};
+          },
+        }),
       });
       window.godotPlayground = playground.api;
       const panel = createDebugPanel(recorder.api, playground.api);
       recorder.subscribe(panel.refresh);
-      createAgentPanel(playground);
+      createAgentPanel(playground, {
+        unavailable: () => undefined,
+        supportsRuntimeObservation: () => false,
+        open: async () => { legacyColor = 'red'; return 'fixture-project'; },
+        cancelLaunch() {},
+      });
     `,
   },
   bundle: true,
@@ -227,7 +251,7 @@ try {
   assert.match(await page.locator('#agent-trace').textContent(), /"name": "wait_for_event"/);
   assert.ok((await page.locator('#agent-trace').textContent()).includes(JSON.stringify(testMessage).slice(1, -1)));
   await page.locator('#agent-stop').click();
-  await page.getByText('已取得退出回执', { exact: true }).waitFor();
+  await page.getByText('编辑器已关闭预览，未收到退出回执', { exact: true }).waitFor();
   assert.match(await page.locator('#agent-trace').textContent(), /editor-local/);
 
   await page.evaluate(() => window.debugPanelFixture.delayReplay());
@@ -249,10 +273,17 @@ try {
   }, late.runId);
   assert.equal(crossRealmAbort.error.code, 'cancelled');
   await page.locator('#agent-stop').click();
-  await page.getByText('已取得退出回执', { exact: true }).waitFor();
+  await page.getByText('编辑器已关闭预览，未收到退出回执', { exact: true }).waitFor();
   const lateRun = await page.evaluate(runId => window.godotPlayground.get_run({runId}).result, late.runId);
   assert.equal(lateRun.attemptId, late.attemptId);
   assert.equal(lateRun.state, 'exited');
+
+  await page.locator('#agent-playtest').click();
+  await page.getByText('已验证画面变化，编辑器已关闭预览，未收到退出回执', { exact: true }).waitFor();
+  assert.deepEqual(await page.locator('#agent-observations figcaption').allTextContents(), ['输入前', '输入后']);
+  const legacyTrace = await page.locator('#agent-trace').textContent();
+  assert.match(legacyTrace, /"code": "Space"/);
+  assert.doesNotMatch(legacyTrace, /"name": "get_runtime_tree"/);
 
   await page.setViewportSize({ width: 320, height: 720 });
   assert.equal(await page.locator('#debug-panel').evaluate(node => node.scrollWidth <= node.clientWidth), true);

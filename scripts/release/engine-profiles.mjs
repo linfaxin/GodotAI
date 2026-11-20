@@ -73,7 +73,10 @@ export function isEngineProfile(id){return typeof id==='string'&&Object.hasOwn(E
 /** Transport ABI is independent of the engine capability/profile dimension. */
 export const WORKER_RUNTIME_ABI=Object.freeze({protocolVersion:2,host:1,audio:1,presentation:1,lifecycle:1});
 export function assertWorkerRuntimeAbi(value){
- if(!value||['protocolVersion','host','audio','presentation'].some(key=>value[key]!==WORKER_RUNTIME_ABI[key])||(value.lifecycle!==undefined&&value.lifecycle!==1)||Object.keys(value).some(key=>!Object.hasOwn(WORKER_RUNTIME_ABI,key)))throw Error('E_WORKER_RUNTIME_ABI');
+ if(!value||['protocolVersion','host','audio','presentation'].some(key=>value[key]!==WORKER_RUNTIME_ABI[key])||
+    (value.lifecycle!==undefined&&value.lifecycle!==1)||
+    (value.observation!==undefined&&(value.observation!==1||value.lifecycle!==1))||
+    Object.keys(value).some(key=>key!=='observation'&&!Object.hasOwn(WORKER_RUNTIME_ABI,key)))throw Error('E_WORKER_RUNTIME_ABI');
  return value;
 }
 export function getEngineProfile(id=FULL_ENGINE_PROFILE){if(!isEngineProfile(id))throw Error('E_ENGINE_PROFILE: Unsupported official engine profile '+String(id));return ENGINE_PROFILES[id];}

@@ -6,7 +6,9 @@ import { createWriteStream, existsSync } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
 import { dirname, resolve, basename, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { canonical, digest, fail, options, required, writeJson } from '../release/web-release-utils.mjs';
+import { canonical, digest, fail, options, required, writeJson,
+  OBSERVATION_READER_SOURCE, OBSERVATION_SOURCE_PATHS, OBSERVATION_EXPORTS, assertRuntimeObservationBuildProof,
+} from '../release/web-release-utils.mjs';
 import { applyWebEnginePatches } from '../release/patch-web-engine.mjs';
 import {getEngineProfile,engineExecution,engineBuildArgs,validateEngineProfile,validateEngineExecution} from '../release/engine-profiles.mjs';
 import {workerRuntimeBuildProof} from '../release/patch-web-worker-runtime.mjs';
@@ -84,6 +86,26 @@ export function inspectBrowserTemplate(template, {python='python3'}={}) {
   const assets=JSON.parse(inspect.stdout);
   if(!assets.some(asset=>asset.path==='godot.js')||!assets.some(asset=>asset.path==='godot.wasm'))fail('E_BROWSER_TEMPLATE','Template must contain godot.js and godot.wasm');
   return assets;
+}
+function bindRuntimeObservation(report, template, assets, python) {
+  if (!report.runtimeAbi || !Object.hasOwn(report.source.inputs, OBSERVATION_READER_SOURCE)) return;
+  const inspect = spawnSync(python, ['-c', [
+    'import re, sys, zipfile',
+    'with zipfile.ZipFile(sys.argv[1]) as z:',
+    ' data = z.read("godot.js")',
+    ' for name in sys.argv[2:]:',
+    '  if not re.search(rb"\\b" + name.encode() + rb"\\b", data): sys.exit("Missing runtime observation export: " + name)',
+  ].join('\n'), template, ...OBSERVATION_EXPORTS], {encoding: 'utf8'});
+  if (inspect.error || inspect.status !== 0)
+    fail('E_RUNTIME_OBSERVATION_EXPORT', inspect.error?.message ?? inspect.stderr.trim());
+  report.runtimeAbi = {...report.runtimeAbi, observation: 1};
+  report.runtimeObservation = {
+    abi: 1,
+    sources: Object.fromEntries(OBSERVATION_SOURCE_PATHS.map(path => [path, report.source.inputs[path]])),
+    exports: [...OBSERVATION_EXPORTS],
+    wasmSha256: assets.find(asset => asset.path === 'godot.wasm').sha256,
+  };
+  assertRuntimeObservationBuildProof(report, report.runtimeObservation.wasmSha256);
 }
 async function execute(command, args, cwd, logPath) {
   await mkdir(dirname(logPath), { recursive: true });
@@ -180,6 +202,7 @@ export async function buildBrowserEngine(configuration) {
     const resolvedFeatures=Object.fromEntries(Object.keys(getEngineProfile(runtimeProfile).features).map(key=>[key,resolvedBuildOptions[key]]));
     validateEngineProfile(runtimeProfile,{modules,features:resolvedFeatures,forBuild:true});
     const assets=inspectBrowserTemplate(template,{python:configuration.python??'python3'});
+    bindRuntimeObservation(report, template, assets, configuration.python ?? 'python3');
     // Modern Emscripten embeds pthread bootstrap code and uses the engine JS
     // URL for workers. Bind that actual file, plus separate workers if emitted.
     const workerAssets=execution.wasmThreads?assets.filter(asset=>asset.path==='godot.js'||(/worker.*\.js$/.test(asset.path)&&!asset.path.includes('service.worker'))).map(asset=>({...asset,role:'pthread-runtime',...(asset.path==='godot.js'?{embedded:true}:{})})):[];
