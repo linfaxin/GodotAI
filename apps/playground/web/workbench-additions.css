@@ -120,3 +120,4 @@
 }
 #agent-observations figure { margin: 0; }
 #agent-observations img { display: block; width: 100%; height: auto; }
+#agent-write-results { overflow-wrap: anywhere; }

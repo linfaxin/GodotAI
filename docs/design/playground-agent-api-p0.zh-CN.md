@@ -2,7 +2,7 @@
 
 分析基线为 `cf32cc2`。P0 让 Agent 对指定项目版本做类型检查、读取诊断、启动预览、确认运行并停止指定会话。Playground 通过现有编译 Worker、浏览器预览和调试记录提供结果。Summer Engine 的项目上下文、独立脚本检查、运行和事件等待是这条工作流的参照。[引擎目标](../engine-goals.zh-CN.md) · [Summer 调试流程](https://docs.summerengine.com/mcp/building-a-game#debugging-workflow)
 
-**P0 各工作包可以开工。** 业务实现、受控测试和真实站点准备可以并行。真实 Worker 验收需要合入后的匹配站点和可运行的浏览器门禁。现场由模型选择工具，以及由模型修改源码，分别依赖模型接入与宿主文件工具。
+**P0 各工作包可以开工。** 业务实现、受控测试和真实站点准备可以并行。真实 Worker 验收需要合入后的匹配站点和可运行的浏览器门禁。现场接入的 Agent 使用自身的 `read_file`、`write_file` 等工具修改源码，再调用 Playground 工具检查和预览对应项目版本。后续 API 对齐聚焦运行时状态的读写和验证。 [引擎与平台的职责](../engine-goals.zh-CN.md#引擎与平台的职责)
 
 ## 评审决定
 
@@ -117,3 +117,5 @@ runner 在完成产物和配置校验后、向旧会话发出停止前检查意�
 | `public-api-engine-contracts.json` | `bfa523a1f9111765f1b3a3d90ecb7653c277f4694199249a43977d4aada12b43` |
 
 附加的本地 headless 全量验证中，原生重命名测试在串行复验通过。普通脚本与 React 各有一项退出清理断言在串行复验仍缺少预期标记，记录于 `headless-recheck.log`。
+
+2026 年 11 月 21 日复验前，用 `pnpm prepare:native` 将本仓库的集成补丁应用到 Godot 4.6.1 并重建测试编辑器。普通脚本与 React 的退出清理断言均通过。

@@ -10,6 +10,7 @@ import {assertWorkerBuildProof,assertWorkerCandidate,workerAcceptancePlan,runCon
 import {assertWorkerSdkSources} from './worker-sdk-proof.mjs';
 
 const repo=fileURLToPath(new URL('../../../',import.meta.url));
+const sourceRoots=new Set(['apps','scripts','packages','impl','configs']);
 const json=async file=>JSON.parse(await readFile(file,'utf8'));
 export const REQUIRED_SITE_REPORTS=Object.freeze(['runtime','editor','bridge','projects','demo-regressions','react-demos','workbench','delivery']);
 export const REQUIRED_2D_SITE_REPORTS=Object.freeze(['features','features.firefox','features.webkit','runtime.firefox','runtime.webkit']);
@@ -20,9 +21,13 @@ export const REQUIRED_2D_FEATURE_CHECKS=Object.freeze(['physicsRay','physicsColl
 export function repositorySourcePath(source){
  if(typeof source!=='string'||!source||source.includes('\\')||source.startsWith('/')||/^[A-Za-z][A-Za-z0-9+.-]*:/.test(source)||/[\x00-\x1f]/.test(source))throw Error('E_SITE_SOURCE_PATH: '+source);
  const relative=source.replace(/^(?:\.\.\/|\.\/)+/,'');
- const entry=/^(?:apps|scripts|packages|impl|configs)\//.test(relative)?relative:'apps/playground/'+relative;
- if(entry.split('/').some(part=>!part||part==='.'||part==='..'))throw Error('E_SITE_SOURCE_PATH: '+source);
- return entry;
+ const parts=relative.split('/');
+ if(parts.some(part=>!part||part==='.'||part==='..'))throw Error('E_SITE_SOURCE_PATH: '+source);
+ if(parts.length>1&&sourceRoots.has(parts[0]))return relative;
+ // External output directories can also put the path to the checkout in the map.
+ const checkoutName=path.basename(repo);
+ const checkout=parts.findIndex((part,index)=>part===checkoutName&&index+2<parts.length&&sourceRoots.has(parts[index+1]));
+ return checkout>=0?parts.slice(checkout+1).join('/'):'apps/playground/'+relative;
 }
 export async function sealSiteAcceptance(directory,reports,{verify=false,begin=false}={}){
  directory=path.resolve(directory);reports=path.resolve(reports);
@@ -33,7 +38,7 @@ export async function sealSiteAcceptance(directory,reports,{verify=false,begin=f
  const manifest=worker?await json(path.join(directory,'manifest.json')):undefined;
  if(release.schemaVersion!==2||!isEngineProfile(release.runtimeProfile))throw Error('E_SITE_PROFILE');
  if(release.build?.sourceCertified!==true)throw Error('E_SITE_UNCERTIFIED_SOURCE');
- if(worker)assertWorkerBuildProof({...release.build,kind:'godot-js-browser-engine-build',status:'built',runtimeAbi:release.runtimeAbi,execution:release.execution,source:release.build.engineSource,recipe:release.build.engineRecipe},release.engine.wasm?.decodedSha256??release.engine.wasm?.sha256);
+ if(worker)assertWorkerBuildProof({...release.build,kind:'godot-js-browser-engine-build',status:'built',runtimeProfile:release.runtimeProfile,engineTarget:manifest.engineTarget,runtimeAbi:release.runtimeAbi,execution:release.execution,source:release.build.engineSource,recipe:release.build.engineRecipe},release.engine.wasm?.decodedSha256??release.engine.wasm?.sha256);
  if(worker)await assertWorkerSdkSources(repo,release.build.sdkBuild);
  const resources=await json(path.join(directory,'resource-build.json'));
  if(resources.runtimeProfile!==release.runtimeProfile||resources.engineReleaseId!==release.id)throw Error('E_SITE_RESOURCE_IDENTITY');

@@ -27,11 +27,12 @@ export function workerBuildReportFixture(){
  add(HOST_RESOURCE_PATHS,HOST_RESOURCE_PATCH,'scripts/release/patch-web-resource-owner.mjs');
  add(NATIVE_OBSERVER_PATHS,NATIVE_OBSERVER_PATCH,'scripts/release/patch-native-observer.mjs');
  add(MANAGED_SHUTDOWN_PATHS,MANAGED_SHUTDOWN_PATCH,'scripts/release/patch-managed-shutdown-queue.mjs');
- const recipe={args:['platform=web','threads=no','dlink_enabled=no','use_quickjs_ng=no'],patches};
+ const recipe={args:['platform=web','target=template_debug','threads=no','dlink_enabled=no','use_quickjs_ng=no'],patches};
  return {kind:'godot-js-browser-engine-build',status:'built',
   source:{commit:'a'.repeat(40),inputs:moduleInputs,snapshotHash:digest(canonical(moduleInputs))},
   godotSource:{commit:'b'.repeat(40),inputs,snapshotHash:digest(canonical(inputs))},
   recipe,recipeSha256:digest(canonical(recipe)),
+  resolvedBuildOptions:{target:'template_debug'},
   ...workerRuntimeBuildProof(patches),...webLifecycleBuildProof(patches),...artifactSetMountBuildProof(patches),
   ...hostResourceBuildProof(patches),...nativeObserverBuildProof(patches),...managedShutdownBuildProof(patches),
   execution:{...legacyExecution(),lifecycleAbi:1,artifactSetAbi:1,hostResourceAbi:1,shutdownQueueAbi:1},

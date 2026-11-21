@@ -1,9 +1,9 @@
 import type {
   createDebugRecorder, DebugBuild, DebugCheck, DebugRun, ReadRunEventsOptions,
 } from './debug-api';
-import {prepareRuntimeObservation, type GameInput, type GameScreenshot, type InteractionResult,
+import {prepareRuntimeObservation, prepareRuntimeSet, runtimeWriteError, type GameInput, type GameScreenshot, type InteractionResult,
   type ObservationResult, type PreparedRuntimeObservation, type RuntimeNodeInput, type RuntimeTreeInput, type ScreenshotInput,
-  type WaitForInput, type WorkerPreviewRunner} from '@godot-js/engine/browser/dedicated/worker-runner';
+  type RuntimeSetInput, type RuntimeSetResult, type WaitForInput, type WorkerPreviewRunner} from '@godot-js/engine/browser/dedicated/worker-runner';
 
 type Recorder = ReturnType<typeof createDebugRecorder>;
 type ErrorCode = 'invalid_input' | 'not_found' | 'invalid_cursor' | 'revision_conflict' |
@@ -33,6 +33,7 @@ interface Actions {
   stopRun(runId: string): Promise<unknown> | undefined;
   interaction?(): Pick<WorkerPreviewRunner, 'interactionState' | 'screenshot' | 'gameInput' | 'waitForInput'> | undefined;
   observation?(): Observation | undefined;
+  runtimeWrite?(): Pick<WorkerPreviewRunner, 'runtimeWriteState' | 'setRuntimeProperty'> | undefined;
 }
 
 export interface PlaygroundApiCall {
@@ -62,14 +63,14 @@ export function createPlaygroundApi(recorder: Recorder, actions: Actions) {
   }
 
   function tool<Args extends unknown[], Result>(name: string, execute: (...args: Args) => Result,
-    projectResult?: (value: Awaited<Result>) => unknown) {
+    projectResult?: (value: Awaited<Result>) => unknown, projectInput?: (input: unknown) => unknown) {
     return (...args: Args): Result => {
       const result = execute(...args);
       if (observers.size) {
         // Snapshot parameters at submission. Invalid or excessive inputs need no full UI copy.
         let input: unknown;
         try {
-          const json = JSON.stringify(args[0]);
+          const json = JSON.stringify(projectInput ? projectInput(args[0]) : args[0]);
           input = json === undefined ? {} : json.length <= 4096 ? JSON.parse(json) : {omitted: true};
         } catch { input = {omitted: true}; }
         const observed = (value: Awaited<Result>) => publish(name, input, projectResult ? projectResult(value) : value);
@@ -256,6 +257,7 @@ export function createPlaygroundApi(recorder: Recorder, actions: Actions) {
       return ok({...run.result,
         interaction: actions.interaction?.()?.interactionState(runId) ?? {supported: false, ready: false},
         observation: actions.observation?.()?.observationState(runId) ?? {supported: false, ready: false},
+        runtimeWrite: actions.runtimeWrite?.()?.runtimeWriteState(runId) ?? {supported: false, ready: false},
       });
     }),
     read_run_events: tool('read_run_events', (input: {runId: string} & ReadRunEventsOptions) => {
@@ -276,6 +278,21 @@ export function createPlaygroundApi(recorder: Recorder, actions: Actions) {
       observeRuntime('tree', input, signal, (runner, request) => runner.getRuntimeTree(request, signal))),
     inspect_runtime_node: tool('inspect_runtime_node', (input: RuntimeNodeInput, signal?: AbortSignal) =>
       observeRuntime('node', input, signal, (runner, request) => runner.inspectRuntimeNode(request, signal))),
+    runtime_set: tool('runtime_set', async (input: RuntimeSetInput, signal?: AbortSignal): Promise<RuntimeSetResult> => {
+      const prepared = prepareRuntimeSet(input, signal);
+      if (!prepared.ok) return prepared;
+      const {runId, timeoutMs, command} = prepared.result;
+      const run = debug.getRun(runId);
+      if (!run.ok) return runtimeWriteError('not_found');
+      if (run.result.exit || run.result.state === 'stopping' || run.result.state === 'exited') return runtimeWriteError('run_ended');
+      const runner = actions.runtimeWrite?.();
+      return runner ? runner.setRuntimeProperty({runId, timeoutMs, ...command}, signal) : runtimeWriteError('unsupported');
+    }, undefined, input => {
+      const prepared = prepareRuntimeSet(input);
+      if (!prepared.ok) return {omitted: true};
+      const {runId, timeoutMs, command} = prepared.result;
+      return {runId, timeoutMs, ...command};
+    }),
   });
 
   return {

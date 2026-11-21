@@ -19,6 +19,9 @@ import {createNativeRuntimeSampler, installRuntimeObservationHooks, observationE
   RUNTIME_OBSERVATION_VERSION, supportsWorkerObservation, type ObservationError} from './worker-runtime-observation.js';
 import {createWorkerObservationRequests, readRuntimeObservationRequest,
   type RuntimeObservationReply} from './worker-runtime-observation-transport.js';
+import {createNativeRuntimeWriter, RUNTIME_WRITE_VERSION, runtimeWriteError, supportsWorkerRuntimeWrite,
+  type RuntimeSetError} from './worker-runtime-write.js';
+import {createWorkerRuntimeWrites, readRuntimeWriteId} from './worker-runtime-write-transport.js';
 
 interface RuntimeScope {
   __godotjsRuntimeHost?: RuntimeBinding;
@@ -81,6 +84,17 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
     const rejection = observationRejection();
     return rejection ? observationError(rejection) : sampleNativeObservation!(query);
   }, postObservation);
+  const supportsWrite = supportsWorkerRuntimeWrite(boot.release, boot.configuration.presentationBackend);
+  let writeNativeProperty: ReturnType<typeof createNativeRuntimeWriter> | undefined;
+  const writeUnavailable = (): RuntimeSetError | undefined => !lease.active || stopping || closed || nativeExited ? 'run_ended' :
+    !nativeStarted ? 'not_ready' : !supportsWrite || !writeNativeProperty ? 'unsupported' : undefined;
+  const runtimeWrite = createWorkerRuntimeWrites((command, deadline) => {
+    const rejected = writeUnavailable();
+    return rejected ? runtimeWriteError(rejected) : writeNativeProperty!(command, deadline);
+  }, response => {
+    try { post({type: 'runtime-write-result', ...response}); }
+    catch { /* The runner reports an unconfirmed result at its deadline. */ }
+  });
   let interactionReady = false;
   const interactionRejection = () => !lease.active || stopping || closed || nativeExited ? 'run_ended' :
     !interactionReady || xr?.active || dom?.document.hidden ? 'not_ready' : undefined;
@@ -110,7 +124,8 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
   const phase = (value: RunPhase) => {
     assertStarting();
     post({type: 'phase', phase: value, ...(value === 'running' && supportsInteraction ? {interactionVersion: INTERACTION_VERSION} : {}),
-      ...(value === 'running' && sampleNativeObservation ? {observationVersion: RUNTIME_OBSERVATION_VERSION} : {})});
+      ...(value === 'running' && sampleNativeObservation ? {observationVersion: RUNTIME_OBSERVATION_VERSION} : {}),
+      ...(value === 'running' && supportsWrite && writeNativeProperty ? {runtimeWriteVersion: RUNTIME_WRITE_VERSION} : {})});
   };
   let presentation: ReturnType<typeof createWorkerPresentation> | undefined;
   let dom: ReturnType<typeof createWorkerDom> | undefined;
@@ -222,6 +237,7 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
     capture.stop();
     const attempt=(cleanup:()=>void)=>{try{cleanup();}catch(error){try{fatal(error);}catch{/* A lost diagnostic channel cannot block the remaining cleanup. */}}};
     attempt(()=>observation.stop());
+    attempt(()=>runtimeWrite.stop());
     if(canCooperativelyClose()){
       attempt(()=>binding?.beginClose(reason));attempt(()=>dom?.revokeInput());attempt(()=>audio?.beginDrain());
       attempt(()=>browser?.beginDrain?.());attempt(()=>presentation?.setVisible(false));attempt(()=>lifecycleGate?.beginClose(reason));
@@ -253,6 +269,13 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
   data.onmessage = event => {
     if (!isWorkerEnvelope(event.data) || !sameWorkerRun(event.data, identity) || closed) return;
     const m: any = event.data;
+    if (m.type === 'runtime-write-request' || m.type === 'runtime-write-cancel') {
+      const id = readRuntimeWriteId(m, identity.runId);
+      if (id && m.type === 'runtime-write-cancel') runtimeWrite.cancel(id);
+      else if (id) runtimeWrite.request(id, m, writeUnavailable());
+      if (Number.isSafeInteger(m.dataSequence)) acknowledgeData(m.dataSequence);
+      return;
+    }
     if (m.type === 'runtime-observation-request' || m.type === 'runtime-observation-cancel') {
       if (validInteractionId(m.requestId)) {
         if (m.type === 'runtime-observation-cancel') observation.cancel(m.requestId);
@@ -412,6 +435,7 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
         gestures.exit();
         capture.stop();
         observation.stop();
+        runtimeWrite.stop();
         post({type: 'native-exit', code, memory: metrics(), runtimeSummary: binding?.snapshotSummary()});
         release(); scope.close?.();
       },
@@ -424,7 +448,10 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
       module = value; installPresentationHooks(value, presentation!, supportsInteraction ? capture.frame : undefined);
       if (declaresObservation) {
         removeObservationHooks?.();
-        removeObservationHooks = installRuntimeObservationHooks(value, observation.observe);
+        removeObservationHooks = installRuntimeObservationHooks(value, () => {
+          runtimeWrite.execute();
+          observation.observe();
+        });
       }
       value.onRuntimeInitialized = (() => { const before = value.onRuntimeInitialized; return function (this: unknown, ...values: unknown[]) { if (typeof before === 'function') before.apply(this, values); }; })();
       return value;
@@ -439,6 +466,7 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
     if (declaresObservation) {
       if (!module || !removeObservationHooks) throw Error('E_RUNTIME_OBSERVATION_ABI');
       sampleNativeObservation = createNativeRuntimeSampler(module);
+      if (boot.release.runtimeAbi?.runtimeWrite === RUNTIME_WRITE_VERSION) writeNativeProperty = createNativeRuntimeWriter(module);
     }
     phase('starting'); await engine.start({ args: ['--main-pack', '/application.pck', '--rendering-method', 'gl_compatibility'] }); assertStarting();
     nativeStarted=true;

@@ -41,12 +41,14 @@
       <h3>Agent 工具</h3>
       <button id="agent-replay" type="button">检查并启动预览</button>
       <button id="agent-playtest" type="button" hidden>试玩验证</button>
+      <button id="agent-runtime-write" type="button" hidden>运行时写入验证</button>
       <button id="agent-stop" type="button" disabled>停止本次预览</button>
       <span id="agent-status" class="debug-note" role="status"></span>
     </div>
     <pre id="debug-example-result" aria-label="查询结果" hidden></pre>
     <pre id="agent-trace" aria-label="API 调用实参与返回结果" hidden></pre>
     <div id="agent-observations" aria-label="试玩验证的位置与画面" hidden></div>
+    <ul id="agent-write-results" aria-label="运行时写入验证结果" hidden></ul>
     <pre><code id="debug-api-example"></code></pre>
     <dl class="debug-methods">
       <dt><code>get_project_context()</code></dt>
@@ -70,7 +72,7 @@
       <dt><code>get_run({runId})</code></dt>
       <dd>
         <p>传入运行 ID，读取运行身份、产物、发布与运行配置。用 <code>attemptId</code> 查关联构建。<code>state</code> 为 <code>running</code> 表示引擎已启动，项目就绪与首帧取决于相应观测。</p>
-        <p><code>observation</code> 独立报告运行时查询的支持状态和就绪状态。<code>supported: null</code> 表示尚未确认，<code>ready: true</code> 后可查询节点。</p>
+        <p><code>observation</code> 和 <code>runtimeWrite</code> 分别报告查询与写入能力。<code>supported: null</code> 表示尚未确认，<code>ready: true</code> 表示该会话具备对应能力。</p>
         <p><code>exit</code> 在收到退出回执后出现。<code>exit.evidence</code> 的 <code>host-report</code> 表示宿主回执，<code>editor-local</code> 表示页面兜底。<code>exit.report</code> 给出 <code>reason</code>，并保留来源提供的 <code>engineOutcome</code>、<code>hostCleanup</code> 和 <code>sessionFacts</code>。未观测到的原生退出码与清理字段可缺省。</p>
       </dd>
       <dt><code>read_run_events(input)</code></dt>
@@ -86,6 +88,8 @@
       <dd><p>读取当前运行的节点树。省略 <code>path</code> 时从实际 <code>SceneTree</code> 根节点开始，通常为 <code>/root</code>。<code>depth</code> 默认 2，<code>limit</code> 默认 200。结果包含节点路径、类型、实例 ID 和截断状态。</p></dd>
       <dt><code>inspect_runtime_node({runId, path, properties, timeoutMs?})</code></dt>
       <dd><p>读取绝对节点路径的指定属性，支持 <code>position</code>、<code>rotation</code>、<code>visible</code>。节点缺失时返回 <code>node_not_found</code>。两种查询均返回运行身份、请求 ID 和采样序号，并可通过第二个参数 <code>AbortSignal</code> 取消。状态采样与 PNG 渲染提交分别计数。</p></dd>
+      <dt><code>runtime_set({runId, path, expectedInstanceId, property, value, timeoutMs?})</code></dt>
+      <dd><p>使用查询返回的路径和实例 ID 写入当前运行的 <code>Node2D</code> 本地 <code>position</code>，值为 <code>{x, y}</code>。回执的 <code>outcome</code> 为 <code>applied</code>、<code>not_applied</code> 或 <code>unconfirmed</code>。结果未确认时可重新查询节点，再决定是否写入。</p></dd>
       <dt><code>screenshot({runId, timeoutMs?})</code></dt>
       <dd><p>等待指定运行的新渲染提交，返回 PNG 字节、提交序号、采样几何与尺寸。Direct Worker 的支持状态见 <code>get_run</code> 的 <code>interaction</code>。</p></dd>
       <dt><code>game_input({runId, gesture})</code></dt>

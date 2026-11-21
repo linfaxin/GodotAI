@@ -104,10 +104,17 @@ export function assembleFullEngineRelease({engine,ir,capture,irBytes,declaration
  if(runtimeAbi){
   assertWorkerRuntimeAbi(runtimeAbi);assertWorkerBuildProof(engineBuildReport,engine.wasm.decodedSha256??engine.wasm.sha256);assertWorkerSdkProof(build.sdkBuild);
   if(canonical(runtimeAbi)!==canonical(engineBuildReport.runtimeAbi))throw Error('E_WORKER_BUILD_ABI');
+  if(runtimeAbi.runtimeWrite!==undefined&&build.sourceCertified!==true){
+   runtimeAbi={...runtimeAbi};delete runtimeAbi.runtimeWrite;
+  }
   build={...build,workerPatch:engineBuildReport.workerPatch,engineRecipe:engineBuildReport.recipe};
   // Keep the original receipts with every declared native capability. The
   // site verifier reconstructs this same report from the sealed release.
   for(const field of ['lifecycleAbi','lifecyclePatch','artifactSetAbi','artifactSetPatch','observerAbi','nativeObserverPatch','hostResourceAbi','hostResourcePatch','shutdownQueueAbi','shutdownQueuePatch','runtimeObservation'])if(engineBuildReport[field]!==undefined)build[field]=engineBuildReport[field];
+  if(runtimeAbi.runtimeWrite===1){
+   build.runtimeWrite=engineBuildReport.runtimeWrite;
+   build.resolvedBuildOptions={target:engineBuildReport.resolvedBuildOptions.target};
+  }
  }
  const definition=getEngineProfile(runtimeProfile);
  const profiles={snake:{ir,capture,irBytes,declarations,namingVersion,codegenVersion,typeSnapshot,strictTypechecks,actualAPIHash:build.actualAPIHash},camel:namingProfiles?.camel};

@@ -19,12 +19,18 @@ import {
   supportsWorkerObservation, type ObservationResult, type RuntimeNodeInput, type RuntimeNodeSnapshot,
   type RuntimeObservationQuery, type RuntimeObservationState, type RuntimeTreeInput, type RuntimeTreeSnapshot,
 } from './worker-runtime-observation.js';
+import {prepareRuntimeSet, readRuntimeWriteResult, RUNTIME_WRITE_VERSION, runtimeWriteError, runtimeWriteUnconfirmed,
+  supportsWorkerRuntimeWrite, type RuntimeSetInput, type RuntimeSetResult, type RuntimeWriteResult,
+  type RuntimeWriteState, type RuntimeWriteUnconfirmed} from './worker-runtime-write.js';
+import {readRuntimeWriteId, sameRuntimeWrite, scheduleRuntimeWriteDeadline, type RuntimeWriteId} from './worker-runtime-write-transport.js';
 export {supportsWorkerInteraction} from './worker-interaction.js';
 export type {GameGesture, GameInput, GameScreenshot, InputReceipt, InteractionResult, ScreenshotInput, WaitForInput} from './worker-interaction.js';
 export {prepareRuntimeObservation, supportsWorkerObservation} from './worker-runtime-observation.js';
 export type {ObservationError, ObservationResult, PreparedRuntimeObservation, RuntimeNodeInput, RuntimeNodeSnapshot,
   RuntimeObservationState, RuntimeObservedNode, RuntimeObservedProperty, RuntimePropertySample,
   RuntimeTreeInput, RuntimeTreeSnapshot} from './worker-runtime-observation.js';
+export {prepareRuntimeSet, runtimeWriteError, supportsWorkerRuntimeWrite} from './worker-runtime-write.js';
+export type {RuntimeSetInput, RuntimeSetResult, RuntimeWriteState} from './worker-runtime-write.js';
 const now = () => performance.now();
 const MAX_WAIT_MS = 60_000;
 const MAX_RECEIPTS = 32;
@@ -48,6 +54,11 @@ interface ObservationRequest {
   deadline: number;
   query: RuntimeObservationQuery;
   finish(result: ObservationResult<ObservationSnapshot>): boolean;
+}
+interface PendingRuntimeWrite extends RuntimeWriteId {
+  expire(): void;
+  reply(value: unknown): void;
+  retire(reason: RuntimeWriteUnconfirmed): void;
 }
 
 export interface WorkerPreviewRunnerOptions {
@@ -86,6 +97,8 @@ interface Session {
   capture?: CaptureRequest;
   observation?: ObservationRequest;
   observationSampleSeq: number;
+  runtimeWrite?: PendingRuntimeWrite;
+  writeSequence: number;
   input?: InputRecord;
   inputSequence: number;
   failure?: ReturnType<typeof previewDiagnostic>;
@@ -105,6 +118,7 @@ export class WorkerPreviewRunner {
   private readonly inputRecords = new Map<string, InputRecord>();
   private readonly interactionVersions = new Map<string, boolean | null>();
   private readonly observationVersions = new Map<string, boolean | null>();
+  private readonly runtimeWriteVersions = new Map<string, boolean | null>();
   private inputWaiters = 0;
   private active?: Session;
   private sequence = 0;
@@ -153,6 +167,7 @@ export class WorkerPreviewRunner {
     s.report = report; s.settled = true; ++s.epoch;
     s.capture?.finish(interactionError('run_ended'));
     s.observation?.finish(observationError('run_ended'));
+    s.runtimeWrite?.retire(report.reason === 'forced-frame-disposal' || report.reason === 'crashed' ? 'transport_lost' : 'run_ended');
     if (s.input) this.settleInput(s.input, {down: 'unconfirmed', up: 'unconfirmed', reason: 'run_ended'});
     s.projectQueue.length=0;s.projectBytes=0;s.commands.clear();
     clearTimeout(s.timer); clearInterval(s.watchdog);
@@ -205,17 +220,24 @@ export class WorkerPreviewRunner {
     const s: Session = { identity, frame, port: channel.port1, peer: channel.port2, state: 'loading-frame', epoch: 0, settled: false,
       lastWorkerBeat: now(), beatSequence: -1, resumeEpoch: 0, logs: new WorkerLogBudget(frozen.configuration.budgets), projectQueue: [], projectBytes: 0,
       commands:new WorkerProjectCommandCredits(frozen.configuration.budgets.maxProjectEvents!,frozen.configuration.budgets.maxProjectBytes!),commandSequence:0,
-      inputSequence: 0, observationSampleSeq: 0, resolveRun, rejectRun, exit, resolveExit };
+      inputSequence: 0, observationSampleSeq: 0, writeSequence: 0, resolveRun, rejectRun, exit, resolveExit };
     this.active = s;
     this.interactionVersions.set(identity.runId, null);
     if (this.interactionVersions.size > MAX_RECEIPTS) this.interactionVersions.delete(this.interactionVersions.keys().next().value!);
     this.observationVersions.set(identity.runId, null);
     if (this.observationVersions.size > MAX_RECEIPTS) this.observationVersions.delete(this.observationVersions.keys().next().value!);
+    this.runtimeWriteVersions.set(identity.runId, null);
+    if (this.runtimeWriteVersions.size > MAX_RECEIPTS) this.runtimeWriteVersions.delete(this.runtimeWriteVersions.keys().next().value!);
     s.onVisibility=()=>{if(this.live(s)&&this.options.container.ownerDocument.visibilityState!=='hidden')s.lastWorkerBeat=now();};
     this.options.container.ownerDocument.addEventListener?.('visibilitychange',s.onVisibility);
     s.port.onmessage = event => {
       if (!this.live(s) || !isWorkerEnvelope(event.data) || !sameWorkerRun(event.data, identity)) return;
       const m: any = event.data;
+      if (m.type === 'runtime-write-result') {
+        const id = readRuntimeWriteId(m, identity.runId);
+        if (id && sameRuntimeWrite(s.runtimeWrite, id)) s.runtimeWrite?.reply(m.result);
+        return;
+      }
       if (m.type === 'runtime-observation-result') {
         const current = s.observation;
         if (!current || m.requestId !== current.id) return;
@@ -277,6 +299,13 @@ export class WorkerPreviewRunner {
             return;
           }
           this.observationVersions.set(identity.runId, observationVersion !== undefined);
+          const writeVersion = supportsWorkerRuntimeWrite(this.release, frozen.configuration.presentationBackend)
+            ? RUNTIME_WRITE_VERSION : undefined;
+          if (m.runtimeWriteVersion !== writeVersion) {
+            this.beginStop(s, 'runtime-failed', 'Runtime write ABI does not match the release');
+            return;
+          }
+          this.runtimeWriteVersions.set(identity.runId, writeVersion !== undefined);
           if (m.interactionVersion === INTERACTION_VERSION && frozen.configuration.presentationBackend === 'direct')
             s.interactionVersion = INTERACTION_VERSION;
           this.interactionVersions.set(identity.runId, s.interactionVersion === INTERACTION_VERSION);
@@ -338,6 +367,7 @@ export class WorkerPreviewRunner {
     if(cause!=='stopped')s.failure=previewDiagnostic(detail??cause);
     const before = s.state;
     s.observation?.finish(observationError('run_ended'));
+    s.runtimeWrite?.retire(cause === 'unresponsive' ? 'transport_lost' : 'run_ended');
     if (!this.transition(s, 'stopping')) return;
     s.capture?.finish(interactionError('run_ended'));
     if (before === 'loading-frame' || before === 'handshaking') { this.finishLocal(s, 'forced-frame-disposal', 'Cancelled before host connection'); return; }
@@ -379,6 +409,69 @@ export class WorkerPreviewRunner {
   }
   inspectRuntimeNode(input: RuntimeNodeInput, signal?: AbortSignal): Promise<ObservationResult<RuntimeNodeSnapshot>> {
     return this.observeRuntime('node', input, signal);
+  }
+  private runtimeWriteSupport(runId: string): 'available' | 'not_ready' | 'unsupported' | 'run_ended' | 'not_found' {
+    const session = this.active;
+    if (session?.identity.runId !== runId) return this.runtimeWriteVersions.has(runId) ? 'run_ended' : 'not_found';
+    if (session.state === 'stopping' || session.settled) return 'run_ended';
+    if (session.state !== 'running') return 'not_ready';
+    return this.runtimeWriteVersions.get(runId) === true ? 'available' : 'unsupported';
+  }
+  runtimeWriteState(runId: string): RuntimeWriteState {
+    const supported = this.runtimeWriteVersions.get(runId) ?? null;
+    return {supported, ready: this.runtimeWriteSupport(runId) === 'available',
+      ...(supported ? {version: RUNTIME_WRITE_VERSION} : {})};
+  }
+  setRuntimeProperty(input: RuntimeSetInput, signal?: AbortSignal): Promise<RuntimeSetResult> {
+    const prepared = prepareRuntimeSet(input, signal);
+    if (!prepared.ok) return Promise.resolve(prepared);
+    const {runId, timeoutMs, command} = prepared.result;
+    const support = this.runtimeWriteSupport(runId);
+    if (support !== 'available') return Promise.resolve(runtimeWriteError(support));
+    const session = this.active!;
+    session.runtimeWrite?.expire();
+    if (session.runtimeWrite) return Promise.resolve(runtimeWriteError('busy'));
+    const writeSequence = ++session.writeSequence, requestId = runId + ':' + writeSequence;
+    const deadline = interactionNow() + timeoutMs;
+    const envelope = {...session.identity, protocolVersion: WORKER_PROTOCOL, writeSequence, requestId};
+    const {value: requestedValue, ...target} = command;
+    // Follow the signal's abort state, independently of events on the caller's signal.
+    const cancellation = signal === undefined ? undefined : AbortSignal.any([signal]);
+    return new Promise(resolve => {
+      let settled = false;
+      const finish = (value: RuntimeWriteResult, release: boolean) => {
+        if (release) {
+          if (session.runtimeWrite === pending) session.runtimeWrite = undefined;
+          cancelTimer();
+        }
+        if (settled) return;
+        settled = true;
+        cancellation?.removeEventListener('abort', onAbort);
+        if (!value.ok) resolve({...value, requestId});
+        else resolve({ok: true, result: {...value.result, ...target, requestedValue, requestId,
+          run: {...session.identity}, releaseId: this.release.releaseId}});
+      };
+      const onAbort = () => {
+        finish(runtimeWriteUnconfirmed('cancelled'), false);
+        try { session.port.postMessage({...envelope, type: 'runtime-write-cancel'}); }
+        catch { /* The Worker can still retire the request at its deadline. */ }
+      };
+      const timeout = () => finish(runtimeWriteUnconfirmed('timeout'), true);
+      const pending: PendingRuntimeWrite = {requestId, writeSequence,
+        expire: () => { if (interactionNow() >= deadline) timeout(); },
+        retire: reason => finish(runtimeWriteUnconfirmed(reason), true),
+        reply: value => {
+          if (interactionNow() >= deadline) { timeout(); return; }
+          const result = readRuntimeWriteResult(value);
+          if (result) finish(result, true);
+        },
+      };
+      const cancelTimer = scheduleRuntimeWriteDeadline(deadline, timeout);
+      session.runtimeWrite = pending;
+      cancellation?.addEventListener('abort', onAbort, {once: true});
+      try { session.port.postMessage({...envelope, type: 'runtime-write-request', command, deadline}); }
+      catch { finish(runtimeWriteError('dispatch_failed'), true); }
+    });
   }
   private observeRuntime(kind: 'tree', input: RuntimeTreeInput, signal?: AbortSignal): Promise<ObservationResult<RuntimeTreeSnapshot>>;
   private observeRuntime(kind: 'node', input: RuntimeNodeInput, signal?: AbortSignal): Promise<ObservationResult<RuntimeNodeSnapshot>>;

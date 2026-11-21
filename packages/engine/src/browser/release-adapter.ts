@@ -53,7 +53,8 @@ function abi(value: unknown): asserts value is RuntimeAbi {
   if (!record(value) || value.protocolVersion !== WORKER_PROTOCOL || value.host !== 1 || value.audio !== 1 || value.presentation !== 1 ||
       value.lifecycle !== undefined && value.lifecycle !== 1 ||
       value.observation !== undefined && (value.observation !== 1 || value.lifecycle !== 1) ||
-      Object.keys(value).some(key => !['protocolVersion', 'host', 'audio', 'presentation', 'lifecycle', 'observation'].includes(key)))
+      value.runtimeWrite !== undefined && (value.runtimeWrite !== 1 || value.observation !== 1 || value.lifecycle !== 1) ||
+      Object.keys(value).some(key => !['protocolVersion', 'host', 'audio', 'presentation', 'lifecycle', 'observation', 'runtimeWrite'].includes(key)))
     fail('E_WORKER_RELEASE_ABI', 'Unsupported Worker runtime ABI');
 }
 function root(value: string): URL {
@@ -108,6 +109,8 @@ export async function prepareWorkerRelease(input: PrepareWorkerReleaseOptions): 
   abi(descriptor.runtimeAbi); abi(runtime.abi);
   if (canonicalIdentityJson(descriptor.runtimeAbi) !== canonicalIdentityJson(runtime.abi) || descriptor.runtimeAbi.lifecycle !== execution.lifecycleAbi)
     fail('E_WORKER_RELEASE_ABI', 'Site/runtime/native ABI declarations differ');
+  if (descriptor.runtimeAbi.runtimeWrite && (descriptor.runtimeProfile !== 'full-engine-v1' || site.engineTarget !== 'template_debug'))
+    fail('E_WORKER_RELEASE_ABI', 'Runtime write requires a Full Engine debug target');
   if (!Array.isArray(runtime.presentationBackends) || !runtime.presentationBackends.length ||
       runtime.presentationBackends.some(value => !['direct', 'bitmap'].includes(String(value))) ||
       new Set(runtime.presentationBackends).size !== runtime.presentationBackends.length || !runtime.presentationBackends.includes(presentation) ||

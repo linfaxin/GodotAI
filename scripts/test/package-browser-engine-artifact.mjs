@@ -3,7 +3,8 @@ import {readFile,writeFile,copyFile,mkdir,mkdtemp,rename,rm,lstat,realpath} from
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {randomUUID} from 'node:crypto';
-import {canonical,digest,options,required,safePath} from '../release/web-release-utils.mjs';
+import {spawnSync} from 'node:child_process';
+import {assertRuntimeWriteBuildProof,canonical,digest,options,required,safePath} from '../release/web-release-utils.mjs';
 import {isSourceCertified} from '../release/engine-build-proof.mjs';
 import {browserEnginePaths} from '../release/browser-engine-artifacts.mjs';
 
@@ -40,6 +41,23 @@ async function assertPublicationPaths(inputs,outputs,artifact){
  if(overlaps(outputPaths[0],outputPaths[1])||outputPaths.some(output=>overlaps(output,artifactPath)||inputPaths.some(input=>overlaps(output,input))))throw Error('E_ENGINE_ARTIFACT_OUTPUT: publication overlaps an input or immutable artifact');
 }
 
+function templateWasmSha256(templateBytes) {
+ const hash = spawnSync(process.env.PYTHON ?? 'python3', ['-c', `
+import hashlib, io, sys, zipfile
+with zipfile.ZipFile(io.BytesIO(sys.stdin.buffer.read())) as archive:
+    entries = [entry for entry in archive.infolist() if entry.filename == "godot.wasm"]
+    if len(entries) != 1:
+        sys.exit("Expected exactly one godot.wasm in the template")
+    digest = hashlib.sha256()
+    with archive.open(entries[0]) as wasm:
+        for chunk in iter(lambda: wasm.read(1024 * 1024), b""):
+            digest.update(chunk)
+    print(digest.hexdigest())
+`], {input: templateBytes, encoding: 'utf8'});
+ if (hash.error || hash.status !== 0) throw Error('E_ENGINE_ARTIFACT_WASM: ' + (hash.error?.message ?? hash.stderr.trim()));
+ return hash.stdout.trim();
+}
+
 /** Preserve original report bytes. The portable view changes template.path
  * only; its mapping and both report hashes are independently checked. */
 export async function inspectBrowserEngineArtifact(directory){
@@ -47,9 +65,11 @@ export async function inspectBrowserEngineArtifact(directory){
  const manifest=await json(path.join(directory,'artifact.json'));
  if(manifest.schemaVersion!==1||manifest.kind!=='godotjs-browser-engine-artifact')throw Error('E_ENGINE_ARTIFACT_MANIFEST');
  for(const name of ['engine-report.json','engine-report.original.json','engine-template.zip'])if(!manifest.files?.[name])throw Error('E_ENGINE_ARTIFACT_MANIFEST: '+name);
+ let templateBytes;
  for(const [name,expected]of Object.entries(manifest.files)){
   safePath(name);const filename=path.join(directory,name);await regular(filename);const bytes=await readFile(filename);
   if(digest(bytes)!==expected.sha256||bytes.length!==expected.bytes)throw Error('E_ENGINE_ARTIFACT_INTEGRITY: '+name);
+  if(name==='engine-template.zip')templateBytes=bytes;
  }
  const report=await json(path.join(directory,'engine-report.json')),original=await json(path.join(directory,'engine-report.original.json'));
  const normalized=structuredClone(original);normalized.template.path='engine-template.zip';
@@ -62,6 +82,8 @@ export async function inspectBrowserEngineArtifact(directory){
  }
  if(manifest.runtimeProfile!==report.runtimeProfile||manifest.target!==report.engineTarget||manifest.recipeSha256!==report.recipeSha256)throw Error('E_ENGINE_ARTIFACT_PROVENANCE');
  if(!manifest.development&&(!report.sourceCertified||!isSourceCertified(report)))throw Error('E_ENGINE_ARTIFACT_SOURCE');
+ assertRuntimeWriteBuildProof(report);
+ if(report.runtimeAbi?.runtimeWrite===1)assertRuntimeWriteBuildProof(report,templateWasmSha256(templateBytes));
  if(report.logSha256&&manifest.files['build.log']?.sha256!==report.logSha256)throw Error('E_ENGINE_ARTIFACT_LOG');
  return {status:'verified',directory,manifest,report};
 }
@@ -71,6 +93,7 @@ export async function packageBrowserEngineArtifact({report:reportFile,out,develo
  await regular(reportFile);const originalBytes=await readFile(reportFile),original=JSON.parse(originalBytes);
  if(original.kind!=='godot-js-browser-engine-build'||!['built',...(development?['existing-development']:[])].includes(original.status))throw Error('E_ENGINE_ARTIFACT_REPORT');
  if(!development&&(!original.sourceCertified||!isSourceCertified(original)))throw Error('E_ENGINE_ARTIFACT_SOURCE');
+ assertRuntimeWriteBuildProof(original);
  if(!original.template?.path)throw Error('E_ENGINE_ARTIFACT_REPORT: template missing');
  const template=path.resolve(path.dirname(reportFile),original.template.path);await regular(template);
  for(const input of [reportFile,template])if(input===out||input.startsWith(out+path.sep))throw Error('E_ENGINE_ARTIFACT_OUTPUT: output contains an input');
