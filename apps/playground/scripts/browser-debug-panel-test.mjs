@@ -28,13 +28,18 @@ const harness = await build({
       let delayNextReplay = false;
       let delayedAttempt;
       let legacyColor = 'red';
+      let writeEnabled = false, playerX = 64, renderSerial = 0, sampleSeq = 0;
+      const player = {name: 'Player', type: 'Node2D', path: '/root/Player', parentPath: '/root', instanceId: '42'};
       function buildProject(diagnostics = [], attemptId = recorder.startBuild('fixture-project', 1)) {
-        recorder.recordCompileResponse(attemptId, { variant: artifact.variant, manifest: artifact, pack: new Uint8Array([1]), diagnostics });
+        recorder.recordCompileResponse(attemptId, {
+          variant: artifact.variant, manifest: artifact, pack: new Uint8Array([1]), diagnostics, sourceHash: 'f'.repeat(64)
+        });
         recorder.beginPreview(attemptId);
         return attemptId;
       }
       window.debugPanelFixture = {
         run(delayed) {
+          playerX = 64;
           recorder.setContext({ projectId: 'fixture-project', editorRevision: 1, release: { status: 'available', value: release }, preview: { status: 'available', value: configuration } });
           const attemptId = buildProject([{ category: 'warning', code: 'W_LINKED_BUILD_FIXTURE', message: 'fixture build warning' }], delayed), generation = ++serial;
           last = { runId: 'run-' + generation, buildKey: artifact.buildKey, generation, revision: 1, documentId: 'doc-' + generation, workerId: 'worker-' + generation, runConfigurationHash: 'e'.repeat(64) };
@@ -74,6 +79,7 @@ const harness = await build({
           workbench.logAdded('error');
         },
         showsRun: runId => panel.showsRun(runId),
+        enableRuntimeWrite() { writeEnabled = true; },
         failBuild() {
           const attemptId = recorder.startBuild('fixture-project', 1);
           recorder.recordCompileResponse(attemptId, { diagnostics: [{ category: 'error', code: 2322, file: '/src/start.ts', line: 1, column: 1, message: 'fixture type error' }] });
@@ -103,12 +109,43 @@ const harness = await build({
         },
         stopRun: runId => {
           if (last?.runId !== runId) return undefined;
-          window.debugPanelFixture.losePreview();
+          if (writeEnabled) recorder.recordRunEvent({type: 'exit', report: {
+            ...last, reason: 'clean-exit', engineOutcome: {kind: 'native-exit', code: 0},
+            hostCleanup: {status: 'complete'}, sessionFacts: {nativeExit: {code: 0}, hostCleanup: 'complete'},
+          }});
+          else window.debugPanelFixture.losePreview();
           return Promise.resolve();
         },
+        observation: () => ({
+          observationState: () => ({supported: writeEnabled, ready: writeEnabled}),
+          async getRuntimeTree() { return {ok: true, result: {nodes: [player], run: last}}; },
+          async inspectRuntimeNode() { return {ok: true, result: {
+            node: player, run: last, sampleSeq: ++sampleSeq,
+            properties: [{name: 'position', value: {x: playerX, y: 256}}],
+          }}; },
+        }),
+        runtimeWrite: () => ({
+          runtimeWriteState: () => ({supported: writeEnabled, ready: writeEnabled}),
+          async setRuntimeProperty({path, expectedInstanceId, value}) {
+            if (path !== player.path || expectedInstanceId !== player.instanceId) throw Error('Wrong player');
+            playerX = value.x;
+            return {ok: true, result: {requestId: 'fixture-write', run: last, releaseId: release.releaseId,
+              expectedInstanceId, outcome: 'applied', observedValue: value}};
+          },
+        }),
         interaction: () => ({
           interactionState: () => ({supported: true, ready: true}),
           async screenshot() {
+            if (writeEnabled) {
+              const canvas = new OffscreenCanvas(96, 64), context = canvas.getContext('2d');
+              context.fillStyle = 'red';
+              context.fillRect(0, 0, 96, 64);
+              context.fillStyle = 'white';
+              context.fillRect(Math.floor(playerX / 10) - 1, 24, 3, 4);
+              const png = await canvas.convertToBlob({type: 'image/png'});
+              return {ok: true, result: {width: 96, height: 64, sourceWidth: 96, sourceHeight: 64,
+                renderSerial: ++renderSerial, mimeType: png.type, bytes: await png.arrayBuffer()}};
+            }
             const canvas = new OffscreenCanvas(1, 1), context = canvas.getContext('2d');
             context.fillStyle = legacyColor;
             context.fillRect(0, 0, 1, 1);
@@ -131,6 +168,7 @@ const harness = await build({
       createAgentPanel(playground, {
         unavailable: () => undefined,
         supportsRuntimeObservation: () => false,
+        supportsRuntimeWrite: () => writeEnabled,
         open: async () => { legacyColor = 'red'; return 'fixture-project'; },
         cancelLaunch() {},
       });
@@ -284,6 +322,19 @@ try {
   const legacyTrace = await page.locator('#agent-trace').textContent();
   assert.match(legacyTrace, /"code": "Space"/);
   assert.doesNotMatch(legacyTrace, /"name": "get_runtime_tree"/);
+  const beforeWrite = await page.evaluate(() => window.godotPlayground.get_project_context());
+  await page.locator('#agent-runtime-write').click();
+  await page.getByText('当前预览不支持运行时属性写入', {exact: true}).waitFor();
+  assert.deepEqual(await page.evaluate(() => window.godotPlayground.get_project_context()), beforeWrite);
+  await page.evaluate(() => window.debugPanelFixture.enableRuntimeWrite());
+  await page.locator('#agent-runtime-write').click();
+  await page.getByText('已验证写入、画面变化和重启恢复，并取得两次退出回执', {exact: true}).waitFor();
+  const frames = await page.locator('#agent-observations figcaption').allTextContents();
+  assert.match(frames[0],/写入前 · Player x=64/);
+  assert.match(frames[1],/写入后 · Player x=192/);
+  const writeResults = await page.locator('#agent-write-results li').allTextContents();
+  assert(writeResults.some(line=>line.includes('fixture-write · applied · x=192')));
+  assert.equal(writeResults.filter(line=>line.includes('host-report · clean-exit')).length,2);
 
   await page.setViewportSize({ width: 320, height: 720 });
   assert.equal(await page.locator('#debug-panel').evaluate(node => node.scrollWidth <= node.clientWidth), true);

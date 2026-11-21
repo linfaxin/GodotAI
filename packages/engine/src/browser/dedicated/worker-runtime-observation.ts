@@ -4,7 +4,7 @@ import type {VerifiedRelease} from '../verified-loader.js';
 
 export const RUNTIME_OBSERVATION_VERSION = 1;
 export const MAX_OBSERVATION_TIMEOUT_MS = 30_000;
-const MAX_INPUT_BYTES = 4096;
+export const MAX_RUNTIME_REQUEST_BYTES = 4096;
 const MAX_OUTPUT_BYTES = 65_536;
 const MAX_PATH_BYTES = 2048;
 const MAX_PATH_SEGMENTS = 128;
@@ -72,7 +72,7 @@ function integer(value: unknown, min: number, max: number): value is number {
   return typeof value === 'number' && Number.isInteger(value) && value >= min && value <= max;
 }
 
-function pathIsCanonical(value: unknown): value is string {
+export function pathIsCanonical(value: unknown): value is string {
   if (typeof value !== 'string' || !value.startsWith('/') || value.length > MAX_PATH_BYTES ||
       /[:\u0000-\u001f\u007f\uD800-\uDFFF]/u.test(value) || encoder.encode(value).byteLength > MAX_PATH_BYTES) return false;
   const segments = value.slice(1).split('/');
@@ -104,7 +104,7 @@ export function prepareRuntimeObservation(
     const query = readRuntimeObservationQuery(kind === 'tree' ?
       {kind, path: input.path, depth: input.depth === undefined ? 2 : input.depth, limit: input.limit === undefined ? 200 : input.limit} :
       {kind, path: input.path, properties: input.properties});
-    if (!query || encoder.encode(JSON.stringify(query)).byteLength > MAX_INPUT_BYTES) return observationError('invalid_input');
+    if (!query || encoder.encode(JSON.stringify(query)).byteLength > MAX_RUNTIME_REQUEST_BYTES) return observationError('invalid_input');
     if (signal !== undefined && readAborted.call(signal)) return observationError('cancelled');
     return observationOk({runId: input.runId, timeoutMs, query});
   } catch {
@@ -191,7 +191,7 @@ export function readRuntimeObservationReply(
   return result.ok ? observationOk({...result.result, sampleSeq: reply.sampleSeq as number}) : result;
 }
 
-interface NativeObservationModule {
+export interface NativeObservationModule {
   HEAPU8?: Uint8Array;
   _godotjs_runtime_observation_abi?: () => number;
   _godotjs_runtime_observation_buffer?: () => number;
@@ -205,25 +205,35 @@ function memoryRange(module: NativeObservationModule, pointer: number, length: n
   return heap.subarray(pointer, pointer + length);
 }
 
+export function createNativeRuntimeRequest(module: NativeObservationModule, execute: (bytes: number) => number) {
+  const buffer = module._godotjs_runtime_observation_buffer;
+  if (typeof buffer !== 'function') throw Error('E_RUNTIME_OBSERVATION_BUFFER');
+  memoryRange(module, buffer(), MAX_OUTPUT_BYTES);
+  return (input: Uint8Array, beforeExecute?: () => boolean): unknown => {
+    if (input.byteLength > MAX_RUNTIME_REQUEST_BYTES) throw Error('E_RUNTIME_OBSERVATION_BUFFER');
+    const pointer = buffer();
+    memoryRange(module, pointer, input.byteLength).set(input);
+    if (beforeExecute && !beforeExecute()) return undefined;
+    const length = execute(input.byteLength);
+    if (!integer(length, 1, MAX_OUTPUT_BYTES)) throw Error('E_RUNTIME_OBSERVATION_BUFFER');
+    // WASM may grow while executing the request. Decode from the current heap
+    // before another call can reuse the shared buffer.
+    return JSON.parse(decoder.decode(memoryRange(module, pointer, length)));
+  };
+}
+
 export function createNativeRuntimeSampler(module: NativeObservationModule) {
   const abi = module._godotjs_runtime_observation_abi;
   const buffer = module._godotjs_runtime_observation_buffer;
   const sample = module._godotjs_runtime_observation_sample;
   if (typeof abi !== 'function' || abi() !== RUNTIME_OBSERVATION_VERSION ||
       typeof buffer !== 'function' || typeof sample !== 'function') throw Error('E_RUNTIME_OBSERVATION_ABI');
-  memoryRange(module, buffer(), MAX_OUTPUT_BYTES);
+  const request = createNativeRuntimeRequest(module, sample);
   return (query: RuntimeObservationQuery): ObservationResult<RuntimeObservationSample> => {
     try {
       const input = encoder.encode(JSON.stringify(query));
-      if (input.byteLength > MAX_INPUT_BYTES) return observationError('invalid_input');
-      const pointer = buffer();
-      memoryRange(module, pointer, input.byteLength).set(input);
-      const length = sample(input.byteLength);
-      if (!integer(length, 1, MAX_OUTPUT_BYTES)) return observationError('observation_failed');
-      // WASM can grow memory while it samples. Read from the new heap, then
-      // decode before admitting another request that can reuse this buffer.
-      const json = decoder.decode(memoryRange(module, pointer, length));
-      return readRuntimeObservationResult(query, JSON.parse(json)) ?? observationError('observation_failed');
+      if (input.byteLength > MAX_RUNTIME_REQUEST_BYTES) return observationError('invalid_input');
+      return readRuntimeObservationResult(query, request(input)) ?? observationError('observation_failed');
     } catch {
       return observationError('observation_failed');
     }

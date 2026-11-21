@@ -14,7 +14,7 @@ const unwrap = response => {
   return response.result;
 };
 
-function fixture(beforeCheck = () => {}, observation) {
+function fixture(beforeCheck = () => {}, observation, runtimeWrite) {
   const recorder = createDebugRecorder();
   const calls = {check: 0, play: 0, stop: []};
   const agent = createPlaygroundApi(recorder, {
@@ -34,6 +34,7 @@ function fixture(beforeCheck = () => {}, observation) {
       return Promise.resolve();
     },
     observation: () => observation,
+    runtimeWrite: () => runtimeWrite,
   });
   recorder.setContext({projectId, editorRevision, release: {status: 'available', value: release},
     preview: {status: 'available', value: configuration}});
@@ -53,6 +54,38 @@ function fixture(beforeCheck = () => {}, observation) {
   }
   return {recorder, api, agent, calls, start};
 }
+
+test('runtime_set validates inputs and only forwards writes for the requested live run', async () => {
+  const writes = [];
+  const {api, agent, start} = fixture(undefined, undefined, {
+    runtimeWriteState: () => ({supported: true, ready: true, version: 1}),
+    async setRuntimeProperty(input, signal) {
+      writes.push({input, signal});
+      return {ok: true, result: {outcome: 'applied', observedValue: input.value}};
+    },
+  });
+  const run = start();
+  run.state('running');
+  const {runId} = run.identity;
+  const input = {runId, path: '/root/Player', expectedInstanceId: '9007199254740993',
+    property: 'position', value: {x: 192, y: 256}};
+  const trace = [];
+  agent.subscribe(call => trace.push(call));
+  assert.deepEqual(api.get_run({runId}).result.runtimeWrite, {supported: true, ready: true, version: 1});
+  assert.equal((await api.runtime_set({...input, property: 'visible'})).error.code, 'invalid_input');
+  let getterCalls = 0;
+  assert.equal((await api.runtime_set({...input, value: {get x() { return ++getterCalls; }, y: 256}})).error.code, 'invalid_input');
+  assert.equal(getterCalls, 0);
+  assert.deepEqual(trace.at(-1).input, {omitted: true});
+  assert.equal((await api.runtime_set({...input, runId: 'other'})).error.code, 'not_found');
+  assert.equal((await api.runtime_set(input, AbortSignal.abort())).error.code, 'cancelled');
+  const reply = unwrap(await api.runtime_set(input));
+  assert.deepEqual(reply.observedValue, input.value);
+  assert.deepEqual(writes, [{input: {...input, timeoutMs: 5000}, signal: undefined}]);
+  run.exit();
+  assert.equal((await api.runtime_set(input)).error.code, 'run_ended');
+  assert.equal(writes.length, 1);
+});
 
 test('check admission, original revision, and diagnostic projection preserve source facts', async () => {
   const {recorder, api, calls} = fixture();

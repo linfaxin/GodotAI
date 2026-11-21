@@ -5,7 +5,7 @@ import path from 'node:path';
 import {tmpdir} from 'node:os';
 import {canonical,digest,sitePayloads} from './site-evidence.mjs';
 import {WORKER_RUNTIME_ABI,assertWorkerRuntimeAbi} from '../../../scripts/release/engine-profiles.mjs';
-import {OBSERVATION_EXPORTS,OBSERVATION_SOURCE_PATHS,assertRuntimeObservationBuildProof} from '../../../scripts/release/web-release-utils.mjs';
+import {OBSERVATION_EXPORTS,OBSERVATION_SOURCE_PATHS,RUNTIME_WRITE_EXPORTS,assertRuntimeObservationBuildProof,assertRuntimeWriteBuildProof} from '../../../scripts/release/web-release-utils.mjs';
 import {WORKER_CANDIDATE_ASSETS,WORKER_NATIVE_PATCH_FILES,assertWorkerBuildProof,describeWorkerCandidate,assertWorkerCandidate,runConfigurationHash,workerAcceptancePlan} from './worker-candidate.mjs';
 import {assertWorkerSessionEvidence} from './runtime-evidence.mjs';
 import {workerRuntimeBuildProof} from '../../../scripts/release/patch-web-worker-runtime.mjs';
@@ -124,4 +124,38 @@ test('runtime observation is optional and bound to both the snapshotted reader a
   const changed=structuredClone(report);mutate(changed);
   assert.throws(()=>assertRuntimeObservationBuildProof(changed),/E_RUNTIME_OBSERVATION_BUILD_PROOF/);
  }
+});
+
+test('runtime write proof requires the supported recipe, observations, source bytes and executable',()=>{
+ const sources=Object.fromEntries(OBSERVATION_SOURCE_PATHS.map(path=>[path,digest(path)]));
+ const wasmSha256=digest('matching wasm'),report={
+  runtimeProfile:'full-engine-v1',engineTarget:'template_debug',sourceCertified:true,
+  recipe:{args:['target=template_debug']},resolvedBuildOptions:{target:'template_debug'},
+  execution:{executionModel:'window',wasmThreads:false},
+  runtimeAbi:{...WORKER_RUNTIME_ABI,observation:1,runtimeWrite:1},
+  source:{inputs:sources,snapshotHash:digest(canonical(sources))},
+  template:{assets:[{path:'godot.wasm',sha256:wasmSha256}]},
+  runtimeObservation:{abi:1,exports:OBSERVATION_EXPORTS,wasmSha256,sources},
+  runtimeWrite:{abi:1,exports:RUNTIME_WRITE_EXPORTS,wasmSha256,sources},
+ };
+ assert.doesNotThrow(()=>assertWorkerRuntimeAbi(report.runtimeAbi));
+ assert.throws(()=>assertWorkerRuntimeAbi({...report.runtimeAbi,observation:undefined}),/E_WORKER_RUNTIME_ABI/);
+ assert.doesNotThrow(()=>assertRuntimeWriteBuildProof(report));
+ assert.throws(()=>assertRuntimeWriteBuildProof(report,digest('other wasm')),/E_RUNTIME_WRITE_BUILD_PROOF/);
+ for(const change of [
+  value=>delete value.runtimeAbi.runtimeWrite, value=>delete value.runtimeWrite,
+  value=>value.runtimeWrite.exports.pop(), value=>value.runtimeWrite.sources.SCsub=digest('other rules'),
+  value=>value.runtimeAbi.lifecycle=undefined, value=>value.runtimeProfile='engine-2d-v1',
+  value=>value.engineTarget='template_release', value=>value.execution.wasmThreads=true,
+  value=>value.recipe.args=['target=template_release'],
+  value=>value.recipe.args.push('target=template_release'),
+  value=>delete value.resolvedBuildOptions,
+  value=>value.resolvedBuildOptions.target='template_release',
+  value=>value.sourceCertified=false,
+ ]){
+  const changed=structuredClone(report);change(changed);
+  assert.throws(()=>assertRuntimeWriteBuildProof(changed),/E_RUNTIME_WRITE_BUILD_PROOF/);
+ }
+ const readOnly=structuredClone(report);delete readOnly.runtimeAbi.runtimeWrite;delete readOnly.runtimeWrite;
+ assert.doesNotThrow(()=>assertRuntimeWriteBuildProof(readOnly));
 });

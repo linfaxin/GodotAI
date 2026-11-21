@@ -3,6 +3,7 @@ import type {EditorProject} from './project-model';
 
 export const INTERACTION_DEMO_ID = 'interaction-demo';
 export const INTERACTION_DEMO_PLAYER = {name: 'Player', startX: 64, endX: 128, y: 256, viewportWidth: 960, viewportHeight: 640};
+export const RUNTIME_WRITE_DEMO_X = 192;
 
 export function createInteractionDemo(profile: string) {
   const project = defaultProject('godot', profile);

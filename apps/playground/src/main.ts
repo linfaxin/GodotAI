@@ -52,6 +52,7 @@ const playground=createPlaygroundApi(debugRecorder,{
  stopRun:runId=>nativePreview?.stopRun(runId),
  interaction:()=>nativePreview?.interaction,
  observation:()=>nativePreview?.observation,
+ runtimeWrite:()=>nativePreview?.runtimeWrite,
 });
 Object.defineProperty(window,'godotPlayground',{value:playground.api,enumerable:true});
 const debugPanel=createDebugPanel(debugRecorder.api,playground.api);
@@ -65,6 +66,7 @@ createAgentPanel(playground, {
   if (!ready) return '预览正在准备，请稍后重试';
  },
  supportsRuntimeObservation:()=>nativePreview?.supportsObservation===true,
+ supportsRuntimeWrite:()=>nativePreview?.supportsRuntimeWrite===true,
  async open() {
   const project=createInteractionDemo(siteEngineProfile);
   let demo=demos.find(({id})=>{const candidate=projects.get(id);return candidate&&matchesInteractionDemo(candidate,project);});

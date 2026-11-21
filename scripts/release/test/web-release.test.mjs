@@ -11,7 +11,9 @@ import { publishRelease, verifyCDN } from '../publish-web-release.mjs';
 import { pinRelease } from '../pin-web-release.mjs';
 import { collectBrowserEvidence } from '../collect-browser-evidence.mjs';
 import { buildBrowserEngine, snapshotBrowserSources } from '../../test/build-browser-engine.mjs';
-import { canonical, digest, inspectRelease, json, writeJson, identity, hashSiteRuntimeFiles, assertSourcePatchChains } from '../web-release-utils.mjs';
+import { inspectBrowserEngineArtifact, packageBrowserEngineArtifact, publishBrowserEngineArtifact } from '../../test/package-browser-engine-artifact.mjs';
+import { canonical, digest, inspectRelease, json, writeJson, identity, hashSiteRuntimeFiles, assertSourcePatchChains,
+  OBSERVATION_EXPORTS, OBSERVATION_SOURCE_PATHS, RUNTIME_WRITE_EXPORTS } from '../web-release-utils.mjs';
 import { patchAudioLifecycle } from '../patch-web-audio-lifecycle.mjs';
 import {workerBuildReportFixture} from '../../../apps/playground/scripts/fixtures/worker-build-report.mjs';
 
@@ -76,6 +78,55 @@ test('static release verification requires the evidence for an advertised observ
   descriptor.id = descriptor.runtimeRelease = identity(descriptor);
   await writeJson(descriptorPath, descriptor);
   await assert.rejects(inspectRelease(f.dir), /E_RUNTIME_OBSERVATION_BUILD_PROOF/);
+});
+
+test('portable runtime write evidence must match the WASM inside the ZIP', async t => {
+  const f = await fixture(t, true);
+  const report = {...f.report, ...workerBuildReportFixture(), sourceCertified: true, runtimeProfile: 'full-engine-v1'};
+  const sources = Object.fromEntries(OBSERVATION_SOURCE_PATHS.map(path => [path, digest(path)]));
+  Object.assign(report.source.inputs, sources);
+  report.source.snapshotHash = digest(canonical(report.source.inputs));
+  Object.assign(report.runtimeAbi, {observation: 1, runtimeWrite: 1});
+  const wasm = await readFile(resolve(f.root, 'engine/godot.wasm'));
+  const wasmSha256 = digest(wasm);
+  report.template.assets = [{path: 'godot.wasm', sha256: wasmSha256, bytes: wasm.length}];
+  report.runtimeObservation = {abi: 1, exports: OBSERVATION_EXPORTS, sources, wasmSha256};
+  report.runtimeWrite = {abi: 1, exports: RUNTIME_WRITE_EXPORTS, sources, wasmSha256};
+  const reportPath = f.configuration['engine-report'];
+  await writeJson(reportPath, report);
+  const out = resolve(f.root, 'portable');
+  const {manifest} = await packageBrowserEngineArtifact({report: reportPath, out});
+  assert.equal((await inspectBrowserEngineArtifact(out)).status, 'verified');
+
+  const wrongTarget = structuredClone(report);
+  wrongTarget.recipe.args[wrongTarget.recipe.args.indexOf('target=template_debug')] = 'target=template_release';
+  wrongTarget.recipeSha256 = digest(canonical(wrongTarget.recipe));
+  wrongTarget.resolvedBuildOptions.target = 'template_release';
+  await writeJson(reportPath, wrongTarget);
+  await assert.rejects(packageBrowserEngineArtifact({report: reportPath, out: resolve(f.root, 'invalid-target')}),
+    /E_RUNTIME_WRITE_BUILD_PROOF/);
+
+  const wrongSha256 = digest('different WASM');
+  report.template.assets[0].sha256 = wrongSha256;
+  report.runtimeObservation.wasmSha256 = wrongSha256;
+  report.runtimeWrite.wasmSha256 = wrongSha256;
+  await writeJson(reportPath, report);
+  await assert.rejects(packageBrowserEngineArtifact({report: reportPath, out: resolve(f.root, 'invalid-portable')}),
+    /E_RUNTIME_WRITE_BUILD_PROOF/);
+  await assert.rejects(publishBrowserEngineArtifact({report: reportPath, publish: resolve(f.root, 'current.json'),
+    templateOut: resolve(f.root, 'current.zip')}), /E_RUNTIME_WRITE_BUILD_PROOF/);
+
+  // Even when all report and manifest hashes agree, the original ZIP remains authoritative.
+  for (const [name, value] of [['engine-report.original.json', report],
+    ['engine-report.json', {...report, template: {...report.template, path: 'engine-template.zip'}}]]) {
+    const filename = resolve(out, name);
+    await writeJson(filename, value);
+    const bytes = await readFile(filename);
+    manifest.files[name] = {sha256: digest(bytes), bytes: bytes.length};
+  }
+  manifest.sourceReportSha256 = manifest.files['engine-report.original.json'].sha256;
+  await writeJson(resolve(out, 'artifact.json'), manifest);
+  await assert.rejects(inspectBrowserEngineArtifact(out), /E_RUNTIME_WRITE_BUILD_PROOF/);
 });
 
 test('native source snapshot includes SCsub preset bundles while excluding unrelated generated outputs', async t => {

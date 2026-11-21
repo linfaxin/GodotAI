@@ -9,11 +9,21 @@ import {runReportedBrowserTest,listenBrowserTestServer as listen,closeBrowserTes
 const selectedCase=process.env.PLAYGROUND_DEBUG_API_CASE;
 const scope=selectedCase?'actual-product-debug-api-case':'actual-product-debug-api';
 const observationCase='runtime-tree-node-and-png';
+const writeCase='runtime-set-position';
+const writeBoundariesCase='runtime-set-boundaries';
+const readOnlyCase='runtime-set-unsupported';
+const publicMethods=['check','game_input','get_build','get_diagnostics','get_project_context','get_run','get_runtime_tree',
+ 'inspect_runtime_node','play','read_run_events','runtime_set','schemaVersion','screenshot','stop','wait_for_event','wait_for_input'];
 await runReportedBrowserTest({scope,reportFile:process.env.PLAYGROUND_DEBUG_API_REPORT,run:async test=>{
  const directory=path.resolve(defaultTestDirectory());
  const {site,release,candidateId,descriptorHash}=await test.preflight(directory,{worker:true});
  const observationDeclared=release.runtimeAbi?.observation===1;
+ const writeDeclared=release.runtimeAbi?.runtimeWrite===1;
  if(selectedCase===observationCase&&!observationDeclared)throw Error('E_TEST_RUNTIME_OBSERVATION_REQUIRED: this case requires runtime observation ABI 1');
+ if([writeCase,writeBoundariesCase].includes(selectedCase)&&(!writeDeclared||site.engineTarget!=='template_debug'))
+  throw Error('E_TEST_RUNTIME_WRITE_REQUIRED: Full Engine debug and runtime write ABI 1 are required');
+ if(selectedCase===readOnlyCase&&(writeDeclared||!observationDeclared||site.engineTarget!=='template_debug'))
+  throw Error('E_TEST_RUNTIME_READ_ONLY_REQUIRED: Full Engine debug with observation ABI 1 and no write ABI is required');
  const prefix=site.publicAssets?'/releases/'+candidateId+'/':'/';
  const options={urlPrefix:prefix,publicImmutable:site.publicAssets===true};
  const editor=createStaticServer(directory,options),preview=createStaticServer(directory,options);
@@ -35,7 +45,7 @@ await runReportedBrowserTest({scope,reportFile:process.env.PLAYGROUND_DEBUG_API_
   globalThis.MessageChannel=new Proxy(Channel,{construct(target,args,newTarget){
    const channel=Reflect.construct(target,args,newTarget);
    for(const port of [channel.port1,channel.port2])port.addEventListener('message',({data})=>{
-    if(data?.protocolVersion===2&&typeof data.runId==='string'&&['phase','log','exit-report'].includes(data.type)&&wire.messages.length<4096)wire.messages.push(data);
+    if(data?.protocolVersion===2&&typeof data.runId==='string'&&['phase','log','exit-report','runtime-write-result'].includes(data.type)&&wire.messages.length<4096)wire.messages.push(data);
    });
    return channel;
   }});
@@ -152,6 +162,7 @@ export async function start(){
   return snapshot.run.exit;
  }
  const invoke=(page,tool,input)=>page.evaluate(({tool,input})=>window.godotPlayground[tool](input),{tool,input});
+ const assertPublicTools=async page=>assert.deepEqual((await page.evaluate(()=>Object.keys(window.godotPlayground))).sort(),publicMethods);
  function unwrap(response){
   assert.equal(response.ok,true,JSON.stringify(response));
   return response.result;
@@ -215,10 +226,7 @@ export async function start(){
   await page.locator('#debug-open-docs').click();
   assert(await page.locator('#debug-docs #agent-replay').isVisible());
   assert.deepEqual(await page.evaluate(()=>Object.getOwnPropertyNames(window).filter(key=>key.startsWith('godotPlayground'))),['godotPlayground']);
-  assert.deepEqual((await page.evaluate(()=>Object.keys(window.godotPlayground))).sort(),[
-   'check','game_input','get_build','get_diagnostics','get_project_context','get_run','get_runtime_tree','inspect_runtime_node','play','read_run_events','schemaVersion',
-   'screenshot','stop','wait_for_event','wait_for_input',
-  ]);
+  await assertPublicTools(page);
   const example=await page.locator('#debug-api-example').textContent();
   assert(example?.includes('window.godotPlayground'));
   const literal=JSON.parse(JSON.stringify(await page.evaluate(example)));
@@ -642,6 +650,169 @@ export async function start(){
   assert.equal(await page.locator('#agent-status').textContent(),'已验证画面变化并取得退出回执');
   assert.deepEqual(await page.locator('#agent-observations figcaption').allTextContents(),['输入前','输入后']);
   return {observation:run.observation,legacyPlaytest:true};
+ });
+
+ if(observationDeclared&&!writeDeclared&&site.engineTarget==='template_debug')await browserCase(readOnlyCase,async page=>{
+  await assertPublicTools(page);
+  const {run}=await read(page);
+  const {runId}=run;
+  assert.deepEqual(run.configuration,{executionBackend:'worker',presentationBackend:'direct'});
+  assert.deepEqual(run.runtimeWrite,{supported:false,ready:false});
+  assert.deepEqual(run.observation,{supported:true,ready:true,version:1});
+  const tree=unwrap(await invoke(page,'get_runtime_tree',{runId,depth:3}));
+  const node=tree.nodes.find(node=>node.type==='Node2D')??tree.nodes[0];
+  assert(node);
+  const write=await invoke(page,'runtime_set',{runId,path:node.path,expectedInstanceId:node.instanceId,
+   property:'position',value:{x:192,y:256}});
+  assert.equal(write.error.code,'unsupported');
+  const sample=unwrap(await invoke(page,'inspect_runtime_node',{runId,path:node.path,properties:['position']}));
+  assert.equal(sample.node.instanceId,node.instanceId);
+  const screenshot=await page.evaluate(async runId=>{
+   const result=await window.godotPlayground.screenshot({runId});
+   if(!result.ok)return result;
+   return {ok:true,mimeType:result.result.mimeType,png:Array.from(new Uint8Array(result.result.bytes,0,8))};
+  },runId);
+  assert.deepEqual(screenshot,{ok:true,mimeType:'image/png',png:[137,80,78,71,13,10,26,10]});
+  const phase=(await readWire(page)).messages.find(message=>message.runId===runId&&message.type==='phase'&&message.phase==='running');
+  assert.equal(phase?.observationVersion,1);
+  assert.equal(phase.runtimeWriteVersion,undefined);
+  unwrap(await invoke(page,'stop',{runId}));
+  const exit=await waitForExit(page,runId);
+  assert.equal(exit.evidence,'host-report');
+  assert.equal(exit.report.sessionFacts.nativeExit.code,0);
+  assert.equal(exit.report.sessionFacts.hostCleanup,'complete');
+  engineExecuted=true;
+  return {runId,node,write,sample,screenshot,exit};
+ });
+
+ if(writeDeclared)await browserCase(writeCase,async page=>{
+  await assertPublicTools(page);
+  await page.locator('#debug-tab').click();
+  await page.locator('#debug-open-docs').click();
+  const initialRunId=(await read(page)).run.runId;
+  await page.locator('#agent-runtime-write').click();
+  await page.waitForFunction(()=>!document.querySelector('#agent-runtime-write')?.disabled,null,{timeout});
+  assert.equal(await page.locator('#agent-status').textContent(),'已验证写入、画面变化和重启恢复，并取得两次退出回执');
+  const media=page.locator('#agent-observations');
+  const captions=await media.locator('figcaption').allTextContents();
+  assert.match(captions[0],/^写入前 · Player x=64 · 状态 #\d+ · 画面 #\d+$/);
+  assert.match(captions[1],/^写入后 · Player x=192 · 状态 #\d+ · 画面 #\d+$/);
+  const trace=await page.locator('#agent-trace').textContent();
+  assert.match(trace,/"code": "run_ended"/);
+  const wire=await readWire(page);
+  const phases=wire.messages.filter(message=>message.runId!==initialRunId&&message.type==='phase'&&message.phase==='running');
+  assert.equal(phases.length,2);
+  const identityFields=['runId','revision','buildKey','generation','documentId','workerId','runConfigurationHash'];
+  const [first,restarted]=await Promise.all(phases.map(async phase=>{
+   assert.equal(phase.runtimeWriteVersion,1);
+   const run=unwrap(await invoke(page,'get_run',{runId:phase.runId}));
+   for(const field of identityFields)assert.equal(run[field],phase[field],field);
+   assert.deepEqual(run.runtimeWrite,{supported:true,ready:false,version:1});
+   assert.deepEqual(run.configuration,{executionBackend:'worker',presentationBackend:'direct'});
+   assert.equal(run.release.candidateId,candidateId);
+   assert.equal(run.release.descriptorSha256,descriptorHash);
+   assert.equal(run.exit.evidence,'host-report');
+   assert.equal(run.exit.report.reason,'clean-exit');
+   assert.equal(run.exit.report.sessionFacts.nativeExit.code,0);
+   assert.equal(run.exit.report.sessionFacts.hostCleanup,'complete');
+   const build=unwrap(await invoke(page,'get_build',{attemptId:run.attemptId}));
+   assert.match(build.sourceHash,/^[a-f0-9]{64}$/);
+   return {run,build};
+  }));
+  assert.notEqual(first.run.runId,restarted.run.runId);
+  assert.equal(first.build.editorRevision,restarted.build.editorRevision);
+  assert.equal(first.build.sourceHash,restarted.build.sourceHash);
+  const replies=wire.messages.filter(message=>message.type==='runtime-write-result');
+  assert.equal(replies.length,1);
+  const receipt=replies[0];
+  assert.equal(receipt.result.result.outcome,'applied');
+  assert.deepEqual(receipt.result.result.observedValue,{x:192,y:256});
+  for(const field of identityFields)assert.equal(receipt[field],first.run[field],field);
+  assert.equal(receipt.requestId,first.run.runId+':1');
+  const summaries=await page.locator('#agent-write-results li').allTextContents();
+  assert(summaries.some(line=>line.includes(receipt.requestId)&&line.includes('applied')));
+  assert(summaries.some(line=>line.includes(restarted.run.runId)&&line.includes('Player x=64')));
+  const frames=await media.locator('img').evaluateAll(async images=>Promise.all(images.map(async image=>{
+   const png=await (await fetch(image.src)).blob();
+   const bitmap=await createImageBitmap(png);
+   try {
+    const canvas=new OffscreenCanvas(bitmap.width,bitmap.height),context=canvas.getContext('2d');
+    context.drawImage(bitmap,0,0);
+    const marker=[64,192].map(x=>Array.from(context.getImageData(Math.floor(x*bitmap.width/960),
+     Math.floor(256*bitmap.height/640),1,1).data));
+    return {marker,bytes:Array.from(new Uint8Array(await png.arrayBuffer()))};
+   }finally{bitmap.close();}
+  })));
+  assert.deepEqual(frames.map(frame=>frame.marker),[[[255,255,255,255],[255,0,0,255]],[[255,0,0,255],[255,255,255,255]]]);
+  const images=[];
+  for(const [index,frame] of frames.entries()){
+   const png=Buffer.from(frame.bytes);
+   assert.equal(png.subarray(0,8).toString('hex'),'89504e470d0a1a0a');
+   const metadata={sha256:createHash('sha256').update(png).digest('hex'),bytes:png.length};
+   if(process.env.PLAYGROUND_DEBUG_API_REPORT){
+    const report=path.resolve(process.env.PLAYGROUND_DEBUG_API_REPORT),directory=path.dirname(report);
+    metadata.png=path.basename(report,'.json')+(index===0?'-before.png':'-after.png');
+    await mkdir(directory,{recursive:true});
+    await writeFile(path.join(directory,metadata.png),png);
+   }
+   images.push(metadata);
+  }
+  engineExecuted=true;
+  return {first,restarted,receipt,images,summaries,captions};
+ },{deviceScaleFactor:2});
+
+ if(writeDeclared)await browserCase(writeBoundariesCase,async page=>{
+  const marker='DEBUG_API_WRITE_BOUNDARIES';
+  const source=`import {Node,Node2D,print} from 'godot';
+export function start({mount}: {mount: Node}){
+ const target=new Node2D();
+ target.set_name('WriteBoundaryTarget');
+ mount.add_child(target);
+ print('${marker}');
+}`;
+  const {run:{runId}}=await waitForRun(page,marker,await importProject(page,source));
+  const {nodes}=unwrap(await invoke(page,'get_runtime_tree',{runId,depth:3}));
+  const node=nodes.find(item=>item.name==='WriteBoundaryTarget');
+  assert(node);
+  const coordinates=[0.10000002011656761,0.10000007227063179,3.4028234663852886e38,3.402823466385289e38];
+  const samples=await page.evaluate(async ({runId,path,expectedInstanceId,coordinates})=>{
+   const api=window.godotPlayground,frame=document.createElement('iframe');
+   document.body.append(frame);
+   try{
+    const results=[];
+    for(const x of coordinates){
+     const input=frame.contentWindow.JSON.parse(JSON.stringify({runId,path,expectedInstanceId,property:'position',value:{x,y:256}}));
+     const controller=new frame.contentWindow.AbortController();
+     const pending=api.runtime_set(input,controller.signal);
+     controller.signal.dispatchEvent(new frame.contentWindow.Event('abort'));
+     const write=await pending;
+     const read=await api.inspect_runtime_node({runId,path,properties:['position']});
+     results.push({write,read,aborted:controller.signal.aborted});
+    }
+    return results;
+   }finally{frame.remove();}
+  },{runId,path:node.path,expectedInstanceId:node.instanceId,coordinates});
+  for(const [index,{write,read,aborted}]of samples.entries()){
+   const x=Math.fround(coordinates[Math.min(index,2)]);
+   assert.equal(aborted,false);
+   if(index===3){
+    assert.equal(write.ok,false);
+    assert.equal(write.error.code,'invalid_input');
+   }else{
+    const receipt=unwrap(write);
+    assert.equal(receipt.outcome,'applied');
+    assert.deepEqual(receipt.observedValue,{x,y:256});
+   }
+   const observed=unwrap(read);
+   assert.equal(observed.node.instanceId,node.instanceId);
+   assert.deepEqual(observed.properties,[{name:'position',value:{x,y:256}}]);
+  }
+  unwrap(await invoke(page,'stop',{runId}));
+  const exit=await waitForExit(page,runId);
+  assert.equal(exit.evidence,'host-report');
+  assert.equal(exit.report.sessionFacts.nativeExit.code,0);
+  assert.equal(exit.report.sessionFacts.hostCleanup,'complete');
+  return {runId,node,coordinates,samples,exit};
  });
 
  if(observationDeclared)await browserCase(observationCase, async page=>{

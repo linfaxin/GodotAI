@@ -8,6 +8,7 @@ import { dirname, resolve, basename, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { canonical, digest, fail, options, required, writeJson,
   OBSERVATION_READER_SOURCE, OBSERVATION_SOURCE_PATHS, OBSERVATION_EXPORTS, assertRuntimeObservationBuildProof,
+  RUNTIME_WRITE_EXPORTS, assertRuntimeWriteBuildProof, runtimeWriteBuildTarget,
 } from '../release/web-release-utils.mjs';
 import { applyWebEnginePatches } from '../release/patch-web-engine.mjs';
 import {getEngineProfile,engineExecution,engineBuildArgs,validateEngineProfile,validateEngineExecution} from '../release/engine-profiles.mjs';
@@ -89,13 +90,15 @@ export function inspectBrowserTemplate(template, {python='python3'}={}) {
 }
 function bindRuntimeObservation(report, template, assets, python) {
   if (!report.runtimeAbi || !Object.hasOwn(report.source.inputs, OBSERVATION_READER_SOURCE)) return;
+  const includeWrite = report.sourceCertified && runtimeWriteBuildTarget(report);
+  const requiredExports = includeWrite ? [...OBSERVATION_EXPORTS, ...RUNTIME_WRITE_EXPORTS] : OBSERVATION_EXPORTS;
   const inspect = spawnSync(python, ['-c', [
     'import re, sys, zipfile',
     'with zipfile.ZipFile(sys.argv[1]) as z:',
     ' data = z.read("godot.js")',
     ' for name in sys.argv[2:]:',
-    '  if not re.search(rb"\\b" + name.encode() + rb"\\b", data): sys.exit("Missing runtime observation export: " + name)',
-  ].join('\n'), template, ...OBSERVATION_EXPORTS], {encoding: 'utf8'});
+    '  if not re.search(rb"\\b" + name.encode() + rb"\\b", data): sys.exit("Missing runtime bridge export: " + name)',
+  ].join('\n'), template, ...requiredExports], {encoding: 'utf8'});
   if (inspect.error || inspect.status !== 0)
     fail('E_RUNTIME_OBSERVATION_EXPORT', inspect.error?.message ?? inspect.stderr.trim());
   report.runtimeAbi = {...report.runtimeAbi, observation: 1};
@@ -106,6 +109,11 @@ function bindRuntimeObservation(report, template, assets, python) {
     wasmSha256: assets.find(asset => asset.path === 'godot.wasm').sha256,
   };
   assertRuntimeObservationBuildProof(report, report.runtimeObservation.wasmSha256);
+  if (includeWrite) {
+    report.runtimeAbi.runtimeWrite = 1;
+    report.runtimeWrite = {...report.runtimeObservation, exports: [...RUNTIME_WRITE_EXPORTS]};
+    assertRuntimeWriteBuildProof(report, report.runtimeWrite.wasmSha256);
+  }
 }
 async function execute(command, args, cwd, logPath) {
   await mkdir(dirname(logPath), { recursive: true });
@@ -198,18 +206,19 @@ export async function buildBrowserEngine(configuration) {
     const modules=resolvedBrowserModules(modulesHeader);
     const resolvedOptionsBytes=await readFile(resolve(destination,featureEvidencePath));
     const resolvedBuildOptions=JSON.parse(resolvedOptionsBytes.toString('utf8'));
+    if(resolvedBuildOptions.target!==target)fail('E_BROWSER_TARGET','Resolved SCons target differs from the build recipe');
     validateEngineExecution(execution.executionModel,{resolvedBuildOptions});
     const resolvedFeatures=Object.fromEntries(Object.keys(getEngineProfile(runtimeProfile).features).map(key=>[key,resolvedBuildOptions[key]]));
     validateEngineProfile(runtimeProfile,{modules,features:resolvedFeatures,forBuild:true});
     const assets=inspectBrowserTemplate(template,{python:configuration.python??'python3'});
-    bindRuntimeObservation(report, template, assets, configuration.python ?? 'python3');
+    // Unknown source archives remain usable locally, never certified by a flag.
+    report.sourceCertified = [source.commit, godotSource.commit].every(commit => /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(commit));
     // Modern Emscripten embeds pthread bootstrap code and uses the engine JS
     // URL for workers. Bind that actual file, plus separate workers if emitted.
     const workerAssets=execution.wasmThreads?assets.filter(asset=>asset.path==='godot.js'||(/worker.*\.js$/.test(asset.path)&&!asset.path.includes('service.worker'))).map(asset=>({...asset,role:'pthread-runtime',...(asset.path==='godot.js'?{embedded:true}:{})})):[];
     const workerBootstrap=execution.wasmThreads?(workerAssets.some(asset=>!asset.embedded)?'separate':'embedded'):undefined;
     Object.assign(report, await version(destination), { status: 'built', execution:{...execution,workerAssets,...(workerBootstrap?{workerBootstrap}:{})}, modules, resolvedFeatures, resolvedBuildOptions, featuresEvidence:{path:featureEvidencePath,sha256:digest(resolvedOptionsBytes)}, modulesEvidence: { path: 'modules/modules_enabled.gen.h', sha256: digest(modulesHeader) }, template: { path: template, sha256: digest(bytes), bytes: bytes.length,assets }, logSha256: digest(await readFile(`${reportFile}.log`)) });
-    // Unknown source archives remain usable locally, never certified by a flag.
-    report.sourceCertified = [source.commit, godotSource.commit].every(commit => /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(commit));
+    bindRuntimeObservation(report, template, assets, configuration.python ?? 'python3');
     await writeJson(reportFile, report); return { status: 'built', sourceCertified: report.sourceCertified, template, report: reportFile };
   } catch (error) { report.status = 'failed'; report.error = error.message; await writeJson(reportFile, report); throw error; }
 }

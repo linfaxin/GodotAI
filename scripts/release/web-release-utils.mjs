@@ -26,19 +26,47 @@ export const OBSERVATION_EXPORTS = [
   '_godotjs_runtime_observation_buffer',
   '_godotjs_runtime_observation_sample',
 ];
+export const RUNTIME_WRITE_EXPORTS = [
+  '_godotjs_runtime_write_abi',
+  '_godotjs_runtime_write_execute',
+];
 
 export function assertRuntimeObservationBuildProof(report, wasmSha256 = report.template?.assets?.find(asset => asset.path === 'godot.wasm')?.sha256) {
   const proof = report.runtimeObservation;
   if (report.runtimeAbi?.observation === undefined && proof === undefined) return;
-  const hash = /^[a-f0-9]{64}$/;
-  if (report.runtimeAbi?.observation !== 1 || report.runtimeAbi?.lifecycle !== 1 || proof?.abi !== 1 ||
-      !hash.test(proof.wasmSha256) || proof.wasmSha256 !== wasmSha256 ||
-      canonical(proof.exports) !== canonical(OBSERVATION_EXPORTS) ||
-      !report.source?.inputs || digest(canonical(report.source.inputs)) !== report.source.snapshotHash ||
-      Object.keys(proof.sources ?? {}).length !== OBSERVATION_SOURCE_PATHS.length ||
-      OBSERVATION_SOURCE_PATHS.some(path => !hash.test(proof.sources[path]) || proof.sources[path] !== report.source.inputs[path])) {
+  if (report.runtimeAbi?.observation !== 1 || report.runtimeAbi?.lifecycle !== 1 ||
+      !validRuntimeBridgeProof(report, proof, OBSERVATION_EXPORTS, wasmSha256)) {
     throw Error('E_RUNTIME_OBSERVATION_BUILD_PROOF');
   }
+}
+
+export function runtimeWriteBuildTarget(report) {
+  const args = report.recipe?.args;
+  const targets = Array.isArray(args) && args.filter(arg => typeof arg === 'string' && arg.startsWith('target='));
+  return report.runtimeProfile === 'full-engine-v1' && report.engineTarget === 'template_debug' &&
+    targets && targets.length === 1 && targets[0] === 'target=template_debug' &&
+    report.resolvedBuildOptions?.target === 'template_debug' &&
+    report.execution?.executionModel === 'window' && report.execution.wasmThreads === false;
+}
+
+export function assertRuntimeWriteBuildProof(report, wasmSha256 = report.template?.assets?.find(asset => asset.path === 'godot.wasm')?.sha256) {
+  const proof = report.runtimeWrite;
+  if (report.runtimeAbi?.runtimeWrite === undefined && proof === undefined) return;
+  if (report.runtimeAbi?.runtimeWrite !== 1 || report.runtimeAbi.observation !== 1 || report.runtimeAbi.lifecycle !== 1 ||
+      !report.sourceCertified || !runtimeWriteBuildTarget(report) ||
+      !validRuntimeBridgeProof(report, proof, RUNTIME_WRITE_EXPORTS, wasmSha256)) {
+    throw Error('E_RUNTIME_WRITE_BUILD_PROOF');
+  }
+  assertRuntimeObservationBuildProof(report, wasmSha256);
+}
+
+function validRuntimeBridgeProof(report, proof, exports, wasmSha256) {
+  const hash = /^[a-f0-9]{64}$/;
+  return proof?.abi === 1 && hash.test(proof.wasmSha256) && proof.wasmSha256 === wasmSha256 &&
+    Array.isArray(proof.exports) && canonical(proof.exports) === canonical(exports) &&
+    report.source?.inputs && digest(canonical(report.source.inputs)) === report.source.snapshotHash &&
+    Object.keys(proof.sources ?? {}).length === OBSERVATION_SOURCE_PATHS.length &&
+    OBSERVATION_SOURCE_PATHS.every(path => hash.test(proof.sources[path]) && proof.sources[path] === report.source.inputs[path]);
 }
 
 /** Ordered checked patches may compose on one source file. Only the last
@@ -162,6 +190,7 @@ export async function inspectRelease(directory, { requireCertified = false } = {
   assertSourcePatchChains(attestation);
   const wasm = descriptor.files.find(file => file.kind === 'engine-wasm');
   assertRuntimeObservationBuildProof(attestation, wasm?.decodedSha256 ?? wasm?.sha256);
+  assertRuntimeWriteBuildProof(attestation, wasm?.decodedSha256 ?? wasm?.sha256);
   if (descriptor.sourceCertified) {
     if (attestation.status !== 'built') fail('E_RELEASE_SOURCE', 'Source certification requires an actual successful build');
     assertCommit(attestation.source?.commit, 'GodotJS commit'); assertHash(attestation.source?.snapshotHash, 'GodotJS snapshot');

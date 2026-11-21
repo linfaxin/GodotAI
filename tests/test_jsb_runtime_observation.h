@@ -46,6 +46,45 @@ Dictionary observation_result(const Dictionary& reply) {
     return reply["result"];
 }
 
+Dictionary write_reply(const CharString& input) {
+    const CharString reply = execute_runtime_write(input.get_data(), input.length());
+    JSON json;
+    REQUIRE(json.parse(String::utf8(reply.get_data(), reply.length())) == OK);
+    REQUIRE(json.get_data().get_type() == Variant::DICTIONARY);
+    return json.get_data();
+}
+
+Dictionary write_reply(const Node* target, const String& path, const Variant& x, const Variant& y, const String& id = String()) {
+    Dictionary value;
+    value["x"] = x;
+    value["y"] = y;
+    Dictionary request;
+    request["path"] = path;
+    request["expectedInstanceId"] = id.is_empty() ? uitos(static_cast<uint64_t>(target->get_instance_id())) : id;
+    request["property"] = "position";
+    request["value"] = value;
+    return write_reply(JSON::stringify(request, "", false, true).utf8());
+}
+
+class RuntimeWriteTestNode : public Node2D {
+    GDCLASS(RuntimeWriteTestNode, Node2D)
+
+protected:
+    void _notification(int notification) {
+        if (notification != NOTIFICATION_LOCAL_TRANSFORM_CHANGED) return;
+        if (retire_on_write) {
+            queue_free();
+        } else if (rewrite_position) {
+            rewrite_position = false;
+            set_position(Vector2(12, 34));
+        }
+    }
+
+public:
+    bool rewrite_position = false;
+    bool retire_on_write = false;
+};
+
 } // namespace
 
 TEST_CASE("[jsb][SceneTree] runtime observation reads current public nodes and typed values") {
@@ -162,6 +201,78 @@ TEST_CASE("[jsb][SceneTree] runtime observation reports traversal limits and val
     CHECK(observation_error(observation_reply(R"({"kind":"node","path":"/root/Wide","properties":["visible","visible"]})")) == "invalid_input");
     CHECK(observation_error(observation_reply(R"({"kind":"node","path":"/root/Wide","properties":["script"]})")) == "invalid_input");
     CHECK(observation_error(observation_reply("{}\0{}", 5)) == "invalid_input");
+}
+
+TEST_CASE("[jsb][SceneTree] runtime write validates the exact node and reads back native coordinates") {
+    ObservationTestWorld world;
+    Node* root = SceneTree::get_singleton()->get_root();
+    Node2D* player = memnew(Node2D);
+    player->set_name("WritePlayer");
+    root->add_child(player);
+    player->set_position(Vector2(64, 42));
+    const String path = "/root/WritePlayer";
+    const String old_id = uitos(static_cast<uint64_t>(player->get_instance_id()));
+    CHECK(observation_error(write_reply(player, path, 9, "no")) == "invalid_input");
+    CHECK(observation_error(write_reply(player, path, 9, 1e100, "18446744073709551616")) == "invalid_input");
+    if constexpr (sizeof(real_t) == sizeof(float)) {
+        CHECK(observation_error(write_reply(player, path, 1e100, 0)) == "invalid_input");
+    }
+    CHECK(observation_error(write_reply(player, "/root/../WritePlayer", 9, 42)) == "invalid_input");
+    CHECK(player->get_position() == Vector2(64, 42));
+    const Dictionary applied = observation_result(write_reply(player, path, 192.1, 42));
+    CHECK(applied["outcome"] == "applied");
+    CHECK(player->get_position() == Vector2(192.1, 42));
+    CHECK(real_t(double(Dictionary(applied["observedValue"])["x"])) == player->get_position().x);
+
+    root->remove_child(player);
+    CHECK(observation_error(write_reply(player, path, 9, 42)) == "node_not_found");
+    memdelete(player);
+    Node2D* replacement = memnew(Node2D);
+    replacement->set_name("WritePlayer");
+    root->add_child(replacement);
+    CHECK(observation_error(write_reply(replacement, path, 9, 42, old_id)) == "node_changed");
+    CHECK(replacement->get_position() == Vector2());
+    CHECK(observation_error(write_reply(root, "/root", 9, 42)) == "unsupported_node_type");
+}
+
+TEST_CASE("[jsb][SceneTree] runtime write rechecks the target after synchronous transform notifications") {
+    ObservationTestWorld world;
+    RuntimeWriteTestNode* player = memnew(RuntimeWriteTestNode);
+    player->set_name("WritePlayer");
+    SceneTree::get_singleton()->get_root()->add_child(player);
+    player->set_notify_local_transform(true);
+    player->rewrite_position = true;
+    const Dictionary changed = observation_result(write_reply(player, "/root/WritePlayer", 192, 42));
+    CHECK(changed["outcome"] == "not_applied");
+    CHECK(double(Dictionary(changed["observedValue"])["x"]) == 12.0);
+    player->retire_on_write = true;
+    const Dictionary retired = observation_result(write_reply(player, "/root/WritePlayer", 192, 42));
+    CHECK(retired["outcome"] == "unconfirmed");
+    CHECK(retired["reason"] == "target_changed");
+    CHECK_FALSE(retired.has("observedValue"));
+}
+
+TEST_CASE("[jsb][SceneTree] runtime write parses coordinates at real_t rounding boundaries") {
+    ObservationTestWorld world;
+    Node2D* player = memnew(Node2D);
+    player->set_name("Player192");
+    SceneTree::get_singleton()->get_root()->add_child(player);
+    const String id = uitos(static_cast<uint64_t>(player->get_instance_id()));
+    const auto request = [&](const char* value) {
+        return write_reply(vformat(R"({"value":{"y":-0.10000007227063179,"x":%s},"expectedInstanceId":"%s","path":"/root/Player\u003192","property":"position"})",
+            value, id).utf8());
+    };
+    const Dictionary midpoint = observation_result(request("0.10000002011656761"));
+    CHECK(midpoint["outcome"] == "applied");
+    CHECK(player->get_position() == Vector2(real_t(0.10000002011656761), real_t(-0.10000007227063179)));
+    if constexpr (sizeof(real_t) == sizeof(float)) {
+        const Dictionary boundary = observation_result(request("3.4028234663852886e+38"));
+        CHECK(boundary["outcome"] == "applied");
+        CHECK(player->get_position().x == real_t(3.4028234663852886e+38));
+        CHECK(observation_error(request("3.402823466385289e+38")) == "invalid_input");
+    }
+    CHECK(observation_error(request("\"0.1\"")) == "invalid_input");
+    CHECK(observation_error(request("1e")) == "invalid_input");
 }
 
 } // namespace jsb::tests

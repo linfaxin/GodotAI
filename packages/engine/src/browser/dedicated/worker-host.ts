@@ -17,6 +17,8 @@ import {
   RUNTIME_OBSERVATION_VERSION, observationError, supportsWorkerObservation,
 } from './worker-runtime-observation.js';
 import {createRuntimeObservationRelay, readRuntimeObservationRequest} from './worker-runtime-observation-transport.js';
+import {RUNTIME_WRITE_VERSION, supportsWorkerRuntimeWrite} from './worker-runtime-write.js';
+import {createRuntimeWriteRelay, readRuntimeWriteId} from './worker-runtime-write-transport.js';
 
 export interface WorkerPreviewHostOptions {
   canvas: HTMLCanvasElement;
@@ -34,6 +36,7 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
   let managedClose = false;
   let interactionReady = false;
   let observationReady = false;
+  let runtimeWriteReady = false;
   let captureRequest: string | undefined, inputOperation: string | undefined;
   let configuration: Readonly<WorkerRunConfiguration> | undefined;
   let runtime: Awaited<ReturnType<typeof loadVerifiedRuntimeWorker>> | undefined;
@@ -88,16 +91,18 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
     catch(error){pendingData.delete(sequence);pendingCleanupData.delete(sequence);pendingPresentationData.delete(sequence);throw error;}
     return true;
   };
-  const observation = createRuntimeObservationRelay(
-    packet => {
-      if (!lease.active || !data || finalized) return;
-      // The relay bounds its own request and cancellation slots so a state read
-      // cannot consume the existing input and presentation data budget.
-      const sequence = ++dataSequence;
-      data.postMessage({...identity, protocolVersion: WORKER_PROTOCOL, dataSequence: sequence, ...packet});
-      return sequence;
-    },
+  // Both relays bound their own credits independently of input and rendering.
+  const postRuntimeData = (packet: object): number | undefined => {
+    if (!lease.active || !data || finalized) return;
+    const sequence = ++dataSequence;
+    data.postMessage({...identity, protocolVersion: WORKER_PROTOCOL, dataSequence: sequence, ...packet});
+    return sequence;
+  };
+  const observation = createRuntimeObservationRelay(postRuntimeData,
     response => post({type: 'runtime-observation-result', ...response}),
+  );
+  const runtimeWrite = createRuntimeWriteRelay(postRuntimeData,
+    response => post({type: 'runtime-write-result', ...response}),
   );
   function publish(): void {
     snapshot = Object.freeze({ schemaVersion: 1, ...identity, executionBackend: 'worker', presentationBackend: configuration?.presentationBackend ?? null,
@@ -155,6 +160,7 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
     // cannot create a second cleanup or adoption window.
     finalized = true; ending = true; running = false; lease.cancel(); heartbeat.close();
     observation.dispose();
+    runtimeWrite.dispose();
     projectCommands?.clear();
     pendingData.clear();pendingCleanupData.clear();pendingPresentationData.clear();
     clearTimeout(stopTimer); clearInterval(watchdog); observer?.disconnect();
@@ -203,6 +209,7 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
     if (ending || finalized) return;
     ending = true; lease.cancel(); heartbeat.close(); disposeSafely(()=>audio?.mute());
     disposeSafely(()=>observation.stop());
+    disposeSafely(()=>runtimeWrite.stop());
     if(runtime)stopTimer = setTimeout(() => terminate(detail), stopTimeoutMs);
     // Browser requests cease at the fence; audio is muted synchronously before
     // asking the Worker to quit. stop() also flushes the old audio epoch.
@@ -246,6 +253,13 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
     }
     if (m.type === 'runtime-observation-cancel' && validInteractionId(m.requestId)) {
       observation.cancel(m.requestId);
+      return;
+    }
+    if (m.type === 'runtime-write-request' || m.type === 'runtime-write-cancel') {
+      const id = readRuntimeWriteId(m, identity.runId);
+      if (id && m.type === 'runtime-write-cancel') runtimeWrite.cancel(id);
+      else if (id) runtimeWrite.request(id, m, !lease.active ? 'run_ended' : !running ? 'not_ready' :
+        !runtimeWriteReady ? 'unsupported' : undefined);
       return;
     }
     if (m.type === 'capture-request' && validInteractionId(m.requestId)) {
@@ -344,6 +358,11 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
           observation.reply(m);
           return;
         }
+        if (m.type === 'runtime-write-result') {
+          const id = readRuntimeWriteId(m, identity.runId);
+          if (id) runtimeWrite.reply(id, m.result);
+          return;
+        }
         if (m.type === 'input-result' && inputOperation && m.operationId === inputOperation) {
           const evidence = readInputEvidence(m.evidence);
           if (evidence) { inputOperation = undefined; post({type: m.type, operationId: m.operationId, evidence}); }
@@ -401,11 +420,18 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
               return;
             }
             observationReady = observationVersion !== undefined;
+            const writeVersion = supportsWorkerRuntimeWrite(release, configuration!.presentationBackend) ? RUNTIME_WRITE_VERSION : undefined;
+            if (m.runtimeWriteVersion !== writeVersion) {
+              fail(Error('E_RUNTIME_WRITE_ABI'));
+              return;
+            }
+            runtimeWriteReady = writeVersion !== undefined;
             running = true; workerState = 'running';
             interactionReady = configuration?.presentationBackend === 'direct' && m.interactionVersion === INTERACTION_VERSION;
           }
           post({type: 'phase', phase: m.phase, ...(interactionReady ? {interactionVersion: INTERACTION_VERSION} : {}),
-            ...(observationReady ? {observationVersion: RUNTIME_OBSERVATION_VERSION} : {})});
+            ...(observationReady ? {observationVersion: RUNTIME_OBSERVATION_VERSION} : {}),
+            ...(runtimeWriteReady ? {runtimeWriteVersion: RUNTIME_WRITE_VERSION} : {})});
           publish();
         }
       };
@@ -414,7 +440,10 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
         if (!isWorkerEnvelope(raw) || !sameWorkerRun(raw, identity)) { (raw?.bitmap as ImageBitmap | undefined)?.close?.(); return; }
         const m: any = raw;
         if (m.type === 'data-receipt') {
-          if (Number.isSafeInteger(m.dataSequence)) observation.receipt(m.dataSequence);
+          if (Number.isSafeInteger(m.dataSequence)) {
+            observation.receipt(m.dataSequence);
+            runtimeWrite.receipt(m.dataSequence);
+          }
           pendingCleanupData.delete(m.dataSequence);
           if(Number.isSafeInteger(m.dataSequence)&&pendingData.delete(m.dataSequence)&&pendingPresentationData.delete(m.dataSequence))presentation?.observeWorkerCheckpoint(m.presentationCheckpoint,m.dataSequence);
           return;
