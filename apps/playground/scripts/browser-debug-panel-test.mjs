@@ -17,6 +17,7 @@ const harness = await build({
       import { createAgentPanel } from './src/workbench/agent-panel';
       import { createDebugPanel } from './src/workbench/debug-panel';
       import { createWorkbench } from './src/workbench/workbench';
+      import { createSummerDispatcher } from './src/summer-adapter';
       const workbench = createWorkbench({ selectFile() {}, focusEditor() {}, toast() {} });
       const recorder = createDebugRecorder();
       recorder.setContext({ release: { status: 'unsupported' }, preview: { status: 'unsupported' } });
@@ -29,6 +30,8 @@ const harness = await build({
       let delayedAttempt;
       let legacyColor = 'red';
       let writeEnabled = false, playerX = 64, renderSerial = 0, sampleSeq = 0;
+      let propertiesEnabled=false,health=100,moveStep=64,propertySequence=0;
+      let holdPropertyRead=false,propertyReadPending=false,finishPropertyRead;
       const player = {name: 'Player', type: 'Node2D', path: '/root/Player', parentPath: '/root', instanceId: '42'};
       function buildProject(diagnostics = [], attemptId = recorder.startBuild('fixture-project', 1)) {
         recorder.recordCompileResponse(attemptId, {
@@ -40,6 +43,7 @@ const harness = await build({
       window.debugPanelFixture = {
         run(delayed) {
           playerX = 64;
+          health=100;moveStep=64;propertySequence=0;
           recorder.setContext({ projectId: 'fixture-project', editorRevision: 1, release: { status: 'available', value: release }, preview: { status: 'available', value: configuration } });
           const attemptId = buildProject([{ category: 'warning', code: 'W_LINKED_BUILD_FIXTURE', message: 'fixture build warning' }], delayed), generation = ++serial;
           last = { runId: 'run-' + generation, buildKey: artifact.buildKey, generation, revision: 1, documentId: 'doc-' + generation, workerId: 'worker-' + generation, runConfigurationHash: 'e'.repeat(64) };
@@ -80,6 +84,10 @@ const harness = await build({
         },
         showsRun: runId => panel.showsRun(runId),
         enableRuntimeWrite() { writeEnabled = true; },
+        enableRuntimeProperties() { propertiesEnabled=true;writeEnabled=true;player.path='/root/Main/Player'; },
+        holdPropertyRead() { holdPropertyRead=true; },
+        propertyReadPending:()=>propertyReadPending,
+        switchPropertyProject() { recorder.setContext({projectId:'other-project',editorRevision:2});finishPropertyRead(); },
         failBuild() {
           const attemptId = recorder.startBuild('fixture-project', 1);
           recorder.recordCompileResponse(attemptId, { diagnostics: [{ category: 'error', code: 2322, file: '/src/start.ts', line: 1, column: 1, message: 'fixture type error' }] });
@@ -118,7 +126,7 @@ const harness = await build({
         },
         observation: () => ({
           observationState: () => ({supported: writeEnabled, ready: writeEnabled}),
-          async getRuntimeTree() { return {ok: true, result: {nodes: [player], run: last}}; },
+          async getRuntimeTree() { return {ok: true, result: {nodes: [player], run: last,releaseId:release.releaseId}}; },
           async inspectRuntimeNode() { return {ok: true, result: {
             node: player, run: last, sampleSeq: ++sampleSeq,
             properties: [{name: 'position', value: {x: playerX, y: 256}}],
@@ -133,6 +141,31 @@ const harness = await build({
               expectedInstanceId, outcome: 'applied', observedValue: value}};
           },
         }),
+        runtimeProperties:()=>({
+          runtimePropertiesState:runId=>({supported:propertiesEnabled,ready:propertiesEnabled&&recorder.api.getRun(runId).result?.state==='running',version:1}),
+          async describeRuntimeProperties(input){
+            const types={health:'int',move_step:'float',can_move:'bool',display_name:'string'};
+            const properties=input.names.map(name=>types[name]?{name,status:'found',descriptor:{name,type:types[name],origin:'godotjs_export',declaredType:{variantType:{int:2,float:3,bool:1,string:4}[types[name]],name:types[name]},readAccess:{status:'candidate'},writeAccess:{status:'candidate'},readMayExecuteScript:true,writeMayExecuteScript:true,shadowedExport:false}}:{name,status:'absent'}).sort((a,b)=>a.name.localeCompare(b.name));
+            return {ok:true,receipt:propertyReceipt(input),result:{mode:'names',properties,frame:frame(),scan:{metadataEntriesVisited:4,inheritanceLevelsVisited:1,truncated:false,reasons:[]}}};
+          },
+          async readRuntimeProperties(input,signal){
+            if(holdPropertyRead){
+              holdPropertyRead=false;propertyReadPending=true;
+              try{await new Promise((resolve,reject)=>{finishPropertyRead=resolve;signal.addEventListener('abort',()=>reject(new DOMException('Cancelled','AbortError')),{once:true});});}
+              finally{propertyReadPending=false;finishPropertyRead=undefined;}
+            }
+            const values={health,move_step:moveStep,can_move:true,display_name:'Player 你好',position:{x:playerX,y:256}};
+            return {ok:true,receipt:propertyReceipt(input),result:{outcome:'completed',frame:frame(),properties:input.properties.map(({name,expectedType})=>({name,expectedType,status:'value',readEntered:true,value:{type:expectedType,value:values[name]}}))}};
+          },
+          async writeRuntimeProperty(input){
+            const before=input.property==='health'?health:input.property==='move_step'?moveStep:{x:playerX,y:256};
+            if(input.property==='health')health=input.value.value;
+            else if(input.property==='move_step')moveStep=input.value.value;
+            else playerX=input.value.value.x;
+            return {ok:true,receipt:propertyReceipt(input),result:{property:input.property,requestedValue:input.value,outcome:'applied',phase:'readback',writeEntered:true,frame:frame(),beforeValue:{type:input.value.type,value:before},comparisonValue:input.value,observedValue:input.value}};
+          },
+        }),
+        summerCall:(input,signal)=>summer(input,signal),
         interaction: () => ({
           interactionState: () => ({supported: true, ready: true}),
           async screenshot() {
@@ -142,8 +175,10 @@ const harness = await build({
               context.fillRect(0, 0, 96, 64);
               context.fillStyle = 'white';
               context.fillRect(Math.floor(playerX / 10) - 1, 24, 3, 4);
+              if(propertiesEnabled){context.fillStyle='black';context.fillRect(2.4,2.4,20,1.6);context.fillStyle='lime';context.fillRect(2.4,2.4,health*.2,1.6);}
               const png = await canvas.convertToBlob({type: 'image/png'});
               return {ok: true, result: {width: 96, height: 64, sourceWidth: 96, sourceHeight: 64,
+                run:last,releaseId:release.releaseId,requestId:'capture-'+renderSerial,geometry:{epoch:1},iteration:renderSerial,
                 renderSerial: ++renderSerial, mimeType: png.type, bytes: await png.arrayBuffer()}};
             }
             const canvas = new OffscreenCanvas(1, 1), context = canvas.getContext('2d');
@@ -153,14 +188,26 @@ const harness = await build({
             return {ok: true, result: {width: 1, height: 1, mimeType: png.type, bytes: await png.arrayBuffer()}};
           },
           gameInput({gesture}) {
+            if(propertiesEnabled){if(gesture.code==='ArrowRight')playerX+=moveStep;else if(gesture.code==='ArrowDown')playerX=64;else throw Error('Wrong property input');return {ok:true,result:{operationId:'properties-input'}};}
             if (gesture.code !== 'Space') throw Error('Legacy replay must use Space');
             legacyColor = 'lime';
             return {ok: true, result: {operationId: 'legacy-input'}};
           },
           async waitForInput() {
-            return {ok: true, result: {operation: {status: 'dispatched'}}};
+            return {ok: true, result: {operation: {status: 'dispatched',down:'dispatched',up:'dispatched',run:last}}};
           },
         }),
+      });
+      const frame=()=>({process:String(propertySequence),physics:String(propertySequence),drawn:String(renderSerial)});
+      function propertyReceipt(input){const accessSequence=++propertySequence;return {requestId:last.runId+':'+accessSequence,accessSequence,run:last,releaseId:release.releaseId,path:input.path,expectedInstanceId:input.expectedInstanceId};}
+      const summer=createSummerDispatcher({
+        captureContext:()=>({projectId:'fixture-project',editorRevision:1,activeRunId:recorder.api.getContext().result.activeRunId,pendingAttemptId:null}),
+        getProjectContext:()=>playground.api.get_project_context(),play:input=>playground.api.play(input),cancelLaunch(){},
+        getBuild:input=>playground.api.get_build(input),getRun:input=>playground.api.get_run(input),stop:input=>playground.api.stop(input),
+        getRuntimeTree:(input,signal)=>playground.api.get_runtime_tree(input,signal),inspectRuntimeNode:(input,signal)=>playground.api.inspect_runtime_node(input,signal),
+        describeRuntimeProperties:(input,signal)=>playground.api.describe_runtime_properties(input,signal),
+        writeRuntimeProperty:(input,signal)=>playground.api.write_runtime_property(input,signal),runtimeSet:(input,signal)=>playground.api.runtime_set(input,signal),
+        screenshot:(input,signal)=>playground.api.screenshot(input,signal),
       });
       window.godotPlayground = playground.api;
       const panel = createDebugPanel(recorder.api, playground.api);
@@ -169,7 +216,9 @@ const harness = await build({
         unavailable: () => undefined,
         supportsRuntimeObservation: () => false,
         supportsRuntimeWrite: () => writeEnabled,
+        supportsRuntimeProperties:()=>propertiesEnabled,
         open: async () => { legacyColor = 'red'; return 'fixture-project'; },
+        openProperties:async()=> 'fixture-project',
         cancelLaunch() {},
       });
     `,
@@ -335,6 +384,55 @@ try {
   const writeResults = await page.locator('#agent-write-results li').allTextContents();
   assert(writeResults.some(line=>line.includes('fixture-write · applied · x=192')));
   assert.equal(writeResults.filter(line=>line.includes('host-report · clean-exit')).length,2);
+
+  const beforeProperties=await page.evaluate(()=>window.godotPlayground.get_project_context());
+  await page.locator('#agent-runtime-properties').click();
+  await page.getByText('当前引擎不支持公开脚本属性访问',{exact:true}).waitFor();
+  assert.deepEqual(await page.evaluate(()=>window.godotPlayground.get_project_context()),beforeProperties);
+  await page.evaluate(()=>window.debugPanelFixture.enableRuntimeProperties());
+  await page.locator('#agent-runtime-properties').click();
+  await page.getByText('已验证公开属性、玩法变化、重启恢复和两次完整退出',{exact:true}).waitFor();
+  const propertyEvidence=JSON.parse(await page.locator('#agent-properties-evidence').textContent());
+  assert.equal(propertyEvidence.frames.length,4);
+  assert(propertyEvidence.checks.some(check=>check.kind==='summer-write'&&check.response.result.data.payload.result.property==='health'));
+  assert(propertyEvidence.checks.some(check=>check.kind==='stale-write'&&check.reply.error.code==='run_ended'));
+  assert.notEqual(propertyEvidence.first.run.runId,propertyEvidence.second.run.runId);
+  assert.equal(propertyEvidence.first.sourceHash,propertyEvidence.second.sourceHash);
+  assert.equal(propertyEvidence.first.exit.report.sessionFacts.nativeExit.code,0);
+  assert.equal(propertyEvidence.second.exit.report.sessionFacts.hostCleanup,'complete');
+  assert.match(await page.locator('#agent-trace').textContent(),/summer_call/);
+
+  await page.evaluate(()=>window.debugPanelFixture.holdPropertyRead());
+  await page.locator('#agent-runtime-properties').click();
+  await page.waitForFunction(()=>window.debugPanelFixture.propertyReadPending());
+  const cancelledRunId=await page.evaluate(()=>window.godotPlayground.get_project_context().result.activeRunId);
+  assert(cancelledRunId);
+  assert.equal(await page.locator('#agent-replay').isDisabled(),true);
+  assert.equal(await page.locator('#agent-playtest').isDisabled(),true);
+  assert.equal(await page.locator('#agent-runtime-write').isDisabled(),true);
+  await page.locator('#agent-stop').click();
+  await page.getByText('已取消属性验证；退出状态见运行记录',{exact:true}).waitFor();
+  const cancelledRun=await page.evaluate(runId=>window.godotPlayground.get_run({runId}).result,cancelledRunId);
+  assert.equal(cancelledRun.state,'exited');
+  assert.equal(cancelledRun.exit.report.reason,'clean-exit');
+  assert.equal(cancelledRun.exit.report.sessionFacts.nativeExit.code,0);
+  assert.equal(cancelledRun.exit.report.sessionFacts.hostCleanup,'complete');
+  assert.equal(await page.locator('#agent-replay').isEnabled(),true);
+  assert.equal(await page.locator('#agent-runtime-properties').isEnabled(),true);
+  assert.match(await page.locator('#agent-write-results').textContent(),/host-report · clean-exit/);
+
+  await page.evaluate(()=>window.debugPanelFixture.holdPropertyRead());
+  await page.locator('#agent-runtime-properties').click();
+  await page.waitForFunction(()=>window.debugPanelFixture.propertyReadPending());
+  const switchedRunId=await page.evaluate(()=>window.godotPlayground.get_project_context().result.activeRunId);
+  await page.evaluate(()=>window.debugPanelFixture.switchPropertyProject());
+  await page.getByText('验证期间项目或运行意图已变化',{exact:true}).waitFor();
+  const switched=await page.evaluate(runId=>({context:window.godotPlayground.get_project_context().result,run:window.godotPlayground.get_run({runId}).result}),switchedRunId);
+  assert.equal(switched.context.projectId,'other-project');
+  assert.equal(switched.run.state,'exited');
+  assert.equal(switched.run.exit.report.sessionFacts.nativeExit.code,0);
+  assert.equal(switched.run.exit.report.sessionFacts.hostCleanup,'complete');
+  assert.equal(await page.locator('#agent-runtime-properties').isEnabled(),true);
 
   await page.setViewportSize({ width: 320, height: 720 });
   assert.equal(await page.locator('#debug-panel').evaluate(node => node.scrollWidth <= node.clientWidth), true);

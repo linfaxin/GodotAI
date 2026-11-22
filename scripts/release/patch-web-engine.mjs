@@ -14,6 +14,7 @@ import {patchShaderUtf8} from './patch-web-shader-utf8.mjs';
 import {patchAudioServerFinish} from './patch-web-audio-server-finish.mjs';
 import {patchWorkerRuntimeFile,WORKER_RUNTIME_PATHS} from './patch-web-worker-runtime.mjs';
 import {patchWebLifecycleFile} from './patch-web-lifecycle.mjs';
+import {patchRuntimePropertiesQuitFile,RUNTIME_PROPERTIES_QUIT_PATHS} from './patch-runtime-properties-quit.mjs';
 import {patchArtifactSetMount,unpatchArtifactSetMount} from './patch-artifact-set-mount.mjs';
 import {NATIVE_OBSERVER_PATHS,patchNativeObserverFile} from './patch-native-observer.mjs';
 import {HOST_RESOURCE_PATHS,patchHostResourceFile,unpatchHostResourceFile} from './patch-web-resource-owner.mjs';
@@ -96,6 +97,11 @@ export async function applyWebEnginePatches(root,{python='python3',executionMode
   const path=AUDIO_WORKLET_FINISH_PATH,before=planned.findLast(item=>item.record.path===path)?.code??await readFile(resolve(root,path),'utf8');
   const result=patchAudioWorkletFinish(before);
   await add(path,result.code,result.patchId,'scripts/release/patch-web-audio-worklet-finish.mjs',before);
+ }
+ for(const path of RUNTIME_PROPERTIES_QUIT_PATHS){
+  const before=planned.findLast(item=>item.record.path===path)?.code??await readFile(resolve(root,path),'utf8');
+  const result=patchRuntimePropertiesQuitFile(path,before);
+  await add(path,result.code,result.patchId,'scripts/release/patch-runtime-properties-quit.mjs',before);
  }
  for(const {code,record}of planned)if(record.changed)await writeFile(resolve(root,record.path),code);
  return planned.map(({record})=>record);

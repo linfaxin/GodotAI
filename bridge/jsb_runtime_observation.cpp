@@ -1,4 +1,5 @@
 #include "jsb_runtime_observation.h"
+#include "jsb_runtime_access_common.h"
 #include "jsb_native_world.h"
 #include "core/config/engine.h"
 #include "core/io/json.h"
@@ -21,6 +22,7 @@
 
 namespace jsb {
 namespace {
+using namespace runtime_access;
 
 constexpr int MAX_PATH_BYTES = 2048;
 constexpr int MAX_PATH_COMPONENTS = 128;
@@ -28,91 +30,25 @@ constexpr int MAX_CHILDREN_PER_PARENT = 512;
 constexpr int MAX_CHILD_CACHE_WORK = 2048;
 constexpr int RESULT_ENVELOPE_RESERVE = 128;
 
-Dictionary error_reply(const char* code, const char* message) {
-    Dictionary error;
-    error["code"] = code;
-    error["message"] = message;
-    Dictionary reply;
-    reply["ok"] = false;
-    reply["error"] = error;
-    return reply;
-}
 
-Dictionary success_reply(const Dictionary& result) {
-    Dictionary reply;
-    reply["ok"] = true;
-    reply["result"] = result;
-    return reply;
-}
 
-bool valid_component(const String& name) {
-    if (name.is_empty() || name[0] == '%' || name == "." || name == ".." || name.length() > MAX_PATH_BYTES) return false;
-    for (int index = 0; index < name.length(); ++index) {
-        const char32_t character = name[index];
-        if (character < 0x20 || character == 0x7f || (character >= 0xd800 && character <= 0xdfff) ||
-            character == ':' || character == '/') return false;
-    }
-    return true;
-}
 
-bool read_path(const Variant& raw, String& path, Vector<String>& components) {
-    if (raw.get_type() != Variant::STRING) return false;
-    path = raw;
-    if (path.length() < 2 || path.length() > MAX_PATH_BYTES || path[0] != '/' || path.utf8().length() > MAX_PATH_BYTES) return false;
-    components = path.substr(1).split("/");
-    if (components.size() > MAX_PATH_COMPONENTS) return false;
-    for (const String& name : components) if (!valid_component(name)) return false;
-    return true;
-}
 
-bool read_integer(const Dictionary& request, const char* key, int fallback, int lower, int upper, int& value) {
-    const Variant raw = request.get(key, fallback);
-    if (raw.get_type() != Variant::INT && raw.get_type() != Variant::FLOAT) return false;
-    const double number = raw;
-    if (!Math::is_finite(number) || number < lower || number > upper || number != static_cast<int>(number)) return false;
-    value = static_cast<int>(number);
-    return true;
-}
 
-bool is_public_node(const Node* node, const SceneTree* tree) {
-    return node && node->is_inside_tree() && node->get_tree() == tree &&
-        !node->is_queued_for_deletion() && node->get_internal_mode() == Node::INTERNAL_MODE_DISABLED;
-}
 
-Node* find_node(const SceneTree* tree, const Vector<String>& components) {
-    Node* node = tree->get_root();
-    if (!is_public_node(node, tree)) return nullptr;
-    if (components.is_empty()) return node;
-    if (node->get_name() != StringName(components[0])) return nullptr;
-    for (int index = 1; index < components.size(); ++index) {
-        // Resolve a single canonical name. This does not populate the ordered
-        // child cache, and checks every ancestor against the public tree scope.
-        node = node->get_node_or_null(NodePath(components[index]));
-        if (!is_public_node(node, tree)) return nullptr;
-    }
-    return node;
-}
 
-String instance_id(const Node* node) {
-    return uitos(static_cast<uint64_t>(node->get_instance_id()));
-}
 
-const char* active_scene_error(std::shared_ptr<NativeWorld>& world, const SceneTree*& tree) {
-    if (!Thread::is_main_thread() || Main::is_iterating() || NativeWorld::inside_interop()) return "not_ready";
-    world = NativeWorld::current();
-    if (world && world->is_closing()) return "run_ended";
-    const Engine* engine = Engine::get_singleton();
-    tree = SceneTree::get_singleton();
-    if (!world || !engine || engine->is_in_physics_frame() || !tree || !tree->get_root() || !world->can_commit()) return "not_ready";
-    return nullptr;
-}
 
-Dictionary coordinates(const Vector2& position) {
-    Dictionary value;
-    value["x"] = position.x;
-    value["y"] = position.y;
-    return value;
-}
+
+
+
+
+
+
+
+
+
+
 
 Dictionary node_description(const Node* node, const String& path, const Variant& parent_path) {
     Dictionary description;
@@ -260,15 +196,7 @@ Dictionary observe(const Dictionary& request) {
     return read_node(node, path, node == tree->get_root(), properties);
 }
 
-bool read_instance_id(const Variant& raw, String& id) {
-    if (raw.get_type() != Variant::STRING) return false;
-    id = raw;
-    if (id.is_empty() || id.length() > 20 || id[0] == '0') return false;
-    for (int index = 0; index < id.length(); ++index) {
-        if (id[index] < '0' || id[index] > '9') return false;
-    }
-    return id.length() < 20 || id <= "18446744073709551615";
-}
+
 
 bool read_coordinate(const Variant& value, const std::vector<double>& numbers, real_t& coordinate) {
     if (value.get_type() != Variant::INT && value.get_type() != Variant::FLOAT) return false;
@@ -339,50 +267,9 @@ Dictionary write_position(const Dictionary& request, const std::vector<double>& 
 // Godot's JSON decimal conversion can move a value across a rounding boundary.
 // Parse number tokens separately and let Godot validate the JSON structure
 // with exact, small integer indices substituted for those tokens.
-bool index_json_numbers(const char* request, uint32_t size, std::string& json, std::vector<double>& numbers) {
-    const char* end = request + size;
-    bool in_string = false;
-    for (const char* cursor = request; cursor != end;) {
-        const char ch = *cursor++;
-        if (ch == '"') in_string = !in_string;
-        if (in_string && ch == '\\' && cursor != end) {
-            json += ch;
-            json += *cursor++;
-            continue;
-        }
-        if (in_string || (ch != '-' && (ch < '0' || ch > '9'))) {
-            json += ch;
-            continue;
-        }
 
-        const char* start = cursor - 1;
-        while (cursor != end && std::strchr("0123456789.+-eE", *cursor)) ++cursor;
-        if (cursor != end && !std::strchr(" \t\r\n,]}", *cursor)) return false;
-        std::istringstream token(std::string(start, cursor));
-        token.imbue(std::locale::classic());
-        double number;
-        if (!(token >> number) || !token.eof()) return false;
-        json += std::to_string(numbers.size());
-        numbers.push_back(number);
-    }
-    return true;
-}
 
-bool parse_request(const char* request, uint32_t size, Dictionary& parsed, std::vector<double>* numbers = nullptr) {
-    if (!request || size == 0 || size > RUNTIME_OBSERVATION_REQUEST_BYTES || std::memchr(request, 0, size)) return false;
-    std::string indexed;
-    if (numbers) {
-        if (!index_json_numbers(request, size, indexed, *numbers)) return false;
-        request = indexed.data();
-        size = indexed.size();
-    }
-    String source;
-    JSON parser;
-    if (source.append_utf8(request, size) != OK || parser.parse(source) != OK ||
-        parser.get_data().get_type() != Variant::DICTIONARY) return false;
-    parsed = parser.get_data();
-    return true;
-}
+
 
 } // namespace
 
@@ -404,38 +291,15 @@ CharString execute_runtime_write(const char* request, uint32_t size) {
 } // namespace jsb
 
 #if JSB_WITH_WEB && !defined(THREADS_ENABLED)
-namespace {
-char observation_buffer[jsb::RUNTIME_OBSERVATION_RESULT_BYTES];
-bool buffer_in_use = false;
-
-uint32_t execute_buffer(uint32_t input_size, CharString (*handler)(const char*, uint32_t)) {
-    if (!Thread::is_main_thread() || buffer_in_use) return 0;
-    struct BufferScope {
-        BufferScope() { buffer_in_use = true; }
-        ~BufferScope() { buffer_in_use = false; }
-    } scope;
-    const CharString reply = handler(observation_buffer, input_size);
-    if (reply.length() <= 0 || static_cast<uint32_t>(reply.length()) > jsb::RUNTIME_OBSERVATION_RESULT_BYTES) return 0;
-    std::memcpy(observation_buffer, reply.get_data(), reply.length());
-    return reply.length();
-}
-}
-
-extern "C" EMSCRIPTEN_KEEPALIVE uint32_t godotjs_runtime_observation_abi() {
-    return 1;
-}
-
+extern "C" EMSCRIPTEN_KEEPALIVE uint32_t godotjs_runtime_observation_abi() { return 1; }
 extern "C" EMSCRIPTEN_KEEPALIVE uintptr_t godotjs_runtime_observation_buffer() {
-    return Thread::is_main_thread() && !buffer_in_use ? reinterpret_cast<uintptr_t>(observation_buffer) : 0;
+    return reinterpret_cast<uintptr_t>(jsb::runtime_access::buffer());
 }
-
 extern "C" EMSCRIPTEN_KEEPALIVE uint32_t godotjs_runtime_observation_sample(uint32_t input_size) {
-    return execute_buffer(input_size, jsb::sample_runtime_observation);
+    return jsb::runtime_access::execute_buffer(input_size, jsb::sample_runtime_observation);
 }
-
 extern "C" EMSCRIPTEN_KEEPALIVE uint32_t godotjs_runtime_write_abi() { return 1; }
-
 extern "C" EMSCRIPTEN_KEEPALIVE uint32_t godotjs_runtime_write_execute(uint32_t input_size) {
-    return execute_buffer(input_size, jsb::execute_runtime_write);
+    return jsb::runtime_access::execute_buffer(input_size, jsb::execute_runtime_write);
 }
 #endif

@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
-import {mkdir,writeFile} from 'node:fs/promises';
+import {mkdir,readFile,writeFile} from 'node:fs/promises';
 import path from 'node:path';
 import {defaultTestDirectory,launchBrowser,withAcceptanceContext} from './browser-harness.mjs';
 import {createStaticServer} from './serve.mjs';
 import {runReportedBrowserTest,listenBrowserTestServer as listen,closeBrowserTestServer as close} from './browser-contract-report.mjs';
+import {createRuntimePropertiesDemo} from '../src/runtime-properties-demo.ts';
+import {exportProject} from '../src/project-model.ts';
 
 const selectedCase=process.env.PLAYGROUND_DEBUG_API_CASE;
 const scope=selectedCase?'actual-product-debug-api-case':'actual-product-debug-api';
@@ -12,13 +14,21 @@ const observationCase='runtime-tree-node-and-png';
 const writeCase='runtime-set-position';
 const writeBoundariesCase='runtime-set-boundaries';
 const readOnlyCase='runtime-set-unsupported';
-const publicMethods=['check','game_input','get_build','get_diagnostics','get_project_context','get_run','get_runtime_tree',
- 'inspect_runtime_node','play','read_run_events','runtime_set','schemaVersion','screenshot','stop','wait_for_event','wait_for_input'];
+const propertiesCase='runtime-script-properties';
+const propertiesBoundariesCase='runtime-script-properties-boundaries';
+const propertiesUnsupportedCase='runtime-script-properties-unsupported';
+const publicMethods=['check','describe_runtime_properties','game_input','get_build','get_diagnostics','get_project_context','get_run','get_runtime_tree',
+ 'inspect_runtime_node','play','read_run_events','read_runtime_properties','runtime_set','schemaVersion','screenshot','stop','summer_call','wait_for_event','wait_for_input','write_runtime_property'];
 await runReportedBrowserTest({scope,reportFile:process.env.PLAYGROUND_DEBUG_API_REPORT,run:async test=>{
  const directory=path.resolve(defaultTestDirectory());
  const {site,release,candidateId,descriptorHash}=await test.preflight(directory,{worker:true});
  const observationDeclared=release.runtimeAbi?.observation===1;
  const writeDeclared=release.runtimeAbi?.runtimeWrite===1;
+ const propertiesDeclared=release.runtimeAbi?.runtimeProperties===1;
+ if([propertiesCase,propertiesBoundariesCase].includes(selectedCase)&&(!propertiesDeclared||site.engineTarget!=='template_debug'))
+  throw Error('E_TEST_RUNTIME_PROPERTIES_REQUIRED: Full Engine debug and runtime properties ABI 1 are required');
+ if(selectedCase===propertiesUnsupportedCase&&(propertiesDeclared||!writeDeclared||site.engineTarget!=='template_debug'))
+  throw Error('E_TEST_RUNTIME_PROPERTIES_LEGACY_REQUIRED: this case requires the old write-1 Full Engine debug template');
  if(selectedCase===observationCase&&!observationDeclared)throw Error('E_TEST_RUNTIME_OBSERVATION_REQUIRED: this case requires runtime observation ABI 1');
  if([writeCase,writeBoundariesCase].includes(selectedCase)&&(!writeDeclared||site.engineTarget!=='template_debug'))
   throw Error('E_TEST_RUNTIME_WRITE_REQUIRED: Full Engine debug and runtime write ABI 1 are required');
@@ -45,7 +55,7 @@ await runReportedBrowserTest({scope,reportFile:process.env.PLAYGROUND_DEBUG_API_
   globalThis.MessageChannel=new Proxy(Channel,{construct(target,args,newTarget){
    const channel=Reflect.construct(target,args,newTarget);
    for(const port of [channel.port1,channel.port2])port.addEventListener('message',({data})=>{
-    if(data?.protocolVersion===2&&typeof data.runId==='string'&&['phase','log','exit-report','runtime-write-result'].includes(data.type)&&wire.messages.length<4096)wire.messages.push(data);
+    if(data?.protocolVersion===2&&typeof data.runId==='string'&&['phase','log','exit-report','runtime-write-result','runtime-property-result'].includes(data.type)&&wire.messages.length<4096)wire.messages.push(data);
    });
    return channel;
   }});
@@ -115,6 +125,59 @@ export async function start(){
   await page.locator('#import').setInputFiles({name:'debug-api.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(project(source,settings)))});
   return nextBuild(page,before);
  }
+ async function importPropertyFixture(page){
+  const document=exportProject(createRuntimePropertiesDemo(release.runtimeProfile));
+  document.files['/src/Player.ts']=`import {Node2D,Vector2,Variant,ResourceLoader,print} from 'godot';
+import {createClassBinder} from 'godot.annotations';
+const bind=createClassBinder();
+@bind()
+export default class PropertyBoundary extends Node2D {
+ @bind.export(Variant.Type.TYPE_INT) accessor health:number=100;
+ @bind.export(Variant.Type.TYPE_STRING) accessor mode:string='normal';
+ @bind.export(Variant.Type.TYPE_STRING) accessor text:string='initial';
+ @bind.export(Variant.Type.TYPE_INT) accessor reads:number=0;
+ @bind.export(Variant.Type.TYPE_INT) accessor writes:number=0;
+ private stored=100;
+ @bind.export(Variant.Type.TYPE_INT)
+ get probe():number {
+  this.reads++;
+  if(this.mode==='getter_throw')throw Error('EXPECTED_PROPERTY_GETTER');
+  if(this.mode==='boxed')return new Number(7) as any;
+  if(this.mode==='swap_script'){
+   const value=this.stored;
+   this.set_script(ResourceLoader.load('res://src/Replacement.ts'));
+   return value;
+  }
+  if(this.mode==='quit')this.get_tree()!.quit();
+  return this.stored;
+ }
+ set probe(value:number){
+  this.writes++;
+  this.stored=this.mode==='clamp'?Math.min(100,value):value;
+  if(this.mode==='setter_throw')throw Error('EXPECTED_PROPERTY_SETTER');
+ }
+ @bind.export(Variant.Type.TYPE_VECTOR2)
+ get exported_vector():Vector2 {this.reads++;return new Vector2(1,2);}
+ _ready(){print('PROPERTY_BOUNDARIES_READY');}
+}`;
+  document.files['/src/Replacement.ts']=`import {Node2D,Vector2,Variant} from 'godot';
+import {createClassBinder} from 'godot.annotations';
+const bind=createClassBinder();
+@bind()
+export default class Replacement extends Node2D {
+ // Existing set_script rebinding changes the prototype without constructing
+ // new auto-accessor private slots. Native position is stable backing state.
+ @bind.export(Variant.Type.TYPE_INT)
+ get probe():number {return this.position.x+436;}
+ set probe(value:number){this.position=new Vector2(value-436,this.position.y);}
+}`;
+  const before=(await read(page)).context.latestBuildAttemptId;
+  await page.locator('#import').setInputFiles({name:'property-boundaries.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(document))});
+  const ready=await waitForRun(page,'PROPERTY_BOUNDARIES_READY',await nextBuild(page,before));
+  const sourceDocument=await exportSourceDocument(page);
+  assert.deepEqual(sourceDocument.files,document.files,'Exported scene sources match the imported boundary fixture');
+  return {...ready,sourceDocument};
+ }
  async function waitForRun(page,marker,attemptId){
   const result=await page.waitForFunction(({marker,attemptId})=>{
    const result=window.godotPlayground.get_build({attemptId});
@@ -163,6 +226,33 @@ export async function start(){
  }
  const invoke=(page,tool,input)=>page.evaluate(({tool,input})=>window.godotPlayground[tool](input),{tool,input});
  const assertPublicTools=async page=>assert.deepEqual((await page.evaluate(()=>Object.keys(window.godotPlayground))).sort(),publicMethods);
+ async function exportSourceDocument(page){
+  const downloaded=page.waitForEvent('download');
+  await page.locator('#project-menu').evaluate(node=>node.open=true);
+  await page.locator('#export').click();
+  const document=JSON.parse(await readFile(await(await downloaded).path(),'utf8'));
+  await page.locator('#project-menu').evaluate(node=>node.open=false);
+  return document;
+ }
+ async function savePanelImages(page,stem){
+  const frames=await page.locator('#agent-observations img').evaluateAll(async images=>Promise.all(images.map(async image=>{
+   const png=await(await fetch(image.src)).blob();
+   return {caption:image.alt,bytes:Array.from(new Uint8Array(await png.arrayBuffer()))};
+  })));
+  const images=[];
+  for(const [index,frame]of frames.entries()){
+   const bytes=Buffer.from(frame.bytes);
+   assert.equal(bytes.subarray(0,8).toString('hex'),'89504e470d0a1a0a');
+   const metadata={caption:frame.caption,sha256:createHash('sha256').update(bytes).digest('hex'),bytes:bytes.length};
+   if(process.env.PLAYGROUND_DEBUG_API_REPORT){
+    const report=path.resolve(process.env.PLAYGROUND_DEBUG_API_REPORT),directory=path.dirname(report);
+    metadata.png=path.basename(report,'.json')+'-'+stem+'-'+index+'.png';
+    await mkdir(directory,{recursive:true});await writeFile(path.join(directory,metadata.png),bytes);
+   }
+   images.push(metadata);
+  }
+  return images;
+ }
  function unwrap(response){
   assert.equal(response.ok,true,JSON.stringify(response));
   return response.result;
@@ -207,7 +297,13 @@ export async function start(){
     cases.push({name,...result});
    }catch(error){
     const snapshot=page&&await read(page).catch(()=>undefined);
-    failures.push({name,pageErrors:errors,context:snapshot?.context,build:snapshot?.build,run:snapshot?.run});
+    const diagnostics=page&&await page.evaluate(()=>{
+     const api=window.godotPlayground,context=api?.get_project_context().result;
+     return context?.projectId&&context.editorRevision!==null?api.get_diagnostics({projectId:context.projectId,editorRevision:context.editorRevision}):undefined;
+    }).catch(()=>undefined);
+    const agent=page&&await page.evaluate(()=>({status:document.querySelector('#agent-status')?.textContent,
+     trace:document.querySelector('#agent-trace')?.textContent,results:document.querySelector('#agent-write-results')?.textContent})).catch(()=>undefined);
+    failures.push({name,pageErrors:errors,context:snapshot?.context,build:snapshot?.build,run:snapshot?.run,diagnostics,agent});
     test.checkpoint({failures});
     process.stderr.write(`[${scope}] ${name} failed: ${error.stack??error}\n`);
     throw error;
@@ -683,6 +779,249 @@ export async function start(){
   assert.equal(exit.report.sessionFacts.hostCleanup,'complete');
   engineExecuted=true;
   return {runId,node,write,sample,screenshot,exit};
+ });
+
+ if(propertiesDeclared)await browserCase(propertiesCase,async page=>{
+  await assertPublicTools(page);
+  await page.locator('#debug-tab').click();await page.locator('#debug-open-docs').click();
+  await page.locator('#agent-runtime-properties').click();
+  await page.waitForFunction(()=>!document.querySelector('#agent-runtime-properties')?.disabled,null,{timeout});
+  assert.equal(await page.locator('#agent-status').textContent(),'已验证公开属性、玩法变化、重启恢复和两次完整退出');
+  const evidence=JSON.parse(await page.locator('#agent-properties-evidence').textContent());
+  const sourceDocument=await exportSourceDocument(page);
+  assert.deepEqual(sourceDocument.files,exportProject(createRuntimePropertiesDemo(release.runtimeProfile)).files,
+   'The public replay leaves all project sources unchanged');
+  assert.notEqual(evidence.first.run.runId,evidence.second.run.runId);
+  assert.equal(evidence.first.sourceHash,evidence.second.sourceHash);
+  assert.equal(evidence.frames.length,4);
+  assert.deepEqual(evidence.frames.map(frame=>frame.caption),[
+   '初始 · health=100 · move_step=64','写入后 · health=40','同次输入 · Player x=192','重启 · health=100 · Player x=64',
+  ]);
+  const identities=['runId','revision','buildKey','generation','documentId','workerId','runConfigurationHash'];
+  const wire=await readWire(page);
+  const propertyReplies=evidence.checks.flatMap(check=>check.kind==='summer-write'?[check.response.result.data.payload]:
+   ['read','describe'].includes(check.kind)?[check.reply]:[]);
+  const nativePropertyResults=propertyReplies.map(reply=>{
+   const {receipt}=reply;
+   const native=wire.messages.find(message=>message.type==='runtime-property-result'&&message.requestId===receipt.requestId);
+   assert(native,'Every property observation was independently received from the actual Worker');
+   for(const field of identities)assert.equal(native[field],receipt.run[field],field);
+   assert.equal(native.accessSequence,receipt.accessSequence);
+   assert.deepEqual(native.result,{ok:true,result:reply.result});
+   return native;
+  });
+  assert.equal(new Set(propertyReplies.map(reply=>reply.receipt.requestId)).size,propertyReplies.length);
+  for(const entry of [evidence.first,evidence.second]){
+   const {runId}=entry.run;
+   const phase=wire.messages.find(message=>message.type==='phase'&&message.phase==='running'&&message.runId===runId);
+   assert.equal(phase?.runtimePropertiesVersion,1);
+   const run=unwrap(await invoke(page,'get_run',{runId}));
+   for(const field of identities)assert.equal(run[field],entry.run[field],field);
+   assert.equal(run.release.releaseId,release.id);assert.equal(run.release.candidateId,candidateId);
+   assert.equal(run.exit.evidence,'host-report');assert.equal(run.exit.report.reason,'clean-exit');
+   assert.equal(run.exit.report.sessionFacts.nativeExit.code,0);assert.equal(run.exit.report.sessionFacts.hostCleanup,'complete');
+   assert.equal(run.runtimeProperties.supported,true);assert.equal(run.runtimeProperties.ready,false);
+  }
+  const writes=evidence.checks.filter(check=>check.kind==='summer-write');
+  assert.equal(writes.length,2);
+  for(const [index,check]of writes.entries()){
+   const data=check.response.result.data,receipt=data.payload.receipt,result=data.payload.result;
+   assert.equal(data.route,'runtime_properties');
+   assert.equal(result.property,index===0?'health':'move_step');
+   assert.equal(result.outcome,'applied');assert.equal(result.writeEntered,true);assert.equal(result.phase,'readback');
+   assert.deepEqual(result.beforeValue,{type:index===0?'int':'float',value:index===0?100:64});
+   assert.deepEqual(result.observedValue,{type:index===0?'int':'float',value:index===0?40:128});
+   const native=wire.messages.find(message=>message.type==='runtime-property-result'&&message.kind==='write'&&message.requestId===receipt.requestId);
+   assert(native,'Actual Worker property write result was observed independently');
+   for(const field of identities)assert.equal(native[field],receipt.run[field],field);
+   assert.deepEqual(native.result.result,result);
+  }
+  const stale=evidence.checks.find(check=>check.kind==='stale-write');
+  assert.equal(stale.reply.ok,false);assert.equal(stale.reply.error.code,'run_ended');
+  assert.equal(evidence.checks.filter(check=>check.kind==='input').length,3);
+  for(const input of evidence.checks.filter(check=>check.kind==='input')){
+   assert.equal(input.receipt.operation.down,'dispatched');assert.equal(input.receipt.operation.up,'dispatched');
+  }
+  const images=await savePanelImages(page,'properties');assert.equal(images.length,4);
+  engineExecuted=true;return {sourceDocument,evidence,nativePropertyResults,images};
+ },{deviceScaleFactor:2});
+
+ if(propertiesDeclared)await browserCase(propertiesBoundariesCase,async page=>{
+  await assertPublicTools(page);
+  const identityFields=['runId','revision','buildKey','generation','documentId','workerId','runConfigurationHash'];
+  const fixtures=[];
+  async function fixture(){
+   const {run,build,sourceDocument}=await importPropertyFixture(page);
+   const tree=unwrap(await invoke(page,'get_runtime_tree',{runId:run.runId,depth:3}));
+   for(const field of identityFields)assert.equal(tree.run[field],run[field]);
+   assert.equal(tree.releaseId,release.id);
+   assert.equal(run.runtimeProperties.supported,true);assert.equal(run.runtimeProperties.ready,true);
+   assert.equal(run.runtimeProperties.version,1);
+   const nodes=tree.nodes.filter(node=>node.path==='/root/Main/Player'&&node.type==='Node2D');assert.equal(nodes.length,1);
+   const target={runId:run.runId,path:nodes[0].path,expectedInstanceId:nodes[0].instanceId};
+   const checks=[],sequences=new Set();
+   test.checkpoint({propertyBoundaryFixtures:fixtures,propertyBoundaryCurrent:{run,build,sourceDocument,target,checks}});
+   const matched=reply=>{
+    if(reply.ok)assert(reply.receipt,'Every successful property result carries its captured receipt');
+    if(reply.receipt){
+     for(const field of identityFields)assert.equal(reply.receipt.run[field],run[field]);
+     assert.equal(reply.receipt.releaseId,release.id);assert.equal(reply.receipt.expectedInstanceId,target.expectedInstanceId);
+     assert.equal(reply.receipt.path,target.path);
+     assert(Number.isSafeInteger(reply.receipt.accessSequence)&&reply.receipt.accessSequence>0);
+     assert.equal(reply.receipt.requestId,run.runId+':'+reply.receipt.accessSequence);
+     assert(!sequences.has(reply.receipt.accessSequence),'Property operations do not reuse access sequences');
+     sequences.add(reply.receipt.accessSequence);
+    }
+    checks.push(reply);return reply;
+   };
+   const readProps=async properties=>matched(await invoke(page,'read_runtime_properties',{...target,properties}));
+   const readInt=async name=>{
+    const reply=await readProps([{name,expectedType:'int'}]);const result=unwrap(reply);
+    assert.equal(result.outcome,'completed');assert.equal(result.properties[0].status,'value');return result.properties[0].value.value;
+   };
+   const write=async(property,type,value)=>matched(await invoke(page,'write_runtime_property',{...target,property,value:{type,value}}));
+   const mode=async value=>assert.equal(unwrap(await write('mode','string',value)).outcome,'applied');
+   const finish=async()=>{
+    unwrap(await invoke(page,'stop',{runId:run.runId}));const exit=await waitForExit(page,run.runId);
+    assert.equal(exit.evidence,'host-report');assert.equal(exit.report.reason,'clean-exit');
+    assert.equal(exit.report.sessionFacts.nativeExit.code,0);assert.equal(exit.report.sessionFacts.hostCleanup,'complete');
+    const wire=await readWire(page);
+    const nativePropertyResults=checks.filter(reply=>reply.receipt).map(reply=>{
+     const native=wire.messages.find(message=>message.type==='runtime-property-result'&&message.requestId===reply.receipt.requestId);
+     assert(native,'Boundary observations were independently received from the actual Worker');
+     for(const field of identityFields)assert.equal(native[field],run[field]);
+     assert.equal(native.accessSequence,reply.receipt.accessSequence);
+     const {receipt,...payload}=reply;assert.deepEqual(native.result,payload);
+     return native;
+    });
+    fixtures.push({run,build,sourceDocument,target,checks,nativePropertyResults,exit});return exit;
+   };
+   return {run,build,sourceDocument,target,readProps,readInt,write,mode,finish,checks,matched};
+  }
+  const first=await fixture();
+  const copiedNames=await page.evaluate(async target=>{
+   let getterCalls=0;
+   class Names extends Array{
+    get every(){getterCalls++;throw Error('input every was called');}
+    get [Symbol.iterator](){getterCalls++;throw Error('input iterator was called');}
+    get toJSON(){getterCalls++;throw Error('input toJSON was called');}
+   }
+   const reply=await window.godotPlayground.describe_runtime_properties({...target,names:new Names('health')});
+   return {reply,getterCalls};
+  },first.target);
+  assert.equal(copiedNames.getterCalls,0);
+  assert.equal(unwrap(first.matched(copiedNames.reply)).properties[0].status,'found');
+  const vectorRequest={x:0.1,y:0.2},vectorComparison={x:Math.fround(0.1),y:Math.fround(0.2)};
+  const nativePosition=unwrap(await first.write('position','vector2',vectorRequest));
+  assert.equal(nativePosition.outcome,'applied');
+  assert.deepEqual(nativePosition.requestedValue,{type:'vector2',value:vectorRequest});
+  assert.deepEqual(nativePosition.comparisonValue,{type:'vector2',value:vectorComparison});
+  assert.deepEqual(nativePosition.observedValue,nativePosition.comparisonValue);
+  const positionRead=unwrap(await first.readProps([{name:'position',expectedType:'vector2'}]));
+  assert.deepEqual(positionRead.properties[0].value,nativePosition.observedValue);
+  assert.equal(unwrap(await first.write('position','vector2',{x:64,y:256})).outcome,'applied');
+  await first.mode('getter_throw');
+  const batch=unwrap(await first.readProps([{name:'health',expectedType:'int'},{name:'probe',expectedType:'int'},{name:'writes',expectedType:'int'}]));
+  assert.equal(batch.outcome,'completed');
+  assert.deepEqual(batch.properties.map(item=>item.status),['value','unavailable','not_attempted']);
+  assert.equal(batch.properties[1].reason,'getter_failed');assert.equal(batch.properties[1].readEntered,true);assert.equal(batch.properties[2].readEntered,false);
+  const beforeFailed=unwrap(await first.write('probe','int',7));
+  assert.equal(beforeFailed.outcome,'not_written');assert.equal(beforeFailed.writeEntered,false);assert.equal(beforeFailed.phase,'before_read');assert.equal(beforeFailed.reason,'getter_failed');
+  assert.equal(await first.readInt('writes'),0);
+  await first.mode('setter_throw');const readsBefore=await first.readInt('reads');
+  const thrown=unwrap(await first.write('probe','int',55));
+  assert.equal(thrown.outcome,'unconfirmed');assert.equal(thrown.reason,'setter_failed');
+  assert.equal(thrown.evidence.phase,'write');assert.equal(thrown.evidence.writeEntered,true);
+  assert.equal(await first.readInt('writes'),1);assert.equal(await first.readInt('reads'),readsBefore+1,'No automatic readback/retry after a throwing setter');
+  assert.equal(await first.readInt('probe'),55,'The throwing setter really changed state');
+  await first.mode('clamp');
+  const clamped=unwrap(await first.write('probe','int',140));
+  assert.equal(clamped.outcome,'not_applied');assert.deepEqual(clamped.beforeValue,{type:'int',value:55});assert.deepEqual(clamped.observedValue,{type:'int',value:100});
+  const text='\ufeffa'+Array.from({length:32},(_,code)=>String.fromCharCode(code)).join('')+'b 😀𐐷\n';
+  const writtenText=unwrap(await first.write('text','string',text));assert.equal(writtenText.outcome,'applied');
+  assert.deepEqual(writtenText.requestedValue,{type:'string',value:text});
+  assert.deepEqual(writtenText.beforeValue,{type:'string',value:'initial'});
+  assert.deepEqual(writtenText.comparisonValue,{type:'string',value:text});
+  assert.deepEqual(writtenText.observedValue,{type:'string',value:text});
+  const readText=unwrap(await first.readProps([{name:'text',expectedType:'string'}]));
+  assert.equal(readText.outcome,'completed');assert.equal(readText.properties[0].status,'value');
+  assert.deepEqual(readText.properties[0].value,{type:'string',value:text});
+  const count=await first.readInt('reads');
+  const description=unwrap(first.matched(await invoke(page,'describe_runtime_properties',{...first.target,names:['exported_vector']})));
+  assert.equal(description.properties[0].status,'found');
+  assert.deepEqual(description.properties[0].descriptor.readAccess,{status:'unsupported',reason:'unsupported_export_type'});
+  const vectorRead=await first.readProps([{name:'exported_vector',expectedType:'vector2'}]);assert.equal(vectorRead.ok,false);assert.equal(vectorRead.error.code,'unsupported');
+  const vectorWrite=await first.write('exported_vector','vector2',{x:3,y:4});assert.equal(vectorWrite.ok,false);assert.equal(vectorWrite.error.code,'unsupported');
+  assert.equal(await first.readInt('reads'),count,'Unsupported script Vector2 did not execute its getter');
+  const fractional=await first.write('health','int',1.5);assert.equal(fractional.ok,false);assert(['invalid_input','out_of_range'].includes(fractional.error.code));
+  const mismatch=await first.write('health','string','40');assert.equal(mismatch.ok,false);assert.equal(mismatch.error.code,'type_mismatch');
+  assert.equal(await first.readInt('health'),100);
+  await first.mode('boxed');const boxed=unwrap(await first.readProps([{name:'probe',expectedType:'int'}]));
+  assert.equal(boxed.properties[0].status,'unavailable');assert.equal(boxed.properties[0].reason,'type_mismatch');
+  await first.finish();
+
+  const swapped=await fixture();await swapped.mode('swap_script');
+  const changed=unwrap(await swapped.write('probe','int',7));
+  assert.equal(changed.outcome,'not_written');assert.equal(changed.writeEntered,false);assert.equal(changed.reason,'target_changed');
+  const replacement=unwrap(await swapped.readProps([{name:'probe',expectedType:'int'},{name:'position',expectedType:'vector2'}]));
+  assert.equal(replacement.outcome,'completed');
+  assert.deepEqual(replacement.properties.map(item=>({status:item.status,value:item.value})),[
+   {status:'value',value:{type:'int',value:500}},{status:'value',value:{type:'vector2',value:{x:64,y:256}}},
+  ],'Old metadata did not write the replacement script or its native backing state');
+  await swapped.finish();
+
+  const quitting=await fixture();await quitting.mode('quit');
+  const quitReply=await quitting.write('probe','int',7);
+  if(quitReply.ok&&quitReply.result.outcome==='not_written')assert.equal(quitReply.result.writeEntered,false);
+  else assert(quitReply.ok&&quitReply.result.outcome==='unconfirmed',JSON.stringify(quitReply));
+  const quitExit=await waitForExit(page,quitting.run.runId);
+  const quitWire=(await readWire(page)).messages.find(message=>message.type==='runtime-property-result'&&message.kind==='write'&&message.requestId===quitReply.receipt?.requestId);
+  assert(quitWire?.result.ok,'The native quit-boundary result was independently observed');
+  for(const field of identityFields)assert.equal(quitWire[field],quitting.run[field]);
+  assert.equal(quitWire.accessSequence,quitReply.receipt.accessSequence);
+  assert.equal(quitWire.result.result.outcome,'not_written');assert.equal(quitWire.result.result.writeEntered,false);
+  assert.equal(quitExit.evidence,'host-report');assert.equal(quitExit.report.reason,'clean-exit');
+  assert.equal(quitExit.report.sessionFacts.nativeExit.code,0);assert.equal(quitExit.report.sessionFacts.hostCleanup,'complete');
+  fixtures.push({run:quitting.run,build:quitting.build,sourceDocument:quitting.sourceDocument,target:quitting.target,
+   checks:quitting.checks,nativePropertyResults:[quitWire],exit:quitExit});
+  test.checkpoint({propertyBoundaryFixtures:undefined,propertyBoundaryCurrent:undefined});
+  engineExecuted=true;return {fixtures};
+ });
+
+ if(!propertiesDeclared&&writeDeclared)await browserCase(propertiesUnsupportedCase,async page=>{
+  await assertPublicTools(page);
+  const {run:{runId}}=await read(page);
+  const run=unwrap(await invoke(page,'get_run',{runId}));
+  assert.equal(run.runtimeProperties.supported,false);assert.equal(run.runtimeProperties.ready,false);
+  const tree=unwrap(await invoke(page,'get_runtime_tree',{runId,depth:3}));
+  const node=tree.nodes.find(item=>item.type==='Node2D');assert(node);
+  const target={runId,path:node.path,expectedInstanceId:node.instanceId};
+  const before=(await readWire(page)).messages.filter(message=>message.type==='runtime-property-result').length;
+  const unsupported=[];
+  for(const [name,input]of [
+   ['describe_runtime_properties',target],
+   ['read_runtime_properties',{...target,properties:[{name:'position',expectedType:'vector2'}]}],
+   ['write_runtime_property',{...target,property:'position',value:{type:'vector2',value:{x:192,y:256}}}],
+  ]){
+   const result=await invoke(page,name,input);assert.equal(result.ok,false);assert.equal(result.error.code,'unsupported');unsupported.push({name,result});
+  }
+  assert.equal((await readWire(page)).messages.filter(message=>message.type==='runtime-property-result').length,before);
+  const legacy=unwrap(await invoke(page,'summer_call',{op:'engine.runtime_set',input:{path:node.path,property:'position',value:'Vector2(192, 256)'}}));
+  assert.equal(legacy.data.route,'legacy_write');
+  assert.equal(legacy.data.payload.result.outcome,'applied');
+  assert.equal(legacy.data.payload.result.beforeValue,undefined);assert.equal(legacy.data.payload.result.frame,undefined);
+  const sample=unwrap(await invoke(page,'inspect_runtime_node',{runId,path:node.path,properties:['position']}));
+  assert.deepEqual(sample.properties,[{name:'position',value:{x:192,y:256}}]);
+  const png=await page.evaluate(async()=>{
+   const result=await window.godotPlayground.summer_call({op:'engine.screenshot',input:{target:'game'}});
+   if(!result.ok)return result;
+   const frame=result.result.data;
+   return {run:frame.run,releaseId:frame.releaseId,mimeType:frame.mimeType,signature:Array.from(new Uint8Array(frame.bytes,0,8))};
+  });
+  assert.equal(png.run.runId,runId);assert.equal(png.releaseId,release.id);assert.deepEqual(png.signature,[137,80,78,71,13,10,26,10]);
+  unwrap(await invoke(page,'stop',{runId}));const exit=await waitForExit(page,runId);
+  assert.equal(exit.evidence,'host-report');assert.equal(exit.report.sessionFacts.nativeExit.code,0);assert.equal(exit.report.sessionFacts.hostCleanup,'complete');
+  engineExecuted=true;return {runId,node,unsupported,legacy,sample,png,exit};
  });
 
  if(writeDeclared)await browserCase(writeCase,async page=>{

@@ -1,7 +1,8 @@
+import type {FacadeReply} from './summer-adapter';
 import type {
-  createDebugRecorder, DebugBuild, DebugCheck, DebugRun, ReadRunEventsOptions,
+  createDebugRecorder, DebugBuild, DebugCheck, DebugRun, DebugContext, DebugExit, ReadRunEventsOptions,
 } from './debug-api';
-import {prepareRuntimeObservation, prepareRuntimeSet, runtimeWriteError, type GameInput, type GameScreenshot, type InteractionResult,
+import {snapshotRuntimePropertyData, prepareRuntimeProperties, runtimePropertiesError, type DescribeInput, type ReadInput, type WriteInput, type PropertyKind, type PropertyResult, prepareRuntimeObservation, prepareRuntimeSet, runtimeWriteError, type GameInput, type GameScreenshot, type InteractionResult,
   type ObservationResult, type PreparedRuntimeObservation, type RuntimeNodeInput, type RuntimeTreeInput, type ScreenshotInput,
   type RuntimeSetInput, type RuntimeSetResult, type WaitForInput, type WorkerPreviewRunner} from '@godot-js/engine/browser/dedicated/worker-runner';
 
@@ -21,6 +22,11 @@ type WaitResult = {
   run?: DebugRun;
 };
 type Capability = 'available' | 'not_ready' | 'unsupported';
+export interface ProjectContextData extends DebugContext {
+  capabilities: {check: Capability; play: Capability; wait_for_event: 'available'; stop: Capability};
+}
+export type StopResult = ToolError | {ok: true; result:
+  {status: 'stopping'; runId: string} | {status: 'exited'; runId: string; exit: DebugExit}};
 type Observation = Pick<WorkerPreviewRunner, 'observationState' | 'getRuntimeTree' | 'inspectRuntimeNode'>;
 type ObservationKind = PreparedRuntimeObservation['query']['kind'];
 type ObservationInput<Kind extends ObservationKind> = Pick<PreparedRuntimeObservation, 'runId' | 'timeoutMs'> &
@@ -34,6 +40,8 @@ interface Actions {
   interaction?(): Pick<WorkerPreviewRunner, 'interactionState' | 'screenshot' | 'gameInput' | 'waitForInput'> | undefined;
   observation?(): Observation | undefined;
   runtimeWrite?(): Pick<WorkerPreviewRunner, 'runtimeWriteState' | 'setRuntimeProperty'> | undefined;
+  runtimeProperties?(): Pick<WorkerPreviewRunner, 'runtimePropertiesState' | 'describeRuntimeProperties' | 'readRuntimeProperties' | 'writeRuntimeProperty'> | undefined;
+  summerCall?(input: unknown, signal?: AbortSignal): Promise<FacadeReply>;
 }
 
 export interface PlaygroundApiCall {
@@ -70,7 +78,7 @@ export function createPlaygroundApi(recorder: Recorder, actions: Actions) {
         // Snapshot parameters at submission. Invalid or excessive inputs need no full UI copy.
         let input: unknown;
         try {
-          const json = JSON.stringify(projectInput ? projectInput(args[0]) : args[0]);
+          const json = JSON.stringify(snapshotRuntimePropertyData(projectInput ? projectInput(args[0]) : args[0]));
           input = json === undefined ? {} : json.length <= 4096 ? JSON.parse(json) : {omitted: true};
         } catch { input = {omitted: true}; }
         const observed = (value: Awaited<Result>) => publish(name, input, projectResult ? projectResult(value) : value);
@@ -81,7 +89,7 @@ export function createPlaygroundApi(recorder: Recorder, actions: Actions) {
     };
   }
 
-  function getProjectContext() {
+  function getProjectContext(): {ok: true; result: ProjectContextData} {
     const context = debug.getContext().result;
     const check: Capability = context.release.status === 'unsupported' ||
       context.projectId !== null && !actions.supportsProject() ? 'unsupported' :
@@ -223,8 +231,30 @@ export function createPlaygroundApi(recorder: Recorder, actions: Actions) {
       {ok: false, error: {code: 'unsupported', message: '当前预览不支持运行时观察'}};
   }
 
+  async function accessProperties<K extends PropertyKind>(kind: K, input: unknown, signal?: AbortSignal): Promise<PropertyResult<K>> {
+    const prepared = prepareRuntimeProperties(kind, input, signal);
+    if (!prepared.ok) return prepared;
+    const {runId, timeoutMs, command} = prepared.result;
+    const run = debug.getRun(runId);
+    if (!run.ok) return runtimePropertiesError('not_found');
+    if (run.result.exit || run.result.state === 'stopping' || run.result.state === 'exited') return runtimePropertiesError('run_ended');
+    const runner = actions.runtimeProperties?.();
+    if (!runner) return runtimePropertiesError('unsupported');
+    const request = {runId, timeoutMs, ...command};
+    // The kind discriminator belongs to the Worker command, not the public input.
+    const {kind: _kind, ...value} = request;
+    if (kind === 'describe') return runner.describeRuntimeProperties(value as DescribeInput, signal) as Promise<PropertyResult<K>>;
+    if (kind === 'read') return runner.readRuntimeProperties(value as ReadInput, signal) as Promise<PropertyResult<K>>;
+    return runner.writeRuntimeProperty(value as WriteInput, signal) as Promise<PropertyResult<K>>;
+  }
+
   const api = Object.freeze({
     schemaVersion: 1 as const,
+    describe_runtime_properties: tool('describe_runtime_properties', (input: DescribeInput, signal?: AbortSignal) => accessProperties('describe', input, signal)),
+    read_runtime_properties: tool('read_runtime_properties', (input: ReadInput, signal?: AbortSignal) => accessProperties('read', input, signal)),
+    write_runtime_property: tool('write_runtime_property', (input: WriteInput, signal?: AbortSignal) => accessProperties('write', input, signal)),
+    summer_call: tool('summer_call', (input: unknown, signal?: AbortSignal): Promise<FacadeReply> => actions.summerCall?.(input, signal) ??
+      Promise.resolve({ok: false, error: {code: 'unsupported', message: 'Summer adapter is unavailable', retry: 'no', details: {godotai: {compatibility: {input: 'subset', semantics: 'partial', payload: 'godotai-typed-v1', summerNativeFixture: false}}}}})),
     get_project_context: tool('get_project_context', getProjectContext),
     check: tool('check', async (input: ProjectInput) => {
       const rejected = admit(input, 'check');
@@ -240,7 +270,7 @@ export function createPlaygroundApi(recorder: Recorder, actions: Actions) {
       return attemptId ? ok({attemptId}) : fail('busy', '构建操作已达上限');
     }),
     wait_for_event: tool('wait_for_event', waitFor),
-    stop: tool('stop', (input: {runId: string}) => {
+    stop: tool('stop', (input: {runId: string}): StopResult => {
       const result = debug.getRun(input?.runId);
       if (!result.ok) return result;
       if (result.result.exit) return ok({status: 'exited' as const, runId: input.runId, exit: result.result.exit});
@@ -258,6 +288,7 @@ export function createPlaygroundApi(recorder: Recorder, actions: Actions) {
         interaction: actions.interaction?.()?.interactionState(runId) ?? {supported: false, ready: false},
         observation: actions.observation?.()?.observationState(runId) ?? {supported: false, ready: false},
         runtimeWrite: actions.runtimeWrite?.()?.runtimeWriteState(runId) ?? {supported: false, ready: false},
+        runtimeProperties: actions.runtimeProperties?.()?.runtimePropertiesState(runId) ?? {supported: false, ready: false},
       });
     }),
     read_run_events: tool('read_run_events', (input: {runId: string} & ReadRunEventsOptions) => {

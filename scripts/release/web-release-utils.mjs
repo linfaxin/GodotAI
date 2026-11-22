@@ -31,6 +31,58 @@ export const RUNTIME_WRITE_EXPORTS = [
   '_godotjs_runtime_write_execute',
 ];
 
+
+export const RUNTIME_PROPERTIES_EXPORTS = [
+  '_godotjs_runtime_properties_abi',
+  '_godotjs_runtime_properties_execute',
+];
+export const RUNTIME_PROPERTIES_SOURCE_PATHS = Object.freeze([
+  'SCsub',
+  'bridge/jsb_runtime_observation.cpp', 'bridge/jsb_runtime_observation.h',
+  'bridge/jsb_runtime_access_common.cpp', 'bridge/jsb_runtime_access_common.h',
+  'bridge/jsb_runtime_properties.cpp', 'bridge/jsb_runtime_properties.h',
+  'bridge/jsb_runtime_scalar.cpp', 'bridge/jsb_runtime_script_properties.h',
+  'bridge/jsb_environment.cpp', 'bridge/jsb_environment.h',
+  'bridge/jsb_class_info.cpp', 'bridge/jsb_class_info.h',
+  'bridge/jsb_object_handle.h',
+  'bridge/jsb_native_world.cpp', 'bridge/jsb_native_world.h',
+  'bridge/jsb_type_convert.cpp', 'bridge/jsb_type_convert.h',
+  'bridge/jsb_bridge_module_loader.cpp', 'bridge/jsb_bridge_module_loader.h',
+  'weaver/jsb_script.cpp', 'weaver/jsb_script.h',
+  'weaver/jsb_script_instance.cpp', 'weaver/jsb_script_instance.h',
+  'impl/web/jsb_web_interop.h', 'impl/web/js/library_godotjs_jsbi.js',
+  'impl/web/bridge/src/monolith.ts', 'impl/web/js/jsbb.impl.js',
+  'scripts/jsb.runtime/src/godot.annotations.ts',
+  'scripts/out/jsb.runtime.bundle.js',
+  'scripts/release/patch-runtime-properties-quit.mjs',
+]);
+export function assertRuntimePropertiesBuildProof(report, wasmSha256 = report.template?.assets?.find(asset => asset.path === 'godot.wasm')?.sha256) {
+  const proof = report.runtimeProperties;
+  if (report.runtimeAbi?.runtimeProperties === undefined && proof === undefined) return;
+  const hash = /^[a-f0-9]{64}$/;
+  const quitPath = 'scene/main/scene_tree.h';
+  const quit = report.recipe?.patches?.findLast(item => item.path === quitPath && item.patchId === 'godotjs-runtime-properties-quit-v1');
+  const latest = report.recipe?.patches?.findLast(item => item.path === quitPath);
+  if (report.runtimeAbi?.runtimeProperties !== 1 || report.runtimeAbi.observation !== 1 || report.runtimeAbi.lifecycle !== 1 ||
+      report.status !== 'built' || !report.sourceCertified || !runtimeWriteBuildTarget(report) ||
+      report.resolvedBuildOptions?.threads !== false || report.resolvedBuildOptions?.dlink_enabled !== false ||
+      digest(canonical(report.recipe)) !== report.recipeSha256 ||
+      proof?.abi !== 1 || !hash.test(proof.wasmSha256) || proof.wasmSha256 !== wasmSha256 ||
+      !Array.isArray(proof.exports) || canonical(proof.exports) !== canonical(RUNTIME_PROPERTIES_EXPORTS) ||
+      !report.source?.inputs || digest(canonical(report.source.inputs)) !== report.source.snapshotHash ||
+      Object.keys(proof.sources ?? {}).length !== RUNTIME_PROPERTIES_SOURCE_PATHS.length ||
+      !RUNTIME_PROPERTIES_SOURCE_PATHS.every(path => hash.test(proof.sources[path]) && proof.sources[path] === report.source.inputs[path]) ||
+      !quit || !latest || !hash.test(quit.afterSha256) ||
+      quit.implementation?.path !== 'scripts/release/patch-runtime-properties-quit.mjs' ||
+      quit.implementation?.sha256 !== report.source.inputs[quit.implementation.path] ||
+      latest.afterSha256 !== report.godotSource?.inputs?.[quitPath] ||
+      digest(canonical(report.godotSource?.inputs)) !== report.godotSource?.snapshotHash) {
+    throw Error('E_RUNTIME_PROPERTIES_BUILD_PROOF');
+  }
+  assertRuntimeObservationBuildProof(report, wasmSha256);
+  assertSourcePatchChains(report);
+}
+
 export function assertRuntimeObservationBuildProof(report, wasmSha256 = report.template?.assets?.find(asset => asset.path === 'godot.wasm')?.sha256) {
   const proof = report.runtimeObservation;
   if (report.runtimeAbi?.observation === undefined && proof === undefined) return;
@@ -191,6 +243,7 @@ export async function inspectRelease(directory, { requireCertified = false } = {
   const wasm = descriptor.files.find(file => file.kind === 'engine-wasm');
   assertRuntimeObservationBuildProof(attestation, wasm?.decodedSha256 ?? wasm?.sha256);
   assertRuntimeWriteBuildProof(attestation, wasm?.decodedSha256 ?? wasm?.sha256);
+  assertRuntimePropertiesBuildProof(attestation, wasm?.decodedSha256 ?? wasm?.sha256);
   if (descriptor.sourceCertified) {
     if (attestation.status !== 'built') fail('E_RELEASE_SOURCE', 'Source certification requires an actual successful build');
     assertCommit(attestation.source?.commit, 'GodotJS commit'); assertHash(attestation.source?.snapshotHash, 'GodotJS snapshot');

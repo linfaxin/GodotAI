@@ -14,7 +14,7 @@ const unwrap = response => {
   return response.result;
 };
 
-function fixture(beforeCheck = () => {}, observation, runtimeWrite) {
+function fixture(beforeCheck = () => {}, observation, runtimeWrite, runtimeProperties) {
   const recorder = createDebugRecorder();
   const calls = {check: 0, play: 0, stop: []};
   const agent = createPlaygroundApi(recorder, {
@@ -35,6 +35,7 @@ function fixture(beforeCheck = () => {}, observation, runtimeWrite) {
     },
     observation: () => observation,
     runtimeWrite: () => runtimeWrite,
+    runtimeProperties: () => runtimeProperties,
   });
   recorder.setContext({projectId, editorRevision, release: {status: 'available', value: release},
     preview: {status: 'available', value: configuration}});
@@ -263,4 +264,64 @@ test('runtime observation reports unsupported for a known run without an observa
   const {runId} = run.identity;
   assert.deepEqual(unwrap(api.get_run({runId})).observation, {supported: false, ready: false});
   assert.equal((await api.get_runtime_tree({runId})).error.code, 'unsupported');
+});
+
+
+test('new property methods validate and bind the requested retained run before backend access', async () => {
+  const calls = [];
+  const backend = {
+    runtimePropertiesState: () => ({supported: true, ready: true, version: 1}),
+    describeRuntimeProperties: async value => {calls.push(['describe', value]); return {ok: true, result: {mode: 'enumerate'}};},
+    readRuntimeProperties: async value => {calls.push(['read', value]); return {ok: true, result: {outcome: 'completed'}};},
+    writeRuntimeProperty: async value => {calls.push(['write', value]); return {ok: true, result: {outcome: 'applied'}};},
+  };
+  const {api, start} = fixture(undefined, undefined, undefined, backend);
+  const run = start(); run.state('running');
+  const target = {runId: run.identity.runId, path: '/root/Player', expectedInstanceId: '33'};
+  assert.equal(api.get_run({runId: target.runId}).result.runtimeProperties.ready, true);
+  assert.equal((await api.read_runtime_properties({...target, properties: []})).error.code, 'invalid_input');
+  assert.equal((await api.describe_runtime_properties({...target, runId: 'foreign'})).error.code, 'not_found');
+  assert.equal((await api.write_runtime_property({...target, property: 'health', value: {type: 'int', value: 1.5}})).error.code, 'invalid_input');
+  assert.equal((await api.read_runtime_properties({...target, properties: [{name: 'health', expectedType: 'int'}]}, AbortSignal.abort())).error.code, 'cancelled');
+  assert.equal(calls.length, 0);
+  await api.describe_runtime_properties(target);
+  await api.read_runtime_properties({...target, properties: [{name: 'health', expectedType: 'int'}]});
+  await api.write_runtime_property({...target, property: 'health', value: {type: 'int', value: 40}});
+  assert.deepEqual(calls.map(([kind]) => kind), ['describe', 'read', 'write']);
+  for (const [,input] of calls) {
+    assert.equal(input.runId, target.runId); assert.equal(input.timeoutMs, 5000);
+    assert.equal(Object.hasOwn(input, 'kind'), false);
+  }
+  run.exit();
+  assert.equal((await api.describe_runtime_properties(target)).error.code, 'run_ended');
+  assert.equal(calls.length, 3);
+});
+
+test('missing property backend reports an explicit unsupported capability', async () => {
+  const {api, start} = fixture(); const run = start(); run.state('running');
+  assert.deepEqual(api.get_run({runId: run.identity.runId}).result.runtimeProperties, {supported: false, ready: false});
+  assert.equal((await api.describe_runtime_properties({runId: run.identity.runId, path: '/root/Player', expectedInstanceId: '33'})).error.code, 'unsupported');
+});
+
+test('property tracing never calls inherited array hooks or rejected input accessors', async () => {
+  let getters = 0;
+  class Names extends Array {
+    get every() {getters++; throw Error('every');}
+    get [Symbol.iterator]() {getters++; throw Error('iterator');}
+    get toJSON() {getters++; throw Error('toJSON');}
+  }
+  const inputs = [], trace = [];
+  const backend = {describeRuntimeProperties: async input => {inputs.push(input); return {ok: true, result: {mode: 'names'}};}};
+  const {api, agent, start} = fixture(undefined, undefined, undefined, backend);
+  const run = start();run.state('running');
+  const unsubscribe = agent.subscribe(call => trace.push(call));
+  const target = {runId: run.identity.runId, path: '/root/Player', expectedInstanceId: '33'};
+  assert.equal((await api.describe_runtime_properties({...target, names: new Names('health')})).ok, true);
+  assert.deepEqual(inputs[0].names, ['health']);
+  assert.deepEqual(trace[0].input.names, ['health']);
+  const rejected = {...target, get names() {getters++; return ['health'];}};
+  assert.equal((await api.describe_runtime_properties(rejected)).error.code, 'invalid_input');
+  assert.deepEqual(trace.at(-1).input, {omitted: true});
+  assert.equal(getters, 0);
+  unsubscribe();
 });

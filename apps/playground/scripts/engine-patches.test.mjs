@@ -11,6 +11,7 @@ import {digest,canonical} from '../../../scripts/release/web-release-utils.mjs';
 import {THREADLESS_GROUP_WAIT_ORIGINAL} from '../../../scripts/release/patch-web-threadless-groups.mjs';
 import {PROXY_ENTRY_ORIGINAL,patchProxyEntry} from '../../../scripts/release/patch-web-proxy-entry.mjs';
 import {patchShaderUtf8} from '../../../scripts/release/patch-web-shader-utf8.mjs';
+import {RUNTIME_PROPERTIES_QUIT_PATCH} from '../../../scripts/release/patch-runtime-properties-quit.mjs';
 
 async function fixture(root){
  const sources={
@@ -58,11 +59,24 @@ test('local patch CLI and the actual CI snapshot builder produce identical engin
  const out=join(root,'report.json');
  await buildBrowserEngine({'godot-source':source,'build-dir':built,out,'snapshot-only':true,scons:process.execPath,emcc:process.execPath});
  const report=JSON.parse(await readFile(out,'utf8'));
- assert.equal(report.status,'snapshotted');assert.equal(report.recipe.patches.length,35);
+ assert.equal(report.status,'snapshotted');assert.equal(report.recipe.patches.length,36);
  for(const id of ['godotjs-artifact-set-early-mount-v1','godotjs-host-resource-owner-v1','godotjs-native-observer-v1'])assert(report.recipe.patches.some(record=>record.patchId===id));
  assert.equal(report.execution.artifactSetAbi,1);assert.equal(report.execution.hostResourceAbi,1);assert.equal(report.nativeObserverPatch.abi,1);assert.equal(report.execution.shutdownQueueAbi,1);
  assert.deepEqual(report.runtimeAbi,{protocolVersion:2,host:1,audio:1,presentation:1,lifecycle:1});
  assert.equal(report.execution.lifecycleAbi,1);assert.equal(report.lifecyclePatch.abi,1);
+ const quitPatches=report.recipe.patches.filter(record=>record.patchId===RUNTIME_PROPERTIES_QUIT_PATCH);
+ assert.equal(quitPatches.length,1);
+ const [quit]=quitPatches;
+ assert.equal(quit.path,'scene/main/scene_tree.h');
+ assert.equal(quit.implementation.path,'scripts/release/patch-runtime-properties-quit.mjs');
+ assert.equal(quit.implementation.sha256,digest(await readFile(new URL('../../../scripts/release/patch-runtime-properties-quit.mjs',import.meta.url))));
+ const headerLifecycle=report.recipe.patches.find(record=>record.path===quit.path&&record.patchId==='godotjs-web-lifecycle-v1');
+ assert.equal(quit.beforeSha256,headerLifecycle.afterSha256,'quit observation composes after lifecycle');
+ assert.equal(report.godotSource.inputs[quit.path],quit.afterSha256);
+ assert.equal(report.lifecyclePatch.files[quit.path].sha256,quit.afterSha256,'lifecycle seals the final composed header');
+ const header=await readFile(join(built,quit.path),'utf8');
+ assert.match(header,/bool godotjs_is_quit_requested\(\) const \{ return _quit; \}/);
+ assert.doesNotMatch(header,/D_METHOD\("godotjs_is_quit_requested"/);
  assert.equal(Object.keys(report.workerPatch.files).length,10);
  assert.deepEqual(report.recipe.patches,localPatches);
  assert(localPatches.some(patch=>patch.implementation.path==='impl/web/patches/patch-web-renderer.py'));
@@ -156,9 +170,14 @@ test('proxy-pthread snapshots retain the native pthread patch set without the De
  const out=join(root,'report.json');
  await buildBrowserEngine({'godot-source':source,'build-dir':built,out,'execution-model':'proxy-pthread','snapshot-only':true,scons:process.execPath,emcc:process.execPath});
  const report=JSON.parse(await readFile(out,'utf8'));
- assert.equal(report.execution.executionModel,'proxy-pthread');assert.equal(report.recipe.patches.length,27);
+ assert.equal(report.execution.executionModel,'proxy-pthread');assert.equal(report.recipe.patches.length,28);
  assert.equal(report.execution.lifecycleAbi,1);assert.equal(report.lifecyclePatch.abi,1);
  assert.equal(report.runtimeAbi,undefined);assert.equal(report.workerPatch,undefined);
+ const quit=report.recipe.patches.filter(record=>record.patchId===RUNTIME_PROPERTIES_QUIT_PATCH);
+ assert.equal(quit.length,1);assert.equal(quit[0].path,'scene/main/scene_tree.h');
+ assert.equal(report.lifecyclePatch.files[quit[0].path].sha256,quit[0].afterSha256);
+ assert.equal(report.godotSource.inputs[quit[0].path],quit[0].afterSha256);
+ assert.match(await readFile(join(built,quit[0].path),'utf8'),/bool godotjs_is_quit_requested\(\) const \{ return _quit; \}/);
  assert(report.recipe.args.includes('threads=yes'));assert(report.recipe.args.includes('proxy_to_pthread=yes'));
  assert(report.recipe.patches.some(item=>item.patchId==='godotjs-audio-server-finish-v1'));
 });

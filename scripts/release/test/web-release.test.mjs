@@ -16,6 +16,7 @@ import { canonical, digest, inspectRelease, json, writeJson, identity, hashSiteR
   OBSERVATION_EXPORTS, OBSERVATION_SOURCE_PATHS, RUNTIME_WRITE_EXPORTS } from '../web-release-utils.mjs';
 import { patchAudioLifecycle } from '../patch-web-audio-lifecycle.mjs';
 import {workerBuildReportFixture} from '../../../apps/playground/scripts/fixtures/worker-build-report.mjs';
+import {propertiesProofFixture} from '../../../apps/playground/scripts/fixtures/runtime-properties-build-report.mjs';
 
 test('composed native source patches require a continuous chain ending at the compiled snapshot',()=>{
  const first=digest('upstream'),middle=digest('lifecycle'),last=digest('worker imports');
@@ -127,6 +128,28 @@ test('portable runtime write evidence must match the WASM inside the ZIP', async
   manifest.sourceReportSha256 = manifest.files['engine-report.original.json'].sha256;
   await writeJson(resolve(out, 'artifact.json'), manifest);
   await assert.rejects(inspectBrowserEngineArtifact(out), /E_RUNTIME_WRITE_BUILD_PROOF/);
+});
+
+test('portable properties evidence is checked against the actual ZIP and cannot be forged by report hashes',async t=>{
+ const f=await fixture(t,true),wasmSha256=digest(await readFile(resolve(f.root,'engine/godot.wasm')));
+ const report={...f.report,...propertiesProofFixture(wasmSha256)};
+ report.template={...report.template,assets:[{path:'godot.wasm',sha256:wasmSha256}]};
+ const reportPath=f.configuration['engine-report'];await writeJson(reportPath,report);
+ const out=resolve(f.root,'properties-portable');
+ const {manifest}=await packageBrowserEngineArtifact({report:reportPath,out});
+ assert.equal((await inspectBrowserEngineArtifact(out)).report.runtimeAbi.runtimeProperties,1);
+ const wrong=digest('wrong properties WASM');
+ report.runtimeProperties.wasmSha256=wrong;report.runtimeObservation.wasmSha256=wrong;
+ report.template.assets=[{path:'godot.wasm',sha256:wrong}];
+ await writeJson(reportPath,report);
+ await assert.rejects(packageBrowserEngineArtifact({report:reportPath,out:resolve(f.root,'bad-properties')}),/E_RUNTIME_PROPERTIES_BUILD_PROOF|E_RUNTIME_OBSERVATION_BUILD_PROOF/);
+ for(const [name,value]of [['engine-report.original.json',report],['engine-report.json',{...report,template:{...report.template,path:'engine-template.zip'}}]]){
+  const filename=resolve(out,name);await writeJson(filename,value);const bytes=await readFile(filename);
+  manifest.files[name]={sha256:digest(bytes),bytes:bytes.length};
+ }
+ manifest.sourceReportSha256=manifest.files['engine-report.original.json'].sha256;
+ await writeJson(resolve(out,'artifact.json'),manifest);
+ await assert.rejects(inspectBrowserEngineArtifact(out),/E_RUNTIME_PROPERTIES_BUILD_PROOF|E_RUNTIME_OBSERVATION_BUILD_PROOF/);
 });
 
 test('native source snapshot includes SCsub preset bundles while excluding unrelated generated outputs', async t => {

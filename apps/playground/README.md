@@ -64,6 +64,10 @@ During framework development, rename supports ordinary scripts and text `.tscn` 
 
 Open **API 调试 → API 文档** to run the query example or the check and preview replay. Queries and operations are available in the current tab through `window.godotPlayground` with `schemaVersion: 1`.
 
+The runtime property workbench adds `describe_runtime_properties`, `read_runtime_properties`, `write_runtime_property` and `summer_call` to the same entry. The independent scripted sample exposes `health`, `move_step`, `can_move` and `display_name` using standard GodotJS export decorators. Its replay changes health and movement, checks actual values and PNGs, then restarts the same source to verify defaults return. Property access requires a matching Full/debug Worker Direct engine with `runtimeProperties: 1`; older write-capable templates continue to support the original position replay.
+
+`summer_call({op, input})` is a Summer 4.9.2-style input subset with explicitly labelled GodotAI typed results. It supports selected context, main play/stop/state, runtime tree, native node inspection, property writes and game screenshots. It does not claim full Summer wire compatibility. Script properties use explicit typed read operations; `engine.inspect_runtime_node` continues to use the native observation path. Game screenshots require an explicit `target: 'game'`. See the [supported parameters, result contracts and lifecycle rules](../../docs/design/runtime-properties-and-summer-api-v2.zh-CN.md).
+
 ```js
 const api = window.godotPlayground;
 const { result: context } = api.get_project_context();

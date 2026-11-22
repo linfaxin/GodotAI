@@ -3,6 +3,7 @@
 
 #include "jsb_bridge_pch.h"
 #include "jsb_module.h"
+#include "jsb_runtime_script_properties.h"
 
 namespace jsb
 {
@@ -221,6 +222,13 @@ namespace jsb
 
     struct ScriptClassInfo : StatelessScriptClassInfo
     {
+        // Runtime inspection only consumes committed, own declarations. The
+        // legacy properties table intentionally retains its existing semantics.
+        uint64_t runtime_metadata_revision = 0;
+        bool runtime_metadata_ready = false;
+        HashMap<StringName, RuntimeExportInfo> own_runtime_exports;
+        StringName runtime_base_script_module_id;
+
         // the native class id the current class inherits from.
         NativeClassID native_class_id;
 

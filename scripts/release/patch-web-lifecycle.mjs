@@ -1,3 +1,4 @@
+import {patchRuntimePropertiesQuitFile,unpatchRuntimePropertiesQuitFile,RUNTIME_PROPERTIES_QUIT_PATCH} from './patch-runtime-properties-quit.mjs';
 /** Godot 4.6.1 owner-thread exit gate. Cleanup runs before Web atexit closes
  * audio, browser services or the filesystem; it never advances business frames. */
 import {createHash} from 'node:crypto';
@@ -90,6 +91,12 @@ const layouts={
 };
 
 export function patchWebLifecycleFile(path,source){
+ const withoutQuit=unpatchRuntimePropertiesQuitFile(path,source);
+ if(withoutQuit!==source){
+  const result=patchWebLifecycleFile(path,withoutQuit);
+  const code=patchRuntimePropertiesQuitFile(path,result.code).code;
+  return {...result,code,changed:code!==source};
+ }
  const layout=layouts[path];
  if(!layout||typeof source!=='string')throw Error('E_WEB_LIFECYCLE_PATCH_UNSUPPORTED: '+path);
  if(hash(source)!==layout.sha256){
@@ -116,7 +123,7 @@ export function webLifecycleBuildProof(patches){
  for(const path of WEB_LIFECYCLE_PATHS){
   const expected=path==='platform/web/web_main.cpp'?new Set([WEB_LIFECYCLE_PATCH,'godotjs-web-worker-runtime-v1']):new Set([WEB_LIFECYCLE_PATCH]);
   const record=patches.findLast(item=>item.path===path&&expected.has(item.patchId)),latest=patches.findLast(item=>item.path===path);
-  if(!record||!latest||(!expected.has(latest.patchId)&&!(path==='scene/main/scene_tree.cpp'&&latest.patchId==='godotjs-managed-shutdown-queue-v1'))||!(/^[a-f0-9]{64}$/).test(latest.afterSha256)||!record.implementation?.sha256)throw Error('E_WEB_LIFECYCLE_PROOF: '+path);
+  if(!record||!latest||(!expected.has(latest.patchId)&&!(path==='scene/main/scene_tree.cpp'&&latest.patchId==='godotjs-managed-shutdown-queue-v1')&&!(path==='scene/main/scene_tree.h'&&latest.patchId===RUNTIME_PROPERTIES_QUIT_PATCH))||!(/^[a-f0-9]{64}$/).test(latest.afterSha256)||!record.implementation?.sha256)throw Error('E_WEB_LIFECYCLE_PROOF: '+path);
   files[path]={sha256:latest.afterSha256,implementation:record.implementation};
  }
  return {lifecycleAbi:WEB_LIFECYCLE_ABI,lifecyclePatch:{abi:WEB_LIFECYCLE_ABI,patchId:WEB_LIFECYCLE_PATCH,files}};

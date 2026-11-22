@@ -21,7 +21,9 @@ import {createWorkerObservationRequests, readRuntimeObservationRequest,
   type RuntimeObservationReply} from './worker-runtime-observation-transport.js';
 import {createNativeRuntimeWriter, RUNTIME_WRITE_VERSION, runtimeWriteError, supportsWorkerRuntimeWrite,
   type RuntimeSetError} from './worker-runtime-write.js';
-import {createWorkerRuntimeWrites, readRuntimeWriteId} from './worker-runtime-write-transport.js';
+import {createWorkerRuntimeAccess, readAccessId} from './worker-runtime-access-transport.js';
+import {createNativeRuntimeProperties, RUNTIME_PROPERTIES_VERSION, supportsWorkerRuntimeProperties,
+  runtimePropertiesError, type PropertyCommand, type AccessErrorCode} from './worker-runtime-properties.js';
 
 interface RuntimeScope {
   __godotjsRuntimeHost?: RuntimeBinding;
@@ -86,14 +88,29 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
   }, postObservation);
   const supportsWrite = supportsWorkerRuntimeWrite(boot.release, boot.configuration.presentationBackend);
   let writeNativeProperty: ReturnType<typeof createNativeRuntimeWriter> | undefined;
-  const writeUnavailable = (): RuntimeSetError | undefined => !lease.active || stopping || closed || nativeExited ? 'run_ended' :
+  const writeUnavailable = (): AccessErrorCode | undefined => !lease.active || stopping || closed || nativeExited ? 'run_ended' :
     !nativeStarted ? 'not_ready' : !supportsWrite || !writeNativeProperty ? 'unsupported' : undefined;
-  const runtimeWrite = createWorkerRuntimeWrites((command, deadline) => {
-    const rejected = writeUnavailable();
-    return rejected ? runtimeWriteError(rejected) : writeNativeProperty!(command, deadline);
+  const supportsProperties = supportsWorkerRuntimeProperties(boot.release, boot.configuration.presentationBackend);
+  let accessNativeProperties: ReturnType<typeof createNativeRuntimeProperties> | undefined;
+  const propertiesUnavailable = (): AccessErrorCode | undefined => !lease.active || stopping || closed || nativeExited ? 'run_ended' :
+    !nativeStarted ? 'not_ready' : !supportsProperties || !accessNativeProperties ? 'unsupported' : undefined;
+  const runtimeAccess = createWorkerRuntimeAccess(request => {
+    if (request.family === 'write') {
+      const rejected = writeUnavailable();
+      return rejected ? runtimeWriteError(rejected as RuntimeSetError) : writeNativeProperty!(request.command as Parameters<NonNullable<typeof writeNativeProperty>>[0], request.deadline);
+    }
+    const rejected = propertiesUnavailable();
+    if (rejected) return runtimePropertiesError(rejected, 'worker');
+    const command = request.command as PropertyCommand;
+    const receipt = {requestId: request.requestId, accessSequence: request.sequence, run: identity,
+      releaseId: boot.release.releaseId, path: command.path, expectedInstanceId: command.expectedInstanceId};
+    const overhead = new TextEncoder().encode(JSON.stringify(receipt)).byteLength + 11 + 1024;
+    return accessNativeProperties!(command, request.deadline, 65536 - overhead);
   }, response => {
-    try { post({type: 'runtime-write-result', ...response}); }
-    catch { /* The runner reports an unconfirmed result at its deadline. */ }
+    const {family, sequence, ...payload} = response;
+    try { post(family === 'write' ? {type: 'runtime-write-result', ...payload, writeSequence: sequence} :
+      {type: 'runtime-property-result', ...payload, accessSequence: sequence}); }
+    catch { /* The runner retains execution uncertainty at its original deadline. */ }
   });
   let interactionReady = false;
   const interactionRejection = () => !lease.active || stopping || closed || nativeExited ? 'run_ended' :
@@ -125,7 +142,8 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
     assertStarting();
     post({type: 'phase', phase: value, ...(value === 'running' && supportsInteraction ? {interactionVersion: INTERACTION_VERSION} : {}),
       ...(value === 'running' && sampleNativeObservation ? {observationVersion: RUNTIME_OBSERVATION_VERSION} : {}),
-      ...(value === 'running' && supportsWrite && writeNativeProperty ? {runtimeWriteVersion: RUNTIME_WRITE_VERSION} : {})});
+      ...(value === 'running' && supportsWrite && writeNativeProperty ? {runtimeWriteVersion: RUNTIME_WRITE_VERSION} : {}),
+      ...(value === 'running' && supportsProperties && accessNativeProperties ? {runtimePropertiesVersion: RUNTIME_PROPERTIES_VERSION} : {})});
   };
   let presentation: ReturnType<typeof createWorkerPresentation> | undefined;
   let dom: ReturnType<typeof createWorkerDom> | undefined;
@@ -237,7 +255,7 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
     capture.stop();
     const attempt=(cleanup:()=>void)=>{try{cleanup();}catch(error){try{fatal(error);}catch{/* A lost diagnostic channel cannot block the remaining cleanup. */}}};
     attempt(()=>observation.stop());
-    attempt(()=>runtimeWrite.stop());
+    attempt(()=>runtimeAccess.stop());
     if(canCooperativelyClose()){
       attempt(()=>binding?.beginClose(reason));attempt(()=>dom?.revokeInput());attempt(()=>audio?.beginDrain());
       attempt(()=>browser?.beginDrain?.());attempt(()=>presentation?.setVisible(false));attempt(()=>lifecycleGate?.beginClose(reason));
@@ -269,10 +287,11 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
   data.onmessage = event => {
     if (!isWorkerEnvelope(event.data) || !sameWorkerRun(event.data, identity) || closed) return;
     const m: any = event.data;
-    if (m.type === 'runtime-write-request' || m.type === 'runtime-write-cancel') {
-      const id = readRuntimeWriteId(m, identity.runId);
-      if (id && m.type === 'runtime-write-cancel') runtimeWrite.cancel(id);
-      else if (id) runtimeWrite.request(id, m, writeUnavailable());
+    if (['runtime-write-request', 'runtime-write-cancel', 'runtime-property-request', 'runtime-property-cancel'].includes(m.type)) {
+      const family = m.type.startsWith('runtime-write-') ? 'write' : 'property';
+      const id = readAccessId(family, m, identity.runId);
+      if (id && m.type.endsWith('-cancel')) runtimeAccess.cancel(id);
+      else if (id) runtimeAccess.request(id, m, family === 'write' ? writeUnavailable() : propertiesUnavailable());
       if (Number.isSafeInteger(m.dataSequence)) acknowledgeData(m.dataSequence);
       return;
     }
@@ -435,7 +454,7 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
         gestures.exit();
         capture.stop();
         observation.stop();
-        runtimeWrite.stop();
+        runtimeAccess.stop();
         post({type: 'native-exit', code, memory: metrics(), runtimeSummary: binding?.snapshotSummary()});
         release(); scope.close?.();
       },
@@ -449,7 +468,7 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
       if (declaresObservation) {
         removeObservationHooks?.();
         removeObservationHooks = installRuntimeObservationHooks(value, () => {
-          runtimeWrite.execute();
+          runtimeAccess.execute();
           observation.observe();
         });
       }
@@ -467,6 +486,7 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
       if (!module || !removeObservationHooks) throw Error('E_RUNTIME_OBSERVATION_ABI');
       sampleNativeObservation = createNativeRuntimeSampler(module);
       if (boot.release.runtimeAbi?.runtimeWrite === RUNTIME_WRITE_VERSION) writeNativeProperty = createNativeRuntimeWriter(module);
+      if (boot.release.runtimeAbi?.runtimeProperties === RUNTIME_PROPERTIES_VERSION) accessNativeProperties = createNativeRuntimeProperties(module);
     }
     phase('starting'); await engine.start({ args: ['--main-pack', '/application.pck', '--rendering-method', 'gl_compatibility'] }); assertStarting();
     nativeStarted=true;

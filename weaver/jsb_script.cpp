@@ -148,6 +148,7 @@ ScriptInstance* GodotJSScript::instance_create(const v8::Local<v8::Object>& p_th
         return nullptr;
     }
 
+    instance->publish_runtime_binding();
     return instance;
 }
 
@@ -227,6 +228,8 @@ ScriptInstance* GodotJSScript::instance_construct(Object* p_this, bool p_is_temp
         JSB_LOG(Error, "Error constructing a GodotJSScriptInstance for %s (%s)", script_class_info_.js_class_name, script_class_info_.module_id);
         return nullptr;
     }
+
+    instance->publish_runtime_binding();
 
     // Serialized values override constructor initializers. Capture them before
     // set_script_instance() deletes the Shadow and cache only the final values.

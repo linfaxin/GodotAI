@@ -1714,6 +1714,22 @@ namespace jsb
     void Environment::_rebind(v8::Isolate* isolate, const v8::Local<v8::Context> context, Object *p_this, ScriptClassID p_class_id)
     {
         ERR_FAIL_COND_MSG(ReactBridge::is_owned(p_this), "E_NATIVE_REBIND: owned React hosts cannot be hot-rebound");
+        const std::shared_ptr<ObjectBindingTicket> runtime_ticket = get_binding_ticket(p_this);
+        const uint64_t runtime_generation = next_runtime_script_identity();
+        // A prototype getter/trap can re-enter rebind and publish another
+        // generation before this operation changes the prototype again. Cover
+        // all exits so that final combination cannot retain a ready identity.
+        struct RuntimeRebindGenerationScope {
+            std::shared_ptr<ObjectBindingTicket> ticket;
+            uint64_t generation;
+            ~RuntimeRebindGenerationScope() {
+                if (ticket && ticket->runtime_script_generation != generation) ticket->runtime_script_ready = false;
+            }
+        } runtime_generation_scope{runtime_ticket, runtime_generation};
+        if (runtime_ticket) {
+            runtime_ticket->runtime_script_ready = false;
+            runtime_ticket->runtime_script_generation = runtime_generation;
+        }
         //TODO a dirty but approaching solution for hot-reloading
         v8::Local<v8::Object> instance;
         if (!this->try_get_object(p_this, instance))
@@ -1722,20 +1738,31 @@ namespace jsb
             return;
         }
 
-        const ScriptClassInfoPtr class_info = this->get_script_class(p_class_id);
-        const StringName class_name = class_info->js_class_name;
-        const v8::Local<v8::Object> class_obj = class_info->js_class.Get(isolate);
-        const v8::Local<v8::Value> prototype = class_obj->Get(context, jsb_name(this, prototype)).ToLocalChecked();
-
+        v8::Local<v8::Object> class_obj;
+        {
+            const ScriptClassInfoPtr class_info = this->find_script_class(p_class_id);
+            if (!class_info) return;
+            class_obj = class_info->js_class.Get(isolate);
+        }
+        // A prototype trap may call back into the environment; never retain an
+        // SArray address scope while invoking it.
         const impl::TryCatch try_catch(isolate);
+        v8::Local<v8::Value> prototype;
+        if (class_obj.IsEmpty() || !class_obj->Get(context, jsb_name(this, prototype)).ToLocal(&prototype)
+            || !prototype->IsObject()) return;
         jsb_check(instance->IsObject());
-        jsb_check(prototype->IsObject());
-        if (instance->SetPrototype(context, prototype).IsNothing())
+        const v8::Maybe<bool> rebound = instance->SetPrototype(context, prototype);
+        if (rebound.IsNothing() || !rebound.FromMaybe(false))
         {
             if (try_catch.has_caught())
             {
                 JSB_LOG(Warning, "something wrong\n%s", BridgeHelper::get_exception(try_catch));
             }
+        }
+        else if (runtime_ticket && verify_binding(runtime_ticket) && runtime_generation != 0
+            && runtime_ticket->runtime_script_generation == runtime_generation) {
+            runtime_ticket->runtime_bound_class_id = p_class_id;
+            runtime_ticket->runtime_script_ready = true;
         }
     }
 

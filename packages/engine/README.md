@@ -35,6 +35,16 @@ Dedicated Worker infrastructure lives under `src/browser/dedicated/`; its concre
 
 Existing `@godot-js/react-browser/engine-api`, identity, loader and session wrappers remain compatibility paths to this implementation. New neutral consumers use the engine package directly. See the [Worker engine guide](../../docs/browser-worker-engine.zh-CN.md) for build provenance, deployment requirements and current activation gates.
 
+## Live exported properties
+
+Dedicated Worker runners expose `describeRuntimeProperties`, `readRuntimeProperties` and `writeRuntimeProperty` when the release advertises and negotiates `runtimeProperties: 1`. Public value types and validators are exported through `@godot-js/engine/browser/dedicated/worker-runtime-properties`.
+
+The first version supports registered GodotJS scalar exports (`bool`, safe `int`, finite `float`, bounded `string`) and the existing native `Node2D.position` Vector2 path. Describe returns static metadata without evaluating getters. Script access is explicitly live and can execute user getters or setters; a descriptor marked `candidate` means access can be attempted, not that writing is guaranteed. Script Vector2 and other object/container values are not supported.
+
+Requests bind `runId`, absolute `path` and the string `expectedInstanceId` obtained from the actual runtime tree. Reads also specify each declared type; writes carry a tagged value. Replies retain a complete `receipt` with run/release/request identity. A confirmed write includes the native before/after/comparison values and frame counters. `not_written` confirms the write path was not entered but may follow a getter with side effects. `unconfirmed` does not establish whether access occurred, so consumers must not automatically retry it.
+
+The new capability is independent of the old observation and position-write ABIs. Older templates keep their original methods and result shapes and report the new property capability as unsupported. New templates require matching source-bound exports, SDK and release proof; a frontend refresh cannot provide them. See the [implementation contract and validation flow](../../docs/design/runtime-properties-and-summer-api-v2.zh-CN.md).
+
 ## Project runtime host
 
 `createRuntimeBinding()` supplies the shared implementation for both browser backends. `RuntimeHost` exposes `apiVersion: 1`, `sessionId`, `role`, `reportDiagnostic()`, `emitProjectEvent()` and `bindProjectCommand()`. A `true` result acknowledges local admission, not remote delivery. Command handlers can return a Promise, but the transport receipt acknowledges synchronous dispatch; later rejection is reported against the originating entry. Project data is copied to an owned bounded JSON snapshot before it is queued or sent. Role assignment, native progress and logging are internal binding hooks.

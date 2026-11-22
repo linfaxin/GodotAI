@@ -2,12 +2,15 @@ import type {GameScreenshot} from '@godot-js/engine/browser/dedicated/worker-run
 import type {DebugExit} from '../debug-api';
 import type {PlaygroundApi, PlaygroundApiCall, createPlaygroundApi} from '../playground-api';
 import {INTERACTION_DEMO_PLAYER, RUNTIME_WRITE_DEMO_X} from '../interaction-demo';
+import {hasCleanRuntimeExit,runRuntimePropertiesReplay} from './runtime-properties-replay';
 
 interface PlaytestActions {
   unavailable(): string | undefined;
   supportsRuntimeObservation(): boolean;
   supportsRuntimeWrite(): boolean;
+  supportsRuntimeProperties?(): boolean;
   open(): Promise<string>;
+  openProperties?(): Promise<string>;
   cancelLaunch(attemptId: string): void;
 }
 
@@ -43,8 +46,9 @@ function untilDeadline(message: string) {
 async function findPlayer(api: PlaygroundApi, runId: string, signal: AbortSignal) {
   const tree = await api.get_runtime_tree({runId, depth: 3}, signal);
   if (!tree.ok) throw Error(tree.error.message);
-  const player = tree.result.nodes.find(node => node.name === INTERACTION_DEMO_PLAYER.name && node.type === 'Node2D');
-  if (!player || tree.result.run.runId !== runId) throw Error('运行时节点树中没有本次运行的 Player');
+  const players = tree.result.nodes.filter(node => node.name === INTERACTION_DEMO_PLAYER.name && node.type === 'Node2D');
+  const player = players[0];
+  if (players.length !== 1 || tree.result.run.runId !== runId) throw Error('运行时节点树中没有本次运行唯一的 Player');
   return player;
 }
 
@@ -155,6 +159,9 @@ export function createAgentPanel(playground: ReturnType<typeof createPlaygroundA
   const trace = document.getElementById('agent-trace')!;
   const testPlay = document.getElementById('agent-playtest') as HTMLButtonElement | null;
   const testWrite = document.getElementById('agent-runtime-write') as HTMLButtonElement | null;
+  const testProperties = document.getElementById('agent-runtime-properties') as HTMLButtonElement | null;
+  const propertiesEvidence = document.getElementById('agent-properties-evidence');
+  const propertiesDetails = document.getElementById('agent-properties-details');
   const images = document.getElementById('agent-observations');
   const writeResults = document.getElementById('agent-write-results');
   const {api} = playground;
@@ -169,6 +176,8 @@ export function createAgentPanel(playground: ReturnType<typeof createPlaygroundA
     if (images) images.hidden = true;
     writeResults?.replaceChildren();
     if (writeResults) writeResults.hidden = true;
+    if (propertiesEvidence) propertiesEvidence.textContent = '';
+    if (propertiesDetails) propertiesDetails.hidden = true;
   };
   addEventListener('pagehide', () => { playtest?.abort(); clearImages(); });
 
@@ -239,6 +248,7 @@ export function createAgentPanel(playground: ReturnType<typeof createPlaygroundA
   };
 
   stop.onclick = async () => {
+    if (playtest) { playtest.abort(); status.textContent = '正在取消验证并收尾'; return; }
     if (!runId) return;
     const target = runId;
     const previousWait = replayWait;
@@ -272,8 +282,7 @@ export function createAgentPanel(playground: ReturnType<typeof createPlaygroundA
     };
     const recordExit = (runId: string, exit: DebugExit | undefined) =>
       report('运行 ' + runId + ' · ' + (exit ? exit.evidence + ' · ' + exit.report.reason : '退出未确认'));
-    const cleanExit = (exit: DebugExit | undefined) =>
-      exit?.evidence === 'host-report' && exit.report.reason === 'clean-exit';
+    const cleanExit = hasCleanRuntimeExit;
     async function withSampleRun(input: Parameters<PlaygroundApi['play']>[0], signal: AbortSignal,
       visit: (runId: string, attemptId: string) => Promise<void>, write: boolean) {
       let attemptId: string | undefined;
@@ -319,6 +328,7 @@ export function createAgentPanel(playground: ReturnType<typeof createPlaygroundA
       previousWait?.abort();
       testPlay.disabled = run.disabled = stop.disabled = true;
       if (testWrite) testWrite.disabled = true;
+      if (testProperties) testProperties.disabled = true;
       calls.length = 0;
       trace.replaceChildren();
       trace.hidden = true;
@@ -334,11 +344,13 @@ export function createAgentPanel(playground: ReturnType<typeof createPlaygroundA
         const input = {projectId: demoId, expectedEditorRevision: context.editorRevision};
         const mode = write ? 'write' : demo.supportsRuntimeObservation() ? 'input' : 'legacy';
         let sourceHash: string | undefined;
+        let originalPlayer: {path:string;instanceId:string} | undefined;
         const first = await withSampleRun(input, controller.signal, async (target, attemptId) => {
           if (write) {
             const build = api.get_build({attemptId});
             sourceHash = build.ok ? build.result.sourceHash : undefined;
             if (!sourceHash) throw Error('缺少试玩示例的源码快照');
+            originalPlayer = await findPlayer(api,target,controller.signal);
           }
           const samples = await collectPlaytest(api, target, controller.signal, status, mode, report);
           for (const sample of samples) {
@@ -359,7 +371,8 @@ export function createAgentPanel(playground: ReturnType<typeof createPlaygroundA
             if (target === previousRunId || !build.ok || build.result.sourceHash !== sourceHash)
               throw Error('重启的运行身份或源码快照不匹配');
             const player = await findPlayer(api, target, controller.signal);
-            const stale = await api.runtime_set({runId: previousRunId, path: player.path, expectedInstanceId: player.instanceId,
+            if (!originalPlayer) throw Error('首次运行的节点身份未保存');
+            const stale = await api.runtime_set({runId: previousRunId, path: originalPlayer.path, expectedInstanceId: originalPlayer.instanceId,
               property: 'position', value: {x: RUNTIME_WRITE_DEMO_X, y: INTERACTION_DEMO_PLAYER.y}}, controller.signal);
             if (stale.ok || stale.error.code !== 'run_ended') throw Error('旧运行写入未被拒绝');
             const {position} = await readPlayer(api, target, player, controller.signal);
@@ -379,9 +392,48 @@ export function createAgentPanel(playground: ReturnType<typeof createPlaygroundA
         playtest = undefined;
         testPlay.disabled = run.disabled = false;
         if (testWrite) testWrite.disabled = false;
+        if (testProperties) testProperties.disabled = false;
       }
     };
     testPlay.onclick = () => startPlaytest(false);
     if (testWrite) testWrite.onclick = () => startPlaytest(true);
+  }
+
+  if(testProperties&&demo?.openProperties&&images){
+    testProperties.hidden=false;
+    testProperties.onclick=async()=>{
+      if(playtest)return;
+      const unavailable=demo.unavailable();
+      if(unavailable){status.textContent=unavailable;return;}
+      if(!demo.supportsRuntimeProperties?.()){status.textContent='当前引擎不支持公开脚本属性访问';return;}
+      const controller=new AbortController();playtest=controller;
+      replayWait?.abort();replayWait=undefined;
+      run.disabled=true;stop.disabled=false;testProperties.disabled=true;
+      if(testPlay)testPlay.disabled=true;if(testWrite)testWrite.disabled=true;
+      calls.length=0;trace.textContent='';trace.hidden=true;clearImages();
+      const report=(message:string)=>{
+        if(!writeResults)return;const row=document.createElement('li');row.textContent=message;
+        writeResults.append(row);writeResults.hidden=false;
+      };
+      try{
+        const result=await runRuntimePropertiesReplay(api,{
+          open:()=>demo.openProperties!(),cancelLaunch:demo.cancelLaunch,
+          status:message=>{status.textContent=message;},report,
+          frame:sample=>{
+            const figure=document.createElement('figure'),caption=document.createElement('figcaption'),image=document.createElement('img');
+            const url=URL.createObjectURL(sample.png);imageUrls.push(url);
+            caption.textContent=sample.caption;image.alt=sample.caption;image.src=url;figure.append(caption,image);images.append(figure);images.hidden=false;
+          },
+        },controller.signal);
+        if(propertiesEvidence)propertiesEvidence.textContent=JSON.stringify(result,null,2);
+        if(propertiesDetails)propertiesDetails.hidden=false;
+        status.textContent='已验证公开属性、玩法变化、重启恢复和两次完整退出';
+      }catch(error){
+        status.textContent=controller.signal.aborted?'已取消属性验证；退出状态见运行记录':error instanceof Error?error.message:String(error);
+      }finally{
+        playtest=undefined;run.disabled=false;stop.disabled=true;testProperties.disabled=false;
+        if(testPlay)testPlay.disabled=false;if(testWrite)testWrite.disabled=false;
+      }
+    };
   }
 }

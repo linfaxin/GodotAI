@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { canonical, digest, fail, options, required, writeJson,
   OBSERVATION_READER_SOURCE, OBSERVATION_SOURCE_PATHS, OBSERVATION_EXPORTS, assertRuntimeObservationBuildProof,
   RUNTIME_WRITE_EXPORTS, assertRuntimeWriteBuildProof, runtimeWriteBuildTarget,
+  RUNTIME_PROPERTIES_EXPORTS, RUNTIME_PROPERTIES_SOURCE_PATHS, assertRuntimePropertiesBuildProof,
 } from '../release/web-release-utils.mjs';
 import { applyWebEnginePatches } from '../release/patch-web-engine.mjs';
 import {getEngineProfile,engineExecution,engineBuildArgs,validateEngineProfile,validateEngineExecution} from '../release/engine-profiles.mjs';
@@ -91,7 +92,10 @@ export function inspectBrowserTemplate(template, {python='python3'}={}) {
 function bindRuntimeObservation(report, template, assets, python) {
   if (!report.runtimeAbi || !Object.hasOwn(report.source.inputs, OBSERVATION_READER_SOURCE)) return;
   const includeWrite = report.sourceCertified && runtimeWriteBuildTarget(report);
-  const requiredExports = includeWrite ? [...OBSERVATION_EXPORTS, ...RUNTIME_WRITE_EXPORTS] : OBSERVATION_EXPORTS;
+  const includeProperties = includeWrite && Object.hasOwn(report.source.inputs, 'bridge/jsb_runtime_properties.cpp');
+  if (includeProperties && !RUNTIME_PROPERTIES_SOURCE_PATHS.every(path => Object.hasOwn(report.source.inputs, path)))
+    fail('E_RUNTIME_PROPERTIES_SOURCE', 'Runtime property source closure is incomplete');
+  const requiredExports = [...OBSERVATION_EXPORTS, ...(includeWrite ? RUNTIME_WRITE_EXPORTS : []), ...(includeProperties ? RUNTIME_PROPERTIES_EXPORTS : [])];
   const inspect = spawnSync(python, ['-c', [
     'import re, sys, zipfile',
     'with zipfile.ZipFile(sys.argv[1]) as z:',
@@ -113,6 +117,11 @@ function bindRuntimeObservation(report, template, assets, python) {
     report.runtimeAbi.runtimeWrite = 1;
     report.runtimeWrite = {...report.runtimeObservation, exports: [...RUNTIME_WRITE_EXPORTS]};
     assertRuntimeWriteBuildProof(report, report.runtimeWrite.wasmSha256);
+  }
+  if (includeProperties) {
+    report.runtimeAbi.runtimeProperties = 1;
+    report.runtimeProperties = {abi: 1, sources: Object.fromEntries(RUNTIME_PROPERTIES_SOURCE_PATHS.map(path => [path, report.source.inputs[path]])), exports: [...RUNTIME_PROPERTIES_EXPORTS], wasmSha256: report.runtimeObservation.wasmSha256};
+    assertRuntimePropertiesBuildProof(report, report.runtimeProperties.wasmSha256);
   }
 }
 async function execute(command, args, cwd, logPath) {

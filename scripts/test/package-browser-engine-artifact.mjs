@@ -4,7 +4,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {randomUUID} from 'node:crypto';
 import {spawnSync} from 'node:child_process';
-import {assertRuntimeWriteBuildProof,canonical,digest,options,required,safePath} from '../release/web-release-utils.mjs';
+import {assertRuntimeWriteBuildProof,assertRuntimePropertiesBuildProof,canonical,digest,options,required,safePath} from '../release/web-release-utils.mjs';
 import {isSourceCertified} from '../release/engine-build-proof.mjs';
 import {browserEnginePaths} from '../release/browser-engine-artifacts.mjs';
 
@@ -83,7 +83,12 @@ export async function inspectBrowserEngineArtifact(directory){
  if(manifest.runtimeProfile!==report.runtimeProfile||manifest.target!==report.engineTarget||manifest.recipeSha256!==report.recipeSha256)throw Error('E_ENGINE_ARTIFACT_PROVENANCE');
  if(!manifest.development&&(!report.sourceCertified||!isSourceCertified(report)))throw Error('E_ENGINE_ARTIFACT_SOURCE');
  assertRuntimeWriteBuildProof(report);
- if(report.runtimeAbi?.runtimeWrite===1)assertRuntimeWriteBuildProof(report,templateWasmSha256(templateBytes));
+ assertRuntimePropertiesBuildProof(report);
+ if(report.runtimeAbi?.runtimeWrite===1||report.runtimeAbi?.runtimeProperties===1){
+  const wasmSha256=templateWasmSha256(templateBytes);
+  assertRuntimeWriteBuildProof(report,wasmSha256);
+  assertRuntimePropertiesBuildProof(report,wasmSha256);
+ }
  if(report.logSha256&&manifest.files['build.log']?.sha256!==report.logSha256)throw Error('E_ENGINE_ARTIFACT_LOG');
  return {status:'verified',directory,manifest,report};
 }
@@ -94,6 +99,7 @@ export async function packageBrowserEngineArtifact({report:reportFile,out,develo
  if(original.kind!=='godot-js-browser-engine-build'||!['built',...(development?['existing-development']:[])].includes(original.status))throw Error('E_ENGINE_ARTIFACT_REPORT');
  if(!development&&(!original.sourceCertified||!isSourceCertified(original)))throw Error('E_ENGINE_ARTIFACT_SOURCE');
  assertRuntimeWriteBuildProof(original);
+ assertRuntimePropertiesBuildProof(original);
  if(!original.template?.path)throw Error('E_ENGINE_ARTIFACT_REPORT: template missing');
  const template=path.resolve(path.dirname(reportFile),original.template.path);await regular(template);
  for(const input of [reportFile,template])if(input===out||input.startsWith(out+path.sep))throw Error('E_ENGINE_ARTIFACT_OUTPUT: output contains an input');

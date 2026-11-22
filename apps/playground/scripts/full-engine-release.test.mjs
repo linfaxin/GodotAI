@@ -11,6 +11,7 @@ import {assertFullEngineIdentities} from '../../../scripts/release/release-ident
 import {assertWorkerBuildProof} from './worker-candidate.mjs';
 import {WORKER_SDK_PACKAGES} from './worker-sdk-proof.mjs';
 import {workerBuildReportFixture} from './fixtures/worker-build-report.mjs';
+import {propertiesProofFixture} from './fixtures/runtime-properties-build-report.mjs';
 import {OBSERVATION_EXPORTS,OBSERVATION_SOURCE_PATHS,RUNTIME_WRITE_EXPORTS} from '../../../scripts/release/web-release-utils.mjs';
 import {createRequire} from 'node:module';
 const {ENGINE_SDK_MODULES}=createRequire(new URL('../../../scripts/jsb.react/package.json',import.meta.url))('@godot-js/react/engine-modules');
@@ -110,6 +111,28 @@ test('Worker release retains composed native ABI receipts for later verification
   assert.throws(()=>assembleFullEngineRelease({...input,engineBuildReport:changed}),/E_WORKER_BUILD_PROOF|E_EXECUTION_CONTRACT|E_RUNTIME_WRITE_BUILD_PROOF/,field);
  }
 });
+test('properties capability and its complete source proof survive the Playground release closure',()=>{
+ const input=fixture(),report=propertiesProofFixture(input.engine.wasm.sha256);
+ const sourceInputs=Object.fromEntries(WORKER_SDK_PACKAGES.flatMap(name=>[[name+'/package.json',sha256('synthetic manifest')],[name+'/tsconfig.json',sha256('synthetic config')]]));
+ const entrypoints=Object.fromEntries(WORKER_SDK_PACKAGES.map(name=>[name,[name+'/dist/index.js']]));
+ const outputs=Object.fromEntries(Object.values(entrypoints).flat().map(name=>[name,{sha256:sha256('synthetic SDK output'),bytes:20}]));
+ const sdkBuild={schemaVersion:1,kind:'worker-sdk-source-build-proof',packages:WORKER_SDK_PACKAGES,entrypoints,sourceInputs,sourceSnapshotHash:sha256(canonical(sourceInputs)),outputs,outputSnapshotHash:sha256(canonical(outputs))};
+ Object.assign(input,{runtimeAbi:report.runtimeAbi,engineBuildReport:report});input.engine.execution=report.execution;
+ Object.assign(input.build,{sourceCertified:true,sdkBuild,engineSource:report.source,godotSource:report.godotSource,recipeSha256:report.recipeSha256});
+ const {manifest}=assembleFullEngineRelease(input);
+ assert.equal(manifest.runtimeAbi.runtimeProperties,1);
+ assert.equal(manifest.runtimeAbi.runtimeWrite,undefined,'properties do not require old write-1');
+ assert.deepEqual(manifest.build.runtimeProperties,report.runtimeProperties);
+ assert.doesNotThrow(()=>assertWorkerBuildProof({...manifest.build,kind:report.kind,status:report.status,
+  runtimeProfile:manifest.runtimeProfile,engineTarget:report.engineTarget,runtimeAbi:manifest.runtimeAbi,
+  execution:manifest.execution,source:manifest.build.engineSource,recipe:manifest.build.engineRecipe},input.engine.wasm.sha256));
+ const development=assembleFullEngineRelease({...input,build:{...input.build,sourceCertified:false,runtimeProperties:report.runtimeProperties}}).manifest;
+ assert.equal(development.runtimeAbi.runtimeProperties,undefined);
+ assert.equal(development.build.runtimeProperties,undefined);
+ const broken=structuredClone(report);delete broken.runtimeProperties;
+ assert.throws(()=>assembleFullEngineRelease({...input,engineBuildReport:broken}),/E_RUNTIME_PROPERTIES_BUILD_PROOF/);
+});
+
 test('actual browser host bytes change engine identity without changing the optional React extension',()=>{
  const input=fixture(),host=Buffer.from('/* actual bundled host fixture */');
  input.engine.host=describeAsset('preview.js',host);input.engineBytes['preview.js']=host;
