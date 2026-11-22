@@ -20,7 +20,8 @@ test('2D resource preparation has an explicit closed asset set and isolated outp
  const project=path.join(root,'export'),workDirectory=path.join(root,'conversion');
  await mkdir(path.join(project,'assets/derived'),{recursive:true});
  await writeFile(path.join(project,'assets/derived','old-3d-model.res'),'stale model');
- const assets=await prepareAssets({runtimeProfile:'engine-2d-v1',project,workDirectory});
+ // This fixture uses no external importer, independently of the full-engine shell configuration.
+ const assets=await prepareAssets({runtimeProfile:'engine-2d-v1',project,workDirectory,importer:''});
  assert.deepEqual(Object.keys(assets).sort(),[...TWO_D_ASSET_IDS].sort());
  const generated=await readFile(path.join(project,'generated/assets.js'),'utf8');
  assert.match(generated,/exports.models = \{\};/);

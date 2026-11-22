@@ -8,12 +8,13 @@ import {patchNativeObserverFile,nativeObserverBuildProof,NATIVE_OBSERVER_PATHS} 
 import {patchNativeLifecycleFile,nativeLifecycleBuildProof,NATIVE_LIFECYCLE_PATHS} from '../release/patch-native-lifecycle.mjs';
 import {patchArtifactSetMount,artifactSetMountBuildProof} from '../release/patch-artifact-set-mount.mjs';
 import {MANAGED_SHUTDOWN_PATHS,patchManagedShutdownQueue,managedShutdownBuildProof} from '../release/patch-managed-shutdown-queue.mjs';
+import {RUNTIME_PROPERTIES_QUIT_PATHS,patchRuntimePropertiesQuitFile} from '../release/patch-runtime-properties-quit.mjs';
 
 const repository=fileURLToPath(new URL('../../',import.meta.url));
 const sha=value=>createHash('sha256').update(value).digest('hex');
 export async function prepareNativeEngine(root,{out}={}){
  root=resolve(root);
- const paths=[...new Set([...NATIVE_OBSERVER_PATHS,...NATIVE_LIFECYCLE_PATHS])];
+ const paths=[...new Set([...NATIVE_OBSERVER_PATHS,...NATIVE_LIFECYCLE_PATHS,...RUNTIME_PROPERTIES_QUIT_PATHS])];
  const original=new Map(await Promise.all(paths.map(async path=>[path,await readFile(resolve(root,path),'utf8')])));
  const current=new Map(original),patches=[];
  const apply=async(path,patcher,implementationPath)=>{
@@ -26,6 +27,7 @@ export async function prepareNativeEngine(root,{out}={}){
  for(const path of NATIVE_LIFECYCLE_PATHS)await apply(path,patchNativeLifecycleFile,'scripts/release/patch-native-lifecycle.mjs');
  await apply('main/main.cpp',(_path,value)=>patchArtifactSetMount(value),'scripts/release/patch-artifact-set-mount.mjs');
  for(const path of MANAGED_SHUTDOWN_PATHS)await apply(path,patchManagedShutdownQueue,'scripts/release/patch-managed-shutdown-queue.mjs');
+ for(const path of RUNTIME_PROPERTIES_QUIT_PATHS)await apply(path,patchRuntimePropertiesQuitFile,'scripts/release/patch-runtime-properties-quit.mjs');
  // Validate every input before mutating any source file. A concurrently edited
  // tree is never overwritten by a stale preparation pass.
  for(const path of paths)if(await readFile(resolve(root,path),'utf8')!==original.get(path))throw Error('E_NATIVE_SOURCE_CHANGED: '+path);

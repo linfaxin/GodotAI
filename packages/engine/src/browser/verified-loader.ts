@@ -13,7 +13,7 @@ export interface VerifiedAsset {
   maxDecodedBytes?: number;
 }
 export interface VerifiedRelease {
-  runtimeAbi?: { protocolVersion: 2; host: 1; audio: 1; presentation: 1; lifecycle?: 1; observation?: 1; runtimeWrite?: 1 };
+  runtimeAbi?: { protocolVersion: 2; host: 1; audio: 1; presentation: 1; lifecycle?: 1; observation?: 1; runtimeWrite?: 1; runtimeProperties?: 1 };
   runtimeWorker?: VerifiedAsset;
   runtimeAudioWorklet?: VerifiedAsset;
   artifactReceiptVersion?:2;
@@ -155,6 +155,9 @@ export function validateRelease(release: VerifiedRelease, base = globalThis.loca
   if (release.runtimeAbi?.runtimeWrite !== undefined && (release.runtimeAbi.runtimeWrite !== 1 ||
       release.runtimeAbi.observation !== 1 || release.runtimeAbi.lifecycle !== 1 || execution.wasmThreads ||
       release.profile !== 'full-engine-v1' || release.engineTarget !== 'template_debug')) throw Error('E_RELEASE_RUNTIME_WRITE_ABI');
+  if (release.runtimeAbi?.runtimeProperties !== undefined && (release.runtimeAbi.runtimeProperties !== 1 ||
+      release.runtimeAbi.observation !== 1 || release.runtimeAbi.lifecycle !== 1 || execution.wasmThreads ||
+      release.profile !== 'full-engine-v1' || release.engineTarget !== 'template_debug')) throw Error('E_RELEASE_RUNTIME_PROPERTIES_ABI');
   const kinds = new Set<WorkletKind>();
   for (const asset of [release.engineJs, release.engineWasm, ...release.worklets ?? [], ...release.workerAssets??[], ...release.runtimeWorker ? [release.runtimeWorker] : [], ...release.runtimeAudioWorklet ? [release.runtimeAudioWorklet] : []]) {
     assetMetadata(asset);

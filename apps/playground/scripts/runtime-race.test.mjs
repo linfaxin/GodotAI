@@ -51,7 +51,7 @@ test('the latest compatible preparation remains usable after superseding an olde
 });
 
 function buildFixture(state='running'){
- const recorder=createDebugRecorder(), requests=[], preparations=[];
+ const recorder=createDebugRecorder(), requests=[], preparations=[],stoppedRuns=[];
  const configuration={executionBackend:'worker',presentationBackend:'direct'};
  recorder.setContext({projectId:'project',editorRevision:1,preview:{status:'available',value:configuration}});
  const deferred=()=>{let resolve,reject;const promise=new Promise((accept,deny)=>{resolve=accept;reject=deny;});return {promise,resolve,reject};};
@@ -64,11 +64,12 @@ function buildFixture(state='running'){
   AbortController,DOMException,Uint8Array,debugRecorder:recorder,clearTimeout,setTimeout:()=>0,checkTimer:undefined,saveTimer:undefined,
   ready:true,current:{engineProfile:'full-engine-v1'},siteEngineProfile:'full-engine-v1',selected:{id:'project',name:'Project'},
   MAX_PENDING_OPERATIONS:16,pendingBuilds:0,playIntent:undefined,runSerial:0,revision:1,checking:0,
+  cancelledLaunches:new Map(),reconcilingCancelledLaunches:false,
   persistenceBlocked:false,storage:{stage(){}},sessionReleaseContext:{},diagnostics:[],setDiagnostics(){},log(){},assertCompiledRelease(){},
   status(text,kind){Object.assign(node('status'),{textContent:text,kind});},
   applyCompiledImportReceipts:()=>false,debugRelease:()=>({}),workbench:{setBuilding(){node('stop').disabled=false;},setReady(){}},
   $:node,
-  nativePreview:{configuration,runner:{state},stop:async()=>{},run(...args){
+  nativePreview:{configuration,runner:{state},stop:async()=>{},stopRun(runId){stoppedRuns.push(runId);return Promise.resolve();},run(...args){
    const preparation=deferred();
    const signal=args[5];
    preparations.push(signal);
@@ -79,12 +80,15 @@ function buildFixture(state='running'){
  };
  const compile=source.slice(source.indexOf('const buildStatus='),source.indexOf('function controls('));
  const invalidate=source.slice(source.indexOf('function invalidatePlay('),source.indexOf('function initialProject('));
+ const cancellation=source.slice(source.indexOf('function cancelLaunch('),source.indexOf("addEventListener('pagehide'"));
  const toolbar=source.slice(source.indexOf("$('run').onclick="),source.indexOf("$<HTMLSelectElement>('mode').onchange="));
- const javascript=ts.transpileModule(invalidate+compile+toolbar,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
+ const javascript=ts.transpileModule(cancellation+invalidate+compile+toolbar,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
  vm.createContext(context);vm.runInContext(javascript,context);
+ recorder.subscribe(()=>vm.runInContext('reconcileCancelledLaunches()',context));
  const variant='single-pack',manifest={variant,buildKey:'a'.repeat(64),artifactId:'b'.repeat(64)};
  const compileReply={variant,manifest,pack:new Uint8Array([1]),diagnostics:[]};
- return {context,node,recorder,requests,preparations,compileReply,
+ return {context,node,recorder,requests,preparations,compileReply,stoppedRuns,
+  cancel:attemptId=>{context.cancelTarget=attemptId;vm.runInContext('cancelLaunch(cancelTarget)',context);},
   compile:()=>vm.runInContext('compile()',context),edit:()=>vm.runInContext('changed()',context)};
 }
 
@@ -135,4 +139,34 @@ test('toolbar stop restores the idle status while a build is still pending',asyn
  requests[0].resolve(compileReply);
  await tick();
  assert.equal(recorder.api.getBuild(attemptId).result.preview.status,'skipped');
+});
+
+test('cancelled attempt retains a late-session stop obligation without targeting a later run',async()=>{
+ const f=buildFixture();
+ const attempt=f.compile();f.requests[0].resolve(f.compileReply);await tick();
+ f.cancel(attempt);
+ assert.equal(f.preparations[0].aborted,true);
+ assert(f.context.cancelledLaunches.has(attempt));
+ const later=f.compile();
+ const release={releaseId:'a'.repeat(64),engineProfile:'full-engine-v1',descriptorSha256:'b'.repeat(64)};
+ const configuration={executionBackend:'worker',presentationBackend:'direct'};
+ const make=(runId,generation)=>({runId,generation,revision:1,buildKey:'a'.repeat(64),documentId:'doc-'+runId,workerId:'worker-'+runId,runConfigurationHash:'c'.repeat(64)});
+ const newer=make('newer-run',2),older=make('cancelled-late-run',1);
+ const oldRegistration=f.recorder.registerPreview(attempt,{generation:1,release,configuration});
+ f.recorder.recordRunEvent({...older,type:'state',state:'loading-frame'});
+ oldRegistration();
+ await tick();
+ assert.deepEqual(f.stoppedRuns,['cancelled-late-run']);
+ f.recorder.recordRunEvent({type:'exit',report:{...older,reason:'clean-exit',code:0}});
+ await tick();
+ assert(!f.context.cancelledLaunches.has(attempt));
+ f.requests[1].resolve(f.compileReply);await tick();
+ const newerRegistration=f.recorder.registerPreview(later,{generation:2,release,configuration});
+ f.recorder.recordRunEvent({...newer,type:'state',state:'loading-frame'});
+ f.recorder.recordRunEvent({...newer,type:'state',state:'running'});
+ newerRegistration();
+ await tick();
+ assert.equal(f.recorder.api.getRun(newer.runId).result.state,'running');
+ assert.deepEqual(f.stoppedRuns,['cancelled-late-run']);
+ f.cancel(later);await tick();
 });

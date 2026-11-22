@@ -6,7 +6,7 @@ import { dirname, resolve, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { gzipSync } from 'node:zlib';
-import { canonical, digest, fail, options, required, json, writeJson, filesIn, relativePath, safePath, within, identity, assertCommit, assertHash, inspectRelease, assertSourcePatchChains, assertRuntimeWriteBuildProof } from './web-release-utils.mjs';
+import { canonical, digest, fail, options, required, json, writeJson, filesIn, relativePath, safePath, within, identity, assertCommit, assertHash, inspectRelease, assertSourcePatchChains, assertRuntimeWriteBuildProof, assertRuntimePropertiesBuildProof } from './web-release-utils.mjs';
 import { patchOptionalPwa, OPTIONAL_PWA_PATCH } from './patch-web-optional-pwa.mjs';
 import { patchAudioLifecycle, AUDIO_LIFECYCLE_PATCH } from './patch-web-audio-lifecycle.mjs';
 import {loadProductionApiProfiles,buildEngineVendor,assembleFullEngineRelease} from '../../apps/playground/scripts/full-engine-release.mjs';
@@ -40,6 +40,7 @@ export async function buildRelease(configuration) {
   const root = dirname(configPath), output = resolve(configuration.out ?? 'scripts/jsb.web-engine/dist');
   const sourceCertified = !configuration.development && !!isSourceCertified(report);
   assertRuntimeWriteBuildProof(report);
+  assertRuntimePropertiesBuildProof(report);
   const sourceExecution = report.execution || report.status === 'built' ? executionFromReport(report) : legacyExecution();
   if (configuration['raw-wasm'] && !configuration.development) fail('E_RELEASE_ENCODING', '--raw-wasm is reserved for development compatibility');
   if (!sourceCertified && !configuration.development) fail('E_RELEASE_SOURCE', 'A source-certified engine build report is required; use --development for an explicitly uncertified local template');
@@ -177,13 +178,18 @@ export async function buildRelease(configuration) {
       recipeSha256: report.recipeSha256 ?? digest(canonical(report.recipe)), builder: report.builder,
       toolchains: report.toolchains, versionEvidence: report.versionEvidence,
       engineReportSha256: digest(await readFile(reportPath)), templateSha256: report.template.sha256,
-      ...Object.fromEntries(['engineTarget','runtimeAbi','workerPatch','lifecycleAbi','lifecyclePatch','artifactSetAbi','artifactSetPatch','observerAbi','nativeObserverPatch','hostResourceAbi','hostResourcePatch','shutdownQueueAbi','shutdownQueuePatch','runtimeObservation','runtimeWrite'].filter(field=>report[field]!==undefined).map(field=>[field,report[field]])),
+      ...Object.fromEntries(['engineTarget','runtimeAbi','workerPatch','lifecycleAbi','lifecyclePatch','artifactSetAbi','artifactSetPatch','observerAbi','nativeObserverPatch','hostResourceAbi','hostResourcePatch','shutdownQueueAbi','shutdownQueuePatch','runtimeObservation','runtimeWrite','runtimeProperties'].filter(field=>report[field]!==undefined).map(field=>[field,report[field]])),
       sourceCertified, requestedArgs:report.requestedArgs??report.recipe?.args, resolvedFeatures:report.resolvedFeatures, resolvedBuildOptions:report.resolvedBuildOptions??report.resolvedOptions, execution:sourceExecution, featuresEvidence:report.featuresEvidence, modulesEvidence:report.modulesEvidence, modules:report.modules, runtimeProfile, jsGluePatches, notes: sourceCertified ? [] : ['Development template; source-to-template provenance was not established.'],
     };
     if (!sourceCertified && attestation.runtimeAbi?.runtimeWrite !== undefined) {
       attestation.runtimeAbi = {...attestation.runtimeAbi};
       delete attestation.runtimeAbi.runtimeWrite;
       delete attestation.runtimeWrite;
+    }
+    if (!sourceCertified && attestation.runtimeAbi?.runtimeProperties !== undefined) {
+      attestation.runtimeAbi = {...attestation.runtimeAbi};
+      delete attestation.runtimeAbi.runtimeProperties;
+      delete attestation.runtimeProperties;
     }
     await asset('attestation.json', `${JSON.stringify(attestation, null, 2)}\n`, 'attestation');
     files.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);

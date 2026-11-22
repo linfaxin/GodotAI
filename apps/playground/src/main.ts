@@ -21,6 +21,8 @@ import {createDebugRecorder,debugFailure,type DebugRelease} from './debug-api';
 import {createPlaygroundApi,type PlaygroundApi} from './playground-api';
 import {createAgentPanel} from './workbench/agent-panel';
 import {createInteractionDemo, INTERACTION_DEMO_ID, matchesInteractionDemo} from './interaction-demo';
+import {createRuntimePropertiesDemo, matchesRuntimePropertiesDemo, RUNTIME_PROPERTIES_DEMO_ID} from './runtime-properties-demo';
+import {createSummerDispatcher} from './summer-adapter';
 
 declare global {
  interface Window {
@@ -42,6 +44,8 @@ let siteEngineProfile='full-engine-v1',shellOnly=false,sessionReleaseContext:Rel
 const MAX_PENDING_OPERATIONS=16;
 type PlayIntent={attemptId?:string;controller:AbortController};
 let pendingChecks=0,pendingBuilds=0,playIntent:PlayIntent|undefined;
+const cancelledLaunches=new Map<string,{release:()=>void;stopping:Set<string>}>();
+let reconcilingCancelledLaunches=false;
 const editor=createCodeEditor({changed(path,value){if(!current)return;current.files[path]=value;changed();},position(line,column){$('position').textContent=`Ln ${line}, Col ${column}`;},query:languageQuery,run:()=>void compile(true),toggleFiles:()=>workbench.toggleFiles()});
 const workbench=createWorkbench({selectFile,focusEditor:()=>editor.focus(),toast});
 const debugRecorder=createDebugRecorder();
@@ -53,10 +57,31 @@ const playground=createPlaygroundApi(debugRecorder,{
  interaction:()=>nativePreview?.interaction,
  observation:()=>nativePreview?.observation,
  runtimeWrite:()=>nativePreview?.runtimeWrite,
+ runtimeProperties:()=>nativePreview?.runtimeProperties,
+ summerCall:(input,signal)=>summerDispatcher(input,signal),
+});
+const summerDispatcher=createSummerDispatcher({
+ captureContext(){const context=playground.api.get_project_context().result;return {
+  projectId:context.projectId,editorRevision:context.editorRevision??0,
+  activeRunId:context.activeRunId,pendingAttemptId:playIntent?.attemptId??null,
+ };},
+ getProjectContext:()=>playground.api.get_project_context(),
+ play:input=>playground.api.play(input),
+ cancelLaunch,
+ getBuild:input=>playground.api.get_build(input),
+ getRun:input=>playground.api.get_run(input),
+ stop:input=>playground.api.stop(input),
+ getRuntimeTree:(input,signal)=>playground.api.get_runtime_tree(input,signal),
+ inspectRuntimeNode:(input,signal)=>playground.api.inspect_runtime_node(input,signal),
+ describeRuntimeProperties:(input,signal)=>playground.api.describe_runtime_properties(input,signal),
+ writeRuntimeProperty:(input,signal)=>playground.api.write_runtime_property(input,signal),
+ runtimeSet:(input,signal)=>playground.api.runtime_set(input,signal),
+ screenshot:(input,signal)=>playground.api.screenshot(input,signal),
 });
 Object.defineProperty(window,'godotPlayground',{value:playground.api,enumerable:true});
 const debugPanel=createDebugPanel(debugRecorder.api,playground.api);
 debugRecorder.subscribe(debugPanel.refresh);
+debugRecorder.subscribe(reconcileCancelledLaunches);
 createAgentPanel(playground, {
  unavailable() {
   const runId=debugRecorder.api.getContext().result.activeRunId;
@@ -67,6 +92,7 @@ createAgentPanel(playground, {
  },
  supportsRuntimeObservation:()=>nativePreview?.supportsObservation===true,
  supportsRuntimeWrite:()=>nativePreview?.supportsRuntimeWrite===true,
+ supportsRuntimeProperties:()=>nativePreview?.supportsRuntimeProperties===true,
  async open() {
   const project=createInteractionDemo(siteEngineProfile);
   let demo=demos.find(({id})=>{const candidate=projects.get(id);return candidate&&matchesInteractionDemo(candidate,project);});
@@ -77,10 +103,39 @@ createAgentPanel(playground, {
   await select(demo,false);
   return demo.id;
  },
- cancelLaunch(attemptId) {
-  if (playIntent?.attemptId===attemptId) invalidatePlay();
- },
+ openProperties:()=>openAgentDemo(createRuntimePropertiesDemo(siteEngineProfile),matchesRuntimePropertiesDemo),
+ cancelLaunch,
 });
+async function openAgentDemo(project:EditorProject,matches:(candidate:EditorProject,sample:EditorProject)=>boolean){
+ let demo=demos.find(({id})=>{const candidate=projects.get(id);return candidate&&matches(candidate,project);});
+ if(!demo){const id='project-'+crypto.randomUUID();projects.set(id,project);storage.stage(id,project);demo=registerProjectDemo(id,project);}
+ await select(demo,false);return demo.id;
+}
+function cancelLaunch(attemptId:string){
+ if(!cancelledLaunches.has(attemptId)){
+  const release=debugRecorder.retainBuild(attemptId);
+  if(release)cancelledLaunches.set(attemptId,{release,stopping:new Set()});
+ }
+ if(playIntent?.attemptId===attemptId)playIntent.controller.abort();
+ reconcileCancelledLaunches();
+}
+function reconcileCancelledLaunches(){
+ if(reconcilingCancelledLaunches)return;reconcilingCancelledLaunches=true;
+ try{for(const [attemptId,entry]of cancelledLaunches){
+  const queried=debugRecorder.api.getBuild(attemptId),build=queried.ok?queried.result:undefined;
+  const preview=build?.preview;
+  if(preview?.status==='session-created'){
+   const run=debugRecorder.api.getRun(preview.runId);
+   if(run.ok&&run.result.exit){entry.release();cancelledLaunches.delete(attemptId);}
+   else if(!entry.stopping.has(preview.runId)){
+    entry.stopping.add(preview.runId);
+    void nativePreview?.stopRun(preview.runId)?.catch(()=>{});
+   }
+  }else if(!build||build.status==='failed'||build.status==='cancelled'||preview?.status==='skipped'||preview?.status==='rejected'){
+   entry.release();cancelledLaunches.delete(attemptId);
+  }
+ }}finally{reconcilingCancelledLaunches=false;}
+}
 addEventListener('pagehide',playground.cancelWaits);
 const fileMenu=createFileMenu({select:selectFile,rename:path=>fileForm(path),remove:deleteFile,canDelete:path=>path!==current?.entry,canRename:path=>canRenameProjectFile(current,path),toast});
 const explorer=createExplorer(path=>{workbench.filePicked();selectFile(path);editor.focus();},(path,x,y)=>fileMenu.open(path,x,y));
@@ -157,8 +212,8 @@ function appendDemoButton(demo:Demo){
 function registerProjectDemo(id:string,project:EditorProject):Demo{
  const existing=demos.find(d=>d.id===id);if(existing)return existing;
  const source=demos.find(d=>d.id===project.demoId),file=(project.entry||project.selected).split('/').at(-1)!;
- const playtest=project.demoId===INTERACTION_DEMO_ID;
- const demo:Demo=source?{...source,id,name:source.name+' · 副本'}:{id,name:playtest?'试玩验证':'导入项目 · '+file,subtitle:playtest?'Godot 原生示例':project.engineProfile,file,
+ const properties=project.demoId===RUNTIME_PROPERTIES_DEMO_ID,playtest=project.demoId===INTERACTION_DEMO_ID;
+ const demo:Demo=source?{...source,id,name:source.name+' · 副本'}:{id,name:properties?'公开脚本属性验证':playtest?'试玩验证':'导入项目 · '+file,subtitle:properties?'Summer API / GodotJS':playtest?'Godot 原生示例':project.engineProfile,file,
   hint:playtest?'按右箭头移动 Player，按左箭头移除 Player。':project.engineProfile===siteEngineProfile?'独立项目，修改会单独保存。':'此项目需要 '+project.engineProfile+'；可查看与导出原文。',
   source:typeof project.files[project.entry]==='string'?project.files[project.entry] as string:'',runtime:project.runtime,controls:[]};
  demos.push(demo);appendDemoButton(demo);return demo;
@@ -186,7 +241,7 @@ async function restore(){
   toast('本地项目恢复失败，已暂停自动保存');log(String(error),'error');
  }
 }
-function invalidatePlay(){playIntent?.controller.abort();}
+function invalidatePlay(){if(playIntent?.attemptId)cancelLaunch(playIntent.attemptId);else playIntent?.controller.abort();}
 function changed(){storage.stage(selected.id,current);invalidatePlay();revision++;debugRecorder.setContext({editorRevision:revision});$('saved').textContent=persistenceBlocked?'保存失败':'正在保存';clearTimeout(saveTimer);saveTimer=setTimeout(()=>void save(),250);clearTimeout(checkTimer);checkTimer=setTimeout(()=>void check(),1100);}
 function initialProject(demo:Demo):EditorProject{return demo.id==='native'||demo.id==='react'?defaultProject(demo.runtime??'react',siteEngineProfile):demoProject(demo,siteEngineProfile);}
 
@@ -231,7 +286,7 @@ function restorePreviewStatus(state:RunnerState){
 }
 function compile(focusPreview=false){
  if(!ready||!current||!nativePreview)return;if(current.engineProfile!==siteEngineProfile){toast('项目与当前引擎配置不匹配，原文已保留');return;}
- if(pendingBuilds>=MAX_PENDING_OPERATIONS)return;
+ if(pendingBuilds>=MAX_PENDING_OPERATIONS||cancelledLaunches.size>=MAX_PENDING_OPERATIONS)return;
  invalidatePlay();
  const intent=new AbortController();
  const play:PlayIntent={controller:intent};

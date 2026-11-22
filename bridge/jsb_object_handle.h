@@ -26,6 +26,11 @@ namespace jsb
         uint64_t environment_epoch = 0;
         uint64_t generation = 0;
         bool godot_object = false;
+        // Independent from wrapper generation, which keys binding_records_.
+        uint64_t runtime_instance_token = 0;
+        uint64_t runtime_script_generation = 0;
+        ScriptClassID runtime_bound_class_id;
+        bool runtime_script_ready = false;
         std::atomic<bool> active{true};
         v8::Global<v8::Object> reference;
         std::shared_ptr<ObjectBindingTicket> gc_lease;

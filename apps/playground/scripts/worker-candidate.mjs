@@ -4,7 +4,7 @@ import {WORKER_RUNTIME_ABI,assertWorkerRuntimeAbi} from '../../../scripts/releas
 import {WORKER_RUNTIME_PATHS,WORKER_RUNTIME_PATCH} from '../../../scripts/release/patch-web-worker-runtime.mjs';
 import {digest,canonical} from './site-evidence.mjs';
 import {executionFromReport} from '../../../scripts/release/execution-contract.mjs';
-import {assertRuntimeObservationBuildProof,assertRuntimeWriteBuildProof} from '../../../scripts/release/web-release-utils.mjs';
+import {assertRuntimeObservationBuildProof,assertRuntimeWriteBuildProof,assertRuntimePropertiesBuildProof} from '../../../scripts/release/web-release-utils.mjs';
 
 export const WORKER_CANDIDATE_ASSETS=Object.freeze({host:'preview.js',worker:'runtime.worker.js',audio:'runtime.audio.worklet.js'});
 export const WORKER_NATIVE_PATCH_FILES=WORKER_RUNTIME_PATHS;
@@ -27,6 +27,7 @@ export function assertWorkerBuildProof(report,wasmSha256){
  if(report.runtimeAbi.lifecycle===1||report.execution?.lifecycleAbi===1)executionFromReport(report);
  assertRuntimeObservationBuildProof(report,wasmSha256);
  assertRuntimeWriteBuildProof(report,wasmSha256);
+ assertRuntimePropertiesBuildProof(report,wasmSha256);
  return proof;
 }
 /** Static bytes are hashed before manifest.json exists; no candidate/release

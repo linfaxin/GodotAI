@@ -146,6 +146,7 @@ private:
 
     // object handle (the JS object binding id)
     jsb::NativeObjectID object_id_;
+    uint64_t runtime_instance_token_ = 0;
 
 #if GODOT_4_6_OR_NEWER
     HashMap<Variant, Variant> property_cache_;
@@ -165,6 +166,11 @@ private:
 
     void postbind();
     void cache_property(const StringName& name, const Variant& value);
+    void publish_runtime_binding();
+    static const char* capture_runtime(Object* owner, jsb::RuntimeScriptSnapshot& snapshot,
+        jsb::RuntimeScriptMetadata& metadata, int max_entries = 512, int max_levels = 16,
+        const Vector<StringName>* names = nullptr);
+    static bool verify_runtime(Object* owner, const jsb::RuntimeScriptSnapshot& snapshot);
 
 #pragma region ScriptIntance Implementation
 
@@ -187,7 +193,7 @@ private:
 #pragma endregion
 
     private:
-        GodotJSScriptInstance() {}
+        GodotJSScriptInstance();
     };
 
 #endif

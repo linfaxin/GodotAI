@@ -18,7 +18,8 @@ import {
 } from './worker-runtime-observation.js';
 import {createRuntimeObservationRelay, readRuntimeObservationRequest} from './worker-runtime-observation-transport.js';
 import {RUNTIME_WRITE_VERSION, supportsWorkerRuntimeWrite} from './worker-runtime-write.js';
-import {createRuntimeWriteRelay, readRuntimeWriteId} from './worker-runtime-write-transport.js';
+import {createRuntimeAccessRelay, readAccessId} from './worker-runtime-access-transport.js';
+import {RUNTIME_PROPERTIES_VERSION, supportsWorkerRuntimeProperties} from './worker-runtime-properties.js';
 
 export interface WorkerPreviewHostOptions {
   canvas: HTMLCanvasElement;
@@ -37,6 +38,7 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
   let interactionReady = false;
   let observationReady = false;
   let runtimeWriteReady = false;
+  let runtimePropertiesReady = false;
   let captureRequest: string | undefined, inputOperation: string | undefined;
   let configuration: Readonly<WorkerRunConfiguration> | undefined;
   let runtime: Awaited<ReturnType<typeof loadVerifiedRuntimeWorker>> | undefined;
@@ -101,9 +103,11 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
   const observation = createRuntimeObservationRelay(postRuntimeData,
     response => post({type: 'runtime-observation-result', ...response}),
   );
-  const runtimeWrite = createRuntimeWriteRelay(postRuntimeData,
-    response => post({type: 'runtime-write-result', ...response}),
-  );
+  const runtimeAccess = createRuntimeAccessRelay(postRuntimeData, response => {
+    const {family, sequence, ...payload} = response;
+    post(family === 'write' ? {type: 'runtime-write-result', ...payload, writeSequence: sequence} :
+      {type: 'runtime-property-result', ...payload, accessSequence: sequence});
+  });
   function publish(): void {
     snapshot = Object.freeze({ schemaVersion: 1, ...identity, executionBackend: 'worker', presentationBackend: configuration?.presentationBackend ?? null,
       workerState, runtime: projectRuntime, runConfiguration: configuration ?? null, closing: ending, memory,
@@ -160,7 +164,7 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
     // cannot create a second cleanup or adoption window.
     finalized = true; ending = true; running = false; lease.cancel(); heartbeat.close();
     observation.dispose();
-    runtimeWrite.dispose();
+    runtimeAccess.dispose();
     projectCommands?.clear();
     pendingData.clear();pendingCleanupData.clear();pendingPresentationData.clear();
     clearTimeout(stopTimer); clearInterval(watchdog); observer?.disconnect();
@@ -209,7 +213,7 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
     if (ending || finalized) return;
     ending = true; lease.cancel(); heartbeat.close(); disposeSafely(()=>audio?.mute());
     disposeSafely(()=>observation.stop());
-    disposeSafely(()=>runtimeWrite.stop());
+    disposeSafely(()=>runtimeAccess.stop());
     if(runtime)stopTimer = setTimeout(() => terminate(detail), stopTimeoutMs);
     // Browser requests cease at the fence; audio is muted synchronously before
     // asking the Worker to quit. stop() also flushes the old audio epoch.
@@ -255,11 +259,12 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
       observation.cancel(m.requestId);
       return;
     }
-    if (m.type === 'runtime-write-request' || m.type === 'runtime-write-cancel') {
-      const id = readRuntimeWriteId(m, identity.runId);
-      if (id && m.type === 'runtime-write-cancel') runtimeWrite.cancel(id);
-      else if (id) runtimeWrite.request(id, m, !lease.active ? 'run_ended' : !running ? 'not_ready' :
-        !runtimeWriteReady ? 'unsupported' : undefined);
+    if (['runtime-write-request', 'runtime-write-cancel', 'runtime-property-request', 'runtime-property-cancel'].includes(m.type)) {
+      const family = m.type.startsWith('runtime-write-') ? 'write' : 'property';
+      const id = readAccessId(family, m, identity.runId);
+      if (id && m.type.endsWith('-cancel')) runtimeAccess.cancel(id);
+      else if (id) runtimeAccess.request(id, m, !lease.active ? 'run_ended' : !running ? 'not_ready' :
+        !(family === 'write' ? runtimeWriteReady : runtimePropertiesReady) ? 'unsupported' : undefined);
       return;
     }
     if (m.type === 'capture-request' && validInteractionId(m.requestId)) {
@@ -358,9 +363,9 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
           observation.reply(m);
           return;
         }
-        if (m.type === 'runtime-write-result') {
-          const id = readRuntimeWriteId(m, identity.runId);
-          if (id) runtimeWrite.reply(id, m.result);
+        if (m.type === 'runtime-write-result' || m.type === 'runtime-property-result') {
+          const id = readAccessId(m.type === 'runtime-write-result' ? 'write' : 'property', m, identity.runId);
+          if (id) runtimeAccess.reply(id, m.result, m.kind);
           return;
         }
         if (m.type === 'input-result' && inputOperation && m.operationId === inputOperation) {
@@ -426,12 +431,19 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
               return;
             }
             runtimeWriteReady = writeVersion !== undefined;
+            const propertiesVersion = supportsWorkerRuntimeProperties(release, configuration!.presentationBackend) ? RUNTIME_PROPERTIES_VERSION : undefined;
+            if (m.runtimePropertiesVersion !== propertiesVersion) {
+              fail(Error('E_RUNTIME_PROPERTIES_ABI'));
+              return;
+            }
+            runtimePropertiesReady = propertiesVersion !== undefined;
             running = true; workerState = 'running';
             interactionReady = configuration?.presentationBackend === 'direct' && m.interactionVersion === INTERACTION_VERSION;
           }
           post({type: 'phase', phase: m.phase, ...(interactionReady ? {interactionVersion: INTERACTION_VERSION} : {}),
             ...(observationReady ? {observationVersion: RUNTIME_OBSERVATION_VERSION} : {}),
-            ...(runtimeWriteReady ? {runtimeWriteVersion: RUNTIME_WRITE_VERSION} : {})});
+            ...(runtimeWriteReady ? {runtimeWriteVersion: RUNTIME_WRITE_VERSION} : {}),
+            ...(runtimePropertiesReady ? {runtimePropertiesVersion: RUNTIME_PROPERTIES_VERSION} : {})});
           publish();
         }
       };
@@ -442,7 +454,7 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
         if (m.type === 'data-receipt') {
           if (Number.isSafeInteger(m.dataSequence)) {
             observation.receipt(m.dataSequence);
-            runtimeWrite.receipt(m.dataSequence);
+            runtimeAccess.receipt(m.dataSequence);
           }
           pendingCleanupData.delete(m.dataSequence);
           if(Number.isSafeInteger(m.dataSequence)&&pendingData.delete(m.dataSequence)&&pendingPresentationData.delete(m.dataSequence))presentation?.observeWorkerCheckpoint(m.presentationCheckpoint,m.dataSequence);

@@ -42,6 +42,7 @@
       <button id="agent-replay" type="button">检查并启动预览</button>
       <button id="agent-playtest" type="button" hidden>试玩验证</button>
       <button id="agent-runtime-write" type="button" hidden>运行时写入验证</button>
+      <button id="agent-runtime-properties" type="button" hidden>公开脚本属性验证</button>
       <button id="agent-stop" type="button" disabled>停止本次预览</button>
       <span id="agent-status" class="debug-note" role="status"></span>
     </div>
@@ -49,6 +50,7 @@
     <pre id="agent-trace" aria-label="API 调用实参与返回结果" hidden></pre>
     <div id="agent-observations" aria-label="试玩验证的位置与画面" hidden></div>
     <ul id="agent-write-results" aria-label="运行时写入验证结果" hidden></ul>
+    <details id="agent-properties-details" hidden><summary>公开属性验证证据</summary><pre id="agent-properties-evidence" aria-label="公开属性、输入、画面与退出证据"></pre></details>
     <pre><code id="debug-api-example"></code></pre>
     <dl class="debug-methods">
       <dt><code>get_project_context()</code></dt>
@@ -90,6 +92,14 @@
       <dd><p>读取绝对节点路径的指定属性，支持 <code>position</code>、<code>rotation</code>、<code>visible</code>。节点缺失时返回 <code>node_not_found</code>。两种查询均返回运行身份、请求 ID 和采样序号，并可通过第二个参数 <code>AbortSignal</code> 取消。状态采样与 PNG 渲染提交分别计数。</p></dd>
       <dt><code>runtime_set({runId, path, expectedInstanceId, property, value, timeoutMs?})</code></dt>
       <dd><p>使用查询返回的路径和实例 ID 写入当前运行的 <code>Node2D</code> 本地 <code>position</code>，值为 <code>{x, y}</code>。回执的 <code>outcome</code> 为 <code>applied</code>、<code>not_applied</code> 或 <code>unconfirmed</code>。结果未确认时可重新查询节点，再决定是否写入。</p></dd>
+      <dt><code>describe_runtime_properties({runId, path, expectedInstanceId, names?, limit?, timeoutMs?})</code></dt>
+      <dd><p>发现实际节点的原生属性和标准 GodotJS 导出属性，不调用 getter。<code>names</code> 精确查询与 <code>limit</code> 不能同时使用。<code>candidate</code> 表示可以尝试访问；截断或 <code>unresolved</code> 不代表属性不存在。</p></dd>
+      <dt><code>read_runtime_properties({runId, path, expectedInstanceId, properties, timeoutMs?})</code></dt>
+      <dd><p><code>properties</code> 为带 <code>name</code>、<code>expectedType</code> 的有界列表。显式读取可能运行脚本 getter。批次按顺序读取，保留 <code>value</code>、<code>unavailable</code>、<code>not_attempted</code>；它不是同帧事务快照。</p></dd>
+      <dt><code>write_runtime_property({runId, path, expectedInstanceId, property, value, timeoutMs?})</code></dt>
+      <dd><p><code>value</code> 使用 <code>{type, value}</code>。导出脚本支持 bool、安全整数、有限 float、受限 string；原生 position 支持 vector2。回执包含完整运行身份、原生 before/after/frame 和执行阶段。<code>not_written</code> 只确认未进入写入路径；<code>unconfirmed</code> 不代表未执行，也不能自动重试。能力见 <code>get_run</code> 的 <code>runtimeProperties</code>。</p></dd>
+      <dt><code>summer_call({op, input})</code></dt>
+      <dd><p>Summer 4.9.2 风格操作子集，返回明确的 GodotAI typed payload 和兼容级别。支持主运行、树、原生检查、受限属性写入及显式 <code>target: 'game'</code> 截图。<code>engine.play</code> 返回待启动的 attempt，需继续等待；<code>engine.stop</code> 只取消/停止接纳时捕获的意图和运行。未支持参数会拒绝，未确认写入返回 <code>outcome_unknown</code>。</p></dd>
       <dt><code>screenshot({runId, timeoutMs?})</code></dt>
       <dd><p>等待指定运行的新渲染提交，返回 PNG 字节、提交序号、采样几何与尺寸。Direct Worker 的支持状态见 <code>get_run</code> 的 <code>interaction</code>。</p></dd>
       <dt><code>game_input({runId, gesture})</code></dt>
@@ -97,7 +107,7 @@
       <dt><code>wait_for_input({runId, operationId, timeoutMs?})</code></dt>
       <dd><p>按操作 ID 读取按下和释放的分发事实。<code>timeoutMs: 0</code> 读取快照。等待超时可用同一 ID 再查。</p></dd>
     </dl>
-    <p><code>schemaVersion</code> 为 1。方法返回 <code>{ok, result}</code> 或 <code>{ok, error}</code>。失败构建的查询仍可成功，构建结果见 <code>status</code>。<code>not_found</code> 表示记录不可用，<code>invalid_input</code> 表示参数无效，<code>invalid_cursor</code> 表示游标无效。记录保存在当前标签页内存中，刷新页面会清除记录。</p>
+    <p><code>schemaVersion</code> 为 1。本地方法返回 <code>{ok, result}</code> 或 <code>{ok, error}</code>，新属性访问另含 <code>receipt</code>。失败构建的查询仍可成功，构建结果见 <code>status</code>。<code>not_found</code> 表示记录不可用，<code>invalid_input</code> 表示参数无效，<code>invalid_cursor</code> 表示游标无效。记录保存在当前标签页内存中，刷新页面会清除记录。</p>
   </div>
   <div class="debug-summary">
     <section id="debug-build" class="debug-card" aria-labelledby="debug-build-heading">

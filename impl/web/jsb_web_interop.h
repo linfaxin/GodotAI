@@ -146,6 +146,10 @@ JSBROWSER_API int   jsbi_GetStringLength(jsb::impl::JSRuntime engine_id, jsb::im
 JSBROWSER_API char* jsbi_ToCStringLen(jsb::impl::JSRuntime engine_id, int32_t* o_size, jsb::impl::StackPosition str_sp);
 JSBROWSER_API jsb::impl::StackPosition jsbi_ToString(jsb::impl::JSRuntime engine_id, jsb::impl::StackPosition stack_pos);
 JSBROWSER_API double jsbi_NumberValue(jsb::impl::JSRuntime engine_id, jsb::impl::StackPosition stack_pos);
+JSBROWSER_API double jsbi_RuntimeNumberValue(jsb::impl::JSRuntime engine_id, jsb::impl::StackPosition stack_pos);
+JSBROWSER_API bool jsbi_RuntimeBooleanValue(jsb::impl::JSRuntime engine_id, jsb::impl::StackPosition stack_pos);
+JSBROWSER_API char* jsbi_RuntimeToCStringLen(jsb::impl::JSRuntime engine_id, int32_t* size, jsb::impl::StackPosition stack_pos);
+JSBROWSER_API jsb::impl::StackPosition jsbi_RuntimeNewString(jsb::impl::JSRuntime engine_id, const char* bytes, int length);
 JSBROWSER_API bool   jsbi_BooleanValue(jsb::impl::JSRuntime engine_id, jsb::impl::StackPosition stack_pos);
 JSBROWSER_API int32_t  jsbi_Int32Value(jsb::impl::JSRuntime engine_id, jsb::impl::StackPosition stack_pos);
 JSBROWSER_API uint32_t jsbi_Uint32Value(jsb::impl::JSRuntime engine_id, jsb::impl::StackPosition stack_pos);

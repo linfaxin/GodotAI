@@ -64,7 +64,8 @@ export async function createEnginePreview(container:HTMLElement, listener:(event
  const supportsPlaytest=supportsWorkerInteraction(release,configuration?.presentationBackend,globalThis.navigator?.userAgent??'');
  const supportsObservation=supportsWorkerObservation(release);
  const supportsRuntimeWrite=configuration!==undefined&&supportsWorkerRuntimeWrite(release,configuration.presentationBackend);
- return {manifest,context,runner,configuration,supportsPlaytest,supportsObservation,supportsRuntimeWrite,async run(pack:Uint8Array|undefined,revision:number,details:unknown,artifactSet?:ArtifactSet,registerDebug?:(generation:string|number)=>()=>void,signal?:AbortSignal){
+ const supportsRuntimeProperties=configuration?.presentationBackend==='direct'&&release.runtimeAbi?.runtimeProperties===1;
+ return {manifest,context,runner,configuration,supportsPlaytest,supportsObservation,supportsRuntimeWrite,supportsRuntimeProperties,async run(pack:Uint8Array|undefined,revision:number,details:unknown,artifactSet?:ArtifactSet,registerDebug?:(generation:string|number)=>()=>void,signal?:AbortSignal){
   if(disposed)throw Error('E_RUNNER_DISPOSED');
   if(signal?.aborted)throw new DOMException('Superseded','AbortError');
   const compiled=structuredClone(details) as {buildKey?:unknown;generation?:unknown;packSha256?:unknown;artifactId?:string;artifactReceipt?:{buildKey?:unknown;packSha256?:unknown}};
@@ -111,5 +112,6 @@ export async function createEnginePreview(container:HTMLElement, listener:(event
  interaction:runner instanceof WorkerPreviewRunner ? runner : undefined,
  observation:runner instanceof WorkerPreviewRunner ? runner : undefined,
  runtimeWrite:runner instanceof WorkerPreviewRunner ? runner : undefined,
+ runtimeProperties:runner instanceof WorkerPreviewRunner ? runner : undefined,
  stop:()=>{++operationSequence;return runner.stop();},dispose:()=>{disposed=true;++operationSequence;return runner.dispose();}};
 }

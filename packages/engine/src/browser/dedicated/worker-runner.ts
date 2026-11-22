@@ -23,6 +23,12 @@ import {prepareRuntimeSet, readRuntimeWriteResult, RUNTIME_WRITE_VERSION, runtim
   supportsWorkerRuntimeWrite, type RuntimeSetInput, type RuntimeSetResult, type RuntimeWriteResult,
   type RuntimeWriteState, type RuntimeWriteUnconfirmed} from './worker-runtime-write.js';
 import {readRuntimeWriteId, sameRuntimeWrite, scheduleRuntimeWriteDeadline, type RuntimeWriteId} from './worker-runtime-write-transport.js';
+import {prepareRuntimeProperties, readNativePropertyResult, runtimePropertiesError, runtimePropertiesUnconfirmed,
+  supportsWorkerRuntimeProperties, RUNTIME_PROPERTIES_VERSION, type DescribeInput, type ReadInput, type WriteInput,
+  type PropertyKind, type PropertyCommand, type PropertyResult, type ResultByKind, type NativeResult,
+  type RuntimePropertiesState, type AccessReason, type Correlation} from './worker-runtime-properties.js';
+import {readAccessId} from './worker-runtime-access-transport.js';
+export * from './worker-runtime-properties.js';
 export {supportsWorkerInteraction} from './worker-interaction.js';
 export type {GameGesture, GameInput, GameScreenshot, InputReceipt, InteractionResult, ScreenshotInput, WaitForInput} from './worker-interaction.js';
 export {prepareRuntimeObservation, supportsWorkerObservation} from './worker-runtime-observation.js';
@@ -54,6 +60,14 @@ interface ObservationRequest {
   deadline: number;
   query: RuntimeObservationQuery;
   finish(result: ObservationResult<ObservationSnapshot>): boolean;
+}
+interface PendingRuntimeProperty {
+  requestId: string;
+  accessSequence: number;
+  kind: PropertyKind;
+  expire(): void;
+  reply(value: unknown): void;
+  retire(reason: 'run_ended' | 'transport_lost'): void;
 }
 interface PendingRuntimeWrite extends RuntimeWriteId {
   expire(): void;
@@ -98,7 +112,8 @@ interface Session {
   observation?: ObservationRequest;
   observationSampleSeq: number;
   runtimeWrite?: PendingRuntimeWrite;
-  writeSequence: number;
+  accessSequence: number;
+  runtimeProperties?: PendingRuntimeProperty;
   input?: InputRecord;
   inputSequence: number;
   failure?: ReturnType<typeof previewDiagnostic>;
@@ -119,6 +134,7 @@ export class WorkerPreviewRunner {
   private readonly interactionVersions = new Map<string, boolean | null>();
   private readonly observationVersions = new Map<string, boolean | null>();
   private readonly runtimeWriteVersions = new Map<string, boolean | null>();
+  private readonly runtimePropertiesVersions = new Map<string, boolean | null>();
   private inputWaiters = 0;
   private active?: Session;
   private sequence = 0;
@@ -168,6 +184,7 @@ export class WorkerPreviewRunner {
     s.capture?.finish(interactionError('run_ended'));
     s.observation?.finish(observationError('run_ended'));
     s.runtimeWrite?.retire(report.reason === 'forced-frame-disposal' || report.reason === 'crashed' ? 'transport_lost' : 'run_ended');
+    s.runtimeProperties?.retire(report.reason === 'forced-frame-disposal' || report.reason === 'crashed' ? 'transport_lost' : 'run_ended');
     if (s.input) this.settleInput(s.input, {down: 'unconfirmed', up: 'unconfirmed', reason: 'run_ended'});
     s.projectQueue.length=0;s.projectBytes=0;s.commands.clear();
     clearTimeout(s.timer); clearInterval(s.watchdog);
@@ -220,7 +237,7 @@ export class WorkerPreviewRunner {
     const s: Session = { identity, frame, port: channel.port1, peer: channel.port2, state: 'loading-frame', epoch: 0, settled: false,
       lastWorkerBeat: now(), beatSequence: -1, resumeEpoch: 0, logs: new WorkerLogBudget(frozen.configuration.budgets), projectQueue: [], projectBytes: 0,
       commands:new WorkerProjectCommandCredits(frozen.configuration.budgets.maxProjectEvents!,frozen.configuration.budgets.maxProjectBytes!),commandSequence:0,
-      inputSequence: 0, observationSampleSeq: 0, writeSequence: 0, resolveRun, rejectRun, exit, resolveExit };
+      inputSequence: 0, observationSampleSeq: 0, accessSequence: 0, resolveRun, rejectRun, exit, resolveExit };
     this.active = s;
     this.interactionVersions.set(identity.runId, null);
     if (this.interactionVersions.size > MAX_RECEIPTS) this.interactionVersions.delete(this.interactionVersions.keys().next().value!);
@@ -228,6 +245,8 @@ export class WorkerPreviewRunner {
     if (this.observationVersions.size > MAX_RECEIPTS) this.observationVersions.delete(this.observationVersions.keys().next().value!);
     this.runtimeWriteVersions.set(identity.runId, null);
     if (this.runtimeWriteVersions.size > MAX_RECEIPTS) this.runtimeWriteVersions.delete(this.runtimeWriteVersions.keys().next().value!);
+    this.runtimePropertiesVersions.set(identity.runId, null);
+    if (this.runtimePropertiesVersions.size > MAX_RECEIPTS) this.runtimePropertiesVersions.delete(this.runtimePropertiesVersions.keys().next().value!);
     s.onVisibility=()=>{if(this.live(s)&&this.options.container.ownerDocument.visibilityState!=='hidden')s.lastWorkerBeat=now();};
     this.options.container.ownerDocument.addEventListener?.('visibilitychange',s.onVisibility);
     s.port.onmessage = event => {
@@ -236,6 +255,13 @@ export class WorkerPreviewRunner {
       if (m.type === 'runtime-write-result') {
         const id = readRuntimeWriteId(m, identity.runId);
         if (id && sameRuntimeWrite(s.runtimeWrite, id)) s.runtimeWrite?.reply(m.result);
+        return;
+      }
+      if (m.type === 'runtime-property-result') {
+        const id = readAccessId('property', m, identity.runId);
+        const current = s.runtimeProperties;
+        if (id && current?.requestId === id.requestId && current.accessSequence === id.sequence && current.kind === m.kind)
+          current.reply(m.result);
         return;
       }
       if (m.type === 'runtime-observation-result') {
@@ -306,6 +332,13 @@ export class WorkerPreviewRunner {
             return;
           }
           this.runtimeWriteVersions.set(identity.runId, writeVersion !== undefined);
+          const propertiesVersion = supportsWorkerRuntimeProperties(this.release, frozen.configuration.presentationBackend)
+            ? RUNTIME_PROPERTIES_VERSION : undefined;
+          if (m.runtimePropertiesVersion !== propertiesVersion) {
+            this.beginStop(s, 'runtime-failed', 'Runtime properties ABI does not match the release');
+            return;
+          }
+          this.runtimePropertiesVersions.set(identity.runId, propertiesVersion !== undefined);
           if (m.interactionVersion === INTERACTION_VERSION && frozen.configuration.presentationBackend === 'direct')
             s.interactionVersion = INTERACTION_VERSION;
           this.interactionVersions.set(identity.runId, s.interactionVersion === INTERACTION_VERSION);
@@ -368,6 +401,7 @@ export class WorkerPreviewRunner {
     const before = s.state;
     s.observation?.finish(observationError('run_ended'));
     s.runtimeWrite?.retire(cause === 'unresponsive' ? 'transport_lost' : 'run_ended');
+    s.runtimeProperties?.retire(cause === 'unresponsive' ? 'transport_lost' : 'run_ended');
     if (!this.transition(s, 'stopping')) return;
     s.capture?.finish(interactionError('run_ended'));
     if (before === 'loading-frame' || before === 'handshaking') { this.finishLocal(s, 'forced-frame-disposal', 'Cancelled before host connection'); return; }
@@ -430,8 +464,9 @@ export class WorkerPreviewRunner {
     if (support !== 'available') return Promise.resolve(runtimeWriteError(support));
     const session = this.active!;
     session.runtimeWrite?.expire();
-    if (session.runtimeWrite) return Promise.resolve(runtimeWriteError('busy'));
-    const writeSequence = ++session.writeSequence, requestId = runId + ':' + writeSequence;
+    session.runtimeProperties?.expire();
+    if (session.runtimeWrite || session.runtimeProperties || session.accessSequence >= Number.MAX_SAFE_INTEGER) return Promise.resolve(runtimeWriteError('busy'));
+    const writeSequence = ++session.accessSequence, requestId = runId + ':' + writeSequence;
     const deadline = interactionNow() + timeoutMs;
     const envelope = {...session.identity, protocolVersion: WORKER_PROTOCOL, writeSequence, requestId};
     const {value: requestedValue, ...target} = command;
@@ -471,6 +506,85 @@ export class WorkerPreviewRunner {
       cancellation?.addEventListener('abort', onAbort, {once: true});
       try { session.port.postMessage({...envelope, type: 'runtime-write-request', command, deadline}); }
       catch { finish(runtimeWriteError('dispatch_failed'), true); }
+    });
+  }
+  private runtimePropertiesSupport(runId: string): 'available' | 'not_ready' | 'unsupported' | 'run_ended' | 'not_found' {
+    const session = this.active;
+    if (session?.identity.runId !== runId) return this.runtimePropertiesVersions.has(runId) ? 'run_ended' : 'not_found';
+    if (session.state === 'stopping' || session.settled) return 'run_ended';
+    if (session.state !== 'running') return 'not_ready';
+    return this.runtimePropertiesVersions.get(runId) === true ? 'available' : 'unsupported';
+  }
+  runtimePropertiesState(runId: string): RuntimePropertiesState {
+    const supported = this.runtimePropertiesVersions.get(runId) ?? null;
+    return {supported, ready: this.runtimePropertiesSupport(runId) === 'available', ...(supported ? {
+      version: RUNTIME_PROPERTIES_VERSION, supportedExportTypes: ['bool', 'int', 'float', 'string'] as const,
+      supportedNativeProperties: ['Node2D.position', 'Node2D.rotation', 'CanvasItem.visible'],
+    } : {})};
+  }
+  describeRuntimeProperties(input: DescribeInput, signal?: AbortSignal): Promise<PropertyResult<'describe'>> {
+    return this.accessRuntimeProperties('describe', input, signal);
+  }
+  readRuntimeProperties(input: ReadInput, signal?: AbortSignal): Promise<PropertyResult<'read'>> {
+    return this.accessRuntimeProperties('read', input, signal);
+  }
+  writeRuntimeProperty(input: WriteInput, signal?: AbortSignal): Promise<PropertyResult<'write'>> {
+    return this.accessRuntimeProperties('write', input, signal);
+  }
+  private accessRuntimeProperties<K extends PropertyKind>(kind: K, input: unknown, signal?: AbortSignal): Promise<PropertyResult<K>> {
+    const prepared = prepareRuntimeProperties(kind, input, signal);
+    if (!prepared.ok) return Promise.resolve(prepared);
+    const {runId, timeoutMs, command} = prepared.result;
+    const support = this.runtimePropertiesSupport(runId);
+    if (support !== 'available') return Promise.resolve(runtimePropertiesError(support));
+    const session = this.active!;
+    session.runtimeWrite?.expire(); session.runtimeProperties?.expire();
+    if (session.runtimeWrite || session.runtimeProperties || session.accessSequence >= Number.MAX_SAFE_INTEGER)
+      return Promise.resolve(runtimePropertiesError('busy'));
+    const accessSequence = ++session.accessSequence, requestId = runId + ':' + accessSequence;
+    const deadline = interactionNow() + timeoutMs;
+    const envelope = {...session.identity, protocolVersion: WORKER_PROTOCOL, accessSequence, requestId};
+    const receipt: Correlation = {requestId, accessSequence, run: {...session.identity}, releaseId: this.release.releaseId,
+      path: command.path, expectedInstanceId: command.expectedInstanceId};
+    const cancellation = signal === undefined ? undefined : AbortSignal.any([signal]);
+    return new Promise(resolve => {
+      let settled = false;
+      const finish = (value: NativeResult<ResultByKind[K]>, release: boolean) => {
+        if (release) {
+          if (session.runtimeProperties === pending) session.runtimeProperties = undefined;
+          cancelTimer();
+        }
+        if (settled) return;
+        settled = true; cancellation?.removeEventListener('abort', onAbort);
+        let result: PropertyResult<K> = value.ok ? {ok: true, receipt, result: value.result} : {...value, receipt};
+        if (new TextEncoder().encode(JSON.stringify(result)).byteLength > 65536) {
+          const unknown = kind === 'describe' ? runtimePropertiesError('dispatch_failed', 'sdk') : runtimePropertiesUnconfirmed(kind, 'transport_lost', command);
+          result = unknown.ok ? {ok: true, receipt, result: unknown.result} : {...unknown, receipt};
+        }
+        resolve(result);
+      };
+      const uncertain = (reason: AccessReason, release: boolean) => finish(kind === 'describe' ?
+        runtimePropertiesError(reason === 'transport_lost' ? 'dispatch_failed' : reason as 'timeout' | 'cancelled' | 'run_ended', 'sdk') :
+        runtimePropertiesUnconfirmed(kind, reason, command), release);
+      const onAbort = () => {
+        uncertain('cancelled', false);
+        try {session.port.postMessage({...envelope, type: 'runtime-property-cancel'});} catch { /* Deadline still applies. */ }
+      };
+      const timeout = () => uncertain('timeout', true);
+      const pending: PendingRuntimeProperty = {requestId, accessSequence, kind,
+        expire: () => {if (interactionNow() >= deadline) timeout();},
+        retire: reason => uncertain(reason, true),
+        reply: value => {
+          if (interactionNow() >= deadline) {timeout(); return;}
+          const result = readNativePropertyResult(command, value);
+          if (result) finish(result, true);
+        },
+      };
+      const cancelTimer = scheduleRuntimeWriteDeadline(deadline, timeout);
+      session.runtimeProperties = pending;
+      cancellation?.addEventListener('abort', onAbort, {once: true});
+      try {session.port.postMessage({...envelope, type: 'runtime-property-request', command, deadline});}
+      catch {finish(runtimePropertiesError('dispatch_failed'), true);}
     });
   }
   private observeRuntime(kind: 'tree', input: RuntimeTreeInput, signal?: AbortSignal): Promise<ObservationResult<RuntimeTreeSnapshot>>;

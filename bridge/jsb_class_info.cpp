@@ -54,8 +54,10 @@ namespace jsb
 #endif
 
     //NOTE ensure the address of p_class_info being locked during this procedure
-    bool _parse_script_class_iterate(const v8::Local<v8::Context>& p_context, const ScriptClassInfoPtr& p_class_info, const v8::Local<v8::Object>& class_obj)
+    bool _parse_script_class_iterate(const v8::Local<v8::Context>& p_context, const ScriptClassInfoPtr& p_class_info,
+        const v8::Local<v8::Object>& class_obj, bool& runtime_exports_complete)
     {
+        runtime_exports_complete = true;
         v8::Isolate* isolate = p_context->GetIsolate();
         Environment* environment = Environment::wrap(isolate);
 
@@ -234,6 +236,11 @@ namespace jsb
             }
         }
 
+        // Runtime metadata is own-only; Get below deliberately retains the
+        // historical inherited-property behavior for ordinary script dispatch.
+        const v8::Maybe<bool> own_exports = prototype->HasOwnProperty(p_context, jsb_symbol(environment, ClassProperties));
+        if (own_exports.IsNothing()) return false;
+
         // properties (@export_)
         // detect all exported properties (which annotated with @export_)
         {
@@ -248,11 +255,13 @@ namespace jsb
                     v8::Local<v8::Value> element;
                     if (!collection->Get(p_context, index).ToLocal(&element))
                     {
+                        if (own_exports.FromMaybe(false)) runtime_exports_complete = false;
                         continue;
                     }
                     const v8::Local<v8::Context>& context = p_context;
                     if (!element->IsObject())
                     {
+                        if (own_exports.FromMaybe(false)) runtime_exports_complete = false;
                         continue;
                     }
                     v8::Local<v8::Object> obj = element.As<v8::Object>();
@@ -260,19 +269,38 @@ namespace jsb
                     v8::Local<v8::Value> prop_name;
                     if (!obj->Get(context, jsb_name(environment, name)).ToLocal(&prop_name))
                     {
+                        if (own_exports.FromMaybe(false)) runtime_exports_complete = false;
                         continue;
+                    }
+                    String runtime_name;
+                    bool runtime_name_valid = false;
+                    if (own_exports.FromMaybe(false)) {
+                        Variant exact_name;
+                        const char* reason = nullptr;
+                        runtime_name_valid = runtime_scalar_from_js(environment, prop_name, Variant::STRING, exact_name, reason);
+                        if (runtime_name_valid) {
+                            runtime_name = exact_name;
+                            runtime_name_valid = !runtime_name.is_empty() && runtime_name.utf8().length() <= 256;
+                            for (int offset = 0; offset < runtime_name.length(); ++offset) {
+                                if (runtime_name[offset] == 0) runtime_name_valid = false;
+                            }
+                        }
+                        if (!runtime_name_valid) runtime_exports_complete = false;
                     }
                     property_info.name = impl::Helper::to_string(isolate, prop_name); // string
                     v8::Local<v8::Value> type_val;
                     if (!obj->Get(context, jsb_name(environment, type)).ToLocal(&type_val))
                     {
+                        if (own_exports.FromMaybe(false)) runtime_exports_complete = false;
                         continue;
                     }
                     int32_t type_int = 0;
                     if (!type_val->Int32Value(context).To(&type_int))
                     {
+                        if (own_exports.FromMaybe(false)) runtime_exports_complete = false;
                         continue;
                     }
+                    if (own_exports.FromMaybe(false) && (!type_val->IsInt32() || type_int < 0 || type_int >= Variant::VARIANT_MAX)) runtime_exports_complete = false;
                     property_info.type = (Variant::Type) type_int; // int
                     property_info.hint = BridgeHelper::to_enum<PropertyHint>(context, obj->Get(context, jsb_name(environment, hint)), PROPERTY_HINT_NONE);
                     v8::Local<v8::Value> hint_string_val;
@@ -280,7 +308,9 @@ namespace jsb
                     {
                         property_info.hint_string = impl::Helper::to_string(isolate, hint_string_val);
                     }
-                    property_info.usage = BridgeHelper::to_enum<PropertyUsageFlags>(context, obj->Get(context, jsb_name(environment, usage)), PROPERTY_USAGE_DEFAULT) | PROPERTY_USAGE_SCRIPT_VARIABLE;
+                    const v8::MaybeLocal<v8::Value> usage_value = obj->Get(context, jsb_name(environment, usage));
+                    if (own_exports.FromMaybe(false) && usage_value.IsEmpty()) runtime_exports_complete = false;
+                    property_info.usage = BridgeHelper::to_enum<PropertyUsageFlags>(context, usage_value, PROPERTY_USAGE_DEFAULT) | PROPERTY_USAGE_SCRIPT_VARIABLE;
 
                     v8::Local<v8::Value> cache;
 
@@ -296,9 +326,17 @@ namespace jsb
                     }
 #endif // TOOLS_ENABLED
                     p_class_info->properties.insert(property_info.name, property_info);
+                    if (own_exports.FromMaybe(false) && runtime_name_valid) {
+                        RuntimeExportInfo runtime_property;
+                        runtime_property.name = runtime_name;
+                        runtime_property.type = property_info.type;
+                        runtime_property.usage = property_info.usage;
+                        p_class_info->own_runtime_exports.insert(runtime_property.name, runtime_property);
+                    }
                     JSB_LOG(VeryVerbose, "... property %s: %s", property_info.name, Variant::get_type_name(property_info.type));
                 }
             }
+            else if (own_exports.FromMaybe(false)) runtime_exports_complete = false;
         }
         return true;
     }
@@ -318,6 +356,17 @@ namespace jsb
 
     bool ScriptClassInfo::_parse_script_class(const v8::Local<v8::Context>& p_context, JavaScriptModule& p_module)
     {
+        Environment* environment = Environment::wrap(p_context->GetIsolate());
+        // Invalidate before any user-observable parse operation. Failed reloads
+        // must not leave the previous metadata authorized for runtime access.
+        {
+            ScriptClassInfoPtr previous = environment->find_script_class(p_module.script_class_id);
+            if (previous) {
+                previous->runtime_metadata_ready = false;
+                previous->runtime_metadata_revision = next_runtime_script_identity();
+                previous->own_runtime_exports.clear();
+            }
+        }
         if (p_module.exports.IsEmpty())
         {
             JSB_LOG(VeryVerbose, "(script-parser) no exports %s", p_module.source_info.source_filepath);
@@ -337,7 +386,6 @@ namespace jsb
             JSB_LOG(VeryVerbose, "(script-parser) non-standard module %s", p_module.source_info.source_filepath);
             return false;
         }
-        Environment* environment = Environment::wrap(isolate);
         v8::Local<v8::Value> default_val;
         if (!exports.As<v8::Object>()->Get(p_context, jsb_name(environment, default)).ToLocal(&default_val)
             || !default_val->IsObject())
@@ -372,6 +420,7 @@ namespace jsb
             existed_class_info = environment->add_script_class(script_class_id);
             p_module.script_class_id = script_class_id;
             existed_class_info->module_id = p_module.id;
+            existed_class_info->runtime_metadata_revision = next_runtime_script_identity();
         }
 
         // trick: save godot class id for convenience of getting it in JS class constructor
@@ -416,7 +465,20 @@ namespace jsb
         jsb_check(existed_class_info->module_id == p_module.id);
         existed_class_info->native_class_id = native_class_id;
 
-        return _parse_script_class_iterate(p_context, existed_class_info, class_obj);
+        // The legacy module tag lookup above is inherited. Runtime discovery
+        // must not mistake an unregistered intermediate JavaScript class for
+        // either a native endpoint or its already loaded script ancestor.
+        const v8::Maybe<bool> own_base_module = dt_base_obj->HasOwnProperty(p_context, jsb_symbol(environment, ClassModuleId));
+        const bool runtime_native_base = dt_base_obj == environment->get_native_class(native_class_id)->clazz.Get(isolate);
+        const bool runtime_script_base = own_base_module.FromMaybe(false) && dt_base_tag->IsString()
+            && existed_class_info->base_script_module_id != StringName();
+        existed_class_info->runtime_base_script_module_id = runtime_native_base ? StringName()
+            : runtime_script_base ? existed_class_info->base_script_module_id : StringName();
+        bool runtime_exports_complete = false;
+        const bool parsed = _parse_script_class_iterate(p_context, existed_class_info, class_obj, runtime_exports_complete);
+        existed_class_info->runtime_metadata_ready = parsed && runtime_exports_complete && !own_base_module.IsNothing()
+            && (runtime_native_base || runtime_script_base) && existed_class_info->runtime_metadata_revision != 0;
+        return parsed;
     }
 
 }

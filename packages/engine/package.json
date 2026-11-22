@@ -160,6 +160,10 @@
     "./runtime-binding-source": {
       "types": "./dist/runtime-binding-source.d.ts",
       "import": "./dist/runtime-binding-source.js"
+    },
+    "./browser/dedicated/worker-runtime-properties": {
+      "types": "./dist/browser/dedicated/worker-runtime-properties.d.ts",
+      "import": "./dist/browser/dedicated/worker-runtime-properties.js"
     }
   },
   "files": [

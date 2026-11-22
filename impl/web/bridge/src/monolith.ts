@@ -1,3 +1,12 @@
+// Capture codecs before project code can replace globals or prototypes.
+const runtime_utf8_encoder = typeof TextEncoder === "function" ? new TextEncoder() : undefined;
+const runtime_utf8_decoder = typeof TextDecoder === "function" ? new TextDecoder("utf-8", {fatal: true, ignoreBOM: true}) : undefined;
+const runtime_encode_utf8 = runtime_utf8_encoder?.encode.bind(runtime_utf8_encoder);
+const runtime_decode_utf8 = runtime_utf8_decoder?.decode.bind(runtime_utf8_decoder);
+const runtime_char_code_at = Function.prototype.call.bind(String.prototype.charCodeAt) as (value: string, index: number) => number;
+const runtime_slice_bytes = Function.prototype.call.bind(Uint8Array.prototype.slice) as (value: Uint8Array, start: number, end: number) => Uint8Array;
+const runtime_set_bytes = Function.prototype.call.bind(Uint8Array.prototype.set) as (value: Uint8Array, bytes: Uint8Array, offset: number) => void;
+
 // -1 for return value to indicate an error thrown in jsbb_Engine internally (not JS throw)
 type ResultValue = number;
 
@@ -658,6 +667,47 @@ class jsbb_Engine {
         _jsbb_.wasmop.stringToUTF8(str, buf, size);
         jsbb_console.trace("alloc.CString", str, buf, size);
         return buf;
+    }
+
+    // Narrow, non-coercing primitives for explicit runtime property access.
+    RuntimeNumberValue(stack_pos: StackPosition): number {
+        const value = this._stack.GetValue(stack_pos);
+        return typeof value === "number" ? value : 0 / 0;
+    }
+
+    RuntimeBooleanValue(stack_pos: StackPosition): boolean {
+        return this._stack.GetValue(stack_pos) === true;
+    }
+
+    RuntimeToCStringLen(o_size: Pointer, str_sp: StackPosition): Pointer {
+        const value = this._stack.GetValue(str_sp);
+        const reject = (reason: number) => { _jsbb_.i32[o_size >>> 2] = reason; return 0; };
+        if (typeof value !== "string") return reject(-1);
+        if (value.length > 1024) return reject(-2);
+        for (let i = 0; i < value.length; i++) {
+            const ch = runtime_char_code_at(value, i);
+            if (ch >= 0xd800 && ch <= 0xdbff) {
+                const next = runtime_char_code_at(value, ++i);
+                if (!(next >= 0xdc00 && next <= 0xdfff)) return reject(-3);
+            } else if (ch >= 0xdc00 && ch <= 0xdfff) return reject(-3);
+        }
+        if (!runtime_encode_utf8) return reject(-3);
+        const bytes = runtime_encode_utf8(value);
+        if (bytes.byteLength > 1024) return reject(-2);
+        _jsbb_.i32[o_size >>> 2] = bytes.byteLength;
+        if (!bytes.byteLength) return 0;
+        const pointer = _jsbb_.wasmop._malloc(bytes.byteLength);
+        if (!pointer) return reject(-3);
+        runtime_set_bytes(_jsbb_.u8, bytes, pointer >>> 0);
+        return pointer;
+    }
+
+    RuntimeNewString(pointer: Pointer, length: number): StackPosition {
+        if (!runtime_decode_utf8 || length < 0 || length > 1024) return jsbb_StackPos.Error;
+        try {
+            // Explicit byte interval: UTF8ToString stops at embedded NUL.
+            return this._stack.Push(runtime_decode_utf8(runtime_slice_bytes(_jsbb_.u8, pointer >>> 0, (pointer >>> 0) + length)));
+        } catch { return jsbb_StackPos.Error; }
     }
 
     /** push the given value as string on the stack */
