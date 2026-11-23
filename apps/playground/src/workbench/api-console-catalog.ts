@@ -7,6 +7,7 @@ export const MAX_CONSOLE_READ_PROPERTIES = 16;
 export type LocalConsoleOperation = 'check' | 'wait_for_event' | 'describe_runtime_properties' |
   'read_runtime_properties' | 'game_input' | 'wait_for_input';
 export type ConsoleOperationId = SummerOperation | LocalConsoleOperation;
+export const DEFAULT_CONSOLE_OPERATION: ConsoleOperationId = 'engine.get_project_context';
 export type ConsoleBinding = 'none' | 'project' | 'main' | 'runtime' | 'explicit';
 
 /** Sources are selected from real responses by the session; no placeholder IDs are generated here. */

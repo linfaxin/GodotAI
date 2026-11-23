@@ -1,11 +1,19 @@
 import { fileIcon, icon } from './file-icons.js';
+import { DEFAULT_CONSOLE_OPERATION, type ConsoleOperationId } from './api-console-catalog';
 const dockTabs = ['problems', 'console', 'debug'] as const;
 type DockTab = (typeof dockTabs)[number];
+type EditorTab = { kind: 'file'; id: string } | { kind: 'api'; id: ConsoleOperationId };
 interface Preferences { sidebar: boolean; ratio: number; dockHeight: number; collapsed: boolean; tab: DockTab; }
 const preferenceKey = 'godotjs-workbench-v1';
 const defaults: Preferences = { sidebar: true, ratio: 52, dockHeight: 178, collapsed: false, tab: 'console' };
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
-export function createWorkbench(options: { selectFile(path: string): void; focusEditor(): void; layoutEditor?(): void; toast(message: string): void }) {
+export function createWorkbench(options: {
+  selectFile(path: string): void;
+  focusEditor(): void;
+  layoutEditor?(): void;
+  showApi?(operationId: ConsoleOperationId | null): void;
+  toast(message: string): void;
+}) {
   const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
   let saved: Partial<Preferences> = {};
   try { saved = JSON.parse(localStorage.getItem(preferenceKey) ?? '{}') ?? {}; } catch {}
@@ -20,8 +28,9 @@ export function createWorkbench(options: { selectFile(path: string): void; focus
   const stacked = () => mobile.matches && !(innerWidth >= 620 && innerHeight < 560);
   let compact = innerHeight < 560;
   if (compact) prefs.collapsed = true;
-  let focused = false, autoscroll = true, tabs: string[] = [], files: string[] = [], selected = '';
-  let leftMode: 'code' | 'api' = 'code';
+  let focused = false, autoscroll = true, tabs: EditorTab[] = [], selectedFile = '';
+  let activeApi: ConsoleOperationId | null = null;
+  let lastApi: ConsoleOperationId = DEFAULT_CONSOLE_OPERATION;
   let previewCanStop = false;
   let replayCanStop = false;
   function syncStopButton() {
@@ -31,17 +40,37 @@ export function createWorkbench(options: { selectFile(path: string): void; focus
     previewCanStop = value;
     syncStopButton();
   }
-  function setLeftMode(mode: 'code' | 'api', focus = false) {
-    leftMode = mode;
-    $('code-pane').hidden = mode !== 'code';
-    $('api-console-pane').hidden = mode !== 'api';
-    $('left-mode-code').setAttribute('aria-pressed', String(mode === 'code'));
-    $('left-mode-api').setAttribute('aria-pressed', String(mode === 'api'));
-    $('check').hidden = mode === 'api';
-    document.body.dataset.leftMode = mode;
+  function updateEditorPane() {
+    if (activeApi === null) options.showApi?.(null);
+    $('code-pane').hidden = activeApi !== null;
+    $('api-console-pane').hidden = activeApi === null;
+    $('check').hidden = activeApi !== null;
+    document.body.dataset.leftMode = activeApi ? 'api' : 'code';
     focusPreview(false);
-    if (mode === 'code') { options.layoutEditor?.(); if (focus) options.focusEditor(); }
-    else if (focus) $('api-console-pane').querySelector<HTMLTextAreaElement>('textarea')?.focus();
+    if (activeApi && mobile.matches) sidebar(false);
+    if (activeApi) options.showApi?.(activeApi);
+    else options.layoutEditor?.();
+  }
+  function showCode() {
+    activeApi = null;
+    updateEditorPane();
+    renderTabs();
+  }
+  function openApi(operationId: ConsoleOperationId, focus = true) {
+    if (!options.showApi) return;
+    if (!tabs.some(tab => tab.kind === 'api' && tab.id === operationId)) tabs.push({kind: 'api', id: operationId});
+    activeApi = lastApi = operationId;
+    updateEditorPane();
+    renderTabs();
+    if (focus) document.getElementById(`api-tab-${operationId}`)?.focus({preventScroll: true});
+  }
+  function activateTab(tab: EditorTab, focus: boolean) {
+    if (tab.kind === 'api') openApi(tab.id, focus);
+    else {
+      showCode();
+      options.selectFile(tab.id);
+      if (focus) options.focusEditor();
+    }
   }
   const persist = () => { try { localStorage.setItem(preferenceKey, JSON.stringify(prefs)); } catch {} };
   function syncSidebar() {
@@ -128,30 +157,62 @@ export function createWorkbench(options: { selectFile(path: string): void; focus
   }
   new ResizeObserver(fitCanvas).observe($('preview-body'));
   function renderTabs() {
-    $('tabs').replaceChildren();
-    for (const path of tabs) {
-      const group = document.createElement('div'); group.className = 'editor-tab' + (path === selected ? ' active' : '');
-      const button = document.createElement('button'); button.type = 'button'; button.setAttribute('role', 'tab'); button.setAttribute('aria-selected', String(path === selected)); button.tabIndex = path === selected ? 0 : -1; button.title = path;
-      const label = document.createElement('span'); label.className = 'tab-name'; label.textContent = path.split('/').at(-1)!; button.append(fileIcon(path), label);
-      button.onclick = () => { focusPreview(false); options.selectFile(path); options.focusEditor(); };
-      button.onkeydown = event => { if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return; event.preventDefault(); const index = (tabs.indexOf(path) + (event.key === 'ArrowLeft' ? -1 : 1) + tabs.length) % tabs.length; options.selectFile(tabs[index]); $('tabs').querySelector<HTMLElement>('[aria-selected="true"]')?.focus(); };
-      const close = document.createElement('button'); close.className = 'icon-button close-tab'; close.append(icon('close')); close.title = '关闭标签页 ' + label.textContent; close.setAttribute('aria-label', close.title); close.disabled = tabs.length === 1;
-      close.onclick = () => { const index = tabs.indexOf(path); tabs = tabs.filter(value => value !== path); if (selected === path) options.selectFile(tabs[Math.min(index, tabs.length - 1)] ?? files[0]); else renderTabs(); };
-      group.append(button, close); $('tabs').append(group);
+    const tabList = $('tabs');
+    const focusedTab = tabList.querySelector<HTMLButtonElement>('[role="tab"][aria-selected="true"]:focus');
+    tabList.replaceChildren();
+    for (const [index, tab] of tabs.entries()) {
+      const active = tab.kind === 'api' ? tab.id === activeApi : activeApi === null && tab.id === selectedFile;
+      const group = document.createElement('div'); group.className = 'editor-tab' + (active ? ' active' : '');
+      const button = document.createElement('button'); button.type = 'button'; button.setAttribute('role', 'tab'); button.setAttribute('aria-selected', String(active)); button.tabIndex = active ? 0 : -1; button.title = tab.id;
+      const label = document.createElement('span'); label.className = 'tab-name';
+      if (tab.kind === 'file') {
+        button.dataset.fileTab = tab.id;
+        label.textContent = tab.id.split('/').at(-1)!;
+        button.append(fileIcon(tab.id));
+      } else {
+        button.dataset.apiTab = tab.id;
+        button.id = `api-tab-${tab.id}`;
+        button.setAttribute('aria-controls', `api-card-${tab.id}`);
+        label.textContent = button.title = `API: ${tab.id}`;
+      }
+      button.append(label);
+      button.onclick = () => activateTab(tab, true);
+      button.onkeydown = event => {
+        if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+        event.preventDefault();
+        const next = (index + (event.key === 'ArrowLeft' ? -1 : 1) + tabs.length) % tabs.length;
+        activateTab(tabs[next], false);
+        $('tabs').querySelector<HTMLElement>('[aria-selected="true"]')?.focus();
+      };
+      const close = document.createElement('button'); close.className = 'icon-button close-tab'; close.append(icon('close')); close.title = '关闭标签页 ' + label.textContent; close.setAttribute('aria-label', close.title);
+      close.disabled = tab.kind === 'file' && tabs.length === 1;
+      close.onclick = () => {
+        tabs.splice(index, 1);
+        if (!active) { renderTabs(); return; }
+        const next = tabs[Math.min(index, tabs.length - 1)];
+        if (next) activateTab(next, true);
+        else if (selectedFile) activateTab({kind: 'file', id: selectedFile}, true);
+        else showCode();
+      };
+      group.append(button, close); tabList.append(group);
     }
-    $('file-path').textContent = selected.replace(/^\//, '');
-    $('file-path').title = selected;
-    $('language-tag').textContent = selected.split('.').at(-1)?.toUpperCase() ?? 'FILE';
-    $('tabs').querySelector('.active')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    $('file-path').textContent = selectedFile.replace(/^\//, '');
+    $('file-path').title = selectedFile;
+    $('language-tag').textContent = selectedFile.split('.').at(-1)?.toUpperCase() ?? 'FILE';
+    tabList.querySelector('.active')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    if (focusedTab) {
+      const selectedTab = tabList.querySelector<HTMLButtonElement>('[role="tab"][aria-selected="true"]');
+      if (selectedTab && selectedTab.dataset.apiTab === focusedTab.dataset.apiTab && selectedTab.dataset.fileTab === focusedTab.dataset.fileTab) {
+        selectedTab.focus({preventScroll: true});
+      }
+    }
   }
   $('open-files').onclick = () => { if (focused) focusPreview(false); sidebar(true); };
   $('toggle-files').onclick = toggleSidebar;
   $('share-menu').onclick = () => $('share').click();
   $('close-sidebar').onclick = () => sidebar(false); $('sidebar-backdrop').onclick = () => sidebar(false);
   $('focus-preview').onclick = () => focusPreview();
-  $('left-mode-code').onclick = () => setLeftMode('code', true);
-  $('left-mode-api').onclick = () => setLeftMode('api', true);
-  $('debug-open-console').onclick = () => setLeftMode('api', true);
+  $('debug-open-console').onclick = () => openApi(lastApi);
   for (const [index, tab] of dockTabs.entries()) {
     const button = $(tab + '-tab');
     button.onclick = () => { if (prefs.tab === tab && !prefs.collapsed) { prefs.collapsed = true; dock(); } else dock(tab, true); };
@@ -195,15 +256,21 @@ export function createWorkbench(options: { selectFile(path: string): void; focus
   resizeVariables(); dock();
   return {
     toggleFiles: toggleSidebar,
-    leftMode: () => leftMode,
-    setLeftMode,
-    showCode: () => setLeftMode('code'),
+    leftMode: () => activeApi ? 'api' as const : 'code' as const,
+    openApi,
+    showCode,
     exitPreview: () => focusPreview(false),
-    syncFiles(paths: string[], active: string) { files = paths; selected = active; tabs = tabs.filter(path => paths.includes(path)); if (active && !tabs.includes(active)) tabs.push(active); $('file-count').textContent = String(paths.length); renderTabs(); },
-    resetTabs() { tabs = []; $<HTMLInputElement>('file-search').value = ''; focusPreview(false); if (mobile.matches) sidebar(false); },
-    renameFile(old: string, path: string) { tabs = tabs.map(value => value === old ? path : value); },
-    filePicked() { setLeftMode('code'); if (mobile.matches) sidebar(false); },
-    runStarted() { if (mobile.matches && leftMode === 'code') focusPreview(true); },
+    syncFiles(paths: string[], active: string) {
+      const selectedChanged = selectedFile !== active;
+      selectedFile = active;
+      tabs = tabs.filter(tab => tab.kind === 'api' || paths.includes(tab.id));
+      if (active && (!activeApi || selectedChanged) && !tabs.some(tab => tab.kind === 'file' && tab.id === active)) tabs.push({kind: 'file', id: active});
+      $('file-count').textContent = String(paths.length); renderTabs();
+    },
+    resetTabs() { tabs = tabs.filter(tab => tab.kind === 'api'); selectedFile = ''; $<HTMLInputElement>('file-search').value = ''; focusPreview(false); if (mobile.matches) sidebar(false); },
+    renameFile(old: string, path: string) { tabs = tabs.map(tab => tab.kind === 'file' && tab.id === old ? {kind: 'file', id: path} : tab); },
+    filePicked() { showCode(); if (mobile.matches) sidebar(false); },
+    runStarted() { if (mobile.matches && activeApi === null) focusPreview(true); },
     logAdded,
     clearLogs() { $('no-logs').hidden = true; },
     showProblems() { dock(prefs.tab === 'debug' ? 'debug' : 'problems', true); focusPreview(false); },

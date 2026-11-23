@@ -1,5 +1,5 @@
 import type {PlaygroundApi} from '../playground-api';
-import {getConsoleOperation, MAX_CONSOLE_READ_PROPERTIES} from './api-console-catalog.ts';
+import {DEFAULT_CONSOLE_OPERATION, getConsoleOperation, MAX_CONSOLE_READ_PROPERTIES} from './api-console-catalog.ts';
 import type {
   ConsoleAnchor, ConsoleAttachment, ConsoleCall, ConsoleEnvironment, ConsoleFillSelection,
   ConsoleGate, ConsoleHooks, ConsoleOwner, ConsoleResultFacts, ConsoleSession, ConsoleSnapshot, ConsoleToken,
@@ -140,14 +140,15 @@ export function consoleResultSource(operationId: string, facts: ConsoleResultFac
 }
 
 export function createApiConsoleSession(api: PlaygroundApi, hooks: ConsoleHooks, gate: ConsoleGate): ConsoleSession {
-  let operationId='engine.get_project_context', disposed=false, sequence=0;
+  let operationId:string=DEFAULT_CONSOLE_OPERATION, disposed=false, sequence=0;
   const drafts=new Map<string,ConsoleCall['draft']>(),history:ConsoleCall[]=[],attachments=new Map<string,ConsoleAttachment>();
   const listeners=new Set<()=>void>();
-  let clientError:ConsoleSnapshot['clientError'];
+  const clientErrors=new Map<string,NonNullable<ConsoleSnapshot['clientError']>>();
   let pending:{callId:string;controller?:AbortController}|undefined;
   function environment():ConsoleEnvironment{return copy(hooks.readContext());}
   function emit(){if(!disposed)notify(listeners);}
-  function error(kind:NonNullable<ConsoleSnapshot['clientError']>['kind'],message:string){clientError={kind,message};emit();}
+  function error(kind:NonNullable<ConsoleSnapshot['clientError']>['kind'],message:string,id=operationId){clientErrors.set(id,{kind,message});emit();}
+  function clearError(){clientErrors.delete(operationId);}
   function draft(){
     let value=drafts.get(operationId);
     if(!value){const context=environment();const preset=getConsoleOperation(operationId)!.createPreset(context.anchor);
@@ -192,19 +193,19 @@ export function createApiConsoleSession(api: PlaygroundApi, hooks: ConsoleHooks,
   const unsubscribeContext=hooks.subscribeContext(emit),unsubscribeGate=gate.subscribe(emit);
   draft();
   return {
-    snapshot(){return {operationId,draft:copy(draft()),environment:environment(),owner:gate.owner(),history:copy(history),
+    snapshot(){const clientError=clientErrors.get(operationId);return {operationId,draft:copy(draft()),environment:environment(),owner:gate.owner(),history:copy(history),
       ...(pending?{pendingCallId:pending.callId}:{}),cancellable:!!pending?.controller,...(clientError?{clientError:copy(clientError)}:{})};},
     subscribe(listener){listeners.add(listener);return()=>{listeners.delete(listener);};},
-    selectOperation(id){if(disposed||!getConsoleOperation(id))return;operationId=id;draft();clientError=undefined;emit();},
-    updateDraft(inputText){if(disposed)return;draft().inputText=inputText;clientError=undefined;emit();},
-    loadPreset(id,inputText){if(disposed||!getConsoleOperation(id))return;operationId=id;drafts.set(id,{operationId:id,inputText,anchor:environment().anchor});clientError=undefined;emit();},
-    loadHistory(callId){const call=history.find(item=>item.callId===callId);if(disposed||!call)return;operationId=call.draft.operationId;drafts.set(operationId,copy(call.draft));clientError=undefined;emit();},
+    selectOperation(id){if(disposed||!getConsoleOperation(id))return;operationId=id;draft();emit();},
+    updateDraft(inputText){if(disposed)return;draft().inputText=inputText;clearError();emit();},
+    loadPreset(id,inputText){if(disposed||!getConsoleOperation(id))return;operationId=id;drafts.set(id,{operationId:id,inputText,anchor:environment().anchor});clearError();emit();},
+    loadHistory(callId){const call=history.find(item=>item.callId===callId);if(disposed||!call)return;operationId=call.draft.operationId;drafts.set(operationId,copy(call.draft));clearError();emit();},
     updateTarget(selection){
       if(disposed)return;
-      clientError=undefined;
-      const input=parsed();if(clientError)return;
+      clearError();
+      const input=parsed();if(clientErrors.has(operationId))return;
       const current=environment(),id=operationId;
-      if(id.startsWith('engine.')&&!selection){draft().anchor=current.anchor;clientError=undefined;emit();return;}
+      if(id.startsWith('engine.')&&!selection){draft().anchor=current.anchor;emit();return;}
       if(!object(input)){error('missing_source','更新目标需要 input 对象；原文已保留');return;}
       const source=selection?history.find(call=>call.callId===selection.sourceCallId)?.resultFacts:undefined;
       if(selection&&!source){error('missing_source','来源记录已释放或没有可填参事实');return;}
@@ -256,11 +257,11 @@ export function createApiConsoleSession(api: PlaygroundApi, hooks: ConsoleHooks,
         if(!node||!source?.run){missing('请从运行树选择实际节点');return;}
         next.path=node.path;
       }
-      draft().inputText=JSON.stringify(next,null,2);draft().anchor=copy(anchor);clientError=undefined;emit();
+      draft().inputText=JSON.stringify(next,null,2);draft().anchor=copy(anchor);emit();
     },
     async submit(){
       if(disposed)return;
-      clientError=undefined;const input=parsed();if(clientError)return;
+      clearError();const input=parsed();if(clientErrors.has(operationId))return;
       const token=gate.acquire('manual');if(!token){error('missing_source','另一个调用或自动验证尚未结束');return;}
       let call:ConsoleCall|undefined;
       try {
@@ -285,12 +286,13 @@ export function createApiConsoleSession(api: PlaygroundApi, hooks: ConsoleHooks,
     cancel(){pending?.controller?.abort();},
     async openExample(){
       if(disposed)return;const token=gate.acquire('open-example');if(!token){error('missing_source','调用或自动验证结束后才能打开示例');return;}
-      clientError=undefined;
-      try{await hooks.openExample();}catch(caught){if(!disposed)error('missing_source',caught instanceof Error?caught.message:'打开示例失败');}
+      const id=operationId;clearError();
+      try{await hooks.openExample();}catch(caught){if(!disposed)error('missing_source',caught instanceof Error?caught.message:'打开示例失败',id);}
       finally{gate.release(token);emit();}
     },
+    hasCall(callId){return history.some(call=>call.callId===callId);},
     getAttachment(id){const attachment=attachments.get(id);return attachment?{blob:attachment.blob,metadata:copy(attachment.metadata)}:undefined;},
-    clearSettled(){for(let index=history.length-1;index>=0;index--)if(history[index].phase!=='pending')removeRow(index);clientError=undefined;emit();},
-    dispose(){if(disposed)return;disposed=true;pending?.controller?.abort();unsubscribeContext();unsubscribeGate();listeners.clear();attachments.clear();history.length=0;drafts.clear();},
+    clearSettled(){for(let index=history.length-1;index>=0;index--)if(history[index].phase!=='pending')removeRow(index);clearError();emit();},
+    dispose(){if(disposed)return;disposed=true;pending?.controller?.abort();unsubscribeContext();unsubscribeGate();listeners.clear();attachments.clear();history.length=0;drafts.clear();clientErrors.clear();},
   };
 }

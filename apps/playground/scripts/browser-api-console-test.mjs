@@ -5,7 +5,7 @@ import {build} from 'esbuild';
 import {launchBrowser} from './browser-harness.mjs';
 import {createStaticServer} from './serve.mjs';
 import {runReportedBrowserTest, listenBrowserTestServer as listen, closeBrowserTestServer as close} from './browser-contract-report.mjs';
-import {consoleElement as element, invokeConsole, consoleResult, summerResult, readConsolePng} from './api-console-browser-helpers.mjs';
+import {consoleElement as element, openConsoleOperation, viewConsoleCall, invokeConsole, consoleResult, summerResult, readConsolePng} from './api-console-browser-helpers.mjs';
 
 const app = fileURLToPath(new URL('../', import.meta.url));
 const scope = 'controlled-api-console';
@@ -57,10 +57,10 @@ await runReportedBrowserTest({scope, reportFile: process.env.PLAYGROUND_API_CONS
     });
     fixture.setReply('game_input',input=>{if(input.gesture.code==='ArrowDown')x=64;else if(input.gesture.code==='ArrowRight')x+=moveStep;return ok({operationId:'input-'+(++inputSerial)});});
     fixture.setReply('wait_for_input',async input=>ok({operation:{run:identity(),operationId:input.operationId,status:'dispatched',down:'dispatched',up:'dispatched',nativeConsumption:'unconfirmed'}}));
-    const workbench=createWorkbench({selectFile(){workbench.filePicked();},focusEditor(){},toast(){}});
+    const workbench=createWorkbench({selectFile(){},focusEditor(){},showApi:id=>view.show(id),toast(){}});
     workbench.syncFiles(['/src/Player.ts'],'/src/Player.ts');
     document.querySelector('#source').textContent='source sentinel';
-    const view=createApiConsole(document.querySelector('#api-console-pane'),session);
+    const view=createApiConsole(document.querySelector('#api-console-pane'),document.querySelector('#api-list'),session,workbench.openApi);
     document.querySelector('#stop').removeAttribute('disabled');
     document.querySelector('#stop').onclick=()=>{stopCount++;if(replayToken){document.body.dataset.replayCancelled='true';return;}environment.activeRunState='exited';update();finishRead?.();};
     window.addEventListener('keydown',event=>{if(event.defaultPrevented||event.isComposing)return;if((event.ctrlKey||event.metaKey)&&event.key==='Enter'){event.preventDefault();if(workbench.leftMode()==='code')compileCount++;}});
@@ -88,17 +88,24 @@ await runReportedBrowserTest({scope, reportFile: process.env.PLAYGROUND_API_CONS
   await page.route('**/api-console.css', async route => route.fulfill({contentType: 'text/css', body: await readFile(new URL('../web/api-console.css', import.meta.url), 'utf8')}));
   test.stage = 'run';
   await page.goto(`http://127.0.0.1:${server.address().port}/`);
-  await page.locator('#left-mode-api').click();
-  await element(page, 'operation').waitFor();
+  await openConsoleOperation(page, 'engine.get_project_context');
+  await element(page, 'input').waitFor();
   const cases = [];
   async function step(name, body) { await test.step(name, async () => { await body(); cases.push(name); }); }
 
   await step('directory-drafts-shortcuts-and-modes', async () => {
-    assert.equal(await element(page, 'operation').locator('option').count(), 14);
-    assert.equal(await element(page, 'operation').locator('optgroup').count(), 2);
+    const entries = page.locator('#api-list [data-api-operation]');
+    assert.equal(await entries.count(), 14);
+    assert.equal(await page.locator('#api-list .api-list-group').count(), 2);
+    for (const entry of await entries.all()) {
+      assert.equal(await entry.locator('.api-list-name').textContent(), await entry.getAttribute('data-api-operation'));
+      const summary = entry.locator('.api-list-summary');
+      assert((await summary.textContent()).trim().length > 0);
+      assert.equal(await summary.evaluate(node => getComputedStyle(node).whiteSpace), 'nowrap');
+    }
     await element(page, 'input').fill('{invalid draft');
-    await element(page, 'operation').selectOption('engine.is_running');
-    await element(page, 'operation').selectOption('engine.get_project_context');
+    await openConsoleOperation(page, 'engine.is_running');
+    await openConsoleOperation(page, 'engine.get_project_context');
     assert.equal(await element(page, 'input').inputValue(), '{invalid draft');
     const before = await page.evaluate(() => window.consoleFixture.calls().length);
     await element(page, 'execute').click();
@@ -110,7 +117,7 @@ await runReportedBrowserTest({scope, reportFile: process.env.PLAYGROUND_API_CONS
     await element(page, 'input').dispatchEvent('compositionend');
     await element(page, 'input').press('Control+Enter');
     await page.waitForFunction(before => window.consoleFixture.calls().length === before + 1, before);
-    await element(page, 'operation').selectOption('game_input');
+    await openConsoleOperation(page, 'game_input');
     await element(page, 'input').focus();
     await page.keyboard.down('Control');
     await page.keyboard.down('Enter');
@@ -120,16 +127,56 @@ await runReportedBrowserTest({scope, reportFile: process.env.PLAYGROUND_API_CONS
     await page.keyboard.up('Control');
     const heldCalls = await page.evaluate(before => window.consoleFixture.calls().slice(before), before + 1);
     assert.deepEqual(heldCalls.map(call => call.name), ['game_input']);
-    await element(page, 'operation').selectOption('engine.get_project_context');
+    await openConsoleOperation(page, 'engine.get_project_context');
     assert.equal((await page.evaluate(() => window.consoleFixture.counts())).compileCount, 0);
-    await page.locator('#left-mode-code').click();
+    await page.locator('#tabs [data-file-tab]').first().click();
     assert.equal(await page.locator('#source').textContent(), 'source sentinel');
-    await page.locator('#left-mode-api').click();
+    await openConsoleOperation(page, 'engine.get_project_context');
     assert.equal(await element(page, 'input').inputValue(), '{}');
     await page.setViewportSize({width: 390, height: 844});
     await page.evaluate(() => window.consoleFixture.runStarted());
     assert.equal(await page.locator('body').evaluate(node => node.classList.contains('preview-focus')), false);
     await page.setViewportSize({width: 1280, height: 900});
+  });
+
+  await step('api-tabs-retain-independent-inputs-results-and-errors', async () => {
+    const a = 'engine.get_project_context', b = 'engine.is_running';
+    const first = await invokeConsole(page, a, {});
+    const second = await invokeConsole(page, b, {});
+    assert.match(await element(page, 'result-status').textContent(), new RegExp(second.callId));
+    const tab = id => page.locator(`[data-api-tab="${id}"]`);
+    assert.equal(await tab(a).textContent(), `API: ${a}`);
+    assert.equal(await tab(b).textContent(), `API: ${b}`);
+    assert.equal(await page.locator('[data-file-tab] .tab-name').first().textContent(), 'Player.ts');
+    const card = id => page.locator(`[data-api-card="${id}"]`);
+    const [aInput, bInput] = await Promise.all([a, b].map(id => card(id).getByTestId('api-console-input').getAttribute('id')));
+    assert.notEqual(aInput, bInput);
+    assert.equal(await tab(a).getAttribute('aria-controls'), await card(a).getAttribute('id'));
+    assert.equal(await card(a).isHidden(), true);
+    assert.equal(await card(b).isVisible(), true);
+    await page.locator(`[data-api-operation="${a}"]`).click();
+    assert.equal(await tab(a).count(), 1);
+    assert.match(await element(page, 'result-status').textContent(), new RegExp(first.callId));
+    await element(page, 'input').fill('{bad draft');
+    await element(page, 'execute').click();
+    assert.match(await element(page, 'client-error').textContent(), /JSON/);
+    await tab(a).press('ArrowRight');
+    assert.equal(await tab(b).getAttribute('aria-selected'), 'true');
+    assert.equal(await element(page, 'client-error').isHidden(), true);
+    await element(page, 'input').fill('{"b":true}');
+    await tab(b).locator('..').locator('.close-tab').click();
+    assert.equal(await tab(b).count(), 0);
+    await openConsoleOperation(page, a);
+    assert.equal(await element(page, 'input').inputValue(), '{bad draft');
+    assert.match(await element(page, 'client-error').textContent(), /JSON/);
+    const callsBefore = await page.evaluate(() => window.consoleFixture.calls().length);
+    await openConsoleOperation(page, b);
+    assert.equal(await element(page, 'input').inputValue(), '{"b":true}');
+    assert.match(await element(page, 'result-status').textContent(), new RegExp(second.callId));
+    await element(page, 'history').locator(`[data-call-id="${first.callId}"] [data-action="load-history"]`).click();
+    assert.equal(await tab(a).getAttribute('aria-selected'), 'true');
+    assert.equal(await element(page, 'input').inputValue(), '{}');
+    assert.equal(await page.evaluate(() => window.consoleFixture.calls().length), callsBefore);
   });
 
   const path = '/root/Main/Player';
@@ -138,10 +185,12 @@ await runReportedBrowserTest({scope, reportFile: process.env.PLAYGROUND_API_CONS
     assert.equal(played.state, 'pending');
     const waited = consoleResult((await invokeConsole(page, 'wait_for_event', {attemptId: played.attemptId, until: 'running'})).reply);
     assert.equal(waited.outcome, 'reached');
-    const tree = summerResult((await invokeConsole(page, 'engine.get_runtime_tree', {depth: 3, limit: 500})).reply);
+    const {callId: treeCall, reply: treeReply} = await invokeConsole(page, 'engine.get_runtime_tree', {depth: 3, limit: 500});
+    const tree = summerResult(treeReply);
     assert.equal(tree.nodes[0].path, path);
     const sourceCount = await page.evaluate(() => window.consoleFixture.calls().length);
-    await element(page, 'operation').selectOption('describe_runtime_properties');
+    await openConsoleOperation(page, 'describe_runtime_properties');
+    await viewConsoleCall(page, treeCall);
     await element(page, 'source-node').selectOption(path);
     await element(page, 'use-result').click();
     assert.deepEqual(JSON.parse(await element(page, 'input').inputValue()), {
@@ -153,12 +202,12 @@ await runReportedBrowserTest({scope, reportFile: process.env.PLAYGROUND_API_CONS
     await invokeConsole(page, 'engine.runtime_set', {path, property: 'position', value: 'Vector2(192, 256)'});
     const after = summerResult((await invokeConsole(page, 'engine.inspect_runtime_node', {path})).reply);
     assert.equal(after.properties[0].value.x, 192);
-    await page.locator('.api-console-lessons summary').click();
+    await element(page, 'lessons').locator('summary').click();
     const beforeLesson = await page.evaluate(() => window.consoleFixture.calls().length);
-    await page.locator('[data-testid="api-console-lesson-step"][data-lesson-id="gameplay-properties"][data-step-id="set-health"]').click();
+    await element(page, 'lessons').locator('[data-testid="api-console-lesson-step"][data-lesson-id="gameplay-properties"][data-step-id="set-health"]').click();
     assert.deepEqual(JSON.parse(await element(page, 'input').inputValue()), {path, property: 'health', value: 40});
     assert.equal(await page.evaluate(() => window.consoleFixture.calls().length), beforeLesson);
-    await page.locator('.api-console-lessons summary').click();
+    await element(page, 'lessons').locator('summary').click();
     const screenshot = summerResult((await invokeConsole(page, 'engine.screenshot', {target: 'game'})).reply);
     assert.equal(screenshot.bytes.kind, 'ArrayBuffer');
     assert.deepEqual((await readConsolePng(page)).pixels.movedMarker, [255, 255, 255, 255]);
@@ -193,15 +242,15 @@ await runReportedBrowserTest({scope, reportFile: process.env.PLAYGROUND_API_CONS
   });
 
   await step('stale-target-history-cancel-stop-and-replay-gate', async () => {
-    await element(page, 'operation').selectOption('engine.runtime_set');
+    await openConsoleOperation(page, 'engine.runtime_set');
     await element(page, 'input').fill(JSON.stringify({path, property: 'health', value: 40}));
     const count = await page.evaluate(() => window.consoleFixture.calls().length);
     await element(page, 'execute').click();
     assert.equal(await page.evaluate(() => window.consoleFixture.calls().length), count);
     assert.match(await element(page, 'client-error').textContent(), /变化|目标|更新/);
-    await page.locator('.api-console-lessons summary').click();
-    await page.locator('[data-lesson-id="gameplay-properties"][data-step-id="set-health"]').click();
-    await page.locator('.api-console-lessons summary').click();
+    if (!await element(page, 'lessons').evaluate(node => node.open)) await element(page, 'lessons').locator('summary').click();
+    await element(page, 'lessons').locator('[data-lesson-id="gameplay-properties"][data-step-id="set-health"]').click();
+    await element(page, 'lessons').locator('summary').click();
     await element(page, 'execute').click();
     assert.equal(await page.evaluate(() => window.consoleFixture.calls().length), count);
     assert.match(await element(page, 'client-error').textContent(), /目标已变化/);
@@ -214,11 +263,19 @@ await runReportedBrowserTest({scope, reportFile: process.env.PLAYGROUND_API_CONS
     assert.equal((await page.evaluate(() => window.consoleFixture.snapshot())).owner, 'replay');
     await page.evaluate(() => window.consoleFixture.endReplay());
     await page.evaluate(() => window.consoleFixture.holdRead());
-    await element(page, 'operation').selectOption('read_runtime_properties');
+    await openConsoleOperation(page, 'read_runtime_properties');
     await element(page, 'input').fill(JSON.stringify({runId: 'run-2', path, expectedInstanceId: '102', properties: [{name: 'health', expectedType: 'int'}]}));
     await element(page, 'execute').click();
     await page.waitForFunction(() => window.consoleFixture.snapshot().owner === 'manual');
     assert.equal(await page.locator('#stop').isDisabled(), false);
+    await openConsoleOperation(page, 'engine.get_project_context');
+    assert.equal(await element(page, 'execute').isDisabled(), true);
+    assert.equal(await element(page, 'cancel').isHidden(), true);
+    assert.match(await element(page, 'status').textContent(), /另一个 API/);
+    await element(page, 'clear-history').click();
+    assert.equal(await element(page, 'history').locator('[data-call-id]').count(), 1);
+    assert.equal(await element(page, 'history').locator('[data-phase="pending"]').count(), 1);
+    await openConsoleOperation(page, 'read_runtime_properties');
     await element(page, 'cancel').click();
     await page.waitForFunction(() => window.consoleFixture.snapshot().owner === null);
     assert.match(await element(page, 'result').textContent(), /cancelled/);
@@ -235,10 +292,18 @@ await runReportedBrowserTest({scope, reportFile: process.env.PLAYGROUND_API_CONS
     assert.equal(resources.attachments, 4);
     assert(resources.revoked > 0, 'Evicted attachments must release their object URLs');
     assert((await element(page, 'history').locator('[data-call-id]').count()) <= 20);
+    await openConsoleOperation(page, 'engine.get_project_context');
     await element(page, 'clear-history').click();
     assert.equal((await page.evaluate(() => window.consoleFixture.resources())).attachments, 0);
+    const hiddenCards = page.locator('[data-api-card][hidden]');
+    assert.equal(await hiddenCards.locator('[data-call-id], [data-source-id], img').count(), 0);
+    assert(await hiddenCards.getByTestId('api-console-result').evaluateAll(nodes => nodes.every(node => node.dataset.phase === 'empty')));
+    assert(await hiddenCards.getByTestId('api-console-call-request').evaluateAll(nodes => nodes.every(node => node.textContent === '')));
+    await openConsoleOperation(page, 'engine.screenshot');
+    assert.equal(await element(page, 'result').getAttribute('data-phase'), 'empty');
+    assert.equal(await element(page, 'history').locator('[data-call-id]').count(), 0);
     await page.evaluate(() => window.consoleFixture.holdRead());
-    await element(page, 'operation').selectOption('read_runtime_properties');
+    await openConsoleOperation(page, 'read_runtime_properties');
     await element(page, 'input').fill(JSON.stringify({runId: 'run-2', path, expectedInstanceId: '102', properties: [{name: 'health', expectedType: 'int'}]}));
     await element(page, 'execute').click();
     await page.waitForFunction(() => window.consoleFixture.snapshot().owner === 'manual');
@@ -246,33 +311,66 @@ await runReportedBrowserTest({scope, reportFile: process.env.PLAYGROUND_API_CONS
     await page.locator('#stop').click();
     await page.waitForFunction(() => window.consoleFixture.snapshot().owner === null);
     assert.equal((await page.evaluate(() => window.consoleFixture.counts())).stopCount, stopBefore + 1);
-    await element(page, 'operation').selectOption('engine.get_project_context');
+    await openConsoleOperation(page, 'engine.get_project_context');
     await element(page, 'input').fill('{}');
   });
 
-  await step('result-fill-matches-selected-operation-and-selection-survives-context-updates', async () => {
+  await step('result-fill-keeps-selection-across-tabs-for-retained-sources', async () => {
     assert.match(await element(page, 'context').innerText(), /截图与输入\s+待确认/);
-    const {reply} = await invokeConsole(page, 'engine.play', {});
+    const {callId: playCall, reply} = await invokeConsole(page, 'engine.play', {});
     const {attemptId} = summerResult(reply);
     await page.evaluate(() => {window.consoleFixture.newRun();window.consoleFixture.setContext({pendingAttemptId:null});});
-    await element(page, 'operation').selectOption('engine.stop');
+    await openConsoleOperation(page, 'engine.stop');
     assert.equal(await element(page, 'sources').isHidden(), true);
-    await element(page, 'operation').selectOption('wait_for_event');
+    await openConsoleOperation(page, 'wait_for_event');
+    await viewConsoleCall(page, playCall);
     await element(page, 'use-result').click();
     assert.equal(JSON.parse(await element(page, 'input').inputValue()).attemptId, attemptId);
 
-    const tree = summerResult((await invokeConsole(page, 'engine.get_runtime_tree', {})).reply);
+    const {callId: treeCall, reply: treeReply} = await invokeConsole(page, 'engine.get_runtime_tree', {});
+    const tree = summerResult(treeReply);
     const node = tree.nodes[0];
-    await invokeConsole(page, 'describe_runtime_properties', {runId:tree.run.runId,path:node.path,expectedInstanceId:node.instanceId,limit:17});
-    await element(page, 'operation').selectOption('read_runtime_properties');
+    await invokeConsole(page, 'engine.get_project_context', {});
+    await openConsoleOperation(page, 'engine.get_runtime_tree');
+    assert.match(await element(page, 'result-status').textContent(), new RegExp(treeCall));
+    assert.equal(await element(page, 'use-result').getAttribute('data-source-id'), treeCall);
+    const treeDraft = await element(page, 'input').inputValue();
+    await element(page, 'source-node').selectOption(node.path);
+    await openConsoleOperation(page, 'engine.get_project_context');
+    await openConsoleOperation(page, 'engine.get_runtime_tree');
+    assert.equal(await element(page, 'source-node').inputValue(), node.path);
+    assert.equal(await element(page, 'use-result').isEnabled(), true);
+    assert.equal(await element(page, 'input').inputValue(), treeDraft);
+
+    const inspection = await invokeConsole(page, 'engine.inspect_runtime_node', {path: node.path});
+    const latestTree = await invokeConsole(page, 'engine.get_runtime_tree', {});
+    await openConsoleOperation(page, 'engine.inspect_runtime_node');
+    assert.match(await element(page, 'result-status').textContent(), new RegExp(inspection.callId));
+    assert.equal(await element(page, 'sources').isHidden(), true);
+    await viewConsoleCall(page, latestTree.callId);
+    assert.match(await element(page, 'result-status').textContent(), new RegExp(latestTree.callId));
+    assert.equal(await element(page, 'use-result').getAttribute('data-source-id'), latestTree.callId);
+
+    const description = await invokeConsole(page, 'describe_runtime_properties', {runId:tree.run.runId,path:node.path,expectedInstanceId:node.instanceId,limit:17});
+    await openConsoleOperation(page, 'read_runtime_properties');
+    await viewConsoleCall(page, description.callId);
     const beforeFill = await element(page, 'input').inputValue();
     const choices = await element(page, 'source-properties').locator('option').evaluateAll(nodes => nodes.map(node => node.value));
     assert.equal(choices.length, 17);
     await element(page, 'source-properties').selectOption(choices);
+    await openConsoleOperation(page, 'engine.get_project_context');
+    await openConsoleOperation(page, 'read_runtime_properties');
+    const selectedProperties = () => element(page, 'source-properties').locator('option:checked').evaluateAll(nodes => nodes.map(node => node.value));
+    assert.deepEqual(await selectedProperties(), choices);
     assert.equal(await element(page, 'use-result').isDisabled(), true);
     assert.match(await element(page, 'source-property-limit').innerText(), /最多 16 项/);
     assert.equal(await element(page, 'input').inputValue(), beforeFill);
     await element(page, 'source-properties').selectOption(choices.slice(0,16));
+    const readTab = page.locator('[data-api-tab="read_runtime_properties"]');
+    await readTab.locator('..').locator('.close-tab').click();
+    assert.equal(await readTab.count(), 0);
+    await openConsoleOperation(page, 'read_runtime_properties');
+    assert.deepEqual(await selectedProperties(), choices.slice(0,16));
     assert.equal(await element(page, 'source-property-limit').isHidden(), true);
     await element(page, 'use-result').click();
     assert.equal(JSON.parse(await element(page, 'input').inputValue()).properties.length, 16);
@@ -287,6 +385,25 @@ await runReportedBrowserTest({scope, reportFile: process.env.PLAYGROUND_API_CONS
     });
     assert(selection.before.length > 0);
     assert.equal(selection.after, selection.before);
+
+    const stop = await invokeConsole(page, 'engine.stop', {});
+    const runId = summerResult(stop.reply).runs[0].runId;
+    await openConsoleOperation(page, 'wait_for_event');
+    await viewConsoleCall(page, stop.callId);
+    await element(page, 'source-run').selectOption(runId);
+    await openConsoleOperation(page, 'engine.get_project_context');
+    await openConsoleOperation(page, 'wait_for_event');
+    assert.equal(await element(page, 'source-run').inputValue(), runId);
+    assert.equal(await element(page, 'use-result').isEnabled(), true);
+
+    await openConsoleOperation(page, 'engine.get_project_context');
+    await element(page, 'clear-history').click();
+    const nextStop = await invokeConsole(page, 'engine.stop', {});
+    assert.equal(summerResult(nextStop.reply).runs[0].runId, runId);
+    await openConsoleOperation(page, 'wait_for_event');
+    await viewConsoleCall(page, nextStop.callId);
+    assert.equal(await element(page, 'source-run').inputValue(), '');
+    assert.equal(await element(page, 'use-result').isDisabled(), true);
   });
 
   assert.deepEqual(errors, []);

@@ -5,7 +5,7 @@ import {fileURLToPath} from 'node:url';
 import {launchBrowser, defaultTestDirectory} from './browser-harness.mjs';
 import {createStaticServer} from './serve.mjs';
 import {runReportedBrowserTest, listenBrowserTestServer as listen, closeBrowserTestServer as close} from './browser-contract-report.mjs';
-import {consoleElement as element} from './api-console-browser-helpers.mjs';
+import {consoleElement as element, openConsoleOperation} from './api-console-browser-helpers.mjs';
 
 const directory = defaultTestDirectory({shellOnly: true});
 const output = path.resolve(process.env.PLAYGROUND_API_CONSOLE_SHELL_OUT ??
@@ -62,18 +62,24 @@ await runReportedBrowserTest({scope: 'real-main-api-console-shell',
       assert.equal(initial.build, null);
     });
     await test.step('mode-and-per-operation-drafts-preserve-project', async () => {
-      await page.locator('#left-mode-api').click();
+      await openConsoleOperation(page, 'engine.get_project_context');
       assert.equal(await page.locator('#api-console-pane').isVisible(), true);
       assert.equal(await page.locator('#code-pane').isVisible(), false);
-      assert.equal(await element(page, 'operation').locator('option').count(), 14);
-      assert.equal(await element(page, 'operation').locator('optgroup').count(), 2);
+      assert.equal(await page.locator('#api-list .api-list-summary:visible').count(), 14);
+      assert.equal(await page.locator('#api-list .api-list-group').count(), 2);
+      assert(await page.locator('#api-list').evaluate(node => node.scrollWidth <= node.clientWidth));
+      assert(await page.locator('.api-list-summary').evaluateAll(nodes => nodes.every(node => node.scrollWidth <= node.clientWidth)));
       await element(page, 'input').fill('{invalid unsent API draft');
-      await element(page, 'operation').selectOption('engine.is_running');
-      await element(page, 'operation').selectOption('engine.get_project_context');
+      await openConsoleOperation(page, 'engine.is_running');
+      await openConsoleOperation(page, 'engine.get_project_context');
       assert.equal(await element(page, 'input').inputValue(), '{invalid unsent API draft');
-      await page.locator('#left-mode-code').click();
-      await page.locator('#left-mode-api').click();
+      const card = page.locator('.api-console-card:visible');
+      const beforeScroll = await card.evaluate(node => {node.scrollTop = 180; return node.scrollTop;});
+      assert(beforeScroll > 0);
+      await page.locator('#tabs [data-file-tab]').first().click();
+      await openConsoleOperation(page, 'engine.get_project_context');
       assert.equal(await element(page, 'input').inputValue(), '{invalid unsent API draft');
+      assert.equal(await card.evaluate(node => node.scrollTop), beforeScroll);
       const current = await inspect();
       assert.equal(current.revision, initial.revision);
       assert.equal(current.projectId, initial.projectId);
@@ -84,7 +90,7 @@ await runReportedBrowserTest({scope: 'real-main-api-console-shell',
       await element(page, 'input').fill('{}');
       assert.equal(await element(page, 'history').locator('[data-call-id]').count(), 0);
       await element(page, 'input').press('Control+Enter');
-      await page.waitForFunction(() => document.querySelector('[data-testid="api-console-history"] [data-phase="settled"]'));
+      await page.waitForFunction(() => document.querySelector('.api-console-card:not([hidden]) [data-testid="api-console-history"] [data-phase="settled"]'));
       assert.equal(await element(page, 'history').locator('[data-call-id]').count(), 1);
       const reply = JSON.parse(await element(page, 'result').textContent());
       assert.equal(reply.ok, true);
@@ -92,7 +98,14 @@ await runReportedBrowserTest({scope: 'real-main-api-console-shell',
       assert.equal(reply.result.data.editorRevision, initial.revision);
       assert.equal(reply.result.data.latestBuildAttemptId, null);
       assert.equal(reply.result.godotai.compatibility.payload, 'godotai-typed-v1');
-      await element(page, 'operation').focus();
+      const card = page.locator('.api-console-card:visible');
+      await element(page, 'lessons').locator('summary').click();
+      const previousScroll = await card.evaluate(node => {node.scrollTop = node.scrollHeight; return node.scrollTop;});
+      await openConsoleOperation(page, 'engine.is_running');
+      await openConsoleOperation(page, 'engine.get_project_context');
+      assert.equal(await card.evaluate(node => node.scrollTop), previousScroll);
+      assert(await card.evaluate(node => node.querySelector('textarea').getBoundingClientRect().bottom < node.getBoundingClientRect().top));
+      assert.equal(await page.evaluate(() => document.activeElement?.dataset.apiTab), 'engine.get_project_context');
       await page.keyboard.press('Control+Enter');
       assert.equal(await element(page, 'history').locator('[data-call-id]').count(), 1);
       const current = await inspect();
@@ -110,12 +123,16 @@ await runReportedBrowserTest({scope: 'real-main-api-console-shell',
       const current = await inspect();
       assert.deepEqual(current.files, initial.files);
       assert.equal(current.revision, initial.revision);
-      await page.locator('#left-mode-api').click();
+      await openConsoleOperation(page, 'engine.get_project_context');
       assert.equal(await element(page, 'input').inputValue(), '{}');
     }, {after: ['ctrl-enter-invokes-selected-context-once-without-building']});
     await test.step('mobile-api-remains-visible-and-usable', async () => {
       await page.setViewportSize({width: 390, height: 844});
-      await page.locator('.api-console-heading').scrollIntoViewIfNeeded();
+      await openConsoleOperation(page, 'engine.is_running');
+      await openConsoleOperation(page, 'engine.stop');
+      assert.equal(await page.locator('#open-files').getAttribute('aria-expanded'), 'false');
+      await openConsoleOperation(page, 'engine.get_project_context');
+      await page.locator('.api-console-card:visible .api-console-heading').scrollIntoViewIfNeeded();
       await capture('mobile-api-overview');
       await element(page, 'input').scrollIntoViewIfNeeded();
       assert.equal(await page.locator('#api-console-pane').isVisible(), true);
@@ -131,7 +148,7 @@ await runReportedBrowserTest({scope: 'real-main-api-console-shell',
       await capture('mobile-api');
       await element(page, 'input').fill('{}');
       await element(page, 'execute').click();
-      await page.waitForFunction(() => document.querySelectorAll('[data-testid="api-console-history"] [data-phase="settled"]').length === 2);
+      await page.waitForFunction(() => document.querySelectorAll('.api-console-card:not([hidden]) [data-testid="api-console-history"] [data-phase="settled"]').length === 2);
       assert.equal(JSON.parse(await element(page, 'result').textContent()).result.data.projectId, initial.projectId);
       assert.equal((await inspect()).build, null);
       await element(page, 'execute').scrollIntoViewIfNeeded();
@@ -152,9 +169,9 @@ await runReportedBrowserTest({scope: 'real-main-api-console-shell',
       try {
         await loading.goto(`http://127.0.0.1:${server.address().port}/?project=native`, {waitUntil: 'domcontentloaded'});
         await requestedCatalog;
-        await loading.locator('#left-mode-api').click();
+        await openConsoleOperation(loading, 'engine.get_project_context');
         await element(loading, 'open-example').click();
-        await loading.waitForFunction(() => document.querySelector('[data-testid="api-console-client-error"]')?.textContent.includes('工作区正在初始化'));
+        await loading.waitForFunction(() => document.querySelector('.api-console-card:not([hidden]) [data-testid="api-console-client-error"]')?.textContent.includes('工作区正在初始化'));
         assert.match(await element(loading, 'client-error').textContent(), /工作区正在初始化/);
         const state = await loading.evaluate(() => ({project: window.__playgroundWorkbench.inspect().project,
           context: window.godotPlayground.get_project_context().result}));
@@ -164,10 +181,18 @@ await runReportedBrowserTest({scope: 'real-main-api-console-shell',
         assert.equal(await element(loading, 'history').locator('[data-call-id]').count(), 0);
         const filename = path.join(output, 'initializing-example-client-error.png');
         await loading.screenshot({path: filename}); screenshots.push(filename);
+        await openConsoleOperation(loading, 'engine.is_running');
+        await openConsoleOperation(loading, 'engine.get_project_context');
+        const focusedApi = () => loading.evaluate(() => document.activeElement?.dataset.apiTab);
+        assert.equal(await focusedApi(), 'engine.get_project_context');
         releaseCatalog();
         await loading.waitForFunction(() => window.__playgroundWorkbench?.inspect().project &&
           document.querySelector('#saved')?.textContent === '已自动保存', null, {timeout: 120000});
         assert.equal((await loading.evaluate(() => window.godotPlayground.get_project_context().result)).projectId, 'native');
+        assert.equal(await focusedApi(), 'engine.get_project_context');
+        await loading.keyboard.press('ArrowRight');
+        assert.equal(await focusedApi(), 'engine.is_running');
+        assert.equal(await loading.locator('[data-api-tab="engine.is_running"]').getAttribute('aria-selected'), 'true');
       } finally {
         releaseCatalog();
         await loading.close();
@@ -190,7 +215,7 @@ await runReportedBrowserTest({scope: 'real-main-api-console-shell',
       assert.equal(await settled.count(), previousCalls);
       await element(page, 'input').fill('{}');
       await element(page, 'execute').click();
-      await page.waitForFunction(count => document.querySelectorAll('[data-testid="api-console-history"] [data-phase="settled"]').length === count, previousCalls + 1);
+      await page.waitForFunction(count => document.querySelectorAll('.api-console-card:not([hidden]) [data-testid="api-console-history"] [data-phase="settled"]').length === count, previousCalls + 1);
       assert.equal(JSON.parse(await element(page, 'result').textContent()).ok, true);
     }, {after: ['opening-example-during-workspace-loading-is-a-client-error']});
     await test.step('no-page-or-console-errors', async () => {

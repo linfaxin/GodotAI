@@ -5,7 +5,7 @@ import path from 'node:path';
 import {defaultTestDirectory, launchBrowser, withAcceptanceContext} from './browser-harness.mjs';
 import {createStaticServer} from './serve.mjs';
 import {runReportedBrowserTest, listenBrowserTestServer as listen, closeBrowserTestServer as close} from './browser-contract-report.mjs';
-import {consoleElement as element, invokeConsole, submitConsole, consoleResult, summerResult, readConsolePng} from './api-console-browser-helpers.mjs';
+import {consoleElement as element, openConsoleOperation, viewConsoleCall, invokeConsole, submitConsole, consoleResult, summerResult, readConsolePng} from './api-console-browser-helpers.mjs';
 
 const scope = 'actual-product-api-console';
 const reportFile = path.resolve(process.env.PLAYGROUND_API_CONSOLE_REAL_REPORT ?? 'work/api-console-real/report.json');
@@ -56,14 +56,20 @@ await runReportedBrowserTest({scope, reportFile, run: async test => {
     calls.push({operationId, input, ...value}); return value;
   }
   async function fillFrom(sourceCallId, operationId, field, selection) {
-    await element(page, 'operation').selectOption(operationId);
-    await element(page, 'history').locator(`[data-call-id="${sourceCallId}"] [data-action="view-history"]`).click();
+    await openConsoleOperation(page, operationId);
+    await viewConsoleCall(page, sourceCallId);
+    assert.equal(await element(page, 'use-result').getAttribute('data-source-id'), sourceCallId);
     await element(page, field).selectOption(selection);
+    await openConsoleOperation(page, 'engine.get_project_context');
+    await openConsoleOperation(page, operationId);
+    assert.equal(await element(page, 'use-result').getAttribute('data-source-id'), sourceCallId);
+    const selected = await element(page, field).locator('option:checked').evaluateAll(options => options.map(option => option.value));
+    assert.deepEqual(selected, Array.isArray(selection) ? selection : [selection]);
     await element(page, 'use-result').click();
     assert.equal(await element(page, 'client-error').textContent(), '');
   }
   async function loadLesson(lesson, step) {
-    const lessons = page.locator('.api-console-lessons');
+    const lessons = element(page, 'lessons');
     if (!await lessons.evaluate(node => node.open)) await lessons.locator('summary').click();
     await lessons.locator(`[data-lesson-id="${lesson}"][data-step-id="${step}"]`).click();
   }
@@ -170,7 +176,7 @@ await runReportedBrowserTest({scope, reportFile, run: async test => {
 
   test.stage = 'run';
   await page.goto(`http://127.0.0.1:${editor.address().port}${prefix}?project=native&presentationBackend=direct&previewOrigin=${encodeURIComponent(`http://127.0.0.1:${preview.address().port}${prefix}`)}`, {waitUntil: 'domcontentloaded'});
-  await ready(); await page.locator('#left-mode-api').click();
+  await ready(); await openConsoleOperation(page, 'engine.get_project_context');
   await test.step('summer-position-through-page', async () => {
     await openExample();
     await call('engine.get_project_context', {});
