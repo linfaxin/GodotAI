@@ -1,0 +1,95 @@
+import type {GameScreenshot} from '@godot-js/engine/browser/dedicated/worker-runner';
+import type {WorkerRunIdentity} from '@godot-js/engine/browser/dedicated/worker-protocol';
+import type {RunnerState} from '@godot-js/engine/browser/protocol';
+import type {RuntimeType} from '@godot-js/engine/browser/dedicated/worker-runtime-properties';
+
+export interface ConsoleAnchor {
+  editorProjectId: string | null;
+  editorRevision: number | null;
+  activeRunId: string | null;
+  activeRunProjectId: string | null;
+  activeRunRevision: WorkerRunIdentity['revision'] | null;
+  pendingAttemptId: string | null;
+}
+export interface ConsoleCapability {supported: boolean | null; ready: boolean}
+export interface ConsoleEnvironment {
+  anchor: ConsoleAnchor;
+  activeRunState: RunnerState | null;
+  capabilities?: {
+    observation?: ConsoleCapability;
+    runtimeWrite?: ConsoleCapability;
+    runtimeProperties?: ConsoleCapability;
+    interaction?: ConsoleCapability;
+  };
+}
+export interface ConsoleDraft {operationId: string; inputText: string; anchor: ConsoleAnchor}
+export interface ConsoleResultFacts {
+  sourceCallId: string;
+  sourceAnchor: ConsoleAnchor;
+  attemptId?: string;
+  run?: {identity: WorkerRunIdentity; projectId?: string; attemptId?: string};
+  nodes?: {path: string; instanceId: string; type: string}[];
+  propertyTarget?: {runId: string; path: string; expectedInstanceId: string};
+  properties?: {name: string; type: RuntimeType}[];
+  input?: {runId: string; operationId: string};
+  stoppedRunIds?: string[];
+  truncated?: true;
+}
+export interface ConsoleCall {
+  callId: string;
+  draft: ConsoleDraft;
+  submittedAt: number;
+  settledAt?: number;
+  phase: 'pending' | 'settled' | 'thrown';
+  summary?: string;
+  resultProjection?: string;
+  resultFacts?: ConsoleResultFacts;
+  truncated?: boolean;
+  attachmentId?: string;
+  attachmentReleased?: boolean;
+}
+export type ConsoleToken = symbol;
+export type ConsoleOwner = 'manual' | 'replay' | 'open-example';
+export interface ConsoleGate {
+  acquire(owner: ConsoleOwner): ConsoleToken | undefined;
+  release(token: ConsoleToken): void;
+  owner(): ConsoleOwner | null;
+  subscribe(listener: () => void): () => void;
+}
+export interface ConsoleHooks {
+  readContext(): ConsoleEnvironment;
+  subscribeContext(listener: () => void): () => void;
+  openExample(): Promise<string>;
+}
+export interface ConsoleFillSelection {
+  sourceCallId: string;
+  nodePath?: string;
+  propertyNames?: readonly string[];
+  stoppedRunId?: string;
+}
+export interface ConsoleSnapshot {
+  operationId: string;
+  draft: ConsoleDraft;
+  environment: ConsoleEnvironment;
+  owner: ConsoleOwner | null;
+  history: readonly ConsoleCall[];
+  pendingCallId?: string;
+  cancellable: boolean;
+  clientError?: {kind: 'json' | 'stale_target' | 'wrong_project' | 'missing_source'; message: string};
+}
+export interface ConsoleAttachment {blob: Blob; metadata: Omit<GameScreenshot, 'bytes'>}
+export interface ConsoleSession {
+  snapshot(): ConsoleSnapshot;
+  subscribe(listener: () => void): () => void;
+  selectOperation(operationId: string): void;
+  updateDraft(inputText: string): void;
+  loadPreset(operationId: string, inputText: string): void;
+  loadHistory(callId: string): void;
+  updateTarget(source?: ConsoleFillSelection): void;
+  submit(): Promise<void>;
+  cancel(): void;
+  openExample(): Promise<void>;
+  getAttachment(id: string): ConsoleAttachment | undefined;
+  clearSettled(): void;
+  dispose(): void;
+}

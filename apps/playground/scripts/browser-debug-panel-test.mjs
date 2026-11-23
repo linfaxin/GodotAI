@@ -18,6 +18,7 @@ const harness = await build({
       import { createDebugPanel } from './src/workbench/debug-panel';
       import { createWorkbench } from './src/workbench/workbench';
       import { createSummerDispatcher } from './src/summer-adapter';
+      import { createConsoleGate } from './src/workbench/api-console-session';
       const workbench = createWorkbench({ selectFile() {}, focusEditor() {}, toast() {} });
       const recorder = createDebugRecorder();
       recorder.setContext({ release: { status: 'unsupported' }, preview: { status: 'unsupported' } });
@@ -32,6 +33,9 @@ const harness = await build({
       let writeEnabled = false, playerX = 64, renderSerial = 0, sampleSeq = 0;
       let propertiesEnabled=false,health=100,moveStep=64,propertySequence=0;
       let holdPropertyRead=false,propertyReadPending=false,finishPropertyRead;
+      let holdNextCheck=false,checkPending=false,finishCheck,playCalls=0,globalStops=0;
+      let holdNextSampleOpen=false,finishSampleOpen;
+      const gate=createConsoleGate();
       const player = {name: 'Player', type: 'Node2D', path: '/root/Player', parentPath: '/root', instanceId: '42'};
       function buildProject(diagnostics = [], attemptId = recorder.startBuild('fixture-project', 1)) {
         recorder.recordCompileResponse(attemptId, {
@@ -88,6 +92,16 @@ const harness = await build({
         holdPropertyRead() { holdPropertyRead=true; },
         propertyReadPending:()=>propertyReadPending,
         switchPropertyProject() { recorder.setContext({projectId:'other-project',editorRevision:2});finishPropertyRead(); },
+        holdCheck() { holdNextCheck=true;document.querySelector('#stop').disabled=false; },
+        checkPending:()=>checkPending,
+        finishCheck(){finishCheck?.();},
+        holdSampleOpen(){holdNextSampleOpen=true;},
+        sampleOpening:()=>!!finishSampleOpen,
+        finishSampleOpen(){finishSampleOpen?.();},
+        playCalls:()=>playCalls,
+        globalStops:()=>globalStops,
+        gateOwner:()=>gate.owner(),
+        canAcquireManual(){const token=gate.acquire('manual');if(token)gate.release(token);return !!token;},
         failBuild() {
           const attemptId = recorder.startBuild('fixture-project', 1);
           recorder.recordCompileResponse(attemptId, { diagnostics: [{ category: 'error', code: 2322, file: '/src/start.ts', line: 1, column: 1, message: 'fixture type error' }] });
@@ -103,10 +117,17 @@ const harness = await build({
       };
       const playground = createPlaygroundApi(recorder, {
         supportsProject: () => true,
-        check: async () => recorder.finishCheck(recorder.startCheck('fixture-project', 1), {
-          diagnostics: [{ category: 'warning', message: ${JSON.stringify(testMessage)} }],
-        }),
+        check: async () => {
+          const request=recorder.startCheck('fixture-project',1);
+          if(holdNextCheck){
+            holdNextCheck=false;checkPending=true;
+            try{await new Promise(resolve=>{finishCheck=resolve;});}
+            finally{checkPending=false;finishCheck=undefined;}
+          }
+          return recorder.finishCheck(request,{diagnostics:[{category:'warning',message:${JSON.stringify(testMessage)}}]});
+        },
         play: () => {
+          playCalls++;
           if (delayNextReplay) {
             delayNextReplay = false;
             delayedAttempt = recorder.startBuild('fixture-project', 1);
@@ -212,15 +233,27 @@ const harness = await build({
       window.godotPlayground = playground.api;
       const panel = createDebugPanel(recorder.api, playground.api);
       recorder.subscribe(panel.refresh);
-      createAgentPanel(playground, {
+      const agentPanel=createAgentPanel(playground, {
         unavailable: () => undefined,
         supportsRuntimeObservation: () => false,
         supportsRuntimeWrite: () => writeEnabled,
         supportsRuntimeProperties:()=>propertiesEnabled,
-        open: async () => { legacyColor = 'red'; return 'fixture-project'; },
+        open: async () => {
+          if (holdNextSampleOpen) {
+            holdNextSampleOpen=false;
+            await new Promise(resolve=>{finishSampleOpen=resolve;});
+            finishSampleOpen=undefined;
+          }
+          legacyColor = 'red'; return 'fixture-project';
+        },
         openProperties:async()=> 'fixture-project',
         cancelLaunch() {},
-      });
+      },{gate});
+      document.querySelector('#stop').onclick=()=>{
+        if(agentPanel.abortReplay())return;
+        globalStops++;
+        if(recorder.api.getContext().result.activeRunId)window.debugPanelFixture.losePreview();
+      };
     `,
   },
   bundle: true,
@@ -253,7 +286,7 @@ try {
 
   await page.locator('#debug-open-docs').click();
   assert(await page.locator('#debug-docs #debug-run-example').isVisible());
-  assert(await page.locator('#debug-docs #agent-replay').isVisible());
+  assert(await page.locator('#agent-tools #agent-replay').isVisible());
   const documented = await page.locator('#debug-docs code').allTextContents();
   for (const field of ['diagnostics.observed', 'preview.status', 'exit.evidence']) assert(documented.includes(field));
   const source = await page.locator('#debug-api-example').textContent();
@@ -267,7 +300,7 @@ try {
   }
   await assertExample();
   await page.locator('#debug-open-docs').click();
-  assert(await page.locator('#agent-replay').isHidden());
+  assert(await page.locator('#agent-replay').isVisible());
 
   await page.evaluate(() => window.debugPanelFixture.run());
   await page.locator('#debug-run[data-run-id="run-1"]').waitFor();
@@ -344,9 +377,15 @@ try {
   await page.evaluate(() => window.debugPanelFixture.delayReplay());
   await page.locator('#agent-replay').click();
   await page.getByText('等待超时，仍在跟踪本次预览', { exact: true }).waitFor();
-  assert.equal(await page.locator('#agent-stop').isDisabled(), true);
+  assert.equal(await page.locator('#agent-replay').isDisabled(), true);
+  for (const selector of ['#agent-playtest', '#agent-runtime-write', '#agent-runtime-properties']) {
+    assert.equal(await page.locator(selector).isDisabled(), true);
+  }
+  assert.equal(await page.locator('#agent-stop').isEnabled(), true);
   const late = await page.evaluate(() => window.debugPanelFixture.finishDelayedReplay());
   await page.getByText('预览已启动', { exact: true }).waitFor();
+  assert.equal(await page.locator('#agent-replay').isEnabled(), true);
+  assert.equal(await page.locator('#agent-runtime-write').isEnabled(), true);
   assert.equal(await page.locator('#agent-stop').isEnabled(), true);
   const crossRealmAbort = await page.evaluate(async runId => {
     const frame = document.createElement('iframe');
@@ -384,6 +423,24 @@ try {
   const writeResults = await page.locator('#agent-write-results li').allTextContents();
   assert(writeResults.some(line=>line.includes('fixture-write · applied · x=192')));
   assert.equal(writeResults.filter(line=>line.includes('host-report · clean-exit')).length,2);
+
+  for (const selector of ['#agent-playtest', '#agent-runtime-write']) {
+    const count=await page.evaluate(()=>{
+      window.debugPanelFixture.holdSampleOpen();
+      return window.debugPanelFixture.playCalls();
+    });
+    await page.locator(selector).click();
+    await page.waitForFunction(()=>window.debugPanelFixture.sampleOpening());
+    await page.locator('#agent-stop').click();
+    assert.equal(await page.locator('#agent-status').textContent(),'正在取消自动验证并收尾');
+    assert.equal(await page.evaluate(()=>window.debugPanelFixture.gateOwner()),'replay');
+    await page.evaluate(()=>window.debugPanelFixture.finishSampleOpen());
+    await page.waitForFunction(()=>window.debugPanelFixture.gateOwner()===null);
+    assert.equal(await page.locator('#agent-status').textContent(),'已取消自动验证；退出状态见运行记录');
+    assert.equal(await page.locator(selector).isEnabled(),true);
+    assert.equal(await page.locator('#agent-stop').isDisabled(),true);
+    assert.equal(await page.evaluate(()=>window.debugPanelFixture.playCalls()),count);
+  }
 
   const beforeProperties=await page.evaluate(()=>window.godotPlayground.get_project_context());
   await page.locator('#agent-runtime-properties').click();
@@ -433,6 +490,36 @@ try {
   assert.equal(switched.run.exit.report.sessionFacts.nativeExit.code,0);
   assert.equal(switched.run.exit.report.sessionFacts.hostCleanup,'complete');
   assert.equal(await page.locator('#agent-runtime-properties').isEnabled(),true);
+
+  // A source check has no AbortSignal. Cancelling the replay must keep its gate
+  // until that check settles, and then skip play entirely. A later run must not
+  // become a cleanup target just because it became the active preview.
+  const beforeCancelledCheck=await page.evaluate(()=>{
+    window.debugPanelFixture.run();
+    window.debugPanelFixture.holdCheck();
+    return {plays:window.debugPanelFixture.playCalls(),globalStops:window.debugPanelFixture.globalStops()};
+  });
+  await page.locator('#agent-replay').click();
+  await page.waitForFunction(()=>window.debugPanelFixture.checkPending());
+  assert.equal(await page.evaluate(()=>window.debugPanelFixture.gateOwner()),'replay');
+  assert.equal(await page.evaluate(()=>window.debugPanelFixture.canAcquireManual()),false);
+  await page.locator('#stop').click();
+  assert.equal(await page.evaluate(()=>window.debugPanelFixture.checkPending()),true);
+  assert.equal(await page.evaluate(()=>window.debugPanelFixture.canAcquireManual()),false);
+  const laterRunId=await page.evaluate(()=>{
+    window.debugPanelFixture.run();
+    return window.godotPlayground.get_project_context().result.activeRunId;
+  });
+  await page.evaluate(()=>window.debugPanelFixture.finishCheck());
+  await page.waitForFunction(()=>window.debugPanelFixture.gateOwner()===null);
+  const cancelledCheck=await page.evaluate(runId=>({
+    plays:window.debugPanelFixture.playCalls(),globalStops:window.debugPanelFixture.globalStops(),
+    manualAvailable:window.debugPanelFixture.canAcquireManual(),run:window.godotPlayground.get_run({runId}).result,
+  }),laterRunId);
+  assert.equal(cancelledCheck.plays,beforeCancelledCheck.plays);
+  assert.equal(cancelledCheck.globalStops,beforeCancelledCheck.globalStops);
+  assert.equal(cancelledCheck.manualAvailable,true);
+  assert.equal(cancelledCheck.run.state,'running');
 
   await page.setViewportSize({ width: 320, height: 720 });
   assert.equal(await page.locator('#debug-panel').evaluate(node => node.scrollWidth <= node.clientWidth), true);

@@ -1,0 +1,172 @@
+{
+  "schemaVersion": 1,
+  "kind": "godotjs-playground-api-console-verification",
+  "status": "passed",
+  "date": "2026-11-23",
+  "baselineCommit": "87ab9ef7179496998554ddca3707c5032587741a",
+  "scope": {
+    "profile": "full-engine-v1",
+    "target": "template_debug",
+    "executionBackend": "worker",
+    "presentationBackend": "direct",
+    "node": "24.15.0",
+    "pnpm": "10.11.0",
+    "browser": {
+      "name": "chromium",
+      "version": "154.0.8037.57",
+      "platform": "linux",
+      "requestedLaunchArgs": [
+        "--no-sandbox",
+        "--enable-webgl",
+        "--use-gl=angle",
+        "--use-angle=swiftshader",
+        "--enable-unsafe-swiftshader",
+        "--disable-dev-shm-usage"
+      ],
+      "launchArgs": [
+        "--no-sandbox",
+        "--enable-webgl",
+        "--use-gl=angle",
+        "--use-angle=swiftshader",
+        "--enable-unsafe-swiftshader",
+        "--disable-dev-shm-usage"
+      ],
+      "containerArgs": [
+        "--no-sandbox",
+        "--disable-dev-shm-usage"
+      ],
+      "featureLaunchArgs": [
+        "--enable-webgl",
+        "--use-gl=angle",
+        "--use-angle=swiftshader",
+        "--enable-unsafe-swiftshader"
+      ],
+      "removedLaunchArgs": [],
+      "ignoredLaunchArgs": [],
+      "settingsTier": "environment-override",
+      "executablePath": "/usr/bin/chromium",
+      "envOverrides": {},
+      "environment": {
+        "display": null,
+        "waylandDisplayConfigured": false,
+        "virtualDisplay": false,
+        "audioDeviceKind": "unspecified",
+        "pulseServerConfigured": false,
+        "pulseSink": null
+      },
+      "settingsOverrides": {
+        "userPreferencesOverridden": false,
+        "defaultArgumentsOverridden": false
+      }
+    },
+    "fullReleaseMatrix": "outside-this-scope"
+  },
+  "identity": {
+    "releaseId": "4cf98f639012f62a175fcd1c3c57c6244e1a36a86d0365e2d0953846e132b463",
+    "candidateId": "f7663bcfa7ba3aa0010a761af3236c10f41de759944eb8c9b452e1e167e8b914",
+    "descriptorHash": "9d731e395a5d37f971d2781dd5d5e293401dd48970fbc594a332cd8f9c67332e",
+    "siteHash": "967f73d181a79a4753e1754334e8a52ea774f5985ff865948692a9445642c700"
+  },
+  "tests": {
+    "engine": {
+      "pass": 143,
+      "fail": 0
+    },
+    "project-tools": {
+      "pass": 123,
+      "fail": 0
+    },
+    "playground": {
+      "pass": 435,
+      "fail": 0
+    },
+    "controlled-browser": {
+      "pass": 6,
+      "engineExecuted": false
+    },
+    "production-shell": {
+      "pass": 8,
+      "engineExecuted": false
+    },
+    "real-browser": {
+      "pass": 5,
+      "engineExecuted": true,
+      "workerSessions": 5
+    },
+    "legacy-debug-api": {
+      "pass": 22,
+      "engineExecuted": true
+    }
+  },
+  "operations": [
+    "check",
+    "describe_runtime_properties",
+    "engine.get_project_context",
+    "engine.get_runtime_tree",
+    "engine.inspect_runtime_node",
+    "engine.is_running",
+    "engine.play",
+    "engine.runtime_set",
+    "engine.screenshot",
+    "engine.stop",
+    "game_input",
+    "read_runtime_properties",
+    "wait_for_event",
+    "wait_for_input"
+  ],
+  "reports": {
+    "controlled": {
+      "path": "/workspace/.godotai-logs/api-console-cancel-status-fix/controlled/report.json",
+      "sha256": "18aa8f5e56dd0506539b80e095309c22385d0d21222ff7996f148ff10db82533"
+    },
+    "shell": {
+      "path": "/workspace/.godotai-logs/api-console-cancel-status-fix/shell/report.json",
+      "sha256": "596269381f475ea4a62455e21e2e430d853964fe7603416c8941b2ceb9299d80"
+    },
+    "real": {
+      "path": "/workspace/.godotai-logs/api-console-cancel-status-fix/real/report.json",
+      "sha256": "fa9e945a5e2dd323f013d87f2c5521487863bc34756be0cc82370f72c9d90749"
+    },
+    "legacy-debug-api": {
+      "path": "/workspace/.godotai-logs/api-console-cancel-status-fix/legacy-verified/legacy.json",
+      "sha256": "912d07812c91e26d9a9af8d1a594a31619165e56793831390256bc199651763f"
+    }
+  },
+  "images": [
+    {
+      "name": "position-before",
+      "filename": "/workspace/.godotai-logs/api-console-cancel-status-fix/real/position-before.png",
+      "sha256": "0999c0522c3c1bab9239c324bbf59ea77aba972b37f940c2c446fb70c291a525",
+      "byteLength": 7174,
+      "width": 542,
+      "height": 360
+    },
+    {
+      "name": "position-after",
+      "filename": "/workspace/.godotai-logs/api-console-cancel-status-fix/real/position-after.png",
+      "sha256": "f18b7454432502c2aef45326d1f7fcf61f168ffdd78bef66d445719ec0a392e2",
+      "byteLength": 7175,
+      "width": 542,
+      "height": 360
+    },
+    {
+      "name": "properties-moved",
+      "filename": "/workspace/.godotai-logs/api-console-cancel-status-fix/real/properties-moved.png",
+      "sha256": "7728533777ab8c10e5e29168a3c4176f2102281cfba26f0ce44f1a470d3d36ae",
+      "byteLength": 7118,
+      "width": 542,
+      "height": 360
+    },
+    {
+      "name": "properties-restarted",
+      "filename": "/workspace/.godotai-logs/api-console-cancel-status-fix/real/properties-restarted.png",
+      "sha256": "0999c0522c3c1bab9239c324bbf59ea77aba972b37f940c2c446fb70c291a525",
+      "byteLength": 7174,
+      "width": 542,
+      "height": 360
+    }
+  ],
+  "site": "/workspace/.godotai-sites/api-console",
+  "portableEngine": "/workspace/.godotai-artifacts/api-console-engine",
+  "environmentReport": "/workspace/.godotai-logs/api-console-environment.json"
+}

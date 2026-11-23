@@ -62,7 +62,11 @@ During framework development, rename supports ordinary scripts and text `.tscn` 
 
 ## Agent tools
 
-Open **API 调试 → API 文档** to run the query example or the check and preview replay. Queries and operations are available in the current tab through `window.godotPlayground` with `schemaVersion: 1`.
+Switch the left workspace to **API 调用** to select an operation, edit its JSON input, execute it and inspect results or PNGs alongside the live preview. The menu contains eight Summer-style operations and six explicitly labelled GodotAI helpers. Requests use the same `window.godotPlayground` API (`schemaVersion: 1`) as external callers; editing a request does not change project source or build it. Ctrl/Cmd+Enter in the request editor executes that request, while the code editor retains its build shortcut.
+
+The console retains per-operation drafts and bounded in-memory history. Loading a preset or historical request never executes it. **更新目标 / 填入上下文** uses explicit project/run/node/input sources; a runtime change does not silently redirect a stored request. PNGs are separate attachments and JSON results identify binary summaries. **打开独立示例** switches to a preserved or new runtime-properties sample and ends the previous preview without automatically playing it. The two editable lesson lists cover position changes and exported gameplay properties/input/restart. See the [console design and lifecycle rules](../../docs/design/playground-api-console.zh-CN.md).
+
+Open **API 调试** for the existing **自动验证** replays; these retain their independent assertions and cleanup. The adjacent **API 文档** opens reference examples. Manual console calls and replays share a UI gate, while the page's Stop action remains available. Cancelling a supported request or wait does not undo an effect already performed by the game.
 
 The runtime property workbench adds `describe_runtime_properties`, `read_runtime_properties`, `write_runtime_property` and `summer_call` to the same entry. The independent scripted sample exposes `health`, `move_step`, `can_move` and `display_name` using standard GodotJS export decorators. Its replay changes health and movement, checks actual values and PNGs, then restarts the same source to verify defaults return. Property access requires a matching Full/debug Worker Direct engine with `runtimeProperties: 1`; older write-capable templates continue to support the original position replay.
 
@@ -156,6 +160,8 @@ pnpm --filter @godot-js/playground test:browser
 Browser suites cover control edits during startup, input for dynamically mounted components, native scripts importing demo helpers, the actual compiler, native and React startup, all eight demo interactions, controls and JSON export, persistence/migration, workbench layout and fresh-session stop/rerun. The older browser SDK conformance workbench remains an independent library fixture (`build:conformance`), rather than a selectable Playground runtime.
 
 Run `test:browser:debug-api` against a matching Full Engine debug Worker site to verify the Agent API on real WASM. Set `PLAYGROUND_DEBUG_API_CASE=runtime-tree-node-and-png` to run just the runtime observation case. With `PLAYGROUND_DEBUG_API_REPORT` set, it saves the sampled PNG evidence alongside the JSON report. The full suite also reads node state with rendering paused.
+
+`test:browser:api-console` validates the console against controlled APIs (`engineExecuted=false`). `test:browser:api-console:shell` exercises the actual main/editor integration on a separately built shell-only site. Run `test:browser:api-console:real` with `PLAYGROUND_TEST_DIRECTORY` set to a matching Full/debug Worker Direct site and `PLAYGROUND_API_CONSOLE_REAL_REPORT` set to the output JSON path for real gameplay, PNG and restart verification. The real suite requires runtimeProperties ABI 1 and records `engineExecuted=true`; the two UI suites cannot replace that evidence.
 
 Run `PLAYGROUND_DEBUG_API_CASE=runtime-set-position` on a site with write ABI 1 and `runtime-set-unsupported` on an observation ABI 1 site with a read-only template. Set `PLAYGROUND_TEST_DIRECTORY` to the matching site for each run. The write case records the write receipt, PNGs and both exits.
 `PLAYGROUND_DEBUG_API_CASE=runtime-set-boundaries` checks coordinate precision, same-origin iframe inputs and synthetic abort events on the write-capable site.

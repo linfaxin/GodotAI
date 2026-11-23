@@ -8,6 +8,8 @@ import type {
   RuntimeNodeInput, RuntimeNodeSnapshot, ScreenshotInput, GameScreenshot, ObservationResult, InteractionResult,
 } from '@godot-js/engine/browser/dedicated/worker-runner';
 import type {ProjectContextData, StopResult} from './playground-api';
+import {SUMMER_OPERATION_SPECS as rules, SUMMER_TREE_LIMITS, SUMMER_COMPATIBILITY, type SummerOperation} from './summer-operation-spec.ts';
+export {SUMMER_COMPATIBILITY} from './summer-operation-spec.ts';
 
 type BackendFailure = Extract<RuntimeSetResult | ObservationResult<unknown> | InteractionResult<unknown> | StopResult | PublicResult<unknown>, {ok: false}>;
 export type BackendError = {code: BackendFailure['error']['code']; message: string; source?: AccessError['source']; [key: string]: unknown};
@@ -39,8 +41,6 @@ export interface SummerBackend {
   runtimeSet(input: RuntimeSetInput, signal?: AbortSignal): Promise<RuntimeSetResult>;
   screenshot(input: ScreenshotInput, signal?: AbortSignal): Promise<BackendReply<GameScreenshot>>;
 }
-export const SUMMER_COMPATIBILITY = Object.freeze({input: 'subset' as const, semantics: 'partial' as const,
-  payload: 'godotai-typed-v1' as const, summerNativeFixture: false as const});
 export type CompletedWriteResult = Exclude<WriteResult, {outcome: 'unconfirmed'}>;
 type LegacyWriteSuccess = Extract<RuntimeSetResult, {ok: true}>;
 export type WriteData =
@@ -62,17 +62,7 @@ export type SummerCallInput = {op: string; input?: Record<string, unknown>};
 const readAborted = Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'aborted')!.get!;
 const vectorNumber = '[+-]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?';
 const vectorLiteral = new RegExp('^Vector2[\\t\\n\\r ]*\\([\\t\\n\\r ]*(' + vectorNumber + ')[\\t\\n\\r ]*,[\\t\\n\\r ]*(' + vectorNumber + ')[\\t\\n\\r ]*\\)$');
-const rules = {
-  'engine.get_project_context': {allowed: [], unsupported: ['include', 'settingsPrefix', 'settingsPrefixes']},
-  'engine.play': {allowed: ['instance'], unsupported: ['scene', 'mode', 'focus', 'deterministic', 'seed', 'fixed_fps', 'time_scale', 'speed', 'players', 'spectators', 'queue']},
-  'engine.stop': {allowed: ['instance'], unsupported: []},
-  'engine.is_running': {allowed: [], unsupported: []},
-  'engine.get_runtime_tree': {allowed: ['path', 'depth', 'limit'], unsupported: ['maxCharacters']},
-  'engine.inspect_runtime_node': {allowed: ['path'], unsupported: ['maxCharacters']},
-  'engine.runtime_set': {allowed: ['path', 'property', 'value', 'instance'], unsupported: ['field']},
-  'engine.screenshot': {allowed: ['target'], unsupported: ['scenePath', 'framing', 'bookmark_name', 'size', 'nodePath', 'camera_path', 'camera_position', 'camera_look_at', 'fov', 'marks', 'max_marks', 'compare_previous', 'update_previous']},
-} as const;
-type Operation = keyof typeof rules;
+type Operation = SummerOperation;
 type Validated = {op: Operation; input: Record<string, unknown>};
 
 const done = <T>(data: T): FacadeSuccess<T> => ({ok: true, status: 'done', result: {data, godotai: {compatibility: SUMMER_COMPATIBILITY}}});
@@ -103,9 +93,10 @@ function validate(raw: unknown): Validated | FacadeFailure {
       if (!pathIsCanonical(input.path)) return localError('invalid_input', 'path');
     }
     if (op === 'engine.get_runtime_tree') {
-      for (const [key, max] of [['depth', 8], ['limit', 500]] as const) {
-        if (Object.hasOwn(input, key) && (typeof input[key] !== 'number' || !Number.isSafeInteger(input[key]) || (input[key] as number) < 1)) return localError('invalid_input', key);
-        if ((input[key] as number | undefined) !== undefined && (input[key] as number) > max) return localError('unsupported', key);
+      for (const key of ['depth', 'limit'] as const) {
+        const bounds = SUMMER_TREE_LIMITS[key];
+        if (Object.hasOwn(input, key) && (typeof input[key] !== 'number' || !Number.isSafeInteger(input[key]) || (input[key] as number) < bounds.min)) return localError('invalid_input', key);
+        if ((input[key] as number | undefined) !== undefined && (input[key] as number) > bounds.max) return localError('unsupported', key);
       }
     }
     if (op === 'engine.screenshot' && input.target !== 'game') return localError(typeof input.target === 'string' ? 'unsupported' : 'invalid_input', 'target');
@@ -173,7 +164,7 @@ export function createSummerDispatcher(backend: SummerBackend) {
     if (run.result.state === 'stopping' || run.result.state === 'exited') return localError('run_ended', 'run');
     if (op === 'engine.get_runtime_tree') {
       const response = await backend.getRuntimeTree({runId, ...(input.path ? {path: input.path as string} : {}),
-        depth: (input.depth ?? 3) as number, limit: (input.limit ?? 500) as number}, signal);
+        depth: (input.depth ?? SUMMER_TREE_LIMITS.depth.default) as number, limit: (input.limit ?? SUMMER_TREE_LIMITS.limit.default) as number}, signal);
       return response.ok ? done(response.result) : backendFailure(response);
     }
     if (op === 'engine.inspect_runtime_node') {
