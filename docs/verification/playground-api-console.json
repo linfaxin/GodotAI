@@ -3,7 +3,7 @@
   "kind": "godotjs-playground-api-console-verification",
   "status": "passed",
   "date": "2026-11-23",
-  "baselineCommit": "87ab9ef7179496998554ddca3707c5032587741a",
+  "baselineCommit": "6e1628702b76d51a4cfe044b7ddf2dc16016284e",
   "scope": {
     "profile": "full-engine-v1",
     "target": "template_debug",
@@ -63,9 +63,9 @@
   },
   "identity": {
     "releaseId": "4cf98f639012f62a175fcd1c3c57c6244e1a36a86d0365e2d0953846e132b463",
-    "candidateId": "f7663bcfa7ba3aa0010a761af3236c10f41de759944eb8c9b452e1e167e8b914",
+    "candidateId": "f317400f7cdb660e5630721cbb8b6e11dfa636cce3029270c7902ed676821180",
     "descriptorHash": "9d731e395a5d37f971d2781dd5d5e293401dd48970fbc594a332cd8f9c67332e",
-    "siteHash": "967f73d181a79a4753e1754334e8a52ea774f5985ff865948692a9445642c700"
+    "siteHash": "7b5e36eeb46a8aa2f59e28c8208d4bbe5ce939985a11631b6fb2cef1b22cb1a4"
   },
   "tests": {
     "engine": {
@@ -81,7 +81,7 @@
       "fail": 0
     },
     "controlled-browser": {
-      "pass": 6,
+      "pass": 7,
       "engineExecuted": false
     },
     "production-shell": {
@@ -116,26 +116,26 @@
   ],
   "reports": {
     "controlled": {
-      "path": "/workspace/.godotai-logs/api-console-cancel-status-fix/controlled/report.json",
-      "sha256": "18aa8f5e56dd0506539b80e095309c22385d0d21222ff7996f148ff10db82533"
+      "path": "/workspace/.godotai-logs/api-console-tabs-merge/controlled/report.json",
+      "sha256": "1c04b4518da16484f38d282d35cc98299a993ebf56133603a9d74dce4566eb65"
     },
     "shell": {
-      "path": "/workspace/.godotai-logs/api-console-cancel-status-fix/shell/report.json",
-      "sha256": "596269381f475ea4a62455e21e2e430d853964fe7603416c8941b2ceb9299d80"
+      "path": "/workspace/.godotai-logs/api-console-tabs-merge/shell/report.json",
+      "sha256": "7f581ee1d776668f128db407a478a00691ee06bcf935161a74b5b5dee3839075"
     },
     "real": {
-      "path": "/workspace/.godotai-logs/api-console-cancel-status-fix/real/report.json",
-      "sha256": "fa9e945a5e2dd323f013d87f2c5521487863bc34756be0cc82370f72c9d90749"
+      "path": "/workspace/.godotai-logs/api-console-tabs-merge/real/report.json",
+      "sha256": "c685a7dbb6f722134de80724892bf197144d0e06438a2c640fc1f78e878086a3"
     },
     "legacy-debug-api": {
-      "path": "/workspace/.godotai-logs/api-console-cancel-status-fix/legacy-verified/legacy.json",
-      "sha256": "912d07812c91e26d9a9af8d1a594a31619165e56793831390256bc199651763f"
+      "path": "/workspace/.godotai-logs/api-console-tabs-merge/legacy/report.json",
+      "sha256": "c5bb539e8658670f973b27c65cf6ca280173f157e675a792637a405eca758e95"
     }
   },
   "images": [
     {
       "name": "position-before",
-      "filename": "/workspace/.godotai-logs/api-console-cancel-status-fix/real/position-before.png",
+      "filename": "/workspace/.godotai-logs/api-console-tabs-merge/real/position-before.png",
       "sha256": "0999c0522c3c1bab9239c324bbf59ea77aba972b37f940c2c446fb70c291a525",
       "byteLength": 7174,
       "width": 542,
@@ -143,7 +143,7 @@
     },
     {
       "name": "position-after",
-      "filename": "/workspace/.godotai-logs/api-console-cancel-status-fix/real/position-after.png",
+      "filename": "/workspace/.godotai-logs/api-console-tabs-merge/real/position-after.png",
       "sha256": "f18b7454432502c2aef45326d1f7fcf61f168ffdd78bef66d445719ec0a392e2",
       "byteLength": 7175,
       "width": 542,
@@ -151,7 +151,7 @@
     },
     {
       "name": "properties-moved",
-      "filename": "/workspace/.godotai-logs/api-console-cancel-status-fix/real/properties-moved.png",
+      "filename": "/workspace/.godotai-logs/api-console-tabs-merge/real/properties-moved.png",
       "sha256": "7728533777ab8c10e5e29168a3c4176f2102281cfba26f0ce44f1a470d3d36ae",
       "byteLength": 7118,
       "width": 542,
@@ -159,7 +159,7 @@
     },
     {
       "name": "properties-restarted",
-      "filename": "/workspace/.godotai-logs/api-console-cancel-status-fix/real/properties-restarted.png",
+      "filename": "/workspace/.godotai-logs/api-console-tabs-merge/real/properties-restarted.png",
       "sha256": "0999c0522c3c1bab9239c324bbf59ea77aba972b37f940c2c446fb70c291a525",
       "byteLength": 7174,
       "width": 542,

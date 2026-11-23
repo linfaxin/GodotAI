@@ -165,9 +165,13 @@ test('bounded projections keep provenance facts and history eviction invalidates
   f.setReply('summer_call',{ok:true,result:{data:{run:consoleIdentity,nodes:[consoleNode],padding:'界'.repeat(40000)}}});
   await f.session.submit();const first=last(f);assert.equal(first.truncated,true);assert(new TextEncoder().encode(first.resultProjection).length<=65536);
   assert.deepEqual(first.resultFacts.nodes[0],{path:consoleNode.path,instanceId:consoleNode.instanceId,type:'Node2D'});
+  assert.equal(f.session.hasCall(first.callId),true);
   for(let index=0;index<20;index++)await f.session.submit();assert.equal(f.session.snapshot().history.length,20);
+  assert.equal(f.session.hasCall(first.callId),false);
   f.session.selectOperation('describe_runtime_properties');f.session.updateTarget({sourceCallId:first.callId,nodePath:consoleNode.path});
-  assert.equal(f.session.snapshot().clientError.kind,'missing_source');f.session.dispose();
+  assert.equal(f.session.snapshot().clientError.kind,'missing_source');
+  const newest=last(f).callId;assert.equal(f.session.hasCall(newest),true);
+  f.session.clearSettled();assert.equal(f.session.hasCall(newest),false);f.session.dispose();
 });
 
 test('thrown calls and unconfirmed writes retain execution uncertainty, never retry',async()=>{

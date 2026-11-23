@@ -89,6 +89,7 @@ export interface ConsoleSession {
   submit(): Promise<void>;
   cancel(): void;
   openExample(): Promise<void>;
+  hasCall(callId: string): boolean;
   getAttachment(id: string): ConsoleAttachment | undefined;
   clearSettled(): void;
   dispose(): void;

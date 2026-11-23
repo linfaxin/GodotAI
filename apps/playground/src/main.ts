@@ -52,7 +52,7 @@ let reconcilingCancelledLaunches=false;
 const consoleContextListeners=new Set<()=>void>();
 function notifyConsoleContext(){for(const listener of consoleContextListeners)listener();}
 const editor=createCodeEditor({changed(path,value){if(!current)return;current.files[path]=value;changed();},position(line,column){$('position').textContent=`Ln ${line}, Col ${column}`;},query:languageQuery,run:()=>{if(workbench.leftMode()==='code')void compile(true);},toggleFiles:()=>workbench.toggleFiles()});
-const workbench=createWorkbench({selectFile:path=>selectFile(path,true),focusEditor:()=>editor.focus(),layoutEditor:()=>editor.instance.layout(),toast});
+const workbench=createWorkbench({selectFile,focusEditor:()=>editor.focus(),layoutEditor:()=>editor.instance.layout(),showApi:id=>apiConsole.show(id),toast});
 const debugRecorder=createDebugRecorder();
 debugRecorder.subscribe(notifyConsoleContext);
 const playground=createPlaygroundApi(debugRecorder,{
@@ -135,7 +135,7 @@ const consoleSession=createApiConsoleSession(playground.api,{
  subscribeContext(listener){consoleContextListeners.add(listener);return()=>consoleContextListeners.delete(listener);},
  openExample:()=>openAgentDemo(createRuntimePropertiesDemo(siteEngineProfile),matchesRuntimePropertiesDemo),
 },consoleGate);
-const apiConsole=createApiConsole($('api-console-pane'),consoleSession);
+const apiConsole=createApiConsole($('api-console-pane'),$('api-list'),consoleSession,workbench.openApi);
 window.addEventListener('pagehide',event=>{
  if(event.persisted)return;
  apiConsole.dispose();consoleSession.dispose();consoleContextListeners.clear();
