@@ -62,12 +62,13 @@ function buildFixture(state='running'){
  };
  const context={
   AbortController,DOMException,Uint8Array,debugRecorder:recorder,clearTimeout,setTimeout:()=>0,checkTimer:undefined,saveTimer:undefined,
+  notifyConsoleContext(){},agentPanel:{abortReplay:()=>false},
   ready:true,current:{engineProfile:'full-engine-v1'},siteEngineProfile:'full-engine-v1',selected:{id:'project',name:'Project'},
   MAX_PENDING_OPERATIONS:16,pendingBuilds:0,playIntent:undefined,runSerial:0,revision:1,checking:0,
   cancelledLaunches:new Map(),reconcilingCancelledLaunches:false,
   persistenceBlocked:false,storage:{stage(){}},sessionReleaseContext:{},diagnostics:[],setDiagnostics(){},log(){},assertCompiledRelease(){},
   status(text,kind){Object.assign(node('status'),{textContent:text,kind});},
-  applyCompiledImportReceipts:()=>false,debugRelease:()=>({}),workbench:{setBuilding(){node('stop').disabled=false;},setReady(){}},
+  applyCompiledImportReceipts:()=>false,debugRelease:()=>({}),workbench:{setBuilding(){node('stop').disabled=false;},setReady(){},setPreviewCanStop(value){node('stop').disabled=!value;}},
   $:node,
   nativePreview:{configuration,runner:{state},stop:async()=>{},stopRun(runId){stoppedRuns.push(runId);return Promise.resolve();},run(...args){
    const preparation=deferred();
@@ -80,7 +81,8 @@ function buildFixture(state='running'){
  };
  const compile=source.slice(source.indexOf('const buildStatus='),source.indexOf('function controls('));
  const invalidate=source.slice(source.indexOf('function invalidatePlay('),source.indexOf('function initialProject('));
- const cancellation=source.slice(source.indexOf('function cancelLaunch('),source.indexOf("addEventListener('pagehide'"));
+ const cancellationStart=source.indexOf('function cancelLaunch(');
+ const cancellation=source.slice(cancellationStart,source.indexOf("window.addEventListener('pagehide'",cancellationStart));
  const toolbar=source.slice(source.indexOf("$('run').onclick="),source.indexOf("$<HTMLSelectElement>('mode').onchange="));
  const javascript=ts.transpileModule(cancellation+invalidate+compile+toolbar,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
  vm.createContext(context);vm.runInContext(javascript,context);
@@ -139,6 +141,19 @@ test('toolbar stop restores the idle status while a build is still pending',asyn
  requests[0].resolve(compileReply);
  await tick();
  assert.equal(recorder.api.getBuild(attemptId).result.preview.status,'skipped');
+});
+
+test('toolbar stop delegates to replay cleanup without stopping or cancelling a later page launch',async()=>{
+ const f=buildFixture('idle');
+ const attemptId=f.compile();
+ let cancelled=0,globalStops=0;
+ f.context.agentPanel.abortReplay=()=>{cancelled++;return true;};
+ f.context.nativePreview.stop=async()=>{globalStops++;};
+ f.node('stop').onclick();
+ assert.equal(cancelled,1);
+ assert.equal(globalStops,0);
+ assert.equal(f.context.playIntent.controller.signal.aborted,false);
+ f.cancel(attemptId);f.requests[0].resolve(f.compileReply);await tick();
 });
 
 test('cancelled attempt retains a late-session stop obligation without targeting a later run',async()=>{

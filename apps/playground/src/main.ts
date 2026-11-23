@@ -23,6 +23,9 @@ import {createAgentPanel} from './workbench/agent-panel';
 import {createInteractionDemo, INTERACTION_DEMO_ID, matchesInteractionDemo} from './interaction-demo';
 import {createRuntimePropertiesDemo, matchesRuntimePropertiesDemo, RUNTIME_PROPERTIES_DEMO_ID} from './runtime-properties-demo';
 import {createSummerDispatcher} from './summer-adapter';
+import {createConsoleGate,createApiConsoleSession} from './workbench/api-console-session';
+import {createApiConsole} from './workbench/api-console';
+import type {ConsoleEnvironment} from './workbench/api-console-types';
 
 declare global {
  interface Window {
@@ -46,9 +49,12 @@ type PlayIntent={attemptId?:string;controller:AbortController};
 let pendingChecks=0,pendingBuilds=0,playIntent:PlayIntent|undefined;
 const cancelledLaunches=new Map<string,{release:()=>void;stopping:Set<string>}>();
 let reconcilingCancelledLaunches=false;
-const editor=createCodeEditor({changed(path,value){if(!current)return;current.files[path]=value;changed();},position(line,column){$('position').textContent=`Ln ${line}, Col ${column}`;},query:languageQuery,run:()=>void compile(true),toggleFiles:()=>workbench.toggleFiles()});
-const workbench=createWorkbench({selectFile,focusEditor:()=>editor.focus(),toast});
+const consoleContextListeners=new Set<()=>void>();
+function notifyConsoleContext(){for(const listener of consoleContextListeners)listener();}
+const editor=createCodeEditor({changed(path,value){if(!current)return;current.files[path]=value;changed();},position(line,column){$('position').textContent=`Ln ${line}, Col ${column}`;},query:languageQuery,run:()=>{if(workbench.leftMode()==='code')void compile(true);},toggleFiles:()=>workbench.toggleFiles()});
+const workbench=createWorkbench({selectFile:path=>selectFile(path,true),focusEditor:()=>editor.focus(),layoutEditor:()=>editor.instance.layout(),toast});
 const debugRecorder=createDebugRecorder();
+debugRecorder.subscribe(notifyConsoleContext);
 const playground=createPlaygroundApi(debugRecorder,{
  supportsProject:()=>current?.engineProfile===siteEngineProfile,
  check,
@@ -82,7 +88,9 @@ Object.defineProperty(window,'godotPlayground',{value:playground.api,enumerable:
 const debugPanel=createDebugPanel(debugRecorder.api,playground.api);
 debugRecorder.subscribe(debugPanel.refresh);
 debugRecorder.subscribe(reconcileCancelledLaunches);
-createAgentPanel(playground, {
+const consoleGate=createConsoleGate();
+consoleGate.subscribe(()=>workbench.setReplayCanStop(consoleGate.owner()==='replay'));
+const agentPanel=createAgentPanel(playground, {
  unavailable() {
   const runId=debugRecorder.api.getContext().result.activeRunId;
   if (!nativePreview?.supportsPlaytest || runId&&nativePreview.interaction?.interactionState(runId).supported===false) {
@@ -105,8 +113,35 @@ createAgentPanel(playground, {
  },
  openProperties:()=>openAgentDemo(createRuntimePropertiesDemo(siteEngineProfile),matchesRuntimePropertiesDemo),
  cancelLaunch,
+},{gate:consoleGate});
+function readConsoleContext():ConsoleEnvironment{
+ const context=debugRecorder.api.getContext().result;
+ const queried=context.activeRunId?debugRecorder.api.getRun(context.activeRunId):undefined;
+ const run=queried?.ok?queried.result:undefined;
+ const capabilities=run&&nativePreview?{
+  observation:nativePreview.observation?.observationState(run.runId),
+  runtimeWrite:nativePreview.runtimeWrite?.runtimeWriteState(run.runId),
+  runtimeProperties:nativePreview.runtimeProperties?.runtimePropertiesState(run.runId),
+  interaction:nativePreview.interaction?.interactionState(run.runId),
+ }:undefined;
+ return {anchor:{
+  editorProjectId:context.projectId,editorRevision:context.editorRevision,
+  activeRunId:context.activeRunId,activeRunProjectId:run?.projectId??null,
+  activeRunRevision:run?.revision??null,pendingAttemptId:playIntent?.attemptId??null,
+ },activeRunState:run?.state??null,capabilities};
+}
+const consoleSession=createApiConsoleSession(playground.api,{
+ readContext:readConsoleContext,
+ subscribeContext(listener){consoleContextListeners.add(listener);return()=>consoleContextListeners.delete(listener);},
+ openExample:()=>openAgentDemo(createRuntimePropertiesDemo(siteEngineProfile),matchesRuntimePropertiesDemo),
+},consoleGate);
+const apiConsole=createApiConsole($('api-console-pane'),consoleSession);
+window.addEventListener('pagehide',event=>{
+ if(event.persisted)return;
+ apiConsole.dispose();consoleSession.dispose();consoleContextListeners.clear();
 });
 async function openAgentDemo(project:EditorProject,matches:(candidate:EditorProject,sample:EditorProject)=>boolean){
+ if(!storage||!current)throw Error('工作区正在初始化，请稍后打开示例');
  let demo=demos.find(({id})=>{const candidate=projects.get(id);return candidate&&matches(candidate,project);});
  if(!demo){const id='project-'+crypto.randomUUID();projects.set(id,project);storage.stage(id,project);demo=registerProjectDemo(id,project);}
  await select(demo,false);return demo.id;
@@ -117,6 +152,7 @@ function cancelLaunch(attemptId:string){
   if(release)cancelledLaunches.set(attemptId,{release,stopping:new Set()});
  }
  if(playIntent?.attemptId===attemptId)playIntent.controller.abort();
+ notifyConsoleContext();
  reconcileCancelledLaunches();
 }
 function reconcileCancelledLaunches(){
@@ -136,7 +172,7 @@ function reconcileCancelledLaunches(){
   }
  }}finally{reconcilingCancelledLaunches=false;}
 }
-addEventListener('pagehide',playground.cancelWaits);
+window.addEventListener('pagehide',event=>{if(!event.persisted)playground.cancelWaits();});
 const fileMenu=createFileMenu({select:selectFile,rename:path=>fileForm(path),remove:deleteFile,canDelete:path=>path!==current?.entry,canRename:path=>canRenameProjectFile(current,path),toast});
 const explorer=createExplorer(path=>{workbench.filePicked();selectFile(path);editor.focus();},(path,x,y)=>fileMenu.open(path,x,y));
 function toast(message:string){clearTimeout(toastTimer);$('toast').textContent=message;$('toast').hidden=false;toastTimer=setTimeout(()=>$('toast').hidden=true,4000);}
@@ -241,17 +277,17 @@ async function restore(){
   toast('本地项目恢复失败，已暂停自动保存');log(String(error),'error');
  }
 }
-function invalidatePlay(){if(playIntent?.attemptId)cancelLaunch(playIntent.attemptId);else playIntent?.controller.abort();}
+function invalidatePlay(){if(playIntent?.attemptId)cancelLaunch(playIntent.attemptId);else{playIntent?.controller.abort();notifyConsoleContext();}}
 function changed(){storage.stage(selected.id,current);invalidatePlay();revision++;debugRecorder.setContext({editorRevision:revision});$('saved').textContent=persistenceBlocked?'保存失败':'正在保存';clearTimeout(saveTimer);saveTimer=setTimeout(()=>void save(),250);clearTimeout(checkTimer);checkTimer=setTimeout(()=>void check(),1100);}
 function initialProject(demo:Demo):EditorProject{return demo.id==='native'||demo.id==='react'?defaultProject(demo.runtime??'react',siteEngineProfile):demoProject(demo,siteEngineProfile);}
 
 function visibleFile(path:string){return path.split('/').at(-1)!=='package.json';}
 function renderFiles(){fileMenu.close();const paths=Object.keys(current.files).filter(visibleFile);editor.reconcile(paths);explorer.render(paths,current.selected);workbench.syncFiles(paths,current.selected);}
-function selectFile(path:string){if(!current||!Object.hasOwn(current.files,path))return;if(!visibleFile(path))path=current.entry||current.selected;current.selected=path;editor.show(path,current.files[path]);editor.diagnostics(diagnostics);renderFiles();}
+function selectFile(path:string,reveal=false){if(!current||!Object.hasOwn(current.files,path))return;if(!visibleFile(path))path=current.entry||current.selected;if(reveal)workbench.showCode();current.selected=path;editor.show(path,current.files[path]);editor.diagnostics(diagnostics);renderFiles();}
 function setDiagnostics(items:TypeDiagnostic[],reveal=false){
  diagnostics=items;editor.diagnostics(items);$('problem-count').textContent=String(items.length);$('type-status').textContent=items.length?`${items.length} 个问题`:'类型检查通过';$('diagnostics').replaceChildren();
  if(!items.length){const empty=document.createElement('p');empty.className='empty';empty.textContent='没有发现问题';$('diagnostics').append(empty);}
- for(const item of items){const button=document.createElement('button');button.className='diagnostic-item';const code=document.createElement('code');code.textContent=`${item.file?.split('/').at(-1)??'项目'}:${item.line??0}:${item.column??0}`;const text=document.createElement('span');text.textContent=item.message;button.append(code,text);button.onclick=()=>{if(item.file&&Object.hasOwn(current.files,item.file)){selectFile(item.file);editor.reveal(item.start??0,item.length??1);}};$('diagnostics').append(button);}
+ for(const item of items){const button=document.createElement('button');button.className='diagnostic-item';const code=document.createElement('code');code.textContent=`${item.file?.split('/').at(-1)??'项目'}:${item.line??0}:${item.column??0}`;const text=document.createElement('span');text.textContent=item.message;button.append(code,text);button.onclick=()=>{if(item.file&&Object.hasOwn(current.files,item.file)){selectFile(item.file,true);editor.reveal(item.start??0,item.length??1);}};$('diagnostics').append(button);}
  if(reveal&&items.length)workbench.showProblems();
 }
 function check(){
@@ -282,7 +318,7 @@ function restorePreviewStatus(state:RunnerState){
  // A lifecycle event may have already published a newer phase or an exit error.
  if($('status').textContent!==buildStatus)return;
  showPreviewState(state);
- $('stop').toggleAttribute('disabled',state==='idle'||state==='exited');
+ workbench.setPreviewCanStop(state!=='idle'&&state!=='exited');
 }
 function compile(focusPreview=false){
  if(!ready||!current||!nativePreview)return;if(current.engineProfile!==siteEngineProfile){toast('项目与当前引擎配置不匹配，原文已保留');return;}
@@ -294,6 +330,7 @@ function compile(focusPreview=false){
  clearTimeout(checkTimer);const key=++runSerial,rev=revision,preview=nativePreview;checking++;$('run').setAttribute('disabled','');workbench.setBuilding();status(buildStatus);
  const attemptId=debugRecorder.startBuild(selected.id,rev);
  play.attemptId=attemptId;
+ notifyConsoleContext();
  const releaseAttempt=debugRecorder.retainBuild(attemptId);
  pendingBuilds++;
  void settle();
@@ -340,7 +377,7 @@ function compile(focusPreview=false){
   finally{
    pendingBuilds--;
    releaseAttempt?.();
-   if(playIntent===play)playIntent=undefined;
+   if(playIntent===play){playIntent=undefined;notifyConsoleContext();}
    if(key===runSerial){
     $('run').toggleAttribute('disabled',!ready);workbench.setReady();
     if(intent.signal.aborted)restorePreviewStatus(preview.runner.state);
@@ -377,7 +414,7 @@ $<HTMLFormElement>('file-form').onsubmit=async event=>{event.preventDefault();tr
   }
  }}
  else addProjectFiles(current,[[path,path.endsWith('.json')?'{}\n':/\.[jt]sx?$/.test(path)?'export const value = 1;\n':'']]);
- form.hidden=true;selectFile(path);editor.focus();if(modified)changed();
+ form.hidden=true;selectFile(path,true);editor.focus();if(modified)changed();
 }catch(error){toast(String(error));}};
 function deleteFile(path:string){if(path===current.entry)return;delete current.files[path];selectFile(current.selected===path?current.entry:current.selected);changed();}
 $('new-file').onclick=()=>fileForm();$('file-search').oninput=renderFiles;
@@ -448,6 +485,7 @@ $('share').onclick=async()=>{try{const json=new TextEncoder().encode(JSON.string
 async function importShared(){if(!location.hash.startsWith('#project='))return;try{const binary=atob(location.hash.slice(9).replace(/-/g,'+').replace(/_/g,'/'));if(binary.length>24576)throw Error('分享链接过大');const bytes=Uint8Array.from(binary,c=>c.charCodeAt(0));const reader=new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip')).getReader(),chunks:Uint8Array<ArrayBuffer>[]=[];let size=0;try{for(;;){const {done,value}=await reader.read();if(done)break;size+=value.byteLength;if(size>MAX_PROJECT_DOCUMENT_BYTES)throw Error('分享项目过大');chunks.push(value.slice());}}finally{await reader.cancel();}const text=await new Blob(chunks).text();return await importDocument(JSON.parse(text),{shared:true});}catch(error){toast('无法读取分享项目：'+String(error));}}
 function importCity(){const input=document.createElement('input');input.type='file';input.accept='.json,application/json';input.onchange=async()=>{const file=input.files?.[0];if(!file)return;try{if(file.size>262144)throw Error('地图文件超过 256 KB');send({type:'import-data',data:JSON.parse(await file.text())});log(`✓ 已读取 ${file.name}`);}catch(error){log(String(error),'error');}};input.click();}
 $('run').onclick=()=>void compile(true);$('check').onclick=()=>void check();$('stop').onclick=()=>{
+ if(agentPanel.abortReplay())return;
  invalidatePlay();runSerial++;$('run').toggleAttribute('disabled',!ready);workbench.setReady();
  if(nativePreview){void nativePreview.stop();restorePreviewStatus(nativePreview.runner.state);}
 };
@@ -458,7 +496,7 @@ const menu=$<HTMLDetailsElement>('examples-menu');
 function positionProjects(){const popover=$('project-popover');popover.style.removeProperty('--menu-shift');const overflow=popover.getBoundingClientRect().right-innerWidth+8;if(overflow>0&&getComputedStyle(popover).position==='absolute')popover.style.setProperty('--menu-shift',`${-overflow}px`);}
 menu.addEventListener('toggle',()=>{$('project-switcher').setAttribute('aria-expanded',String(menu.open));if(menu.open)positionProjects();});
 $('project-close').onclick=()=>{menu.open=false;$('project-switcher').focus();};window.addEventListener('resize',()=>{if(menu.open)positionProjects();});
-window.addEventListener('keydown',event=>{if(event.defaultPrevented)return;if((event.ctrlKey||event.metaKey)&&event.key==='Enter'){event.preventDefault();void compile(true);}});
+window.addEventListener('keydown',event=>{if(event.defaultPrevented||event.isComposing||workbench.leftMode()==='api')return;if((event.ctrlKey||event.metaKey)&&event.key==='Enter'){event.preventDefault();void compile(true);}});
 addEventListener('message',event=>{
  if(event.data?.type==='godotjs-preview-escape'&&nativePreview&&event.origin===nativePreview.runner.previewOrigin&&event.source===$('preview').querySelector('iframe')?.contentWindow)workbench.exitPreview();
 });
@@ -470,14 +508,14 @@ function onProjectEvent(data:any){
 function onEngineEvent(event:RunnerEvent){
  if(event.type==='state'&&event.state==='loading-frame'){
   activeEngineRevision=event.revision;
-  $('stop').removeAttribute('disabled');
+  workbench.setPreviewCanStop(true);
  }
  const revision=event.type==='exit'?event.report.revision:event.revision;
  if(revision!==activeEngineRevision)return;
  if(event.type==='project'){onProjectEvent({...event.data,generation:event.generation});return;}
  if(event.type==='log'){log(event.text,event.level,event.level==='error'&&debugPanel.showsRun(event.runId));return;}
  if(event.type==='exit'){
-  $('stop').setAttribute('disabled','');$('fps').textContent='— FPS';
+  workbench.setPreviewCanStop(false);$('fps').textContent='— FPS';
   const shownInDebug=debugPanel.showsRun(event.report.runId);
   if(event.report.diagnostic?.stack)log(event.report.diagnostic.stack,'error',shownInDebug);
   if(event.report.reason==='clean-exit'||event.report.reason==='forced-frame-disposal'){status('已停止');$('telemetry').textContent='场景已释放';}
@@ -488,7 +526,7 @@ function onEngineEvent(event:RunnerEvent){
   // Compilation snapshots controls before the new session can accept commands.
   // Replay the current values so edits made during startup reach this session.
   send({type:'controls',controls:current.controls});
-  $('preview-placeholder').hidden=true;$('stop').removeAttribute('disabled');$('telemetry').textContent=getEngineProfile(siteEngineProfile).label;
+  $('preview-placeholder').hidden=true;workbench.setPreviewCanStop(true);$('telemetry').textContent=getEngineProfile(siteEngineProfile).label;
  }
  if(event.state!=='exited')showPreviewState(event.state);
 }

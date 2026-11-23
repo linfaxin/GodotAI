@@ -1,0 +1,64 @@
+.left-mode-switch { display: flex; align-items: center; gap: 3px; padding: 0 7px; flex: none; }
+.left-mode-switch button { font-size: 11px; padding: 4px 8px; border-color: transparent; background: transparent; color: #a5a5a5; }
+.left-mode-switch button[aria-pressed="true"], .left-mode-switch button[aria-selected="true"] { color: #e7f2ff; background: #24415d; border-color: #356085; }
+.code-pane:not([hidden]) { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; }
+#api-console-pane:not([hidden]) { flex: 1; min-height: 0; min-width: 0; overflow: auto; scrollbar-width: thin; scrollbar-color: #424242 transparent; }
+#api-console-pane[hidden], .code-pane[hidden] { display: none; }
+.api-console { display: grid; gap: 10px; padding: 14px; color: #d0d0d0; font-size: 12px; line-height: 1.6; min-width: 0; }
+.api-console h2, .api-console h3, .api-console h4, .api-console p { margin: 0; }
+.api-console h2 { font-size: 14px; font-weight: 600; }
+.api-console h3 { font-size: 12px; font-weight: 600; }
+.api-console h4 { font-size: 11px; }
+.api-console button { font-size: 11px; padding: 4px 8px; min-height: 27px; white-space: normal; text-align: left; }
+.api-console button:disabled { opacity: .5; cursor: default; }
+.api-console button:focus-visible, .api-console textarea:focus-visible, .api-console select:focus-visible { outline: 2px solid #75beff; outline-offset: 2px; }
+.api-console-heading, .api-console-section-heading { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+.api-console-note { color: #a2a2a2; font-size: 11px; overflow-wrap: anywhere; }
+.api-console-context { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 3px 10px; margin: 0; border: 1px solid #383838; border-radius: 4px; padding: 8px; background: #222; font-size: 11px; }
+.api-console-context dt { color: #999; }
+.api-console-context dd { margin: 0; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap: anywhere; }
+.api-console-composer { display: grid; gap: 7px; }
+.api-console-label { display: block; font-size: 11px; font-weight: 600; color: #d4d4d4; }
+.api-console select, .api-console textarea { width: 100%; min-width: 0; box-sizing: border-box; background: #191919; border: 1px solid #494949; border-radius: 3px; color: #ddd; }
+.api-console select { padding: 6px; font-size: 11px; }
+.api-console textarea { resize: vertical; min-height: 126px; max-height: 460px; padding: 9px; font: 12px/1.7 ui-monospace, SFMono-Regular, Consolas, monospace; tab-size: 2; }
+.api-console-description { color: #bababa; font-size: 11px; }
+.api-console-limits { font-size: 11px; color: #aaa; }
+.api-console summary { cursor: pointer; color: #9bcdf7; font-size: 11px; width: fit-content; }
+.api-console-parameters { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 3px 10px; margin: 8px 0; }
+.api-console-parameters dt { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; color: #c2d8ed; }
+.api-console-parameters dd { margin: 0; overflow-wrap: anywhere; }
+.api-console-limits ul { padding-left: 18px; margin: 6px 0; }
+.api-console-actions { display: flex; flex-wrap: wrap; gap: 5px; }
+.api-console-actions .api-console-primary { background: #1264a3; border-color: #287cbb; color: white; margin-left: auto; min-width: 60px; justify-content: center; text-align: center; }
+.api-console-status, .api-console-result-status { font-size: 11px; color: #a7c9e5; overflow-wrap: anywhere; }
+.api-console-error { color: #f48771; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; }
+.api-console pre { margin: 6px 0 0; max-height: 270px; overflow: auto; background: #181818; color: #d2d2d2; padding: 8px; border: 1px solid #333; border-radius: 3px; font: 11px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.api-console-request > button { margin-top: 5px; }
+.api-console-results, .api-console-history-section { display: grid; gap: 7px; border-top: 1px solid #383838; padding-top: 11px; min-width: 0; }
+.api-console-attachments figure { margin: 0; border: 1px solid #3f3f3f; background: #151515; border-radius: 3px; padding: 6px; }
+.api-console-attachments img { display: block; max-width: 100%; height: auto; max-height: 320px; object-fit: contain; margin: auto; }
+.api-console-attachments figcaption { font: 10px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace; color: #aaa; overflow-wrap: anywhere; margin-top: 5px; }
+.api-console-sources { display: grid; gap: 6px; background: #222; border: 1px solid #3b434c; border-radius: 3px; padding: 8px; }
+.api-console-sources[hidden], .api-console [hidden] { display: none; }
+.api-console-sources > button { width: fit-content; }
+.api-console-sources label select { display: block; margin-top: 4px; font-weight: normal; }
+.api-console-history { list-style: none; padding: 0; margin: 0; display: grid; gap: 4px; }
+.api-console-history li { display: flex; gap: 5px; align-items: center; padding: 4px; border: 1px solid transparent; border-radius: 3px; min-width: 0; }
+.api-console-history li.selected { border-color: #46627a; background: #21303c; }
+.api-console-history li > button:first-child { flex: 1; min-width: 0; overflow-wrap: anywhere; background: transparent; border-color: transparent; justify-content: flex-start; }
+.api-console-history li > button:last-child { flex: none; }
+.api-console-lessons { border-top: 1px solid #383838; padding-top: 9px; }
+.api-console-lessons > section { margin-top: 10px; }
+.api-console-lessons ol { margin: 6px 0 0; padding-left: 21px; }
+.api-console-lessons li { margin: 7px 0; }
+.api-console-lessons li p { margin-top: 3px; }
+@media (max-width: 620px) {
+  .api-console { padding: 9px; gap: 8px; }
+  .api-console-context { grid-template-columns: minmax(0, 1fr); gap: 1px; }
+  .api-console-context dd + dt { margin-top: 5px; }
+  .api-console-parameters { grid-template-columns: minmax(0, 1fr); }
+  .api-console-actions .api-console-primary { margin-left: 0; }
+  .api-console-history li { align-items: stretch; }
+  .api-console textarea { min-height: 110px; }
+}

@@ -21,6 +21,7 @@ For full documentation, visit [godotjs.github.io](https://godotjs.github.io/docu
 
 The [engine goals and platform boundaries](docs/engine-goals.zh-CN.md) define the AI game creation platform use case, engine responsibilities and reusable integration contracts.
 The [reviewed runtime properties and Summer API plan V2](docs/design/runtime-properties-and-summer-api-v2.zh-CN.md) defines typed exported scalar access, the Summer operation subset, implementation contracts, parallel work packages and real Playground validation gates.
+The [reviewed Playground API console plan](docs/design/playground-api-console.zh-CN.md) defines the editable Summer/local operation console, runtime binding, implementation work packages and readiness for local validation.
 The [next-stage proposal](docs/engine-next-stage.zh-CN.md) prioritizes independent platform integration, runtime observation and interaction, with concrete acceptance criteria.
 The [minimum engine contracts and core regression plan V4](docs/design/engine-minimum-contracts-v4.zh-CN.md) defines the engine prerequisites for adding the Playground AI assistant. The [implementation and integration record](docs/engine-minimum-contracts-delivery.zh-CN.md) documents the completed SDK/Playground/Node integration and passing core regression scope.
 

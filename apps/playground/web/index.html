@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#181818"><title>GodotAI Playground</title><link rel="icon" href="data:,"><link rel="stylesheet" href="./main.css"><link rel="stylesheet" href="./style.css"><link rel="stylesheet" href="./workbench-additions.css"></head>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#181818"><title>GodotAI Playground</title><link rel="icon" href="data:,"><link rel="stylesheet" href="./main.css"><link rel="stylesheet" href="./style.css"><link rel="stylesheet" href="./workbench-additions.css"><link rel="stylesheet" href="./api-console.css"></head>
 <body>
 <svg class="svg-defs" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><defs>
 <symbol id="i-panel" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></symbol><symbol id="i-play" viewBox="0 0 24 24"><path d="m8 5 11 7-11 7Z"/></symbol><symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1"/></symbol><symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol><symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></symbol><symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></symbol><symbol id="i-expand" viewBox="0 0 24 24"><path d="M9 3H3v6m12-6h6v6M3 15v6h6m12-6v6h-6"/></symbol><symbol id="i-chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol><symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol><symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M15 8V3H3v13h5"/></symbol><symbol id="i-share" viewBox="0 0 24 24"><path d="M12 16V3m-5 5 5-5 5 5M5 13v7h14v-7"/></symbol><symbol id="i-code" viewBox="0 0 24 24"><path d="m8 6-6 6 6 6m8-12 6 6-6 6M14 3l-4 18"/></symbol>
@@ -19,7 +19,7 @@
 <div class="runtime-card"><span class="status-dot"></span><div><strong id="runtime-name">加载运行环境</strong><small id="runtime-meta">Godot WASM + React</small></div><span class="runtime-badge">WASM</span></div>
 </aside>
 <section id="workspace" class="workspace" aria-label="编辑与预览工作区"><div id="panels" class="panels">
-<section id="editor-panel" class="editor-panel" aria-label="代码编辑器"><div class="panel-toolbar editor-toolbar"><nav id="tabs" role="tablist" aria-label="已打开文件"></nav><button id="check" class="icon-button" title="检查 TypeScript" aria-label="检查类型"><svg class="icon"><use href="#i-check"/></svg></button></div><div class="file-breadcrumb"><svg class="icon"><use href="#i-code"/></svg><span id="file-path">src/Counter.tsx</span><span id="language-tag">TSX</span></div><div class="editor-container"><div id="source"></div><div id="binary-file" hidden></div></div></section>
+<section id="editor-panel" class="editor-panel" aria-label="代码编辑器"><div class="panel-toolbar editor-toolbar"><div class="left-mode-switch" role="group" aria-label="左侧工作区"><button id="left-mode-code" type="button" aria-pressed="true" aria-controls="code-pane">代码</button><button id="left-mode-api" type="button" aria-pressed="false" aria-controls="api-console-pane">API 调用</button></div><nav id="tabs" role="tablist" aria-label="已打开文件"></nav><button id="check" class="icon-button" title="检查 TypeScript" aria-label="检查类型"><svg class="icon"><use href="#i-check"/></svg></button></div><div id="code-pane" class="code-pane"><div class="file-breadcrumb"><svg class="icon"><use href="#i-code"/></svg><span id="file-path">src/Counter.tsx</span><span id="language-tag">TSX</span></div><div class="editor-container"><div id="source"></div><div id="binary-file" hidden></div></div></div><section id="api-console-pane" aria-label="API 调用台" hidden></section></section>
 <div id="panel-resizer" class="resize-handle panel-resizer" role="separator" tabindex="0" aria-label="调整编辑器与预览宽度" aria-orientation="vertical" aria-valuemin="28" aria-valuemax="72" aria-valuenow="52" title="拖动调整宽度，双击恢复默认"><span></span></div>
 <section id="preview-panel" class="preview-panel" aria-label="Godot 场景预览"><div class="panel-toolbar"><div class="preview-heading"><span class="status-dot" id="run-dot"></span><strong>场景预览</strong><span class="preview-tech">Godot · WebGL2</span></div><div class="preview-tools"><span id="fps">— FPS</span><span id="preview-size">640 × 360</span><button id="focus-preview" class="icon-button" title="专注预览 · Esc 返回" aria-label="专注预览" aria-pressed="false"><svg class="icon"><use href="#i-expand"/></svg></button></div></div><div id="preview-body" class="preview-body"><div id="preview-placeholder" role="status" aria-live="polite"><div class="preview-symbol"><svg class="icon"><use href="#i-play"/></svg><span class="loading-ring"></span></div><h1>正在准备场景</h1><p>运行环境就绪后，自动启动当前项目。</p><p class="hint">首次加载需要下载编译器与引擎，请稍候。</p><progress id="progress" max="1" value="0"></progress><a id="preview-login" class="button" target="_blank" rel="noopener noreferrer" hidden>登录预览站点</a></div><div id="preview"></div></div><div class="preview-status"><span id="status">正在加载编译器和类型声明…</span><span id="build-info"><span id="telemetry"></span></span></div></section>
 </div><div id="dock-resizer" class="resize-handle dock-resizer" role="separator" tabindex="0" aria-label="调整底部面板高度" aria-orientation="horizontal" aria-valuemin="120" aria-valuemax="340" aria-valuenow="178" title="拖动调整底部面板高度"><span></span></div>
@@ -27,8 +27,22 @@
 <section id="debug-panel" class="dock-content debug-panel" role="tabpanel" aria-labelledby="debug-tab" tabindex="0" hidden>
   <div class="debug-context-row">
     <div id="debug-context" aria-label="运行环境"><p>正在读取运行环境</p></div>
+    <button id="debug-open-console" type="button" class="text-button">打开 API 调用台</button>
     <button id="debug-open-docs" type="button" class="text-button" aria-controls="debug-docs" aria-expanded="false">API 文档</button>
   </div>
+    <div id="agent-tools" class="debug-example-actions">
+      <h3>自动验证</h3>
+      <button id="agent-replay" type="button">检查并启动预览</button>
+      <button id="agent-playtest" type="button" hidden>试玩验证</button>
+      <button id="agent-runtime-write" type="button" hidden>运行时写入验证</button>
+      <button id="agent-runtime-properties" type="button" hidden>公开脚本属性验证</button>
+      <button id="agent-stop" type="button" disabled>停止本次预览</button>
+      <span id="agent-status" class="debug-note" role="status"></span>
+    </div>
+    <pre id="agent-trace" aria-label="API 调用实参与返回结果" hidden></pre>
+    <div id="agent-observations" aria-label="试玩验证的位置与画面" hidden></div>
+    <ul id="agent-write-results" aria-label="运行时写入验证结果" hidden></ul>
+    <details id="agent-properties-details" hidden><summary>公开属性验证证据</summary><pre id="agent-properties-evidence" aria-label="公开属性、输入、画面与退出证据"></pre></details>
   <div id="debug-docs" class="debug-docs" hidden>
     <p>在工作台的 DevTools 中通过 <code>window.godotPlayground</code> 调用查询、检查和预览操作。</p>
     <div class="debug-example-actions">
@@ -37,20 +51,7 @@
       <button id="debug-run-example" type="button">执行查询示例</button>
       <span id="debug-example-status" class="debug-note" role="status"></span>
     </div>
-    <div id="agent-tools" class="debug-example-actions">
-      <h3>Agent 工具</h3>
-      <button id="agent-replay" type="button">检查并启动预览</button>
-      <button id="agent-playtest" type="button" hidden>试玩验证</button>
-      <button id="agent-runtime-write" type="button" hidden>运行时写入验证</button>
-      <button id="agent-runtime-properties" type="button" hidden>公开脚本属性验证</button>
-      <button id="agent-stop" type="button" disabled>停止本次预览</button>
-      <span id="agent-status" class="debug-note" role="status"></span>
-    </div>
     <pre id="debug-example-result" aria-label="查询结果" hidden></pre>
-    <pre id="agent-trace" aria-label="API 调用实参与返回结果" hidden></pre>
-    <div id="agent-observations" aria-label="试玩验证的位置与画面" hidden></div>
-    <ul id="agent-write-results" aria-label="运行时写入验证结果" hidden></ul>
-    <details id="agent-properties-details" hidden><summary>公开属性验证证据</summary><pre id="agent-properties-evidence" aria-label="公开属性、输入、画面与退出证据"></pre></details>
     <pre><code id="debug-api-example"></code></pre>
     <dl class="debug-methods">
       <dt><code>get_project_context()</code></dt>

@@ -3,6 +3,7 @@ import type {DebugExit} from '../debug-api';
 import type {PlaygroundApi, PlaygroundApiCall, createPlaygroundApi} from '../playground-api';
 import {INTERACTION_DEMO_PLAYER, RUNTIME_WRITE_DEMO_X} from '../interaction-demo';
 import {hasCleanRuntimeExit,runRuntimePropertiesReplay} from './runtime-properties-replay';
+import type {ConsoleGate, ConsoleToken} from './api-console-types';
 
 interface PlaytestActions {
   unavailable(): string | undefined;
@@ -152,7 +153,8 @@ async function collectPlaytest(api: PlaygroundApi, runId: string, signal: AbortS
   }));
 }
 
-export function createAgentPanel(playground: ReturnType<typeof createPlaygroundApi>, demo?: PlaytestActions) {
+export function createAgentPanel(playground: ReturnType<typeof createPlaygroundApi>, demo?: PlaytestActions,
+  coordination?: {gate: ConsoleGate}) {
   const run = document.getElementById('agent-replay') as HTMLButtonElement;
   const stop = document.getElementById('agent-stop') as HTMLButtonElement;
   const status = document.getElementById('agent-status')!;
@@ -170,6 +172,38 @@ export function createAgentPanel(playground: ReturnType<typeof createPlaygroundA
   const calls: string[] = [];
   const imageUrls: string[] = [];
   let playtest: AbortController | undefined;
+  let activityToken: ConsoleToken | undefined;
+  const blockedStates = new Map<HTMLButtonElement, boolean>();
+  const activityButtons = [run, stop, testPlay, testWrite, testProperties].filter((button): button is HTMLButtonElement => !!button);
+  function syncActivity() {
+    const owner = coordination?.gate.owner();
+    for (const button of activityButtons) {
+      if (owner && (button !== stop || activityToken === undefined)) {
+        if (!blockedStates.has(button)) blockedStates.set(button, button.disabled);
+        button.disabled = true;
+      } else if (blockedStates.has(button)) {
+        button.disabled = blockedStates.get(button)!;
+        blockedStates.delete(button);
+      }
+    }
+  }
+  const unsubscribeActivity = coordination?.gate.subscribe(syncActivity);
+  function claimActivity() {
+    if (!coordination) return true;
+    if (activityToken) return false;
+    const token = coordination.gate.acquire('replay');
+    if (!token) { status.textContent = '请等待当前调用或示例操作结束'; return false; }
+    activityToken = token;
+    syncActivity();
+    return true;
+  }
+  function releaseActivity() {
+    if (!activityToken) return;
+    const token = activityToken;
+    activityToken = undefined;
+    coordination?.gate.release(token);
+    syncActivity();
+  }
   const clearImages = () => {
     for (const url of imageUrls.splice(0)) URL.revokeObjectURL(url);
     images?.replaceChildren();
@@ -179,7 +213,21 @@ export function createAgentPanel(playground: ReturnType<typeof createPlaygroundA
     if (propertiesEvidence) propertiesEvidence.textContent = '';
     if (propertiesDetails) propertiesDetails.hidden = true;
   };
-  addEventListener('pagehide', () => { playtest?.abort(); clearImages(); });
+  window.addEventListener('pagehide', event => {
+    if (event.persisted) return;
+    playtest?.abort(); replayWait?.abort(); clearImages(); unsubscribeActivity?.();
+  });
+
+  function abortReplay() {
+    if (!activityToken && !playtest && !replayWait) return false;
+    if (playtest || replayWait) {
+      playtest?.abort();
+      replayWait?.abort();
+      stop.disabled = true;
+      status.textContent = '正在取消自动验证并收尾';
+    }
+    return true;
+  }
 
   function show(call: PlaygroundApiCall) {
     const body = JSON.stringify(call, null, 2);
@@ -191,11 +239,13 @@ export function createAgentPanel(playground: ReturnType<typeof createPlaygroundA
   playground.subscribe(show);
 
   run.onclick = async () => {
-    if (playtest) return;
+    if (playtest || !claimActivity()) return;
     replayWait?.abort();
     const controller = new AbortController();
+    let ownedAttemptId: string | undefined;
     replayWait = controller;
-    run.disabled = stop.disabled = true;
+    run.disabled = true;
+    stop.disabled = false;
     runId = undefined;
     calls.length = 0;
     trace.textContent = '';
@@ -210,6 +260,7 @@ export function createAgentPanel(playground: ReturnType<typeof createPlaygroundA
       }
       const input = {projectId, expectedEditorRevision: editorRevision};
       const check = await api.check(input);
+      if (controller.signal.aborted) return;
       if (!check.ok || check.result.status === 'failed') {
         status.textContent = check.ok ? check.result.error?.diagnostic.message ?? '检查失败' : check.error.message;
         return;
@@ -222,6 +273,7 @@ export function createAgentPanel(playground: ReturnType<typeof createPlaygroundA
       const play = api.play(input);
       if (!play.ok) { status.textContent = play.error.message; return; }
       const {attemptId} = play.result;
+      ownedAttemptId = attemptId;
       status.textContent = '正在构建并启动预览';
       for (;;) {
         const observed = await api.wait_for_event({attemptId, until: 'running'}, controller.signal);
@@ -231,29 +283,40 @@ export function createAgentPanel(playground: ReturnType<typeof createPlaygroundA
         const {run: session, outcome} = observed.result;
         runId = session?.runId;
         if (runId) api.read_run_events({runId, kinds: ['log'], limit: 20});
-        stop.disabled = !runId || session?.exit !== undefined;
         if (outcome !== 'timeout') {
+          stop.disabled = !runId || session?.exit !== undefined;
           status.textContent = outcome === 'reached' ? '预览已启动' : '本次预览未进入运行状态';
           return;
         }
         status.textContent = '等待超时，仍在跟踪本次预览';
-        run.disabled = false;
       }
     } finally {
-      if (replayWait === controller) {
-        replayWait = undefined;
-        run.disabled = false;
+      try {
+        if (controller.signal.aborted && ownedAttemptId) {
+          demo?.cancelLaunch(ownedAttemptId);
+          const build = api.get_build({attemptId: ownedAttemptId});
+          const target = build.ok && build.result.preview?.status === 'session-created' ? build.result.preview.runId : undefined;
+          if (target) {
+            api.stop({runId: target});
+            await api.wait_for_event({runId: target, until: 'exited', timeoutMs: 10000});
+          }
+        }
+      } finally {
+        if (replayWait === controller) {
+          replayWait = undefined;
+          run.disabled = false;
+          stop.disabled = !runId || controller.signal.aborted || stop.disabled;
+          if (controller.signal.aborted) status.textContent = '已取消自动验证；退出状态见运行记录';
+        }
+        releaseActivity();
       }
     }
   };
 
   stop.onclick = async () => {
-    if (playtest) { playtest.abort(); status.textContent = '正在取消验证并收尾'; return; }
-    if (!runId) return;
+    if (playtest || replayWait) { abortReplay(); return; }
+    if (!runId || !claimActivity()) return;
     const target = runId;
-    const previousWait = replayWait;
-    replayWait = undefined;
-    previousWait?.abort();
     stop.disabled = run.disabled = true;
     try {
       const stopped = api.stop({runId: target});
@@ -266,6 +329,7 @@ export function createAgentPanel(playground: ReturnType<typeof createPlaygroundA
       if (result.ok && result.result.outcome === 'timeout') stop.disabled = false;
     } finally {
       run.disabled = false;
+      releaseActivity();
     }
   };
 
@@ -314,19 +378,21 @@ export function createAgentPanel(playground: ReturnType<typeof createPlaygroundA
       return {runId: target, exit};
     }
     const startPlaytest = async (write: boolean) => {
-      if (playtest) return;
+      if (playtest || (write ? testWrite : testPlay)?.disabled) return;
       const unavailable = demo.unavailable();
       if (unavailable) { status.textContent = unavailable; return; }
       if (write && !demo.supportsRuntimeWrite()) {
         status.textContent = '当前预览不支持运行时属性写入';
         return;
       }
+      if (!claimActivity()) return;
       const controller = new AbortController();
       playtest = controller;
       const previousWait = replayWait;
       replayWait = undefined;
       previousWait?.abort();
-      testPlay.disabled = run.disabled = stop.disabled = true;
+      testPlay.disabled = run.disabled = true;
+      stop.disabled = false;
       if (testWrite) testWrite.disabled = true;
       if (testProperties) testProperties.disabled = true;
       calls.length = 0;
@@ -388,11 +454,13 @@ export function createAgentPanel(playground: ReturnType<typeof createPlaygroundA
       } catch (error) {
         failure = error instanceof Error ? error.message : String(error);
       } finally {
-        if (!controller.signal.aborted) status.textContent = failure ?? exitStatus;
+        status.textContent = controller.signal.aborted ? '已取消自动验证；退出状态见运行记录' : failure ?? exitStatus;
         playtest = undefined;
         testPlay.disabled = run.disabled = false;
+        stop.disabled = true;
         if (testWrite) testWrite.disabled = false;
         if (testProperties) testProperties.disabled = false;
+        releaseActivity();
       }
     };
     testPlay.onclick = () => startPlaytest(false);
@@ -402,10 +470,11 @@ export function createAgentPanel(playground: ReturnType<typeof createPlaygroundA
   if(testProperties&&demo?.openProperties&&images){
     testProperties.hidden=false;
     testProperties.onclick=async()=>{
-      if(playtest)return;
+      if(playtest||testProperties.disabled)return;
       const unavailable=demo.unavailable();
       if(unavailable){status.textContent=unavailable;return;}
       if(!demo.supportsRuntimeProperties?.()){status.textContent='当前引擎不支持公开脚本属性访问';return;}
+      if(!claimActivity())return;
       const controller=new AbortController();playtest=controller;
       replayWait?.abort();replayWait=undefined;
       run.disabled=true;stop.disabled=false;testProperties.disabled=true;
@@ -433,7 +502,10 @@ export function createAgentPanel(playground: ReturnType<typeof createPlaygroundA
       }finally{
         playtest=undefined;run.disabled=false;stop.disabled=true;testProperties.disabled=false;
         if(testPlay)testPlay.disabled=false;if(testWrite)testWrite.disabled=false;
+        releaseActivity();
       }
     };
   }
+  syncActivity();
+  return {abortReplay};
 }

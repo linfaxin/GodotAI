@@ -5,7 +5,7 @@ interface Preferences { sidebar: boolean; ratio: number; dockHeight: number; col
 const preferenceKey = 'godotjs-workbench-v1';
 const defaults: Preferences = { sidebar: true, ratio: 52, dockHeight: 178, collapsed: false, tab: 'console' };
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
-export function createWorkbench(options: { selectFile(path: string): void; focusEditor(): void; toast(message: string): void }) {
+export function createWorkbench(options: { selectFile(path: string): void; focusEditor(): void; layoutEditor?(): void; toast(message: string): void }) {
   const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
   let saved: Partial<Preferences> = {};
   try { saved = JSON.parse(localStorage.getItem(preferenceKey) ?? '{}') ?? {}; } catch {}
@@ -21,6 +21,28 @@ export function createWorkbench(options: { selectFile(path: string): void; focus
   let compact = innerHeight < 560;
   if (compact) prefs.collapsed = true;
   let focused = false, autoscroll = true, tabs: string[] = [], files: string[] = [], selected = '';
+  let leftMode: 'code' | 'api' = 'code';
+  let previewCanStop = false;
+  let replayCanStop = false;
+  function syncStopButton() {
+    $<HTMLButtonElement>('stop').disabled = !previewCanStop && !replayCanStop;
+  }
+  function setPreviewCanStop(value: boolean) {
+    previewCanStop = value;
+    syncStopButton();
+  }
+  function setLeftMode(mode: 'code' | 'api', focus = false) {
+    leftMode = mode;
+    $('code-pane').hidden = mode !== 'code';
+    $('api-console-pane').hidden = mode !== 'api';
+    $('left-mode-code').setAttribute('aria-pressed', String(mode === 'code'));
+    $('left-mode-api').setAttribute('aria-pressed', String(mode === 'api'));
+    $('check').hidden = mode === 'api';
+    document.body.dataset.leftMode = mode;
+    focusPreview(false);
+    if (mode === 'code') { options.layoutEditor?.(); if (focus) options.focusEditor(); }
+    else if (focus) $('api-console-pane').querySelector<HTMLTextAreaElement>('textarea')?.focus();
+  }
   const persist = () => { try { localStorage.setItem(preferenceKey, JSON.stringify(prefs)); } catch {} };
   function syncSidebar() {
     const open = !focused && (mobile.matches ? document.body.classList.contains('sidebar-open') : prefs.sidebar);
@@ -127,6 +149,9 @@ export function createWorkbench(options: { selectFile(path: string): void; focus
   $('share-menu').onclick = () => $('share').click();
   $('close-sidebar').onclick = () => sidebar(false); $('sidebar-backdrop').onclick = () => sidebar(false);
   $('focus-preview').onclick = () => focusPreview();
+  $('left-mode-code').onclick = () => setLeftMode('code', true);
+  $('left-mode-api').onclick = () => setLeftMode('api', true);
+  $('debug-open-console').onclick = () => setLeftMode('api', true);
   for (const [index, tab] of dockTabs.entries()) {
     const button = $(tab + '-tab');
     button.onclick = () => { if (prefs.tab === tab && !prefs.collapsed) { prefs.collapsed = true; dock(); } else dock(tab, true); };
@@ -170,17 +195,22 @@ export function createWorkbench(options: { selectFile(path: string): void; focus
   resizeVariables(); dock();
   return {
     toggleFiles: toggleSidebar,
+    leftMode: () => leftMode,
+    setLeftMode,
+    showCode: () => setLeftMode('code'),
     exitPreview: () => focusPreview(false),
     syncFiles(paths: string[], active: string) { files = paths; selected = active; tabs = tabs.filter(path => paths.includes(path)); if (active && !tabs.includes(active)) tabs.push(active); $('file-count').textContent = String(paths.length); renderTabs(); },
     resetTabs() { tabs = []; $<HTMLInputElement>('file-search').value = ''; focusPreview(false); if (mobile.matches) sidebar(false); },
     renameFile(old: string, path: string) { tabs = tabs.map(value => value === old ? path : value); },
-    filePicked() { focusPreview(false); if (mobile.matches) sidebar(false); },
-    runStarted() { if (mobile.matches) focusPreview(true); },
+    filePicked() { setLeftMode('code'); if (mobile.matches) sidebar(false); },
+    runStarted() { if (mobile.matches && leftMode === 'code') focusPreview(true); },
     logAdded,
     clearLogs() { $('no-logs').hidden = true; },
     showProblems() { dock(prefs.tab === 'debug' ? 'debug' : 'problems', true); focusPreview(false); },
     showConsole() { dock('console', true); },
     setReady() { $('run-label').textContent = $('preview').querySelector('iframe') ? '重新运行' : '运行'; $('run').setAttribute('aria-busy', 'false'); },
-    setBuilding() { $('run-label').textContent = '构建中'; $('run').setAttribute('aria-busy', 'true'); $('stop').removeAttribute('disabled'); },
+    setBuilding() { $('run-label').textContent = '构建中'; $('run').setAttribute('aria-busy', 'true'); setPreviewCanStop(true); },
+    setPreviewCanStop,
+    setReplayCanStop(value: boolean) { replayCanStop = value; syncStopButton(); },
   };
 }

@@ -319,8 +319,8 @@ export default class Replacement extends Node2D {
   assert.equal(first.build.diagnostics.counts.error,0);
   await page.locator('#debug-tab').click();
   await page.locator('#debug-panel').waitFor({state:'visible'});
+  assert(await page.locator('#agent-tools #agent-replay').isVisible());
   await page.locator('#debug-open-docs').click();
-  assert(await page.locator('#debug-docs #agent-replay').isVisible());
   assert.deepEqual(await page.evaluate(()=>Object.getOwnPropertyNames(window).filter(key=>key.startsWith('godotPlayground'))),['godotPlayground']);
   await assertPublicTools(page);
   const example=await page.locator('#debug-api-example').textContent();
@@ -405,8 +405,7 @@ export default class Replacement extends Node2D {
   assert.notEqual(checked.sourceHash,bad.sourceHash);
 
   await page.locator('#debug-tab').click();
-  await page.locator('#debug-open-docs').click();
-  await page.locator('#debug-docs #agent-replay').click();
+  await page.locator('#agent-tools #agent-replay').click();
   await page.waitForFunction(()=>document.getElementById('agent-status').textContent==='预览已启动',null,{timeout});
   const trace=await page.locator('#agent-trace').textContent();
   const second=await waitForRun(page,marker,await nextBuild(page,rejected.attemptId));
@@ -598,6 +597,10 @@ export default class Replacement extends Node2D {
   assert.equal(after.run.state,'running');
   assert.equal(await page.locator('#demos [data-demo]').count(),projects);
   assert.equal(await page.locator('#agent-stop').isEnabled(),true);
+  await page.locator('#debug-open-console').click();
+  const capabilities=page.getByTestId('api-console-context');
+  assert.match(await capabilities.innerText(),/截图与输入\s+不支持/);
+  assert.match(await capabilities.innerText(),/公开属性访问\s+不支持/);
   return {runId:after.run.runId,projectId:after.context.projectId};
  },{presentationBackend:'bitmap'});
 
@@ -1362,8 +1365,8 @@ export function start(ctx: {mount: Node; host: EngineRuntimeHost}) {
   return {runId:run.runId,exit:run.exit};
  });
 
- await browserCase('interaction-demo-cancels-delayed-start', async page=>{
-  await page.evaluate(()=>{
+ async function delayPlaytestCompile(page,accelerateTimeout=false){
+  await page.evaluate(accelerateTimeout=>{
    const send=Worker.prototype.postMessage,schedule=window.setTimeout;
    Worker.prototype.postMessage=function(packet,...args){
     if(this.isCompiler&&packet?.kind==='compile'&&!window.__releaseDelayedCompile){
@@ -1376,11 +1379,17 @@ export function start(ctx: {mount: Node; host: EngineRuntimeHost}) {
     }
     return send.call(this,packet,...args);
    };
-   window.setTimeout=function(callback,ms,...args){
-    const demoWaiting=document.querySelector('#agent-status')?.textContent==='正在启动试玩示例';
-    return schedule.call(this,callback,ms===30000&&demoWaiting?20:ms,...args);
-   };
-  });
+   if(accelerateTimeout){
+    window.setTimeout=function(callback,ms,...args){
+     const demoWaiting=document.querySelector('#agent-status')?.textContent==='正在启动试玩示例';
+     return schedule.call(this,callback,ms===30000&&demoWaiting?20:ms,...args);
+    };
+   }
+  },accelerateTimeout);
+ }
+
+ await browserCase('interaction-demo-cancels-delayed-start', async page=>{
+  await delayPlaytestCompile(page,true);
   await page.locator('#debug-tab').click();
   await page.locator('#debug-open-docs').click();
   await page.locator('#agent-playtest').click();
@@ -1394,6 +1403,26 @@ export function start(ctx: {mount: Node; host: EngineRuntimeHost}) {
   assert.equal(result.build.status,'succeeded');
   assert.equal(result.build.preview.status,'skipped');
   return {attemptId,preview:result.build.preview};
+ });
+
+ await browserCase('interaction-demo-confirms-explicit-cancellation', async page=>{
+  await delayPlaytestCompile(page);
+  await page.locator('#debug-tab').click();
+  await page.locator('#agent-playtest').click();
+  await page.waitForFunction(()=>window.__releaseDelayedCompile,null,{timeout});
+  await page.locator('#agent-stop').click();
+  await page.waitForFunction(()=>!document.querySelector('#agent-playtest')?.disabled,null,{timeout});
+  const cancellation=await page.locator('#agent-status').textContent();
+  assert.equal(cancellation,'已取消自动验证；退出状态见运行记录');
+  assert.equal(await page.locator('#agent-stop').isDisabled(),true);
+  const {build:{attemptId,status}}=await read(page);
+  assert.equal(status,'pending');
+  await page.evaluate(()=>window.__releaseDelayedCompile());
+  const result=unwrap(await invoke(page,'wait_for_event',{attemptId,until:'running',timeoutMs:30000}));
+  assert.equal(result.outcome,'no_session');
+  assert.equal(result.build.status,'succeeded');
+  assert.equal(result.build.preview.status,'skipped');
+  return {attemptId,cancellation,preview:result.build.preview};
  });
 
  await browserCase('interaction-frame-alpha-and-context-loss', async page=>{
