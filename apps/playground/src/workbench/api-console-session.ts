@@ -1,4 +1,5 @@
 import type {PlaygroundApi} from '../playground-api';
+import {summerGameProbeInputError} from '../summer-adapter.ts';
 import {DEFAULT_CONSOLE_OPERATION, getConsoleOperation, MAX_CONSOLE_READ_PROPERTIES} from './api-console-catalog.ts';
 import type {
   ConsoleAnchor, ConsoleAttachment, ConsoleCall, ConsoleEnvironment, ConsoleFillSelection,
@@ -89,6 +90,7 @@ function resultSummary(operationId: string, reply: unknown): string {
   const outcome = data.payload?.result?.outcome ?? data.outcome;
   if (outcome === 'completed') return '属性批次已结算，请逐项查看';
   if (typeof outcome === 'string') return `执行结果：${outcome}`;
+  if (operationId === 'engine.game_probe') return data.mode === 'rendered' ? '已取得同帧状态和 PNG' : '已取得迭代状态';
   return operationId === 'engine.screenshot' ? '已取得游戏 PNG' : '调用已结算';
 }
 function resultFacts(call: ConsoleCall, input: unknown, reply: unknown, submittedAnchor: ConsoleAnchor): ConsoleResultFacts | undefined {
@@ -107,10 +109,11 @@ function resultFacts(call: ConsoleCall, input: unknown, reply: unknown, submitte
     facts.sourceAnchor.activeRunProjectId = projectId ?? null;
   }
   if (op === 'engine.play' && nonempty(data.attemptId)) facts.attemptId=data.attemptId;
-  if (op === 'engine.get_runtime_tree' && run && Array.isArray(data.nodes)) {
-    facts.nodes=data.nodes.filter((node:unknown)=>object(node)&&nonempty(node.path)&&nonempty(node.instanceId)&&nonempty(node.type))
+  const nodes = op === 'engine.get_runtime_tree' ? data.nodes : op === 'engine.game_probe' ? data.tree?.nodes : undefined;
+  if (run && Array.isArray(nodes)) {
+    facts.nodes=nodes.filter((node:unknown)=>object(node)&&nonempty(node.path)&&nonempty(node.instanceId)&&nonempty(node.type))
       .slice(0,500).map((node:any)=>({path:node.path,instanceId:node.instanceId,type:node.type}));
-    if(data.nodes.length>500)facts.truncated=true;
+    if(nodes.length>500||data.tree?.truncated)facts.truncated=true;
   }
   if ((op === 'describe_runtime_properties' || op === 'describe_runtime_methods') && object(reply) && object(reply.receipt) && object(input) &&
       reply.receipt.run?.runId === input.runId && reply.receipt.path === input.path && reply.receipt.expectedInstanceId === input.expectedInstanceId) {
@@ -162,6 +165,7 @@ export function consoleResultSource(operationId: string, facts: ConsoleResultFac
   if (!facts) return;
   const hasNode = facts.run && !!facts.nodes?.length;
   switch (operationId) {
+    case 'engine.game_probe':
     case 'engine.get_runtime_tree':
     case 'engine.inspect_runtime_node':
     case 'engine.runtime_set':
@@ -204,8 +208,11 @@ export function createApiConsoleSession(api: PlaygroundApi, hooks: ConsoleHooks,
   function dropAttachment(id:string){attachments.delete(id);const row=history.find(item=>item.attachmentId===id);if(row)row.attachmentReleased=true;}
   function removeRow(index:number){const [row]=history.splice(index,1);if(row?.attachmentId)dropAttachment(row.attachmentId);}
   function storeImage(call:ConsoleCall,reply:unknown){
-    if(call.draft.operationId!=='engine.screenshot')return;
-    const frame=dataFor(call.draft.operationId,reply) as GameScreenshot|undefined;
+    const op = call.draft.operationId;
+    if (op !== 'engine.screenshot' && op !== 'engine.game_probe') return;
+    const data = dataFor(op, reply);
+    const frame = (op === 'engine.game_probe' && data?.image ? {...data.image, run: data.run, releaseId: data.releaseId, requestId: data.requestId} :
+      op === 'engine.screenshot' ? data : undefined) as GameScreenshot | undefined;
     if(!frame||!(frame.bytes instanceof ArrayBuffer)||frame.mimeType!=='image/png')return;
     const {bytes,...metadata}=frame;
     const blob=new Blob([bytes],{type:frame.mimeType});
@@ -253,6 +260,11 @@ export function createApiConsoleSession(api: PlaygroundApi, hooks: ConsoleHooks,
       clearError();
       const input=parsed();if(clientErrors.has(operationId))return;
       const current=environment(),id=operationId;
+      if (id === 'engine.game_probe' && !selection && object(input) && (input.tree?.path !== undefined ||
+          Array.isArray(input.props) && input.props.length > 0) &&
+          !same(draft().anchor,current.anchor,['editorProjectId','activeRunId'])) {
+        error('missing_source','请从当前运行的节点树重新选择目标，原草稿已保留');return;
+      }
       if(id.startsWith('engine.')&&!selection){
         if(draft().selectedMethod){error('missing_source','请从当前运行的发现结果重新选择方法');return;}
         draft().anchor=current.anchor;emit();return;
@@ -311,6 +323,32 @@ export function createApiConsoleSession(api: PlaygroundApi, hooks: ConsoleHooks,
         if(source?.input){next.runId=source.input.runId;next.operationId=source.input.operationId;}
         else if(!source&&next.runId===current.anchor.activeRunId&&nonempty(next.operationId)) { /* No rebind to another run. */ }
         else {missing('请使用该次运行的输入回执');return;}
+      }else if(id==='engine.game_probe'&&selection){
+        if(!node||!source?.run||source.run.identity.runId!==current.anchor.activeRunId||
+          source.run.projectId!==current.anchor.editorProjectId){
+          missing('请从当前项目的当前运行选择节点');return;
+        }
+        const changedRun = draft().anchor.activeRunId !== current.anchor.activeRunId ||
+          draft().anchor.editorProjectId !== current.anchor.editorProjectId;
+        if (selection.probeTarget === 'tree') {
+          if (next.tree !== undefined && !object(next.tree)) {missing('tree 需要对象');return;}
+          if (changedRun && Array.isArray(next.props) && next.props.length) {missing('请先移除旧运行的属性路径');return;}
+          next.tree = {...next.tree, path:node.path};
+        } else {
+          if (next.props !== undefined && (!Array.isArray(next.props) || !next.props.every((prop: unknown) => typeof prop === 'string'))) {
+            missing('props 需要字符串数组');return;
+          }
+          if (changedRun && (next.tree?.path || next.props?.length)) {missing('请先移除旧运行的路径');return;}
+          const props = [...new Set([...(next.props ?? []), node.path+':position', node.path+':visible'])];
+          if (props.length>16) {missing('每次最多 16 项属性');return;}
+          next.props=props;
+        }
+        const invalid = summerGameProbeInputError(next);
+        if (invalid) {
+          missing(invalid.message === invalid.code ? '探测参数超出支持范围或无效' : invalid.message);
+          return;
+        }
+        anchor=current.anchor;
       }else if(['engine.get_runtime_tree','engine.inspect_runtime_node','engine.runtime_set'].includes(id)&&selection){
         if(!node||!source?.run){missing('请从运行树选择实际节点');return;}
         next.path=node.path;

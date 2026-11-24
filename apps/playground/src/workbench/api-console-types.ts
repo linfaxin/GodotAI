@@ -22,6 +22,7 @@ export interface ConsoleEnvironment {
     runtimeWrite?: ConsoleCapability;
     runtimeProperties?: ConsoleCapability;
     runtimeCall?: ConsoleCapability;
+    gameProbe?: ConsoleCapability;
     interaction?: ConsoleCapability;
   };
 }
@@ -69,6 +70,7 @@ export interface ConsoleHooks {
 export interface ConsoleFillSelection {
   sourceCallId: string;
   nodePath?: string;
+  probeTarget?: 'tree' | 'properties';
   methodName?: string;
   propertyNames?: readonly string[];
   stoppedRunId?: string;

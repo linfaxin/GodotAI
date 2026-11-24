@@ -3,7 +3,7 @@ import { isProjectData, previewDiagnostic, type RunPhase } from '../protocol.js'
 import { WORKER_PROTOCOL, isWorkerEnvelope, prepareWorkerRunConfiguration, sameWorkerRun, type WorkerRunIdentity, type WorkerRunConfiguration } from './worker-protocol.js';
 import { WorkerSessionLease } from './worker-session.js';
 import { loadVerifiedWorkerEngine, type GodotInstance, type LoadedWorkerEngine, type VerifiedRelease } from '../verified-loader.js';
-import { createWorkerPresentation, installPresentationHooks, type CanvasGeometry } from './worker-presentation.js';
+import { createWorkerPresentation, drawingBufferSize, installPresentationHooks, type CanvasGeometry } from './worker-presentation.js';
 import { createWorkerDom } from './worker-dom.js';
 import {DOM_CLEANUP_COMMAND_LIMIT,isDomCleanupOperation} from './worker-dom-policy.js';
 import { createWorkerAudioBridge } from './worker-audio.js';
@@ -14,7 +14,8 @@ import {installNativeLifecycleGate, type NativeLifecycleGate, type NativeLifecyc
 import {assertArtifactSet,type ArtifactSet} from '../../artifact-set.js';
 import {assertArtifactSetTarget,preloadArtifactSet} from '../artifact-input.js';
 import {createWorkerCapture, createWorkerGesture} from './worker-observation.js';
-import {INTERACTION_VERSION, readGesture, supportsWorkerInteraction, undispatched, validInteractionId, validInteractionSequence} from './worker-interaction.js';
+import {createInteractionResultSender, INTERACTION_VERSION, interactionNow, readGesture, supportsWorkerInteraction,
+  undispatched, validInteractionId, validInteractionSequence, type CapturedFrame, type InteractionError} from './worker-interaction.js';
 import {createNativeRuntimeSampler, installRuntimeObservationHooks, observationError,
   RUNTIME_OBSERVATION_VERSION, supportsWorkerObservation, type ObservationError} from './worker-runtime-observation.js';
 import {createWorkerObservationRequests, readRuntimeObservationRequest,
@@ -25,6 +26,10 @@ import {createWorkerRuntimeAccess, readAccessId, runtimeAccessFamily} from './wo
 import {createNativeRuntimeProperties, RUNTIME_PROPERTIES_VERSION, supportsWorkerRuntimeProperties,
   runtimePropertiesError, type PropertyCommand, type AccessErrorCode} from './worker-runtime-properties.js';
 import {createNativeRuntimeCall, RUNTIME_CALL_VERSION, supportsWorkerRuntimeCall, runtimeMethodError, type MethodCommand} from './worker-runtime-call.js';
+
+import {createNativeGameProbe, gameProbeError, GAME_PROBE_VERSION, readGameProbeRequest, readGameProbeSequence, supportsGameProbe,
+  type GameProbeData, type GameProbeError} from './worker-game-probe.js';
+import {scheduleRuntimeWriteDeadline} from './worker-runtime-write-transport.js';
 
 interface RuntimeScope {
   __godotjsRuntimeHost?: RuntimeBinding;
@@ -73,6 +78,8 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
   let memoryPeak = 0, heapPeak = 0;
   const post = (fields: object, transfer: Transferable[] = []) => control.postMessage({ ...identity, protocolVersion: WORKER_PROTOCOL, ...fields }, transfer);
   const dataPost = (fields: object, transfer: Transferable[] = []) => data.postMessage({ ...identity, protocolVersion: WORKER_PROTOCOL, ...fields }, transfer);
+  // Leave the native frame or teardown callback before reporting a fatal transport failure.
+  const sendInteractionResult = createInteractionResultSender(post, error => queueMicrotask(() => fatal(error)));
   const supportsInteraction = supportsWorkerInteraction(boot.release, boot.configuration.presentationBackend, scope.navigator?.userAgent ?? '');
   const declaresObservation = supportsWorkerObservation(boot.release);
   let sampleNativeObservation: ReturnType<typeof createNativeRuntimeSampler> | undefined;
@@ -131,11 +138,86 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
       {type: 'runtime-' + family + '-result', ...payload, accessSequence: sequence}); }
     catch { /* The runner retains execution uncertainty at its original deadline. */ }
   });
+  const probeAvailable = supportsGameProbe(boot.release, boot.configuration.presentationBackend);
+  let lastProbeSequence = 0;
+  let nativeProbe: ReturnType<typeof createNativeGameProbe> | undefined;
+  type ProbeSample = Extract<NonNullable<ReturnType<NonNullable<typeof nativeProbe>['take']>>, {ok: true}>['result'];
+  let probeRequest: (NonNullable<ReturnType<typeof readGameProbeRequest>> & {
+    minGeometryEpoch: number;
+    stopTimer?: () => void;
+    sample?: ProbeSample;
+    failure?: ReturnType<typeof gameProbeError>;
+  }) | undefined;
+
+  function postProbe(requestId: string, result: {ok: true; result: GameProbeData} | ReturnType<typeof gameProbeError>) {
+    const image = result.ok ? result.result.image : null;
+    sendInteractionResult({type: 'game-probe-result', requestId, result},
+      {result: result.ok ? gameProbeError('probe_failed', 'dispatch_failed') : result}, image ? [image.bytes] : []);
+  }
+
+  function postCapture(requestId: string, frame: CapturedFrame | undefined, error: InteractionError | undefined) {
+    sendInteractionResult({type: 'capture-result', requestId, frame, error},
+      {error: error ?? 'capture_failed'}, frame ? [frame.bytes] : []);
+  }
+
+  function finishProbe(requestId: string, result: Parameters<typeof postProbe>[1]) {
+    if (probeRequest?.requestId !== requestId) return;
+    probeRequest.stopTimer?.();
+    probeRequest = undefined;
+    queueMicrotask(() => {
+      if (!probeRequest && !closed && !nativeExited) nativeProbe?.clear();
+    });
+    postProbe(requestId, result);
+  }
+
+  function cancelProbe(code: GameProbeError) {
+    const request = probeRequest;
+    if (!request) return;
+    request.failure ??= gameProbeError(code);
+    if (request.query.screenshot) capture.finishProbe(request.requestId, code === 'run_ended' || code === 'cancelled' ||
+      code === 'timeout' ? code : 'capture_failed');
+    else finishProbe(request.requestId, request.failure);
+  }
+
+  function takeProbe() {
+    const request = probeRequest;
+    if (!request || request.sample || request.failure || !nativeProbe) return;
+    try {
+      const result = nativeProbe.take(request.query);
+      if (!result) return;
+      if (!result.ok) {
+        request.failure = result;
+        cancelProbe(result.error.code);
+      } else if (request.query.screenshot) {
+        request.sample = result.result;
+        capture.finishProbe(request.requestId);
+      } else {
+        const {iteration, properties, tree} = result.result;
+        finishProbe(request.requestId, {ok: true, result: {mode: 'state', frame: {iteration}, image: null, properties, tree}});
+      }
+    } catch { cancelProbe('probe_failed'); }
+  }
+
   let interactionReady = false;
   const interactionRejection = () => !lease.active || stopping || closed || nativeExited ? 'run_ended' :
     !interactionReady || xr?.active || dom?.document.hidden ? 'not_ready' : undefined;
   const capture = createWorkerCapture(boot.canvas, () => !interactionRejection(),
-    (requestId, frame, error) => post({type: 'capture-result', requestId, frame, error}, frame ? [frame.bytes] : []),
+    (requestId, frame, error, kind) => {
+      if (kind !== 'probe') {
+        postCapture(requestId, frame, error);
+        return;
+      }
+      const current = probeRequest;
+      if (current?.requestId !== requestId) return;
+      const sample = current.sample;
+      if (current.failure || error || !frame || !sample ||
+          sample.iteration !== frame.iteration || sample.renderSerial !== frame.renderSerial) {
+        finishProbe(requestId, current.failure ?? gameProbeError(error ?? 'probe_failed'));
+        return;
+      }
+      const {iteration, renderSerial, properties, tree} = sample;
+      finishProbe(requestId, {ok: true, result: {mode: 'rendered', frame: {iteration, renderSerial}, image: frame, properties, tree}});
+    },
     estimated => !!presentation && (presentation.stats().aggregateEstimatedBytes ?? Infinity) + estimated <=
       (boot.configuration.budgets.maxPresentationBytes ?? 0),
     () => { try { applyLatestGeometry(); } catch (error) { fatal(error); } });
@@ -163,7 +245,8 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
       ...(value === 'running' && sampleNativeObservation ? {observationVersion: RUNTIME_OBSERVATION_VERSION} : {}),
       ...(value === 'running' && supportsWrite && writeNativeProperty ? {runtimeWriteVersion: RUNTIME_WRITE_VERSION} : {}),
       ...(value === 'running' && supportsProperties && accessNativeProperties ? {runtimePropertiesVersion: RUNTIME_PROPERTIES_VERSION} : {}),
-      ...(value === 'running' && supportsCall && nativeCall ? {runtimeCallVersion: RUNTIME_CALL_VERSION} : {})});
+      ...(value === 'running' && supportsCall && nativeCall ? {runtimeCallVersion: RUNTIME_CALL_VERSION} : {}),
+      ...(value === 'running' && nativeProbe ? {gameProbeVersion: GAME_PROBE_VERSION} : {})});
   };
   let presentation: ReturnType<typeof createWorkerPresentation> | undefined;
   let dom: ReturnType<typeof createWorkerDom> | undefined;
@@ -277,8 +360,9 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
   function beginStopping(reason:string,requestQuit=true):void {
     if(stopping||closed||nativeExited)return;
     stopping=true;
-    capture.stop();
     const attempt=(cleanup:()=>void)=>{try{cleanup();}catch(error){try{fatal(error);}catch{/* A lost diagnostic channel cannot block the remaining cleanup. */}}};
+    attempt(()=>cancelProbe('run_ended'));
+    attempt(()=>capture.stop());
     attempt(()=>observation.stop());
     attempt(()=>runtimeAccess.stop());
     if(canCooperativelyClose()){
@@ -333,9 +417,37 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
       if (Number.isSafeInteger(m.dataSequence)) acknowledgeData(m.dataSequence);
       return;
     }
+    if (m.type === 'game-probe-request' || m.type === 'game-probe-cancel') {
+      try {
+        if (m.type === 'game-probe-cancel' && probeRequest?.requestId === m.requestId) cancelProbe('cancelled');
+        const sequence = m.type === 'game-probe-request' ? readGameProbeSequence(m.requestId, identity.runId) : undefined;
+        if (sequence !== undefined && sequence > lastProbeSequence) {
+          lastProbeSequence = sequence;
+          const request = readGameProbeRequest(m);
+          const minGeometryEpoch = m.minGeometryEpoch;
+          const error = !request || request.query.screenshot && !validInteractionSequence(minGeometryEpoch) ? 'invalid_input' :
+            !lease.active || stopping || nativeExited ? 'run_ended' :
+            !nativeStarted ? 'not_ready' : !nativeProbe || !supportsInteraction ? 'unsupported' :
+            request.deadline <= interactionNow() ? 'timeout' :
+            probeRequest || request.query.screenshot && capture.busy ? 'busy' :
+            request.query.screenshot ? interactionRejection() : undefined;
+          if (error) postProbe(m.requestId, gameProbeError(error));
+          else if (request && nativeProbe) {
+            probeRequest = {...request, minGeometryEpoch: minGeometryEpoch ?? 0};
+            if (!request.query.screenshot)
+              probeRequest.stopTimer = scheduleRuntimeWriteDeadline(request.deadline, () => cancelProbe('timeout'));
+            else capture.request(request.requestId, request.deadline, 'probe', request.query.maxDimension);
+            if (probeRequest?.requestId === request.requestId && !nativeProbe.stage(request.query, request.deadline))
+              cancelProbe(interactionNow() >= request.deadline ? 'timeout' : 'not_ready');
+          }
+        }
+      } catch { cancelProbe('probe_failed'); }
+      if (Number.isSafeInteger(m.dataSequence)) acknowledgeData(m.dataSequence);
+      return;
+    }
     const rejection = m.type === 'capture-request' || m.type === 'input-request' ? interactionRejection() : undefined;
     if (rejection) {
-      if (m.type === 'capture-request' && validInteractionId(m.requestId)) post({type: 'capture-result', requestId: m.requestId, error: rejection});
+      if (m.type === 'capture-request' && validInteractionId(m.requestId)) postCapture(m.requestId, undefined, rejection);
       if (m.type === 'input-request' && validInteractionId(m.operationId)) post({type: 'input-result', operationId: m.operationId, evidence: undispatched(rejection)});
     }
     const cleanupPacket=['host-command-receipt','present-ack','host-result'].includes(m.type)||(m.type==='host-state'&&m.state?.requestId!==undefined);
@@ -477,6 +589,7 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
         if (nativeExited) return;
         nativeExited = true;
         gestures.exit();
+        cancelProbe('run_ended');
         capture.stop();
         observation.stop();
         runtimeAccess.stop();
@@ -489,10 +602,25 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
     const original = config.getModuleConfig;
     config.getModuleConfig = function (...args: unknown[]) {
       const value = original.apply(this, args);
+      if (probeAvailable && supportsInteraction) {
+        value.godotGameProbeMayFreeze = () => {
+          const geometry = presentation?.geometry;
+          if (!probeRequest?.query.screenshot || probeRequest.failure || !geometry || interactionRejection() ||
+              geometry.epoch < probeRequest.minGeometryEpoch) return false;
+          const {maxCanvasDimension, maxCanvasPixels} = boot.configuration.budgets;
+          const size = drawingBufferSize(geometry, {maxDimension: maxCanvasDimension, maxPixels: maxCanvasPixels});
+          const gl = (boot.canvas as OffscreenCanvas & {GLctxObject?: {GLctx?: WebGL2RenderingContext}}).GLctxObject?.GLctx;
+          return !!gl && !gl.isContextLost() && size.width === boot.canvas.width && size.height === boot.canvas.height &&
+            gl.drawingBufferWidth === size.width && gl.drawingBufferHeight === size.height;
+        };
+        value.godotGameProbeFreeze = (iteration: number, serial: number) => !!probeRequest && !!presentation &&
+          capture.freezeProbe(probeRequest.requestId, iteration, serial, presentation.geometry);
+      }
       module = value; installPresentationHooks(value, presentation!, supportsInteraction ? capture.frame : undefined);
       if (declaresObservation) {
         removeObservationHooks?.();
         removeObservationHooks = installRuntimeObservationHooks(value, () => {
+          takeProbe();
           runtimeAccess.execute();
           observation.observe();
         });
@@ -514,6 +642,7 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
       if (boot.release.runtimeAbi?.runtimeProperties === RUNTIME_PROPERTIES_VERSION) accessNativeProperties = createNativeRuntimeProperties(module);
       if (boot.release.runtimeAbi?.runtimeCall === RUNTIME_CALL_VERSION) nativeCall = createNativeRuntimeCall(module);
     }
+    if (probeAvailable && supportsInteraction) nativeProbe = createNativeGameProbe(module!);
     phase('starting'); await engine.start({ args: ['--main-pack', '/application.pck', '--rendering-method', 'gl_compatibility'] }); assertStarting();
     nativeStarted=true;
     if(managedClose&&!lifecycleGate)throw Error('E_NATIVE_LIFECYCLE_ABI: matching native hook was not installed');

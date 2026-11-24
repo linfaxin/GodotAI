@@ -31,6 +31,11 @@ import {readAccessId} from './worker-runtime-access-transport.js';
 import {prepareRuntimeMethod, publicMethodResult, readNativeMethodResult, RUNTIME_CALL_VERSION, runtimeMethodError, supportsWorkerRuntimeCall, uncertainMethod,
   type CallMethodInput, type DescribeMethodsInput, type MethodCallResult, type MethodDescriptionResult,
   type MethodKind, type MethodReceipt, type MethodUncertainReason, type NativeMethodResult, type RuntimeCallState} from './worker-runtime-call.js';
+import {attachGameProbeReceipt, gameProbeError, GAME_PROBE_VERSION, prepareGameProbe, readGameProbeWireResult, supportsGameProbe,
+  type GameProbeInput, type GameProbeQuery, type GameProbeReceipt, type GameProbeResult, type GameProbeState} from './worker-game-probe.js';
+export {gameProbeError, prepareGameProbe, readGameProbeQuery} from './worker-game-probe.js';
+export type {GameProbeInput, GameProbeResult, GameProbeState} from './worker-game-probe.js';
+
 export * from './worker-runtime-properties.js';
 export * from './worker-runtime-call.js';
 export {supportsWorkerInteraction} from './worker-interaction.js';
@@ -116,6 +121,8 @@ interface Session {
   commands:WorkerProjectCommandCredits;commandSequence:number;
   interactionVersion?: number;
   capture?: CaptureRequest;
+  probeSequence: number;
+  probe?: {id: string; query: GameProbeQuery; deadline: number; receipt: GameProbeReceipt; finish(result: GameProbeResult): void};
   observation?: ObservationRequest;
   observationSampleSeq: number;
   runtimeWrite?: PendingRuntimeWrite;
@@ -143,6 +150,7 @@ export class WorkerPreviewRunner {
   private readonly observationVersions = new Map<string, boolean | null>();
   private readonly runtimeWriteVersions = new Map<string, boolean | null>();
   private readonly runtimePropertiesVersions = new Map<string, boolean | null>();
+  private readonly gameProbeVersions = new Map<string, boolean | null>();
   private readonly runtimeCallVersions = new Map<string, boolean | null>();
   private inputWaiters = 0;
   private active?: Session;
@@ -191,6 +199,7 @@ export class WorkerPreviewRunner {
     if (s.report) return s.report;
     s.report = report; s.settled = true; ++s.epoch;
     s.capture?.finish(interactionError('run_ended'));
+    if (s.probe) s.probe.finish(gameProbeError('run_ended', undefined, s.probe.receipt));
     s.observation?.finish(observationError('run_ended'));
     s.runtimeWrite?.retire(report.reason === 'forced-frame-disposal' || report.reason === 'crashed' ? 'transport_lost' : 'run_ended');
     s.runtimeProperties?.retire(report.reason === 'forced-frame-disposal' || report.reason === 'crashed' ? 'transport_lost' : 'run_ended');
@@ -247,7 +256,7 @@ export class WorkerPreviewRunner {
     const s: Session = { identity, frame, port: channel.port1, peer: channel.port2, state: 'loading-frame', epoch: 0, settled: false,
       lastWorkerBeat: now(), beatSequence: -1, resumeEpoch: 0, logs: new WorkerLogBudget(frozen.configuration.budgets), projectQueue: [], projectBytes: 0,
       commands:new WorkerProjectCommandCredits(frozen.configuration.budgets.maxProjectEvents!,frozen.configuration.budgets.maxProjectBytes!),commandSequence:0,
-      inputSequence: 0, observationSampleSeq: 0, accessSequence: 0, resolveRun, rejectRun, exit, resolveExit };
+      inputSequence: 0, observationSampleSeq: 0, accessSequence: 0, probeSequence: 0, resolveRun, rejectRun, exit, resolveExit };
     this.active = s;
     this.interactionVersions.set(identity.runId, null);
     if (this.interactionVersions.size > MAX_RECEIPTS) this.interactionVersions.delete(this.interactionVersions.keys().next().value!);
@@ -257,6 +266,8 @@ export class WorkerPreviewRunner {
     if (this.runtimeWriteVersions.size > MAX_RECEIPTS) this.runtimeWriteVersions.delete(this.runtimeWriteVersions.keys().next().value!);
     this.runtimePropertiesVersions.set(identity.runId, null);
     this.runtimeCallVersions.set(identity.runId, null);
+    this.gameProbeVersions.set(identity.runId, null);
+    if (this.gameProbeVersions.size > MAX_RECEIPTS) this.gameProbeVersions.delete(this.gameProbeVersions.keys().next().value!);
     if (this.runtimeCallVersions.size > MAX_RECEIPTS) this.runtimeCallVersions.delete(this.runtimeCallVersions.keys().next().value!);
     if (this.runtimePropertiesVersions.size > MAX_RECEIPTS) this.runtimePropertiesVersions.delete(this.runtimePropertiesVersions.keys().next().value!);
     s.onVisibility=()=>{if(this.live(s)&&this.options.container.ownerDocument.visibilityState!=='hidden')s.lastWorkerBeat=now();};
@@ -296,6 +307,16 @@ export class WorkerPreviewRunner {
         }
         s.observationSampleSeq = response.result.sampleSeq;
         current.finish(observationOk({...response.result, requestId: current.id, run: {...s.identity}, releaseId: this.release.releaseId}));
+        return;
+      }
+      if (m.type === 'game-probe-result' && s.probe && m.requestId === s.probe.id) {
+        const current = s.probe;
+        s.probe = undefined;
+        if (s.state !== 'running') { current.finish(gameProbeError('run_ended', undefined, current.receipt)); return; }
+        if (interactionNow() >= current.deadline) { current.finish(gameProbeError('timeout', undefined, current.receipt)); return; }
+        const response = readGameProbeWireResult(current.query, m.result) ?? gameProbeError('probe_failed', 'invalid_result');
+        const result = attachGameProbeReceipt(response, current.receipt);
+        current.finish(interactionNow() >= current.deadline ? gameProbeError('timeout', undefined, current.receipt) : result);
         return;
       }
       if (m.type === 'capture-result' && s.capture && m.requestId === s.capture.id) {
@@ -367,6 +388,13 @@ export class WorkerPreviewRunner {
           if (m.interactionVersion === INTERACTION_VERSION && frozen.configuration.presentationBackend === 'direct')
             s.interactionVersion = INTERACTION_VERSION;
           this.interactionVersions.set(identity.runId, s.interactionVersion === INTERACTION_VERSION);
+          const probeVersion = s.interactionVersion && supportsGameProbe(this.release, frozen.configuration.presentationBackend) ?
+            GAME_PROBE_VERSION : undefined;
+          if (m.gameProbeVersion !== probeVersion) {
+            this.beginStop(s, 'runtime-failed', 'Game probe ABI does not match the release');
+            return;
+          }
+          this.gameProbeVersions.set(identity.runId, probeVersion !== undefined);
         }
         if (!this.transition(s, m.phase)) return;
         if (m.phase === 'running') {
@@ -430,6 +458,7 @@ export class WorkerPreviewRunner {
     s.runtimeMethod?.retire(cause === 'unresponsive' ? 'transport_lost' : 'run_ended');
     if (!this.transition(s, 'stopping')) return;
     s.capture?.finish(interactionError('run_ended'));
+    if (s.probe) s.probe.finish(gameProbeError('run_ended', undefined, s.probe.receipt));
     if (before === 'loading-frame' || before === 'handshaking') { this.finishLocal(s, 'forced-frame-disposal', 'Cancelled before host connection'); return; }
     try { s.port.postMessage({ ...s.identity, protocolVersion: WORKER_PROTOCOL, type: 'stop', cause, detail }); }
     catch { this.finishLocal(s, 'forced-frame-disposal', 'Worker host stop channel unavailable'); }
@@ -728,6 +757,51 @@ export class WorkerPreviewRunner {
       catch { finish(observationError('observation_failed')); }
     });
   }
+  gameProbeState(runId: string): GameProbeState {
+    const supported = this.gameProbeVersions.get(runId) ?? null;
+    return {supported, ready: supported === true && this.active?.identity.runId === runId && this.active.state === 'running',
+      ...(supported ? {version: GAME_PROBE_VERSION} : {})};
+  }
+
+  gameProbe(input: GameProbeInput, signal?: AbortSignal): Promise<GameProbeResult> {
+    const prepared = prepareGameProbe(input, signal);
+    if (!prepared.ok) return Promise.resolve(prepared);
+    const {runId, query, timeoutMs} = prepared.result;
+    const session = this.active;
+    if (session?.identity.runId !== runId)
+      return Promise.resolve(gameProbeError(this.gameProbeVersions.has(runId) ? 'run_ended' : 'not_found'));
+    if (session.state === 'stopping' || session.settled) return Promise.resolve(gameProbeError('run_ended'));
+    if (session.state !== 'running') return Promise.resolve(gameProbeError('not_ready'));
+    if (!this.gameProbeState(runId).ready) return Promise.resolve(gameProbeError('unsupported'));
+    if (session.probe || query.screenshot && session.capture) return Promise.resolve(gameProbeError('busy'));
+    if (session.probeSequence === Number.MAX_SAFE_INTEGER) return Promise.resolve(gameProbeError('busy'));
+    const id = runId + ':probe:' + ++session.probeSequence, deadline = interactionNow() + timeoutMs;
+    const receipt = {run: {...session.identity}, requestId: id, releaseId: this.release.releaseId};
+    const envelope = {...session.identity, protocolVersion: WORKER_PROTOCOL, requestId: id};
+    return new Promise(resolve => {
+      let settled = false;
+      const finish = (result: GameProbeResult) => {
+        if (settled) return;
+        settled = true;
+        stopTimer();
+        if (signal) EventTarget.prototype.removeEventListener.call(signal, 'abort', abort);
+        resolve(result);
+      };
+      const cancel = (code: 'cancelled' | 'timeout') => {
+        finish(gameProbeError(code, undefined, receipt));
+        if (session.probe?.id !== id) return;
+        try { session.port.postMessage({...envelope, type: 'game-probe-cancel'}); }
+        catch { /* The original deadline also bounds the Worker request. */ }
+      };
+      const abort = () => cancel(interactionNow() >= deadline ? 'timeout' : 'cancelled');
+      const stopTimer = scheduleRuntimeWriteDeadline(deadline, () => cancel('timeout'));
+      if (signal) EventTarget.prototype.addEventListener.call(signal, 'abort', abort, {once: true});
+      if (signal && readAborted.call(signal)) { finish(gameProbeError('cancelled')); return; }
+      session.probe = {id, query, deadline, receipt, finish};
+      try { session.port.postMessage({...envelope, type: 'game-probe-request', query, deadline}); }
+      catch { session.probe = undefined; finish(gameProbeError('probe_failed', 'dispatch_failed')); }
+    });
+  }
   screenshot(input: ScreenshotInput, signal?: AbortSignal): Promise<InteractionResult<GameScreenshot>> {
     const {runId, timeoutMs = 5000} = input ?? {};
     if (!validInteractionId(runId) || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_WAIT_MS)
@@ -737,7 +811,7 @@ export class WorkerPreviewRunner {
     const support = this.interactionSupport(runId);
     if (support !== 'available') return Promise.resolve(interactionError(support));
     const s = this.active!;
-    if (s.capture) return Promise.resolve(interactionError('busy'));
+    if (s.capture || s.probe?.query.screenshot) return Promise.resolve(interactionError('busy'));
     const id = crypto.randomUUID(), deadline = interactionNow() + timeoutMs;
     return new Promise(resolve => {
       const onAbort = () => {

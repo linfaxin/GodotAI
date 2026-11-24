@@ -39,6 +39,7 @@
     "test:browser:debug-panel": "node scripts/browser-debug-panel-test.mjs",
     "test:browser:api-console": "node scripts/browser-api-console-test.mjs",
     "test:browser:api-console:shell": "node scripts/browser-api-console-shell-test.mjs",
+    "test:browser:game-probe": "node scripts/browser-game-probe-test.mjs",
     "test:browser:runtime-call": "node scripts/browser-runtime-call-test.mjs",
     "test:browser:api-console:real": "node scripts/browser-api-console-real-test.mjs",
     "test:browser:storage": "node scripts/browser-project-blob-storage-test.mjs",

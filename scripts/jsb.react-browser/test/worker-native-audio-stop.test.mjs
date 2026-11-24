@@ -43,7 +43,7 @@ function runtimeStop(f,{managed=false,nativeStarted=true,entryCount=0}={}){
  const control=new Port(),events=[],calls={quit:0,cancel:0,beginClose:0,gateClose:0},lease=new WorkerSessionLease();
  const scope={control,data:{},identity,isWorkerEnvelope,sameWorkerRun,lease,audio:f.bridge,DOMException,
   dom:{revokeInput(){}},aborter:new AbortController(),presentation:{dispose(){},setVisible(){}},xr:{dispose(){}},
-  capture:createWorkerCapture({},()=>false,()=>{}),observation:{stop(){}},runtimeAccess:{stop(){}},
+  capture:createWorkerCapture({},()=>false,()=>{}),cancelProbe(){},observation:{stop(){}},runtimeAccess:{stop(){}},
   cancelNativeStart(){calls.cancel++;},module:{},post:value=>events.push(value),text:values=>values.join(' '),
   closed:false,nativeExited:false,failed:false,previewDiagnostic,binding:undefined,
   managedClose:managed,nativeStarted,stopping:false,quitScheduled:false,browser:undefined,

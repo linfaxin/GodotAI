@@ -19,6 +19,27 @@ export interface ConsoleLesson {
 
 export const CONSOLE_LESSONS: readonly ConsoleLesson[] = [
   {
+    id: 'game-probe',
+    title: 'Summer：验证同帧状态与画面',
+    description: '打开独立位置示例，先探测起点，再移动 Player 并从同一运行验证画面。',
+    steps: [
+      {id: 'play', label: '启动位置示例', operationId: 'engine.play', input: {}},
+      {id: 'wait', label: '等待该次运行', operationId: 'wait_for_event', input: {until: 'running', timeoutMs: 60000}, notes: '从本次启动的历史结果填入 attemptId。'},
+      {id: 'tree', label: '找出本次 Player', operationId: 'engine.get_runtime_tree', input: {depth: 3, limit: 50}},
+      {id: 'before', label: '探测位置和画面', operationId: 'engine.game_probe', input: {screenshot: true}, notes: '选择该次运行树中的 Player 填参，核对 x=64 和 PNG。'},
+      {id: 'move', label: '移动 Player 到 x=192', operationId: 'engine.runtime_set', input: {property: 'position', value: 'Vector2(192, 256)'}, notes: '从同一次运行树填入 Player 路径。'},
+      {id: 'after', label: '再次探测同一 Player', operationId: 'engine.game_probe', input: {screenshot: true}, notes: '重新填参，核对 x=192、像素、同一实例和更大的 renderSerial。'},
+      {id: 'stop', label: '停止并确认退出', operationId: 'engine.stop', input: {}},
+      {id: 'exit', label: '等待原运行退出', operationId: 'wait_for_event', input: {until: 'exited', timeoutMs: 10000}, notes: '从停止回执填入 runId。'},
+      {id: 'restart', label: '启动新运行', operationId: 'engine.play', input: {}},
+      {id: 'wait-new', label: '等待新运行', operationId: 'wait_for_event', input: {until: 'running', timeoutMs: 60000}, notes: '用第二次启动回执填入 attemptId。'},
+      {id: 'tree-new', label: '重新发现 Player', operationId: 'engine.get_runtime_tree', input: {depth: 3, limit: 50}},
+      {id: 'reset', label: '验证恢复起点', operationId: 'engine.game_probe', input: {screenshot: true}, notes: '从新树填参，核对新 run 和 x=64。'},
+      {id: 'stop-new', label: '停止新运行', operationId: 'engine.stop', input: {}},
+      {id: 'exit-new', label: '确认新运行退出', operationId: 'wait_for_event', input: {until: 'exited', timeoutMs: 10000}, notes: '用第二次停止回执填入 runId。'},
+    ],
+  },
+  {
     id: 'runtime-method',
     title: 'Summer：调用玩法方法',
     description: '从方法调用标签打开独立示例。点击步骤载入草稿。在目标标签的共享历史中查看来源，选择该次运行的目标，再点「填入当前操作」。确认参数后手动执行。',

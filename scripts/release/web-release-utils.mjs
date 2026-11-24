@@ -1,3 +1,4 @@
+import {GAME_PROBE_PATCH,GAME_PROBE_PATHS} from './patch-web-game-probe.mjs';
 import { createHash } from 'node:crypto';
 import { readFile, readdir, lstat, mkdir, writeFile } from 'node:fs/promises';
 import { resolve, relative, dirname, sep } from 'node:path';
@@ -104,6 +105,37 @@ export function assertRuntimeCallBuildProof(report, assets = {
       report.resolvedBuildOptions?.threads !== false || report.resolvedBuildOptions?.dlink_enabled !== false) {
     throw Error('E_RUNTIME_CALL_BUILD_PROOF');
   }
+  assertRuntimeObservationBuildProof(report, assets.wasmSha256);
+}
+
+export const GAME_PROBE_EXPORTS = Object.freeze([
+  '_godotjs_game_probe_abi', '_godotjs_game_probe_stage', '_godotjs_game_probe_take', '_godotjs_game_probe_clear',
+]);
+export function assertGameProbeAssets(runtimeAbi, proof, {wasmSha256, javascriptSha256}) {
+  if (runtimeAbi?.gameProbe === undefined && proof === undefined) return;
+  const hash = /^[a-f0-9]{64}$/;
+  if (runtimeAbi?.gameProbe !== 1 || proof?.abi !== 1 || canonical(proof.exports) !== canonical(GAME_PROBE_EXPORTS) ||
+      !hash.test(proof.wasmSha256) || proof.wasmSha256 !== wasmSha256 ||
+      !hash.test(proof.javascriptSha256) || proof.javascriptSha256 !== javascriptSha256)
+    throw Error('E_GAME_PROBE_BUILD_PROOF');
+}
+
+export function assertGameProbeBuildProof(report, assets = {
+  wasmSha256: report.template?.assets?.find(asset => asset.path === 'godot.wasm')?.sha256,
+  javascriptSha256: report.template?.assets?.find(asset => asset.path === 'godot.js')?.sha256,
+}) {
+  assertGameProbeAssets(report.runtimeAbi, report.gameProbe, assets);
+  if (report.runtimeAbi?.gameProbe === undefined) return;
+  const implementation = 'scripts/release/patch-web-game-probe.mjs';
+  const edges = report.recipe?.patches?.filter(patch => patch.patchId === GAME_PROBE_PATCH) ?? [];
+  const inputs = report.source?.inputs;
+  const latest = assertSourcePatchChains(report);
+  if (report.runtimeAbi.observation !== 1 || report.status !== 'built' || !report.sourceCertified || !runtimeWriteBuildTarget(report) ||
+      report.resolvedBuildOptions?.threads !== false || report.resolvedBuildOptions?.dlink_enabled !== false ||
+      !inputs?.['bridge/jsb_runtime_game_probe.h'] || !inputs?.[implementation] ||
+      edges.length !== GAME_PROBE_PATHS.length || !GAME_PROBE_PATHS.every(path => edges.some(edge => edge.path === path &&
+        edge.implementation?.path === implementation && edge.implementation.sha256 === inputs[implementation] &&
+        latest.get(path)?.patchId === GAME_PROBE_PATCH))) throw Error('E_GAME_PROBE_BUILD_PROOF');
   assertRuntimeObservationBuildProof(report, assets.wasmSha256);
 }
 
@@ -270,6 +302,10 @@ export async function inspectRelease(directory, { requireCertified = false } = {
   assertRuntimeWriteBuildProof(attestation, wasmSha256);
   assertRuntimePropertiesBuildProof(attestation, wasmSha256);
   assertRuntimeCallBuildProof(attestation, {
+    wasmSha256,
+    javascriptSha256: descriptor.files.find(file => file.kind === 'engine-js')?.sha256,
+  });
+  assertGameProbeBuildProof(attestation, {
     wasmSha256,
     javascriptSha256: descriptor.files.find(file => file.kind === 'engine-js')?.sha256,
   });

@@ -21,10 +21,14 @@ import {HOST_RESOURCE_PATHS,patchHostResourceFile,unpatchHostResourceFile} from 
 import {MANAGED_SHUTDOWN_PATHS,patchManagedShutdownQueue,unpatchManagedShutdownQueue} from './patch-managed-shutdown-queue.mjs';
 import {AUDIO_WORKLET_FINISH_PATH,patchAudioWorkletFinish,unpatchAudioWorkletFinish} from './patch-web-audio-worklet-finish.mjs';
 
+import {GAME_PROBE_PATHS,GAME_PROBE_PATCH,GAME_PROBE_REMOVAL_PATCH,patchGameProbe,unpatchGameProbe} from './patch-web-game-probe.mjs';
+
 const repo=fileURLToPath(new URL('../../',import.meta.url));
 const execute=promisify(execFile),hash=value=>createHash('sha256').update(value).digest('hex');
-export async function applyWebEnginePatches(root,{python='python3',executionModel='window'}={}) {
+export async function applyWebEnginePatches(root,{python='python3',executionModel='window',gameProbe=true}={}) {
  const planned=[];
+ const enableGameProbe=executionModel==='window'&&gameProbe;
+ const gameProbeImplementation='scripts/release/patch-web-game-probe.mjs';
  const add=async(path,code,patchId,implementation,baseline)=>{
   const before=baseline??await readFile(resolve(root,path),'utf8');
   planned.push({code,record:{patchId,path,beforeSha256:hash(before),afterSha256:hash(code),changed:before!==code,
@@ -32,6 +36,11 @@ export async function applyWebEnginePatches(root,{python='python3',executionMode
  };
  // Compute every patch before writing: unsupported source layouts leave the
  // input tree intact. Python's JSON mode calls the same checked pure patchers.
+ // Disabled profiles may start from a checkout already patched for Full Debug.
+ if(!enableGameProbe)for(const path of GAME_PROBE_PATHS){
+  const before=await readFile(resolve(root,path),'utf8'),code=unpatchGameProbe(path,before);
+  if(code!==before)await add(path,code,GAME_PROBE_REMOVAL_PATCH,gameProbeImplementation,before);
+ }
  for(const [script,patchIds] of [
   ['impl/web/patches/patch-web-renderer.py',{'drivers/gles3/shaders/scene.glsl':'godotjs-gles3-alpha-hash-v1','drivers/gles3/storage/texture_storage.cpp':'godotjs-gles3-small-canvas-backbuffer-v1'}],
   ['impl/web/patches/patch-native-tooltips.py',{'scene/main/viewport.cpp':'godotjs-private-tooltip-v1'}],
@@ -62,14 +71,16 @@ export async function applyWebEnginePatches(root,{python='python3',executionMode
  // patch. Keep both receipts, binding the second receipt to the first output.
  for(const path of executionModel==='window'?WORKER_RUNTIME_PATHS:[]){
   const before=planned.findLast(item=>item.record.path===path)?.code??await readFile(resolve(root,path),'utf8');
-  let normalized=unpatchManagedShutdownQueue(path,unpatchHostResourceFile(path,path==='main/main.cpp'?unpatchArtifactSetMount(before):before));
+  const earlier=unpatchGameProbe(path,before);
+  let normalized=unpatchManagedShutdownQueue(path,unpatchHostResourceFile(path,path==='main/main.cpp'?unpatchArtifactSetMount(earlier):earlier));
   if(path===AUDIO_WORKLET_FINISH_PATH)normalized=unpatchAudioWorkletFinish(normalized);
   const result=patchWorkerRuntimeFile(path,normalized);
   if(result.code===normalized)result.code=before;
   await add(path,result.code,result.patchId,'scripts/release/patch-web-worker-runtime.mjs',before);
  }
  for(const path of ['scene/main/scene_tree.h','scene/main/scene_tree.cpp',...(executionModel==='proxy-pthread'?['platform/web/web_main.cpp']:[])]){
-  const before=await readFile(resolve(root,path),'utf8'),normalized=unpatchManagedShutdownQueue(path,before);
+  const before=planned.findLast(item=>item.record.path===path)?.code??await readFile(resolve(root,path),'utf8');
+  const normalized=unpatchManagedShutdownQueue(path,before);
   const result=patchWebLifecycleFile(path,normalized);
   await add(path,result.code===normalized?before:result.code,result.patchId,'scripts/release/patch-web-lifecycle.mjs',before);
  }
@@ -102,6 +113,10 @@ export async function applyWebEnginePatches(root,{python='python3',executionMode
   const before=planned.findLast(item=>item.record.path===path)?.code??await readFile(resolve(root,path),'utf8');
   const result=patchRuntimePropertiesQuitFile(path,before);
   await add(path,result.code,result.patchId,'scripts/release/patch-runtime-properties-quit.mjs',before);
+ }
+ if(enableGameProbe)for(const path of GAME_PROBE_PATHS){
+  const before=planned.findLast(item=>item.record.path===path)?.code??await readFile(resolve(root,path),'utf8');
+  await add(path,patchGameProbe(path,before),GAME_PROBE_PATCH,gameProbeImplementation,before);
  }
  for(const {code,record}of planned)if(record.changed)await writeFile(resolve(root,record.path),code);
  return planned.map(({record})=>record);

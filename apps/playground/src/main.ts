@@ -65,6 +65,7 @@ const playground=createPlaygroundApi(debugRecorder,{
  runtimeWrite:()=>nativePreview?.runtimeWrite,
  runtimeProperties:()=>nativePreview?.runtimeProperties,
  runtimeCall:()=>nativePreview?.runtimeCall,
+ gameProbe:()=>nativePreview?.runtimeCall,
  summerCall:(input,signal,selected)=>summerDispatcher(input,signal,selected),
 });
 const summerDispatcher=createSummerDispatcher({
@@ -85,6 +86,7 @@ const summerDispatcher=createSummerDispatcher({
  writeRuntimeProperty:(input,signal)=>playground.api.write_runtime_property(input,signal),
  runtimeSet:(input,signal)=>playground.api.runtime_set(input,signal),
  screenshot:(input,signal)=>playground.api.screenshot(input,signal),
+ gameProbe:(input,signal)=>playground.api.game_probe(input,signal),
 });
 Object.defineProperty(window,'godotPlayground',{value:playground.api,enumerable:true});
 const debugPanel=createDebugPanel(debugRecorder.api,playground.api);
@@ -125,6 +127,7 @@ function readConsoleContext():ConsoleEnvironment{
   runtimeWrite:nativePreview.runtimeWrite?.runtimeWriteState(run.runId),
   runtimeProperties:nativePreview.runtimeProperties?.runtimePropertiesState(run.runId),
   runtimeCall:nativePreview.runtimeCall?.runtimeCallState(run.runId),
+  gameProbe:nativePreview.runtimeCall?.gameProbeState(run.runId),
   interaction:nativePreview.interaction?.interactionState(run.runId),
  }:undefined;
  return {anchor:{
@@ -138,6 +141,7 @@ const consoleSession=createApiConsoleSession(playground.api,{
  subscribeContext(listener){consoleContextListeners.add(listener);return()=>consoleContextListeners.delete(listener);},
  callSelectedMethod:(input,signal,selected)=>playground.summerCall({op:'engine.runtime_call',input},signal,selected),
  openExample:operationId=>{
+  if(operationId==='engine.game_probe')return openAgentDemo(createInteractionDemo(siteEngineProfile),matchesInteractionDemo);
   if(operationId==='engine.runtime_call'||operationId==='describe_runtime_methods'){
    if(!methodExampleAvailable)throw Error('当前引擎发布不支持玩法方法示例');
    return openAgentDemo(createRuntimeMethodDemo(siteEngineProfile),matchesRuntimePropertiesDemo);

@@ -4,7 +4,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {randomUUID} from 'node:crypto';
 import {spawnSync} from 'node:child_process';
-import {assertRuntimeWriteBuildProof,assertRuntimePropertiesBuildProof,assertRuntimeCallBuildProof,canonical,digest,options,required,safePath} from '../release/web-release-utils.mjs';
+import {assertRuntimeWriteBuildProof,assertRuntimePropertiesBuildProof,assertGameProbeBuildProof,assertRuntimeCallBuildProof,canonical,digest,options,required,safePath} from '../release/web-release-utils.mjs';
 import {isSourceCertified} from '../release/engine-build-proof.mjs';
 import {browserEnginePaths} from '../release/browser-engine-artifacts.mjs';
 
@@ -91,12 +91,14 @@ export async function inspectBrowserEngineArtifact(directory){
  assertRuntimeWriteBuildProof(report);
  assertRuntimePropertiesBuildProof(report);
  assertRuntimeCallBuildProof(report);
- if(report.runtimeAbi?.runtimeWrite===1||report.runtimeAbi?.runtimeProperties===1||report.runtimeAbi?.runtimeCall===1){
-  const assets=templateRuntimeHashes(templateBytes,report.runtimeAbi?.runtimeCall===1);
+ assertGameProbeBuildProof(report);
+ if(report.runtimeAbi?.runtimeWrite===1||report.runtimeAbi?.runtimeProperties===1||report.runtimeAbi?.runtimeCall===1||report.runtimeAbi?.gameProbe===1){
+  const assets=templateRuntimeHashes(templateBytes,report.runtimeAbi?.runtimeCall===1||report.runtimeAbi?.gameProbe===1);
   const {wasmSha256}=assets;
   assertRuntimeWriteBuildProof(report,wasmSha256);
   assertRuntimePropertiesBuildProof(report,wasmSha256);
   assertRuntimeCallBuildProof(report,assets);
+  assertGameProbeBuildProof(report,assets);
  }
  if(report.logSha256&&manifest.files['build.log']?.sha256!==report.logSha256)throw Error('E_ENGINE_ARTIFACT_LOG');
  return {status:'verified',directory,manifest,report};
@@ -110,6 +112,7 @@ export async function packageBrowserEngineArtifact({report:reportFile,out,develo
  assertRuntimeWriteBuildProof(original);
  assertRuntimePropertiesBuildProof(original);
  assertRuntimeCallBuildProof(original);
+ assertGameProbeBuildProof(original);
  if(!original.template?.path)throw Error('E_ENGINE_ARTIFACT_REPORT: template missing');
  const template=path.resolve(path.dirname(reportFile),original.template.path);await regular(template);
  for(const input of [reportFile,template])if(input===out||input.startsWith(out+path.sep))throw Error('E_ENGINE_ARTIFACT_OUTPUT: output contains an input');

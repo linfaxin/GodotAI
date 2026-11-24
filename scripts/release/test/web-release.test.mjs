@@ -13,8 +13,12 @@ import { collectBrowserEvidence } from '../collect-browser-evidence.mjs';
 import { buildBrowserEngine, snapshotBrowserSources } from '../../test/build-browser-engine.mjs';
 import { inspectBrowserEngineArtifact, packageBrowserEngineArtifact, publishBrowserEngineArtifact } from '../../test/package-browser-engine-artifact.mjs';
 import { canonical, digest, inspectRelease, json, writeJson, identity, hashSiteRuntimeFiles, assertSourcePatchChains,
-  OBSERVATION_EXPORTS, OBSERVATION_SOURCE_PATHS, RUNTIME_WRITE_EXPORTS } from '../web-release-utils.mjs';
+  GAME_PROBE_EXPORTS, OBSERVATION_EXPORTS, OBSERVATION_SOURCE_PATHS, RUNTIME_WRITE_EXPORTS } from '../web-release-utils.mjs';
 import { patchAudioLifecycle } from '../patch-web-audio-lifecycle.mjs';
+import { webLifecycleBuildProof } from '../patch-web-lifecycle.mjs';
+import { artifactSetMountBuildProof } from '../patch-artifact-set-mount.mjs';
+import { managedShutdownBuildProof } from '../patch-managed-shutdown-queue.mjs';
+import { GAME_PROBE_PATCH, GAME_PROBE_PATHS } from '../patch-web-game-probe.mjs';
 import {getEngineProfile} from '../engine-profiles.mjs';
 import {workerBuildReportFixture} from '../../../apps/playground/scripts/fixtures/worker-build-report.mjs';
 import {propertiesProofFixture,runtimeCallProofFixture} from '../../../apps/playground/scripts/fixtures/runtime-properties-build-report.mjs';
@@ -129,6 +133,47 @@ test('portable runtime write evidence must match the WASM inside the ZIP', async
   manifest.sourceReportSha256 = manifest.files['engine-report.original.json'].sha256;
   await writeJson(resolve(out, 'artifact.json'), manifest);
   await assert.rejects(inspectBrowserEngineArtifact(out), /E_RUNTIME_WRITE_BUILD_PROOF/);
+});
+
+test('portable Game Probe requires both the Observation ABI and its source-bound proof', async t => {
+  const f = await fixture(t, true);
+  const wasmSha256 = digest(await readFile(resolve(f.root, 'engine/godot.wasm')));
+  const javascriptSha256 = digest(await readFile(resolve(f.root, 'engine/godot.js')));
+  const report = {...f.report, ...propertiesProofFixture(wasmSha256)};
+  delete report.runtimeAbi.runtimeProperties;
+  delete report.runtimeProperties;
+  report.runtimeAbi.gameProbe = 1;
+  report.gameProbe = {abi: 1, exports: GAME_PROBE_EXPORTS, wasmSha256, javascriptSha256};
+  report.template.assets = [{path: 'godot.wasm', sha256: wasmSha256}, {path: 'godot.js', sha256: javascriptSha256}];
+  const implementation = {path: 'scripts/release/patch-web-game-probe.mjs', sha256: digest('game probe patch')};
+  report.source.inputs[implementation.path] = implementation.sha256;
+  report.source.inputs['bridge/jsb_runtime_game_probe.h'] = digest('game probe header');
+  report.source.snapshotHash = digest(canonical(report.source.inputs));
+  for (const path of GAME_PROBE_PATHS) {
+    const beforeSha256 = report.godotSource.inputs[path] ?? digest('upstream ' + path);
+    const afterSha256 = digest('game probe ' + path);
+    report.recipe.patches.push({path, patchId: GAME_PROBE_PATCH, beforeSha256, afterSha256, implementation});
+    report.godotSource.inputs[path] = afterSha256;
+  }
+  report.godotSource.snapshotHash = digest(canonical(report.godotSource.inputs));
+  report.recipeSha256 = digest(canonical(report.recipe));
+  const {patches} = report.recipe;
+  Object.assign(report, webLifecycleBuildProof(patches), artifactSetMountBuildProof(patches), managedShutdownBuildProof(patches));
+  const reportPath = f.configuration['engine-report'];
+  await writeJson(reportPath, report);
+  const out = resolve(f.root, 'game-probe');
+  const packed = await packageBrowserEngineArtifact({report: reportPath, out});
+  assert.equal(packed.manifest.development, false);
+  assert.equal(packed.report.runtimeAbi.gameProbe, 1);
+
+  delete report.runtimeObservation;
+  await writeJson(reportPath, report);
+  await assert.rejects(packageBrowserEngineArtifact({report: reportPath, out: resolve(f.root, 'without-observation-proof')}),
+    /E_RUNTIME_OBSERVATION_BUILD_PROOF/);
+  delete report.runtimeAbi.observation;
+  await writeJson(reportPath, report);
+  await assert.rejects(packageBrowserEngineArtifact({report: reportPath, out: resolve(f.root, 'without-observation')}),
+    /E_GAME_PROBE_BUILD_PROOF/);
 });
 
 test('portable properties evidence is checked against the actual ZIP and cannot be forged by report hashes',async t=>{
