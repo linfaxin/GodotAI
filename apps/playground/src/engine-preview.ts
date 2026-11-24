@@ -113,5 +113,6 @@ export async function createEnginePreview(container:HTMLElement, listener:(event
  observation:runner instanceof WorkerPreviewRunner ? runner : undefined,
  runtimeWrite:runner instanceof WorkerPreviewRunner ? runner : undefined,
  runtimeProperties:runner instanceof WorkerPreviewRunner ? runner : undefined,
+ runtimeCall:runner instanceof WorkerPreviewRunner ? runner : undefined,
  stop:()=>{++operationSequence;return runner.stop();},dispose:()=>{disposed=true;++operationSequence;return runner.dispose();}};
 }

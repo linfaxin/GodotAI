@@ -4,13 +4,13 @@ import {WORKER_RUNTIME_ABI,assertWorkerRuntimeAbi} from '../../../scripts/releas
 import {WORKER_RUNTIME_PATHS,WORKER_RUNTIME_PATCH} from '../../../scripts/release/patch-web-worker-runtime.mjs';
 import {digest,canonical} from './site-evidence.mjs';
 import {executionFromReport} from '../../../scripts/release/execution-contract.mjs';
-import {assertRuntimeObservationBuildProof,assertRuntimeWriteBuildProof,assertRuntimePropertiesBuildProof} from '../../../scripts/release/web-release-utils.mjs';
+import {assertRuntimeObservationBuildProof,assertRuntimeWriteBuildProof,assertRuntimePropertiesBuildProof,assertRuntimeCallBuildProof} from '../../../scripts/release/web-release-utils.mjs';
 
 export const WORKER_CANDIDATE_ASSETS=Object.freeze({host:'preview.js',worker:'runtime.worker.js',audio:'runtime.audio.worklet.js'});
 export const WORKER_NATIVE_PATCH_FILES=WORKER_RUNTIME_PATHS;
 /** A protocol constant is not proof of a native build. Cross-check the checked
  * patch receipt against both the recipe and the snapshotted compiled sources. */
-export function assertWorkerBuildProof(report,wasmSha256){
+export function assertWorkerBuildProof(report,engine){
  assertWorkerRuntimeAbi(report?.runtimeAbi);
  const proof=report.workerPatch,hash=/^[a-f0-9]{64}$/;
  if(report.kind!=='godot-js-browser-engine-build'||report.status!=='built'||proof?.patchId!==WORKER_RUNTIME_PATCH||proof.version!==1||proof.implementation?.path!=='scripts/release/patch-web-worker-runtime.mjs'||!hash.test(proof.implementation?.sha256)||digest(canonical(report.recipe))!==report.recipeSha256)throw Error('E_WORKER_BUILD_PROOF');
@@ -25,9 +25,11 @@ export function assertWorkerBuildProof(report,wasmSha256){
  }
  if(digest(canonical(report.godotSource?.inputs))!==report.godotSource?.snapshotHash)throw Error('E_WORKER_BUILD_PROOF_SOURCE');
  if(report.runtimeAbi.lifecycle===1||report.execution?.lifecycleAbi===1)executionFromReport(report);
+ const wasmSha256=engine?.wasm?.decodedSha256??engine?.wasm?.sha256;
  assertRuntimeObservationBuildProof(report,wasmSha256);
  assertRuntimeWriteBuildProof(report,wasmSha256);
  assertRuntimePropertiesBuildProof(report,wasmSha256);
+ assertRuntimeCallBuildProof(report,engine&&{wasmSha256,javascriptSha256:engine.javascript?.sha256});
  return proof;
 }
 /** Static bytes are hashed before manifest.json exists; no candidate/release

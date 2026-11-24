@@ -2,7 +2,7 @@
 
 A static Monaco workbench with a TypeScript compiler Worker and an ordinary Dedicated Worker running Godot, GodotJS and React together. Godot 4.6.1's normal Web module set supplies engine capabilities. The main thread provides DOM/input, presentation and AudioContext/AudioWorklet hosts; transport uses transferable ArrayBuffers without SharedArrayBuffer or cross-origin isolation.
 
-Ordinary build/dev commands and demos use Worker execution; the legacy entry has been removed. This framework is in its initial construction phase and will continue to undergo broad refactoring. Follow the [framework development and review principles](../../CONTRIBUTING.md#framework-development-stage-and-reviews): prioritize working core flows, clear module responsibilities and efficient iteration. The [Worker runtime and delivery contract](../../docs/browser-worker-runtime.zh-CN.md) describes runtime behavior and later release validation.
+Ordinary build/dev commands and demos use Worker execution. The legacy entry has been removed. The framework is still pre-launch and its architecture is changing frequently. Prioritize maintainable designs and working core flows under the [framework development and review principles](../../CONTRIBUTING.md#framework-development-stage-and-reviews). See the [Worker runtime and delivery contract](../../docs/browser-worker-runtime.zh-CN.md) for runtime behavior and release validation.
 
 The independently selected `proxy-pthread` candidate is documented in the [complete Worker engine guide](../../docs/browser-worker-engine.zh-CN.md); it retains its own build namespace and acceptance gates.
 
@@ -62,15 +62,28 @@ During framework development, rename supports ordinary scripts and text `.tscn` 
 
 ## Agent tools
 
-Expand **API 调用** in the sidebar to browse eight Summer-style operations and six GodotAI helpers. Each entry shows the API name and a one-line summary. Open an API to edit its JSON input and inspect results or PNGs alongside the live preview. Each API has its own tab, draft and result view, with shared call history. Requests use the same `window.godotPlayground` API (`schemaVersion: 1`) as external callers. Ctrl/Cmd+Enter executes the active API draft in the request editor and builds the project in the code editor.
+Expand **API 调用** in the sidebar to browse nine Summer-style operations and eight GodotAI helpers. Each entry shows the API name and a one-line summary. Open an API to edit its JSON input and inspect results or PNGs alongside the live preview. Each API has its own tab, draft and result view, with shared call history. Requests use the same `window.godotPlayground` API (`schemaVersion: 1`) as external callers. Ctrl/Cmd+Enter executes the active API draft in the request editor and builds the project in the code editor.
 
-The console retains per-operation drafts and bounded in-memory history. Loading a preset or historical request never executes it. **更新目标 / 填入上下文** uses explicit project/run/node/input sources; a runtime change does not silently redirect a stored request. PNGs are separate attachments and JSON results identify binary summaries. **打开独立示例** switches to a preserved or new runtime-properties sample and ends the previous preview without automatically playing it. The two editable lesson lists cover position changes and exported gameplay properties/input/restart. See the [console design and lifecycle rules](../../docs/design/playground-api-console.zh-CN.md).
+The console retains per-operation drafts and bounded in-memory history. Loading a preset or historical request never executes it. **更新目标 / 填入上下文** uses explicit project, run, node and method selections. PNGs are separate attachments and JSON results identify binary summaries. **打开独立示例** switches to the selected sample and ends the previous preview without automatically playing it. The lesson lists cover position changes, exported gameplay properties, and registered method calls. [Console design and lifecycle rules](../../docs/design/playground-api-console.zh-CN.md)
 
 Open **API 调试** for the existing **自动验证** replays; these retain their independent assertions and cleanup. The adjacent **API 文档** opens reference examples. Manual console calls and replays share a UI gate, while the page's Stop action remains available. Cancelling a supported request or wait does not undo an effect already performed by the game.
 
 The runtime property workbench adds `describe_runtime_properties`, `read_runtime_properties`, `write_runtime_property` and `summer_call` to the same entry. The independent scripted sample exposes `health`, `move_step`, `can_move` and `display_name` using standard GodotJS export decorators. Its replay changes health and movement, checks actual values and PNGs, then restarts the same source to verify defaults return. Property access requires a matching Full/debug Worker Direct engine with `runtimeProperties: 1`; older write-capable templates continue to support the original position replay.
 
 `summer_call({op, input})` is a Summer 4.9.2-style input subset with explicitly labelled GodotAI typed results. It supports selected context, main play/stop/state, runtime tree, native node inspection, property writes and game screenshots. It does not claim full Summer wire compatibility. Script properties use explicit typed read operations; `engine.inspect_runtime_node` continues to use the native observation path. Game screenshots require an explicit `target: 'game'`. See the [supported parameters, result contracts and lifecycle rules](../../docs/design/runtime-properties-and-summer-api-v2.zh-CN.md).
+
+On a Full Engine debug Worker Direct preview with `runtimeCall: 1`, decorate instance methods with `@bind.runtimeMethod({args: ['int'], returns: 'int'})`. The runtime method example registers `take_damage` on `/root/Main/Player`. Open the example from the `engine.runtime_call` tab, start it, and use the node and method selectors to fill a request. This example subtracts 25 from the initial health of 100 and returns 75. Read back `health` and capture the game before and after the call to observe the change. Restarting restores 100.
+
+A Console draft filled from method discovery keeps the selected instance and method token. Select a fresh discovery result after the node or registration changes. You can edit the arguments in the draft. Method requests must fit in 4 KiB of UTF-8 JSON, including the native envelope.
+
+```js
+await window.godotPlayground.summer_call({
+  op: 'engine.runtime_call',
+  input: {path: '/root/Main/Player', method: 'take_damage', args: [25]},
+});
+```
+
+For a caller with an exact run and node instance, use `describe_runtime_methods` to obtain a method token and pass it to `call_runtime_method` with typed arguments. Tokens are scoped to the registered method, instance, run and release. If a call reports `outcome_unknown`, read the live state before deciding whether to call again. Older templates report `unsupported`. The generated `godot.annotations` declaration follows the annotation observed in the exact engine template.
 
 ```js
 const api = window.godotPlayground;
@@ -123,7 +136,7 @@ pnpm --filter @godot-js/playground build
 pnpm --filter @godot-js/playground dev
 ```
 
-For an already prepared resource tree, `node apps/playground/scripts/build.mjs --skip-assets` reuses the imported sources. `build:frontend` refreshes an existing release's shell and demo runtime without rebuilding the engine, provided its declaration inputs and frozen SDK source/output proof still match. SDK drift is rejected before any site files or delivery variants are changed; rebuild the complete release to consume a new SDK.
+For an already prepared resource tree, `node apps/playground/scripts/build.mjs --skip-assets` reuses the imported sources. `build:frontend` refreshes an existing release's shell and demo runtime while reusing its engine. Before changing site files or delivery variants, it checks the frozen SDK and, when `runtimeCall` is declared, the actual JavaScript and WASM against the build report. The declaration inputs must also match. Rebuild the complete release to consume a new SDK or engine.
 
 Ordinary build/dev/test commands use Worker in `dist`, `dist-2d-debug`, `dist-2d-release` and `dist-full-release`. The `:worker` npm commands and `--worker-execution` remain aliases for the same path; no `-worker` output suffix is added. Explicit `--out`, `PLAYGROUND_DIRECTORY` and `PLAYGROUND_TEST_DIRECTORY` override locations. Frontend refresh requires an existing Worker release; rebuild an old legacy site with the ordinary build command. Shell-only test fixtures use `dist-shell`; SDK conformance retains `dist-conformance`.
 
@@ -162,6 +175,8 @@ Browser suites cover control edits during startup, input for dynamically mounted
 Run `test:browser:debug-api` against a matching Full Engine debug Worker site to verify the Agent API on real WASM. Set `PLAYGROUND_DEBUG_API_CASE=runtime-tree-node-and-png` to run just the runtime observation case. With `PLAYGROUND_DEBUG_API_REPORT` set, it saves the sampled PNG evidence alongside the JSON report. The full suite also reads node state with rendering paused.
 
 `test:browser:api-console` validates the console against controlled APIs (`engineExecuted=false`). `test:browser:api-console:shell` exercises the actual main/editor integration on a separately built shell-only site. Run `test:browser:api-console:real` with `PLAYGROUND_TEST_DIRECTORY` set to a matching Full/debug Worker Direct site and `PLAYGROUND_API_CONSOLE_REAL_REPORT` set to the output JSON path for real gameplay, PNG and restart verification. The real suite requires runtimeProperties ABI 1 and records `engineExecuted=true`; the two UI suites cannot replace that evidence.
+
+Run `test:browser:runtime-call` once per Full/debug Worker Direct candidate. Set `PLAYGROUND_TEST_DIRECTORY` and `PLAYGROUND_RUNTIME_CALL_REPORT` for each site, and set `PLAYGROUND_RUNTIME_CALL_CASE` to `supported` for ABI 1 or `unsupported` for the previous template. The new template run records the method receipt, typed property readback, before/after/restart PNGs and native exit receipts. The previous template run checks the unavailable response and confirms that no method request was sent to the Worker.
 
 Run `PLAYGROUND_DEBUG_API_CASE=runtime-set-position` on a site with write ABI 1 and `runtime-set-unsupported` on an observation ABI 1 site with a read-only template. Set `PLAYGROUND_TEST_DIRECTORY` to the matching site for each run. The write case records the write receipt, PNGs and both exits.
 `PLAYGROUND_DEBUG_API_CASE=runtime-set-boundaries` checks coordinate precision, same-origin iframe inputs and synthetic abort events on the write-capable site.

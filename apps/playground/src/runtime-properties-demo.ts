@@ -1,15 +1,24 @@
 import {parseProject, type EditorProject} from './project-model.ts';
 
 export const RUNTIME_PROPERTIES_DEMO_ID = 'runtime-properties-demo';
+export const RUNTIME_METHOD_DEMO_ID = 'runtime-method-demo';
 export const RUNTIME_PROPERTIES_PLAYER_PATH = '/root/Main/Player';
 export const RUNTIME_PROPERTIES_DEMO_READY = 'RUNTIME_PROPERTIES_DEMO_READY';
 
 /** A normal scene and standard GodotJS exports; there is no debug state registry. */
 export function createRuntimePropertiesDemo(profile: string): EditorProject {
+  return createRuntimeDemo(profile, false);
+}
+
+export function createRuntimeMethodDemo(profile: string): EditorProject {
+  return createRuntimeDemo(profile, true);
+}
+
+function createRuntimeDemo(profile: string, methods: boolean): EditorProject {
   return parseProject({
     schemaVersion: 4, runtime: 'engine', engineProfile: profile,
     launch: {kind: 'scene', source: 'project'},
-    editor: {demoId: RUNTIME_PROPERTIES_DEMO_ID, selected: '/src/Player.ts', mode: 'production'},
+    editor: {demoId: methods ? RUNTIME_METHOD_DEMO_ID : RUNTIME_PROPERTIES_DEMO_ID, selected: '/src/Player.ts', mode: 'production'},
     files: {
       '/project.godot': `config_version=5
 [application]
@@ -89,7 +98,13 @@ export default class Player extends Node2D {
   @bind.export(Variant.Type.TYPE_STRING)
   accessor display_name: string = 'Player 你好';
 
-  private internalCounter = 0;
+${methods ? `  @bind.runtimeMethod({args: ['int'], returns: 'int'})
+  take_damage(amount: number): number {
+    this.health = Math.max(0, this.health - Math.max(0, amount));
+    return this.health;
+  }
+
+` : ''}  private internalCounter = 0;
   private bar!: ColorRect;
   private caption!: Label;
 
@@ -115,13 +130,13 @@ export default class Player extends Node2D {
   }
 }
 `,
-      '/README.md': '标准 GodotJS 导出属性示例。Right 每次移动 move_step 像素，Down 恢复位置。health 控制血条；运行时修改不保存到场景或源码。',
+      '/README.md': methods ? '调用 take_damage(25)，独立读回血量并比较下一张 PNG。重启后回到 100。' : '标准 GodotJS 导出属性示例。Right 每次移动 move_step 像素，Down 恢复位置。health 控制血条；运行时修改不保存到场景或源码。',
     },
   });
 }
 
 export function matchesRuntimePropertiesDemo(project: EditorProject, sample: EditorProject): boolean {
-  return project.demoId === RUNTIME_PROPERTIES_DEMO_ID && project.engineProfile === sample.engineProfile &&
+  return project.demoId === sample.demoId && project.engineProfile === sample.engineProfile &&
     project.engineDocument?.launch.kind === 'scene' && project.mode === sample.mode &&
     Object.keys(project.files).length === Object.keys(sample.files).length &&
     Object.entries(sample.files).every(([path, contents]) => project.files[path] === contents);

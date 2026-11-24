@@ -2,14 +2,14 @@
 
 ## Framework development stage and reviews
 
-The React/browser Worker framework and its Playground are in the initial construction phase and will continue to undergo broad refactoring. The current development principle is:
+The React/browser Worker framework and its Playground have yet to launch. The architecture is changing frequently during this phase.
 
-> 现在在框架初步搭建阶段，还会持续大范围重构，不用过度追求边界。
+> 方案设计和实现以可维护性为优先。按当前需求划分模块职责和接口，避免过度细分边界而增加系统复杂度和维护成本。
 
 Apply this review standard until the framework explicitly enters stabilization or the user changes these priorities:
 
-- Prioritize working core flows: build, startup, rendering, input, stop/restart and error isolation. Review execution ownership, module responsibilities and the cost of further refactoring.
-- Let internal structure and interfaces evolve, updating their callers and relevant checks together. Avoid premature compatibility layers, extension points and abstractions for hypothetical future requirements.
+- Prioritize core flows such as build, startup, rendering, input, stop/restart and error isolation. Review execution ownership, module responsibilities and the cost of further refactoring.
+- Introduce module boundaries, abstractions and compatibility layers where current requirements justify their cost. Let internal structure and interfaces evolve, updating their callers and relevant checks together.
 - Run validation proportional to the change. Rare edge cases, exhaustive browser/device matrices, strict performance budgets and release-evidence hardening can follow once the affected design settles; they are not prerequisites for every framework iteration.
 - Keep known gaps and deferred work visible. Defer nonblocking acceptance-tool issues without declaring them fixed or marking unverified behavior as passed.
 

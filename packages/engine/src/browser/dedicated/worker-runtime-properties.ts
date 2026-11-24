@@ -376,3 +376,5 @@ export function createNativeRuntimeProperties(module: NativePropertiesModule) {
     }
   };
 }
+
+export {frame as isRuntimeFrame, uint64 as validRuntimeUint64};

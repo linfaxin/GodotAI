@@ -3,7 +3,7 @@ import ts from 'typescript';
 /** Check exactly the supplied declaration snapshot against actual target names.
  * No generated-file mutation, native/editor types, DOM, Node globals or skipped
  * library diagnostics are involved. This is used by the release assembler. */
-export function verifyEngineTypes(api, declarationFiles) {
+export function verifyEngineTypes(api, declarationFiles, authoring) {
  const cls=name=>api.classes.find(c=>c.nativeName===name)?.publicName??api.builtins.find(c=>c.nativeName===name)?.publicName??name;
  const method=(type,name)=>api.classes.find(c=>c.nativeName===type)?.methods.find(m=>m.nativeName===name)?.publicName??api.builtins.find(c=>c.nativeName===type)?.methods.find(m=>m.nativeName===name)?.publicName??name;
  const property=(type,name)=>api.classes.find(c=>c.nativeName===type)?.properties.find(m=>m.nativeName===name)?.publicName??name;
@@ -15,6 +15,7 @@ export function verifyEngineTypes(api, declarationFiles) {
  if(!signal||!mode||!modeValue||!intEnum)throw Error('E_ENGINE_TYPES_TARGET: standard Node/Variant metadata is required');
  const typeInt=(intEnum.enumPublicName??'Variant.Type')+'.'+(intEnum.enumValueName??intEnum.publicName);
  const vector=api.builtins.find(m=>m.nativeName==='Vector2'),string=api.builtins.find(m=>m.nativeName==='String'),bytes=api.builtins.find(m=>m.nativeName==='PackedByteArray');
+ const runtimeMethod=`@bind.runtimeMethod({args:["int"],returns:"int"}) damage(amount:number):number { return this.count-amount; }`;
  const source=`import * as G from "godot";
 import {createClassBinder} from "godot.annotations";
 import {internal} from "godot-jsb";
@@ -25,6 +26,7 @@ export default class Main extends G.${cls('Node2D')} {
  @bind.export(G.${typeInt}) accessor count:number=1;
  @bind.export.range_int(0,10,1) accessor range:number=1;
  @bind.export(G.${typeInt},{${api.bindingNaming==='camel'?'hintString':'hint_string'}:"0,10,1"}) accessor manual:number=1;
+ ${authoring?.runtimeMethod===true?runtimeMethod:''}
  _ready(){
   const base:G.${cls('Node')}=this;
   base.${method('Node','add_child')}(new G.${cls('Node2D')}());
@@ -66,6 +68,11 @@ export default class Main extends G.${cls('Node2D')} {
  const positive='/__engine_types__/positive.ts';
  const virtual=new Map(Object.entries(declarationFiles));virtual.set(positive,source);
  const negatives={};for(const [name,value]of Object.entries(negativeSources)){const file='/__engine_types__/'+name+'.ts';virtual.set(file,'import * as G from "godot";\n'+value);negatives[name]=file;}
+ if(authoring?.runtimeMethod===false){
+  const file='/__engine_types__/runtimeMethodUnavailable.ts';
+  virtual.set(file,source.replace(' _ready(){',runtimeMethod+'\n _ready(){'));
+  negatives.runtimeMethodUnavailable=file;
+ }
  const options={strict:true,skipLibCheck:false,noEmit:true,target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS,lib:['lib.es2022.d.ts'],types:[]};
  const host=ts.createCompilerHost(options),baseGet=host.getSourceFile,baseRead=host.readFile,baseExists=host.fileExists;
  host.getSourceFile=(name,languageVersion,...rest)=>virtual.has(name)?ts.createSourceFile(name,virtual.get(name),languageVersion,true):baseGet(name,languageVersion,...rest);
@@ -76,5 +83,6 @@ export default class Main extends G.${cls('Node2D')} {
  const positiveDiagnostics=all.filter(d=>d.file?.fileName===positive).map(format);
  const negativeDiagnostics=Object.fromEntries(Object.entries(negatives).map(([name,file])=>[name,all.filter(d=>d.file?.fileName===file).map(format)]));
  const checks={declarations:declarationDiagnostics.length===0,positive:positiveDiagnostics.length===0,...Object.fromEntries(Object.entries(negativeDiagnostics).map(([name,list])=>[name,list.length>0]))};
+ if(negativeDiagnostics.runtimeMethodUnavailable)checks.runtimeMethodUnavailable=negativeDiagnostics.runtimeMethodUnavailable.length===1&&negativeDiagnostics.runtimeMethodUnavailable[0].code===2339;
  return{status:Object.values(checks).every(Boolean)?'passed':'failed',compiler:{version:ts.version,strict:true,skipLibCheck:false,target:'ES2022',lib:['ES2022'],types:[]},checks,declarationDiagnostics,positiveDiagnostics,negativeDiagnostics};
 }

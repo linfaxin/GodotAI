@@ -46,6 +46,7 @@ namespace jsb
             ClassId,
             ClassSignals,            // array of all @signal annotations
             ClassProperties,         // array of all @export annotations
+            ClassRuntimeMethods,     // own class, explicit runtime method declarations
             ClassImplicitReadyFuncs, // array of all @onready annotations
             ClassToolScript,         // @tool annotated scripts
             ClassIcon,               // @icon

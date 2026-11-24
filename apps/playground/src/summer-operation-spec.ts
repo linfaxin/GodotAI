@@ -91,6 +91,18 @@ export const SUMMER_OPERATION_SPECS = Object.freeze({
       '不支持 field、Vector3、Color；不接受 runId 或 expectedInstanceId。',
       '按提交时的当前运行重新解析 path；不保证跨调用固定同一节点实例。未确认写入不可自动重试。'],
   }),
+  'engine.runtime_call': spec({
+    title: '调用公开玩法方法', description: '发现登记的脚本方法并在已绑定的运行中调用一次。',
+    allowed: ['path', 'method', 'args', 'instance'], unsupported: [],
+    parameters: [
+      {name: 'path', required: true, description: '从实际运行树取得的绝对节点路径。'},
+      {name: 'method', required: true, description: '类明确登记的方法名称。'},
+      {name: 'args', description: '按登记签名提供至多八个标量，省略时使用空数组。'},
+      {name: 'instance', description: '省略或 main。'},
+    ],
+    defaultInput: {args: []},
+    limitations: ['只支持明确登记的同步标量签名。', '超时或取消可能留下未确认结果，请先独立观察。'],
+  }),
   'engine.screenshot': spec({
     title: '截取游戏画面', description: '等待当前运行的新渲染提交，返回实际 PNG 字节与画面身份。',
     allowed: ['target'], unsupported: ['scenePath', 'framing', 'bookmark_name', 'size', 'nodePath', 'camera_path', 'camera_position', 'camera_look_at', 'fov', 'marks', 'max_marks', 'compare_previous', 'update_previous'],

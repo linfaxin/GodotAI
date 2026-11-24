@@ -1,15 +1,15 @@
 import {verifyAndDecodeAsset,type StoredAsset,type RawAssetReader} from '@godot-js/engine/release-assets';
-import type {ExecutionContract} from '@godot-js/engine/browser/verified-loader';
+import type {ExecutionContract, VerifiedRelease} from '@godot-js/engine/browser/verified-loader';
 import {assertNativeReleaseIdentity,assertNativeTypeSnapshot,assertSiteDescriptorIdentity} from '@godot-js/engine/identities';
 import {getEngineProfile} from '../../../scripts/release/engine-profiles.mjs';
 import {assertReleaseContext,assertSameRelease,type ReleaseContext} from './release-context';
 export type {ReleaseContext} from './release-context';
 export interface ReleaseAsset {path:string;sha256:string;bytes:number;encoding?:'gzip';decodedSha256?:string;decodedBytes?:number;maxDecodedBytes?:number}
 export interface EngineRelease {
- schemaVersion:2;runtimeAbi?:{protocolVersion:2;host:1;audio:1;presentation:1};runtimeProfile:string;id:string;candidateId?:string;engineId?:string;extensionId?:string;artifactReceiptVersion?:2;
+ schemaVersion:2;runtimeAbi?:VerifiedRelease['runtimeAbi'];runtimeProfile:string;id:string;candidateId?:string;engineId?:string;extensionId?:string;artifactReceiptVersion?:2;
  engine:{javascript:ReleaseAsset;wasm:ReleaseAsset;host?:ReleaseAsset;worklets?:ReleaseAsset[];execution?:ExecutionContract;workerAssets?:Array<ReleaseAsset&{role?:string}>};
  execution?:ExecutionContract;
- api:{ir:ReleaseAsset;typeSnapshot:ReleaseAsset;declarations?:unknown;hash?:string;bindingVersion?:string;namingProfiles?:Partial<Record<'snake'|'camel',{typeSnapshot:ReleaseAsset}>>};
+ api:{ir:ReleaseAsset;typeSnapshot:ReleaseAsset;authoring?:{version:1;runtimeMethod:boolean};declarations?:unknown;hash?:string;bindingVersion?:string;namingProfiles?:Partial<Record<'snake'|'camel',{typeSnapshot:ReleaseAsset}>>};
  sdk:{vendor:ReleaseAsset;vendors?:Partial<Record<'development'|'production',ReleaseAsset>>;runtimeModules:Record<string,ReleaseAsset>};
 }
 interface ReleaseState {manifest:EngineRelease;context:ReleaseContext;descriptorBytes:Uint8Array;siteBytes?:Uint8Array;demo?:any;site?:any}

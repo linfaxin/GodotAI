@@ -10,7 +10,7 @@ import {createProjectStorage,openProjectDatabase,projectBlobDatabaseName,isProje
 import type {TypeDiagnostic} from './compiler-types';
 import {defaultProject,demoProject,newEngineReactProject,migrateDemoProject as migrateDemo} from './project-templates';
 import {createEnginePreview} from './engine-preview';
-import {loadReleaseContext,loadSiteConfiguration,type ReleaseContext} from './engine-assets';
+import {loadEngineRelease,loadReleaseContext,loadSiteConfiguration,type ReleaseContext} from './engine-assets';
 import {assertCompiledRelease} from './release-context';
 import {getEngineProfile} from '../../../scripts/release/engine-profiles.mjs';
 import type {RunnerEvent,RunnerState} from '@godot-js/engine/browser/protocol';
@@ -21,7 +21,7 @@ import {createDebugRecorder,debugFailure,type DebugRelease} from './debug-api';
 import {createPlaygroundApi,type PlaygroundApi} from './playground-api';
 import {createAgentPanel} from './workbench/agent-panel';
 import {createInteractionDemo, INTERACTION_DEMO_ID, matchesInteractionDemo} from './interaction-demo';
-import {createRuntimePropertiesDemo, matchesRuntimePropertiesDemo, RUNTIME_PROPERTIES_DEMO_ID} from './runtime-properties-demo';
+import {createRuntimeMethodDemo,createRuntimePropertiesDemo, matchesRuntimePropertiesDemo, RUNTIME_PROPERTIES_DEMO_ID} from './runtime-properties-demo';
 import {createSummerDispatcher} from './summer-adapter';
 import {createConsoleGate,createApiConsoleSession} from './workbench/api-console-session';
 import {createApiConsole} from './workbench/api-console';
@@ -43,7 +43,7 @@ let diagnostics:TypeDiagnostic[]=[],toastTimer:ReturnType<typeof setTimeout>,che
 const projectEvents:Record<string,unknown>[]=[];
 let nativePreview:Awaited<ReturnType<typeof createEnginePreview>>|undefined,nativePreviewPending:Promise<Awaited<ReturnType<typeof createEnginePreview>>>|undefined;
 let runtimeSerial=0,activeEngineRevision:string|number=-1;
-let siteEngineProfile='full-engine-v1',shellOnly=false,sessionReleaseContext:ReleaseContext|undefined;
+let siteEngineProfile='full-engine-v1',shellOnly=false,methodExampleAvailable=false,sessionReleaseContext:ReleaseContext|undefined;
 const MAX_PENDING_OPERATIONS=16;
 type PlayIntent={attemptId?:string;controller:AbortController};
 let pendingChecks=0,pendingBuilds=0,playIntent:PlayIntent|undefined;
@@ -64,9 +64,11 @@ const playground=createPlaygroundApi(debugRecorder,{
  observation:()=>nativePreview?.observation,
  runtimeWrite:()=>nativePreview?.runtimeWrite,
  runtimeProperties:()=>nativePreview?.runtimeProperties,
- summerCall:(input,signal)=>summerDispatcher(input,signal),
+ runtimeCall:()=>nativePreview?.runtimeCall,
+ summerCall:(input,signal,selected)=>summerDispatcher(input,signal,selected),
 });
 const summerDispatcher=createSummerDispatcher({
+ runtimeMethods:playground.methodBackend,
  captureContext(){const context=playground.api.get_project_context().result;return {
   projectId:context.projectId,editorRevision:context.editorRevision??0,
   activeRunId:context.activeRunId,pendingAttemptId:playIntent?.attemptId??null,
@@ -122,18 +124,26 @@ function readConsoleContext():ConsoleEnvironment{
   observation:nativePreview.observation?.observationState(run.runId),
   runtimeWrite:nativePreview.runtimeWrite?.runtimeWriteState(run.runId),
   runtimeProperties:nativePreview.runtimeProperties?.runtimePropertiesState(run.runId),
+  runtimeCall:nativePreview.runtimeCall?.runtimeCallState(run.runId),
   interaction:nativePreview.interaction?.interactionState(run.runId),
  }:undefined;
  return {anchor:{
   editorProjectId:context.projectId,editorRevision:context.editorRevision,
   activeRunId:context.activeRunId,activeRunProjectId:run?.projectId??null,
   activeRunRevision:run?.revision??null,pendingAttemptId:playIntent?.attemptId??null,
- },activeRunState:run?.state??null,capabilities};
+ },activeRunState:run?.state??null,capabilities,methodExampleAvailable};
 }
 const consoleSession=createApiConsoleSession(playground.api,{
  readContext:readConsoleContext,
  subscribeContext(listener){consoleContextListeners.add(listener);return()=>consoleContextListeners.delete(listener);},
- openExample:()=>openAgentDemo(createRuntimePropertiesDemo(siteEngineProfile),matchesRuntimePropertiesDemo),
+ callSelectedMethod:(input,signal,selected)=>playground.summerCall({op:'engine.runtime_call',input},signal,selected),
+ openExample:operationId=>{
+  if(operationId==='engine.runtime_call'||operationId==='describe_runtime_methods'){
+   if(!methodExampleAvailable)throw Error('当前引擎发布不支持玩法方法示例');
+   return openAgentDemo(createRuntimeMethodDemo(siteEngineProfile),matchesRuntimePropertiesDemo);
+  }
+  return openAgentDemo(createRuntimePropertiesDemo(siteEngineProfile),matchesRuntimePropertiesDemo);
+ },
 },consoleGate);
 const apiConsole=createApiConsole($('api-console-pane'),$('api-list'),consoleSession,workbench.openApi);
 window.addEventListener('pagehide',event=>{
@@ -551,6 +561,9 @@ async function start(){
   if(shellOnly)debugRecorder.setContext({release:{status:'unsupported',reason:'仅编辑器测试模式'},preview:{status:'unsupported',reason:'仅编辑器测试模式'}});
   else{
    sessionReleaseContext=await loadReleaseContext();if(sessionReleaseContext.engineProfile!==siteEngineProfile)throw Error('E_SITE_ENGINE_PROFILE');
+   const manifest=await loadEngineRelease();
+   methodExampleAvailable=manifest.api.authoring?.runtimeMethod===true&&manifest.runtimeAbi?.runtimeCall===1 &&
+    new URL(location.href).searchParams.get('presentationBackend')!=='bitmap';
    debugRecorder.setContext({release:{status:'available',value:debugRelease(sessionReleaseContext)}});
   }
  }catch(error){

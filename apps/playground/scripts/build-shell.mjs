@@ -13,6 +13,7 @@ import {invalidateSiteDelivery} from './site-delivery-state.mjs';
 import {describeWorkerCandidate} from './worker-candidate.mjs';
 import {assertWorkerRuntimeAbi} from '../../../scripts/release/engine-profiles.mjs';
 import {assertWorkerSdkBuildFrozen} from './worker-sdk-proof.mjs';
+import {assertRuntimeCallAssets,digest,within} from '../../../scripts/release/web-release-utils.mjs';
 const app=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const repository=path.resolve(app,'../..');
 /** Engine/SDK types are release inputs; demo helper types have their own descriptor. */
@@ -98,6 +99,11 @@ export async function buildShell(dist,options={}){
  if(!shellOnly){
   if((existing.execution??existing.engine?.execution)?.executionModel!=='proxy-pthread'){
    try{assertWorkerRuntimeAbi(existing.runtimeAbi);}catch{throw Error('E_EXECUTION_BACKEND_RETIRED: rebuild the complete playground as a Worker release before refreshing');}
+  }
+  if(existing.runtimeAbi?.runtimeCall!==undefined||existing.build?.runtimeCall!==undefined){
+   const {javascript,wasm}=existing.engine;
+   const [javascriptSha256,wasmSha256]=await Promise.all([javascript,wasm].map(async asset=>digest(await fs.readFile(within(dist,asset.path)))));
+   assertRuntimeCallAssets(existing.runtimeAbi,existing.build?.runtimeCall,{javascriptSha256,wasmSha256});
   }
   await assertWorkerSdkBuildFrozen(repository,existing.build?.sdkBuild);
   const resourceBuild=JSON.parse(await fs.readFile(path.join(dist,'resource-build.json'),'utf8'));

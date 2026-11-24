@@ -108,6 +108,7 @@ declare module "godot-jsb" {
 
         function add_script_signal(prototype: GObject, name: string): void;
         function add_script_property(prototype: GObject, details: ScriptPropertyInfo): void;
+        function add_script_runtime_methods(owner: object, declaration: readonly [object, readonly (readonly [string, Function, readonly string[], string])[]]): void;
         function add_script_ready(
             prototype: GObject,
             details: {

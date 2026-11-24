@@ -663,10 +663,26 @@ export type ClassValueMemberDecoratorContext<This = unknown, Value = unknown> =
 
 type OnReadyAssignment<T = unknown, R = unknown> = (this: T, self: T) => R;
 
+type RuntimeMethodType = "bool" | "int" | "float" | "string";
+type RuntimeMethodSignature = {
+    readonly args: readonly RuntimeMethodType[];
+    readonly returns: RuntimeMethodType | "void";
+};
+const runtimeMethodDescriptor = Object.getOwnPropertyDescriptor;
+const runtimeMethodFreeze = Object.freeze;
+const runtimeMethodPrototype = Object.getPrototypeOf;
+const unsupportedRuntimeMethodPrototypes = [
+    runtimeMethodPrototype(async function () {}),
+    runtimeMethodPrototype(function* () {}),
+    runtimeMethodPrototype(async function* () {}),
+];
+const runtimeMethodMemberTypes: readonly RuntimeMethodType[] = ["bool", "int", "float", "string"];
+
 export function createClassBinder(): ClassBinder {
     const signal_names: string[] = [];
     const property_info_map: Record<string, GodotJsb.ScriptPropertyInfo> = {};
     const rpc_map: Record<string, RPCConfig> = {};
+    const runtimeMethods = new Map<string, readonly [string, Function, readonly RuntimeMethodType[], RuntimeMethodSignature["returns"]]>();
     const onready_map: Record<string, string | GodotJsb.internal.OnReadyEvaluatorFunc> = {};
     let is_tool: boolean = false;
     let icon_path: string | undefined = undefined;
@@ -699,6 +715,16 @@ export function createClassBinder(): ClassBinder {
             }
 
             const proto = target.prototype;
+
+            if (runtimeMethods.size) {
+                const declarations = Array.from(runtimeMethods.values());
+                for (const [name, method] of declarations) {
+                    if (runtimeMethodDescriptor(proto, name)?.value !== method) {
+                        throw new Error("Runtime method is not the declared instance method: " + name);
+                    }
+                }
+                jsb.internal.add_script_runtime_methods(target, runtimeMethodFreeze([target, runtimeMethodFreeze(declarations)]));
+            }
 
             for (const signal_name of signal_names) {
                 jsb.internal.add_script_signal(proto, signal_name);
@@ -880,6 +906,27 @@ export function createClassBinder(): ClassBinder {
             },
 
             // member decorators
+
+            runtimeMethod(signature: RuntimeMethodSignature) {
+                const args = [...signature.args];
+                const returns = signature.returns;
+                if (args.length > 8 || args.some(type => !runtimeMethodMemberTypes.includes(type)) ||
+                    (returns !== "void" && !runtimeMethodMemberTypes.includes(returns))) {
+                    throw new Error("Invalid runtime method signature");
+                }
+                return (method: Function, context: ClassMethodDecoratorContext): void => {
+                    const name = context?.name;
+                    if (context?.kind !== "method" || context.static || context.private ||
+                        typeof method !== "function" || typeof name !== "string" || name.length === 0 || name === "constructor" ||
+                        runtimeMethods.has(name) || runtimeMethods.size >= 64) {
+                        throw new Error("Expected a distinct public runtime instance method");
+                    }
+                    if (unsupportedRuntimeMethodPrototypes.includes(runtimeMethodPrototype(method))) {
+                        throw new Error("Runtime methods must be synchronous and cannot be generators: " + name);
+                    }
+                    runtimeMethods.set(name, runtimeMethodFreeze([name, method, runtimeMethodFreeze(args), returns]));
+                };
+            },
 
             export: Object.assign(bind_export, {
                 multiline(): ClassMemberDecorator {

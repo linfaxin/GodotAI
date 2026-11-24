@@ -1,5 +1,5 @@
 import {
-  propertyRecord, pathIsCanonical, validPropertyName, validRuntimeString, readRuntimeValue,
+  propertyRecord, pathIsCanonical, validPropertyName, validRuntimeString, readRuntimeValue, snapshotRuntimePropertyData,
   type DescribeInput, type DescribeResult, type WriteInput, type WriteResult, type PublicResult,
   type RuntimePropertiesState, type RuntimeValue, type RuntimeType, type AccessError,
 } from '@godot-js/engine/browser/dedicated/worker-runtime-properties';
@@ -7,13 +7,16 @@ import type {
   RuntimeSetInput, RuntimeSetResult, RuntimeTreeInput, RuntimeTreeSnapshot,
   RuntimeNodeInput, RuntimeNodeSnapshot, ScreenshotInput, GameScreenshot, ObservationResult, InteractionResult,
 } from '@godot-js/engine/browser/dedicated/worker-runner';
+import type {CallMethodInput, DescribeMethodsInput, MethodCallResult, MethodDescriptionResult, MethodFailure,
+  RuntimeCallState, RuntimeMethodScalar, MethodOutcome} from '@godot-js/engine/browser/dedicated/worker-runner';
+import {sameWorkerRun, type WorkerRunIdentity} from '@godot-js/engine/browser/dedicated/worker-protocol';
 import type {ProjectContextData, StopResult} from './playground-api';
 import {SUMMER_OPERATION_SPECS as rules, SUMMER_TREE_LIMITS, SUMMER_COMPATIBILITY, type SummerOperation} from './summer-operation-spec.ts';
 export {SUMMER_COMPATIBILITY} from './summer-operation-spec.ts';
 
-type BackendFailure = Extract<RuntimeSetResult | ObservationResult<unknown> | InteractionResult<unknown> | StopResult | PublicResult<unknown>, {ok: false}>;
+type BackendFailure = Extract<RuntimeSetResult | ObservationResult<unknown> | InteractionResult<unknown> | StopResult | PublicResult<unknown> | MethodFailure, {ok: false}>;
 export type BackendError = {code: BackendFailure['error']['code']; message: string; source?: AccessError['source']; [key: string]: unknown};
-export type FacadeErrorCode = BackendError['code'] | 'outcome_unknown';
+export type FacadeErrorCode = BackendError['code'] | 'outcome_unknown' | 'call_error' | 'result_unavailable';
 export type BackendReply<T> = {ok: true; result: T} | {ok: false; error: BackendError};
 export interface SummerContext {
   projectId: string | null;
@@ -26,7 +29,18 @@ export interface SummerRun {
   runtimeProperties?: RuntimePropertiesState;
   runtimeWrite?: {supported: boolean | null; ready: boolean};
 }
+export type SelectedRuntimeMethod = Readonly<Pick<CallMethodInput, 'runId' | 'path' | 'expectedInstanceId' | 'method' | 'methodToken'> & {
+  parameterTypes: readonly RuntimeMethodScalar['type'][];
+}>;
+export interface SummerMethodBackend {
+  context(): SummerContext;
+  run(runId: string): BackendReply<WorkerRunIdentity & {projectId: string; releaseId: string; state: string; runtimeCall: RuntimeCallState}>;
+  tree(input: RuntimeTreeInput, signal: AbortSignal | undefined, deadline: number): Promise<BackendReply<RuntimeTreeSnapshot>>;
+  describe(input: DescribeMethodsInput, signal: AbortSignal | undefined, deadline: number): Promise<MethodDescriptionResult>;
+  invoke(input: CallMethodInput, signal: AbortSignal | undefined, deadline: number): Promise<MethodCallResult>;
+}
 export interface SummerBackend {
+  runtimeMethods?: SummerMethodBackend;
   captureContext(): SummerContext;
   getProjectContext(): BackendReply<ProjectContextData>;
   play(input: {projectId: string; expectedEditorRevision: number}): BackendReply<{attemptId: string}>;
@@ -50,11 +64,13 @@ export type PlayData = {accepted: true; state: 'pending'; attemptId: string; run
 export type RunningData = {playing: boolean; capturedRunId: string | null; pendingAttemptId: string | null};
 export type StopData = {accepted: true; cancelledAttemptId: string | null; capturedRunId: string | null; pendingAttemptId: string | null;
   runs: {runId: string; receipt: StopResult}[]; no_target: boolean};
-export type SummerData = ProjectContextData | RuntimeTreeSnapshot | RuntimeNodeSnapshot | GameScreenshot | WriteData | PlayData | RunningData | StopData;
+export type CallData = {route: 'runtime_call'; payload: {ok: true; receipt: Extract<MethodCallResult, {ok: true}>['receipt']; result: Extract<MethodOutcome, {outcome: 'returned'}>}};
+export type SummerData = CallData | ProjectContextData | RuntimeTreeSnapshot | RuntimeNodeSnapshot | GameScreenshot | WriteData | PlayData | RunningData | StopData;
 export type FacadeSuccess<T = SummerData> = {ok: true; status: 'done'; result: {data: T; godotai: {compatibility: typeof SUMMER_COMPATIBILITY}}};
 export type FacadeFailure = {ok: false; error: {code: FacadeErrorCode; message: string; source?: AccessError['source']; retry: 'no';
-  details: {godotai: {compatibility: typeof SUMMER_COMPATIBILITY; route?: 'runtime_properties' | 'legacy_write';
-    receipt?: PublicResult<WriteResult> | RuntimeSetResult; backendError?: BackendError;
+  details: {godotai: {compatibility: typeof SUMMER_COMPATIBILITY; route?: 'runtime_properties' | 'legacy_write' | 'runtime_call';
+    stage?: 'resolve' | 'describe' | 'invoke';
+    receipt?: PublicResult<WriteResult> | RuntimeSetResult | MethodCallResult | MethodDescriptionResult; backendError?: BackendError;
     parameter?: string; unknownKeys?: string[]}}}};
 export type FacadeReply<T = SummerData> = FacadeSuccess<T> | FacadeFailure;
 export type SummerCallInput = {op: string; input?: Record<string, unknown>};
@@ -89,7 +105,7 @@ function validate(raw: unknown): Validated | FacadeFailure {
     if (unknownKeys.length) return fail('invalid_input', '未知操作参数', {unknownKeys}, 'sdk');
     for (const key of unsupported) if (Object.hasOwn(input, key)) return localError('unsupported', key, '当前不支持该参数');
     if (Object.hasOwn(input, 'instance') && input.instance !== 'main') return localError(typeof input.instance === 'string' ? 'unsupported' : 'invalid_input', 'instance');
-    if (op === 'engine.inspect_runtime_node' || op === 'engine.runtime_set' || Object.hasOwn(input, 'path')) {
+    if (op === 'engine.inspect_runtime_node' || op === 'engine.runtime_set' || op === 'engine.runtime_call' || Object.hasOwn(input, 'path')) {
       if (!pathIsCanonical(input.path)) return localError('invalid_input', 'path');
     }
     if (op === 'engine.get_runtime_tree') {
@@ -106,6 +122,15 @@ function validate(raw: unknown): Validated | FacadeFailure {
       if (typeof input.value !== 'boolean' && typeof input.value !== 'number' && typeof input.value !== 'string' ||
         typeof input.value === 'number' && !Number.isFinite(input.value) || typeof input.value === 'string' && !validRuntimeString(input.value)) return localError('invalid_input', 'value');
     }
+    if (op === 'engine.runtime_call') {
+      if (!validPropertyName(input.method)) return localError('invalid_input', 'method');
+      const args = Object.hasOwn(input, 'args') ? snapshotRuntimePropertyData(input.args) : [];
+      if (!Array.isArray(args)) return localError('invalid_input', 'args');
+      if (args.length > 8 || args.some(value => typeof value === 'string' ? !validRuntimeString(value) :
+          typeof value === 'number' ? !Number.isFinite(value) : typeof value !== 'boolean'))
+        return localError('bad_args', 'args');
+      return {op, input: {...input, args}};
+    }
     return {op, input: {...input}};
   } catch {return localError('invalid_input', 'input');}
 }
@@ -120,15 +145,95 @@ export function parseSummerValue(type: RuntimeType, value: unknown): RuntimeValu
   return readRuntimeValue({type, value});
 }
 
+const methodNow = () => performance.timeOrigin + performance.now();
+
+async function runtimeCall(backend: SummerMethodBackend, input: Record<string, unknown>, signal: AbortSignal | undefined,
+  deadline: number, selected?: SelectedRuntimeMethod): Promise<FacadeReply> {
+  const context = backend.context();
+  const runId = context.activeRunId;
+  const path = input.path as string, method = input.method as string, args = input.args as unknown[];
+  const route = 'runtime_call' as const;
+  const reject = (code: FacadeErrorCode, stage: 'resolve' | 'describe' | 'invoke', message: string = code) =>
+    fail(code, message, {route, stage}, 'sdk');
+  if (selected && (selected.path !== path || selected.method !== method)) return reject('binding_changed', 'resolve');
+  if (selected && selected.runId !== runId) return reject('run_ended', 'resolve');
+  if (!runId || !context.projectId) return reject('not_ready', 'resolve');
+  const bound = backend.run(runId);
+  if (!bound.ok) return backendFailure(bound, {route, stage: 'resolve'});
+  const run = bound.result;
+  if (run.projectId !== context.projectId) return reject('revision_conflict', 'resolve');
+  if (run.state === 'stopping' || run.state === 'exited') return reject('run_ended', 'resolve');
+  if (selected && selected.methodToken.releaseId !== run.releaseId) return reject('binding_changed', 'resolve');
+  if (run.runtimeCall.supported === false) return reject('unsupported', 'resolve');
+  if (!run.runtimeCall.ready) return reject('not_ready', 'resolve');
+
+  function check(stage: 'resolve' | 'describe' | 'invoke') {
+    if (methodNow() >= deadline) return reject('timeout', stage);
+    if (signal && readAborted.call(signal)) return reject('cancelled', stage);
+    const current = backend.context();
+    if (current.projectId !== context.projectId) return reject('revision_conflict', stage);
+    if (current.activeRunId !== runId) return reject('run_ended', stage);
+    const live = backend.run(runId!);
+    if (!live.ok) return backendFailure(live, {route, stage});
+    if (!sameWorkerRun(run, live.result) || run.releaseId !== live.result.releaseId || live.result.state !== 'running')
+      return reject('run_ended', stage);
+  }
+
+  let target = selected;
+  if (!target) {
+    const beforeTree = check('resolve');
+    if (beforeTree) return beforeTree;
+    const tree = await backend.tree({runId, path, depth: 0, limit: 1}, signal, deadline);
+    if (!tree.ok) return backendFailure(tree, {route, stage: 'resolve'});
+    if (!sameWorkerRun(run, tree.result.run) || tree.result.releaseId !== run.releaseId)
+      return reject('dispatch_failed', 'resolve');
+    const [node] = tree.result.nodes;
+    if (tree.result.nodes.length !== 1 || node?.path !== path) return reject('node_not_found', 'resolve');
+
+    const nodeTarget = {runId, path, expectedInstanceId: node.instanceId};
+    const beforeDescribe = check('describe');
+    if (beforeDescribe) return beforeDescribe;
+    const description = await backend.describe({...nodeTarget, method}, signal, deadline);
+    if (!description.ok) return backendFailure(description, {route, stage: 'describe', receipt: description});
+    const receipt = description.receipt;
+    const [descriptor] = description.result.methods;
+    if (!sameWorkerRun(run, receipt.run) || receipt.releaseId !== run.releaseId || receipt.path !== path ||
+        receipt.expectedInstanceId !== node.instanceId || description.result.methods.length !== 1 || descriptor?.method !== method)
+      return reject('dispatch_failed', 'describe');
+    target = {...nodeTarget, method, methodToken: descriptor.methodToken, parameterTypes: descriptor.parameterTypes};
+  }
+  const {parameterTypes, ...invocation} = target;
+  if (parameterTypes.length !== args.length) return reject('bad_args', 'invoke');
+  const typed: RuntimeMethodScalar[] = [];
+  for (const [index, type] of parameterTypes.entries()) {
+    const value = readRuntimeValue({type, value: args[index]});
+    if (!value || value.type === 'vector2') return reject('bad_args', 'invoke', '参数与登记的类型不匹配');
+    typed.push(value);
+  }
+  const beforeInvoke = check('invoke');
+  if (beforeInvoke) return beforeInvoke;
+  const response = await backend.invoke({...invocation, args: typed}, signal, deadline);
+  if (!response.ok) return backendFailure(response, {route, stage: 'invoke', receipt: response});
+  const result = response.result;
+  if (result.outcome === 'returned') return done<CallData>({route, payload: {...response, result}});
+  const code = result.outcome === 'threw' ? 'call_error' : result.outcome === 'unconfirmed' ? 'outcome_unknown' : 'result_unavailable';
+  const message = result.outcome === 'threw' ? '脚本方法已执行并抛出异常' :
+    result.outcome === 'unconfirmed' ? '调用可能已执行，结果未确认' : '脚本方法已返回，返回值无法编码';
+  return fail(code, message, {route, stage: 'invoke', receipt: response});
+}
+
 /** The dispatcher binds each call once; it never re-reads the active run after an await. */
 export function createSummerDispatcher(backend: SummerBackend) {
-  return async (raw: unknown, signal?: AbortSignal): Promise<FacadeReply> => {
+  return async (raw: unknown, signal?: AbortSignal, selected?: SelectedRuntimeMethod): Promise<FacadeReply> => {
+    const methodDeadline = methodNow() + 5000;
     const checked = validate(raw);
     if ('ok' in checked) return checked;
     const {op, input} = checked;
     try {
       if (signal !== undefined && readAborted.call(signal)) return localError('cancelled', 'signal');
     } catch {return localError('invalid_input', 'signal');}
+    if (op === 'engine.runtime_call') return backend.runtimeMethods ?
+      runtimeCall(backend.runtimeMethods, input, signal, methodDeadline, selected) : localError('unsupported', 'runtimeCall');
     const context = {...backend.captureContext()};
     if (op === 'engine.get_project_context') {
       const response = backend.getProjectContext();

@@ -4,6 +4,8 @@
 #include "jsb_test_helpers.h"
 #include "../bridge/jsb_runtime_script_properties.h"
 #include "../bridge/jsb_runtime_properties.h"
+#include "../bridge/jsb_runtime_call.h"
+#include "core/io/file_access.h"
 #include "../bridge/jsb_runtime_access_common.h"
 #include "../bridge/jsb_native_world.h"
 #include "core/io/json.h"
@@ -12,6 +14,8 @@
 #include "../weaver/jsb_script_instance.h"
 #include "scene/2d/node_2d.h"
 #include "core/io/resource_loader.h"
+#include <cmath>
+#include <limits>
 
 namespace jsb::tests {
 namespace {
@@ -587,6 +591,127 @@ TEST_CASE("[jsb][SceneTree] runtime properties wire strings retain NUL BOM Unico
     const char* escaped_literal = R"({"value":"\\u0000"})";
     REQUIRE(runtime_access::parse_properties_request(escaped_literal, strlen(escaped_literal), parsed, numbers));
     CHECK(String(parsed["value"]) == "\\u0000");
+
+    const char* exact_floats = R"({"zero":-0,"subnormal":5e-324,"negative_subnormal":-5e-324})";
+    REQUIRE(runtime_access::parse_properties_request(exact_floats, strlen(exact_floats), parsed, numbers));
+    REQUIRE(numbers.size() == 3);
+    CHECK(numbers[0] == 0.0);
+    CHECK(std::signbit(numbers[0]));
+    CHECK(numbers[1] == std::numeric_limits<double>::denorm_min());
+    CHECK(numbers[2] == -std::numeric_limits<double>::denorm_min());
+    CHECK(String::utf8(runtime_access::stringify(Variant(-0.0)).get_data()) == "-0.0");
+    const char* overflow = R"({"value":1e309})";
+    CHECK_FALSE(runtime_access::parse_properties_request(overflow, strlen(overflow), parsed, numbers));
 }
+#if !JSB_WITH_JAVASCRIPTCORE
+TEST_CASE("[jsb][SceneTree] runtime call invokes only registered GodotJS methods and preserves execution evidence") {
+    RuntimeScriptTestWorld world;
+    GodotJSScriptLanguageIniter initer;
+    const auto env = GodotJSScriptLanguage::get_singleton()->get_environment();
+    JSB_TESTS_EXECUTION_SCOPE(env.get());
+
+    const Dictionary contract = JSON::parse_string(FileAccess::get_file_as_string("res://tests/runtime/runtime-call-contract.json"));
+    REQUIRE(!contract.is_empty());
+    const Ref<Resource> script = ResourceLoader::load("res://tests/runtime/runtime-methods.ts");
+    REQUIRE(script.is_valid());
+    Node2D* target = memnew(Node2D);
+    target->set_script(script);
+    target->set_name("RuntimeMethodTarget");
+    SceneTree::get_singleton()->get_root()->add_child(target);
+    const ObjectID id = target->get_instance_id();
+    const String path = Dictionary(contract["target"])["path"];
+    const auto invoke = [&](Dictionary request, const char* scope = "fixture") -> Dictionary {
+        request["path"] = path;
+        request["expectedInstanceId"] = uitos(static_cast<uint64_t>(id));
+        request["runScope"] = scope;
+        if (!request.has("outputBudgetBytes")) request["outputBudgetBytes"] = 65536;
+        const CharString bytes = runtime_access::stringify(request);
+        const CharString reply = execute_runtime_call(bytes.get_data(), bytes.length(), 5000000);
+        REQUIRE(reply.length() > 0);
+        const Variant parsed = JSON::parse_string(String::utf8(reply.get_data(), reply.length()));
+        REQUIRE(parsed.get_type() == Variant::DICTIONARY);
+        return parsed;
+    };
+    const auto describe = [&](const String& name) -> Dictionary {
+        Dictionary query;
+        query["kind"] = "describe";
+        query["method"] = name;
+        const Dictionary reply = invoke(query);
+        REQUIRE(bool(reply["ok"]));
+        const Array methods = Dictionary(reply["result"])["methods"];
+        REQUIRE(methods.size() == 1);
+        return methods[0];
+    };
+    const auto call = [&](const Dictionary& method, const Array& args = Array()) -> Dictionary {
+        Dictionary command;
+        command["kind"] = "invoke";
+        command["method"] = method["method"];
+        command["methodStamp"] = method["methodStamp"];
+        command["expectedReturnType"] = method["returnType"];
+        command["args"] = args;
+        return command;
+    };
+    const auto result = [&](const Dictionary& request) -> Dictionary {
+        const Dictionary reply = invoke(request);
+        REQUIRE(bool(reply["ok"]));
+        return reply["result"];
+    };
+
+    Dictionary query;
+    query["kind"] = "describe";
+    query["method"] = "hidden_method";
+    CHECK(Dictionary(invoke(query)["error"])["code"] == "method_not_found");
+    query["method"] = "prefixed";
+    CHECK(Dictionary(invoke(query)["error"])["code"] == "method_not_found");
+    const String exact_name = String::chr(0xfeff) + "prefixed";
+    const Dictionary prefixed = describe(exact_name);
+    CHECK(prefixed["method"] == exact_name);
+    CHECK(int64_t(Dictionary(result(call(prefixed))["value"])["value"]) == 100);
+    const Dictionary damage = describe(contract["method"]);
+    CHECK(damage["parameterTypes"] == contract["parameterTypes"]);
+    CHECK(damage["returnType"] == contract["returnType"]);
+    Dictionary damage_request = call(damage, contract["args"]);
+    CHECK(Dictionary(invoke(damage_request.duplicate(), "other-run")["error"])["code"] == "binding_changed");
+    Dictionary short_request = damage_request.duplicate();
+    short_request["outputBudgetBytes"] = 135;
+    CHECK(Dictionary(invoke(short_request)["error"])["code"] == "output_budget");
+    CHECK(int64_t(Dictionary(result(call(describe("read_health")))["value"])["value"]) == 100);
+    RuntimeScriptSnapshot bound;
+    REQUIRE(GodotJSScriptInstance::capture_runtime_binding(target, bound) == nullptr);
+    const auto class_info = env->find_script_class(bound.class_id);
+    REQUIRE(bool(class_info));
+    JavaScriptModule* module = env->get_module_cache().find(class_info->module_id);
+    REQUIRE(module);
+    REQUIRE(ScriptClassInfo::_parse_script_class(env->get_context(), *module));
+    CHECK(Dictionary(invoke(damage_request)["error"])["code"] == "binding_changed");
+    CHECK(int64_t(Dictionary(result(call(describe("read_health")))["value"])["value"]) == 100);
+    damage_request = call(describe(contract["method"]), contract["args"]);
+    const Dictionary changed = result(damage_request);
+    CHECK(changed["outcome"] == "returned");
+    CHECK(bool(changed["callEntered"]));
+    CHECK(Dictionary(changed["entryFrame"])["process"].get_type() == Variant::STRING);
+    const Dictionary actual_value = changed["value"], expected_value = contract["value"];
+    CHECK(actual_value["type"] == expected_value["type"]);
+    CHECK(int64_t(actual_value["value"]) == int64_t(expected_value["value"]));
+
+    const Dictionary fail_method = describe("fail");
+    for (int index = 0; index < 3; ++index) {
+        Array arg;
+        arg.append(runtime_access::typed(index));
+        CHECK(result(call(fail_method, arg))["outcome"] == "threw");
+        CHECK(int64_t(Dictionary(result(call(describe("read_health")))["value"])["value"]) == 74 - index);
+    }
+    const Dictionary invalid_string = result(call(describe("invalid_string")));
+    CHECK(invalid_string["outcome"] == "result_unavailable");
+    CHECK(invalid_string["reason"] == "encoding_failed");
+    CHECK(bool(invalid_string["callEntered"]));
+    CHECK(Dictionary(result(call(describe("finish")))["value"])["type"] == "void");
+    CHECK(result(call(describe("invalid_result")))["outcome"] == "result_unavailable");
+    CHECK(int64_t(Dictionary(result(call(describe("destroy")))["value"])["value"]) == 17);
+    CHECK(::ObjectDB::get_instance(id) == nullptr);
+    CHECK(Dictionary(invoke(damage_request)["error"])["code"] == "node_not_found");
+}
+#endif
+
 }
 #endif

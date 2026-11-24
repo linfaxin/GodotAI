@@ -70,7 +70,7 @@ async function fixture({fetchAsset,loadRuntime,moduleReady,closeReady,inputReady
   message.audioPcmPort.onmessage=({data})=>{if(data.type==='pcm-flushed'&&ackAudio)message.audioCommandPort.postMessage({runId:message.runId,audioEpoch:1,type:'pcm-flushed',outstandingLoans:0});};
  }},dispose(){counters.runtimeDisposals++;this.worker.terminate();}};
  class TestURL extends URL {static createObjectURL(){const value=`blob:host-test-${createdUrls.length}`;createdUrls.push(value);return value;}static revokeObjectURL(value){revokedUrls.push(value);}}
- const sandbox={console,URL:TestURL,Blob,ArrayBuffer,Uint8Array,Float32Array,TextEncoder,crypto,AbortController,DOMException,queueMicrotask,AudioContext:Context,AudioWorkletNode:Worklet,
+ const sandbox={console,URL:TestURL,Blob,ArrayBuffer,Uint8Array,Float32Array,TextEncoder,TextDecoder,crypto,AbortController,AbortSignal,DOMException,queueMicrotask,AudioContext:Context,AudioWorkletNode:Worklet,
   performance:{now:()=>now,timeOrigin:0},devicePixelRatio:1,location:{href:'https://preview.test/app/preview.html?run=1'},document:{hidden:false},navigator:{},
   MessageChannel:class{constructor(){const pair=ports();channels.push(pair);return pair;}},
   ResizeObserver:class{observe(){}disconnect(){}},

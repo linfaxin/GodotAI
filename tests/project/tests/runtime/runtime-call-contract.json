@@ -1,0 +1,9 @@
+{
+  "target": {"runId":"run-a","path":"/root/RuntimeMethodTarget","expectedInstanceId":"9007199254740993"},
+  "method":"take_damage",
+  "parameterTypes":["int"],
+  "returnType":"int",
+  "args":[{"type":"int","value":25}],
+  "value":{"type":"int","value":75},
+  "entryFrame":{"process":"5","physics":"13","drawn":"2"}
+}

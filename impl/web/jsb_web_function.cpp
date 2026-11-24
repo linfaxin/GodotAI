@@ -19,6 +19,17 @@ namespace v8
         return MaybeLocal<Value>(Data(isolate_, rval_sp));
     }
 
+    MaybeLocal<Value> Function::CallRuntime(Local<Value> recv, int argc, Local<Value> argv[], bool& threw)
+    {
+        jsb::impl::StackPosition args[8];
+        if (argc < 0 || argc > 8) return {};
+        for (int i = 0; i < argc; ++i) args[i] = argv[i]->stack_pos_;
+        const int32_t result = jsbi_RuntimeCall(isolate_->rt(), recv->stack_pos_, stack_pos_, argc, args);
+        threw = result == -1;
+        if (result < 0) return {};
+        return MaybeLocal<Value>(Data(isolate_, result));
+    }
+
     MaybeLocal<Function> Function::New(Local<Context> context, FunctionCallback callback, Local<Value> data, int length)
     {
         Isolate* isolate = context->isolate_;

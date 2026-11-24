@@ -12,6 +12,8 @@ import {measureBrowserEngine} from '../../../scripts/test/measure-browser-engine
 import {digest} from '../../../scripts/release/web-release-utils.mjs';
 import {isSourceCertified} from '../../../scripts/release/engine-build-proof.mjs';
 import {engineBuildFixture} from './fixtures/engine-build-report.mjs';
+import {runtimeCallProofFixture} from './fixtures/runtime-properties-build-report.mjs';
+import {buildShell} from './build-shell.mjs';
 
 const repo=fileURLToPath(new URL('../../../',import.meta.url));
 async function workspace(t){const root=await mkdtemp(path.join(tmpdir(),'engine-artifacts-'));t.after(()=>rm(root,{recursive:true,force:true}));return root;}
@@ -42,7 +44,7 @@ test('the real shell wrapper isolates parallel recipes and preserves current rep
  for(const name of ['emcc','scons']){const filename=path.join(bin,name);await writeFile(filename,'#!/bin/sh\nexit 0\n');await chmod(filename,0o755);}
  const outcomes=await Promise.all(['none','thin'].flatMap(lto=>['baseline','explicit'].map(async moduleMode=>{
   const paths=browserEnginePaths({repository,profile:'engine-2d-v1',target:'template_release',lto,moduleMode});await mkdir(path.dirname(paths.reportPath),{recursive:true});await writeFile(paths.reportPath,'last successful report');
-  const capture=path.join(root,lto+'-'+moduleMode+'.json'),env={...process.env,PATH:bin+path.delimiter+process.env.PATH,GODOT_SOURCE:'/fixture/unused',SKIP_ENGINE_JS_BUILD:'1',ENGINE_PROFILE:'engine-2d-v1',ENGINE_TARGET:'template_release',ENGINE_LTO:lto,ENGINE_MODULE_MODE:moduleMode,JOBS:'4',CAPTURE_ARGS:capture};
+  const capture=path.join(root,lto+'-'+moduleMode+'.json'),env={...process.env,PATH:bin+path.delimiter+process.env.PATH,GODOT_SOURCE:'/fixture/unused',ENGINE_PROFILE:'engine-2d-v1',ENGINE_TARGET:'template_release',ENGINE_LTO:lto,ENGINE_MODULE_MODE:moduleMode,JOBS:'4',CAPTURE_ARGS:capture};
   for(const name of ['ENGINE_BUILD_REPORT','GODOT_WEB_BUILD_DIR','WEB_TEMPLATE_OUT'])delete env[name];
   await assert.rejects(promisify(execFile)('bash',['apps/playground/scripts/build-web-engine.sh'],{cwd:repository,env}),error=>error.code===42);
   const args=JSON.parse(await readFile(capture)),value=flag=>args[args.indexOf(flag)+1];
@@ -51,6 +53,22 @@ test('the real shell wrapper isolates parallel recipes and preserves current rep
   return value('--build-dir');
  })));
  assert.equal(new Set(outcomes).size,4);
+});
+
+test('frontend refresh rejects an unproven or mixed runtime call engine before modifying the site',async t=>{
+ const root=await workspace(t),javascript='godot.js',wasm='godot.wasm';
+ const input={wasmSha256:digest('wasm'),javascriptSha256:digest('current bridge')};
+ const {runtimeAbi,runtimeCall}=runtimeCallProofFixture(input);
+ const release={runtimeProfile:'full-engine-v1',runtimeAbi,engine:{javascript:{path:javascript},wasm:{path:wasm}},build:{runtimeCall}};
+ await writeFile(path.join(root,wasm),'wasm');
+ await writeFile(path.join(root,'manifest.json'),'original manifest');
+ for(const [bytes,proof] of [['old bridge',runtimeCall],['current bridge',undefined]]){
+  await writeFile(path.join(root,javascript),bytes);
+  await writeFile(path.join(root,'engine-release.json'),JSON.stringify({...release,build:{runtimeCall:proof}}));
+  await assert.rejects(buildShell(root),/E_RUNTIME_CALL_BUILD_PROOF/);
+  assert.equal(await readFile(path.join(root,'manifest.json'),'utf8'),'original manifest');
+  await assert.rejects(access(path.join(root,'shell-profile.json')),{code:'ENOENT'});
+ }
 });
 
 test('portable artifact preserves original proof bytes and remeasures after original tree removal',async t=>{

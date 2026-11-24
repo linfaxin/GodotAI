@@ -1843,6 +1843,25 @@ const annotation_types = {
                             },
                         },
                     },
+                    runtimeMethod: {
+                        type: DescriptorType.FunctionLiteral,
+                        parameters: [
+                            {
+                                name: "signature",
+                                type: {
+                                    type: DescriptorType.Godot,
+                                    name: '{ readonly args: readonly ("bool" | "int" | "float" | "string")[]; readonly returns: "bool" | "int" | "float" | "string" | "void" }',
+                                },
+                            },
+                        ],
+                        returns: {
+                            type: DescriptorType.FunctionLiteral,
+                            parameters: [
+                                { name: "_target", type: { type: DescriptorType.Godot, name: "Function" } },
+                                { name: "context", type: { type: DescriptorType.Godot, name: "ClassMethodDecoratorContext" } },
+                            ],
+                        },
+                    },
                     rpc: {
                         type: DescriptorType.FunctionLiteral,
                         parameters: [

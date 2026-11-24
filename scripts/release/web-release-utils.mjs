@@ -83,6 +83,30 @@ export function assertRuntimePropertiesBuildProof(report, wasmSha256 = report.te
   assertSourcePatchChains(report);
 }
 
+export function assertRuntimeCallAssets(runtimeAbi, proof, {wasmSha256, javascriptSha256}) {
+  if (runtimeAbi?.runtimeCall === undefined && proof === undefined) return;
+  const hash = /^[a-f0-9]{64}$/;
+  if (runtimeAbi?.runtimeCall !== 1 || proof?.abi !== 1 ||
+      !hash.test(proof.wasmSha256) || proof.wasmSha256 !== wasmSha256 ||
+      !hash.test(proof.javascriptSha256) || proof.javascriptSha256 !== javascriptSha256) {
+    throw Error('E_RUNTIME_CALL_BUILD_PROOF');
+  }
+}
+
+export function assertRuntimeCallBuildProof(report, assets = {
+  wasmSha256: report.template?.assets?.find(asset => asset.path === 'godot.wasm')?.sha256,
+  javascriptSha256: report.template?.assets?.find(asset => asset.path === 'godot.js')?.sha256,
+}) {
+  assertRuntimeCallAssets(report.runtimeAbi, report.runtimeCall, assets);
+  if (report.runtimeAbi?.runtimeCall === undefined) return;
+  if (report.runtimeAbi.observation !== 1 || report.runtimeAbi.lifecycle !== 1 ||
+      report.status !== 'built' || !report.sourceCertified || !runtimeWriteBuildTarget(report) ||
+      report.resolvedBuildOptions?.threads !== false || report.resolvedBuildOptions?.dlink_enabled !== false) {
+    throw Error('E_RUNTIME_CALL_BUILD_PROOF');
+  }
+  assertRuntimeObservationBuildProof(report, assets.wasmSha256);
+}
+
 export function assertRuntimeObservationBuildProof(report, wasmSha256 = report.template?.assets?.find(asset => asset.path === 'godot.wasm')?.sha256) {
   const proof = report.runtimeObservation;
   if (report.runtimeAbi?.observation === undefined && proof === undefined) return;
@@ -241,9 +265,14 @@ export async function inspectRelease(directory, { requireCertified = false } = {
   if (digest(canonical(attestation.recipe)) !== attestation.recipeSha256) fail('E_RELEASE_RECIPE', 'Attestation recipe was changed');
   assertSourcePatchChains(attestation);
   const wasm = descriptor.files.find(file => file.kind === 'engine-wasm');
-  assertRuntimeObservationBuildProof(attestation, wasm?.decodedSha256 ?? wasm?.sha256);
-  assertRuntimeWriteBuildProof(attestation, wasm?.decodedSha256 ?? wasm?.sha256);
-  assertRuntimePropertiesBuildProof(attestation, wasm?.decodedSha256 ?? wasm?.sha256);
+  const wasmSha256 = wasm?.decodedSha256 ?? wasm?.sha256;
+  assertRuntimeObservationBuildProof(attestation, wasmSha256);
+  assertRuntimeWriteBuildProof(attestation, wasmSha256);
+  assertRuntimePropertiesBuildProof(attestation, wasmSha256);
+  assertRuntimeCallBuildProof(attestation, {
+    wasmSha256,
+    javascriptSha256: descriptor.files.find(file => file.kind === 'engine-js')?.sha256,
+  });
   if (descriptor.sourceCertified) {
     if (attestation.status !== 'built') fail('E_RELEASE_SOURCE', 'Source certification requires an actual successful build');
     assertCommit(attestation.source?.commit, 'GodotJS commit'); assertHash(attestation.source?.snapshotHash, 'GodotJS snapshot');

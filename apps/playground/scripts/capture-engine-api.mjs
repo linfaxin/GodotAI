@@ -21,21 +21,32 @@ exports.default=class EngineApiCapture extends G[names.get_class('Node')]{
   if(typeof J.internal.get_engine_api!=='function')throw Error('Production engine API entry is unavailable');
   if(call(G[names.get_class('ClassDB')],'class_exists','P0EngineApiProbe'))throw Error('Inspector template cannot produce a production release');
   const ir=J.internal.get_engine_api();
+  const annotations=require('godot.annotations');
+  const binder=annotations.createClassBinder();
+  if(typeof binder!=='function'||typeof binder.export!=='function')throw Error('Production class binder is unavailable');
+  const runtimeMethod=binder.runtimeMethod;
+  if(runtimeMethod!==undefined){
+   if(typeof runtimeMethod!=='function')throw Error('Invalid runtime method binder');
+   class RuntimeMethodCapture extends G[names.get_class('Node')]{ probe(){return 1;} }
+   runtimeMethod({args:[],returns:'int'})(RuntimeMethodCapture.prototype.probe,{kind:'method',name:'probe',static:false,private:false});
+   binder()(RuntimeMethodCapture,{kind:'class',name:'RuntimeMethodCapture'});
+  }
+  const authoring={version:1,runtimeMethod:runtimeMethod!==undefined};
   const bindingAudit=(${auditEngineBinding.toString()})(G,J);
   let bindable=0;const classFailures=[],nameMismatches=[];
   for(const cls of ir.classes){const original=cls.nativeName??cls.name,alias=names.get_class(original);try{if(!G[alias])throw Error('Unresolved class');bindable++;if(names.get_internal_mapping(alias)!==original)nameMismatches.push({original,alias});}catch(error){classFailures.push({original,alias,error:String(error)});}}
   const inventory={classes:ir.classes.length,bindable,classFailures,nameMismatches};
-  if(bindingAudit.status!=='passed'||classFailures.length||nameMismatches.length)throw Error('Binding audit failed: '+JSON.stringify({bindingAudit,inventory}));
+  if(bindingAudit.status!=='passed'||classFailures.length||nameMismatches.length)throw Error('Binding audit failed: '+JSON.stringify({bindingAudit,inventory,authoring}));
   const host=globalThis.__godotjsRuntimeHost;
   if(host&&typeof host.emitProjectEvent==='function'){
-   this.captureHost=host;this.capturePayload=JSON.stringify({ir,audit:{bindingAudit,inventory}});
+   this.captureHost=host;this.capturePayload=JSON.stringify({ir,audit:{bindingAudit,inventory,authoring}});
    this.captureIndex=0;this.captureTotal=Math.ceil(this.capturePayload.length/65536);
    this.captureAcknowledged=typeof host.bindProjectCommand!=='function';
    if(!this.captureAcknowledged)this.captureDispose=host.bindProjectCommand(data=>{if(data?.type==='engine-api-capture-received')this.captureAcknowledged=true;});
    return;
   }else{
    const window=call(G[names.get_class('JavaScriptBridge')],'get_interface','window');
-   call(window,'call','__captureEngineApi',JSON.stringify(ir),JSON.stringify({bindingAudit,inventory}));
+   call(window,'call','__captureEngineApi',JSON.stringify(ir),JSON.stringify({bindingAudit,inventory,authoring}));
   }
   this.exitCode=0;
  }catch(error){console.error('ENGINE_API_CAPTURE_ERROR '+String(error));}}
@@ -65,10 +76,15 @@ exports.default=class EngineApiCapture extends G[names.get_class('Node')]{
  ]);
 }
 
+export async function engineApiCapturePack(naming) {
+ const {packProject}=await import('@godot-js/project-tools/pck');
+ return packProject(engineApiCaptureFiles(naming)).pack;
+}
+
 export async function captureEngineApi({engineJs,engineWasm,output,reportPath=output+'.capture.json',naming='snake',timeout=120000,execution,executablePath=process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE??(existsSync('/usr/bin/chromium')?'/usr/bin/chromium':undefined)}){
- const [{chromium},{packProject}]=await Promise.all([import('playwright'),import('@godot-js/project-tools/pck')]);
+ const {chromium}=await import('playwright');
  const [javascript,wasm]=await Promise.all([readFile(engineJs),readFile(engineWasm)]);
- const {pack}=packProject(engineApiCaptureFiles(naming));
+ const pack=await engineApiCapturePack(naming);
  const worklets={};
  for(const suffix of ['.audio.worklet.js','.audio.position.worklet.js'])worklets['/engine/godot'+suffix]=await readFile(engineJs.replace(/\.js$/,suffix));
  const {build}=await import('esbuild');
@@ -126,7 +142,7 @@ export async function captureEngineApi({engineJs,engineWasm,output,reportPath=ou
   const result=await page.evaluate(async()=>{const result=window.__engineApiCapture;result.session=window.__captureSession.getStats();result.cleanup=await window.__captureSession.dispose('clean');return result;});
   if(result.exitCode!==0||!result.ir||!result.audit||errors.length)throw Error('E_ENGINE_API_CAPTURE: '+JSON.stringify({exitCode:result.exitCode,errors}));
   if(result.ir.bindingNaming!==naming)throw Error('E_ENGINE_API_NAMING: Native snapshot did not apply '+naming+' bindings');
-  const report={schemaVersion:1,kind:'godotjs-production-engine-api-capture',status:'captured',naming,entry:'godot-jsb.internal.get_engine_api',engineJsSha256:hash(javascript),engineWasmSha256:hash(wasm),bindingAudit:result.audit.bindingAudit,classInventory:result.audit.inventory,capturePackSha256:hash(pack),browser:browser.version(),...(execution?{execution,session:result.session,cleanup:result.cleanup}:{}),worklets:Object.fromEntries(Object.entries(worklets).map(([name,bytes])=>[path.basename(engineJs).replace(/\.js$/,name.slice('/engine/godot'.length)),hash(bytes)]))};
+  const report={schemaVersion:1,kind:'godotjs-production-engine-api-capture',status:'captured',naming,entry:'godot-jsb.internal.get_engine_api',engineJsSha256:hash(javascript),engineWasmSha256:hash(wasm),bindingAudit:result.audit.bindingAudit,authoring:result.audit.authoring,classInventory:result.audit.inventory,capturePackSha256:hash(pack),browser:browser.version(),...(execution?{execution,session:result.session,cleanup:result.cleanup}:{}),worklets:Object.fromEntries(Object.entries(worklets).map(([name,bytes])=>[path.basename(engineJs).replace(/\.js$/,name.slice('/engine/godot'.length)),hash(bytes)]))};
   const bytes=JSON.stringify(result.ir,null,2)+'\n';report.irSha256=hash(bytes);
   // Recheck disk identity after running the exact in-memory inputs.
   if(hash(await readFile(engineJs))!==report.engineJsSha256||hash(await readFile(engineWasm))!==report.engineWasmSha256)throw Error('E_ENGINE_API_CAPTURE: Engine changed during capture');

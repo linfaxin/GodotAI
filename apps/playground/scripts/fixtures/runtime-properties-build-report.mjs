@@ -21,3 +21,10 @@ export function propertiesProofFixture(wasmSha256=digest('actual wasm')) {
   report.recipeSha256=digest(canonical(report.recipe));
   return report;
 }
+
+export function runtimeCallProofFixture({wasmSha256,javascriptSha256}) {
+  const report=propertiesProofFixture(wasmSha256);
+  report.runtimeAbi.runtimeCall=1;
+  report.runtimeCall={abi:1,wasmSha256,javascriptSha256};
+  return report;
+}

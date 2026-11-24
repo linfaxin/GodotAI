@@ -15,8 +15,9 @@ import { inspectBrowserEngineArtifact, packageBrowserEngineArtifact, publishBrow
 import { canonical, digest, inspectRelease, json, writeJson, identity, hashSiteRuntimeFiles, assertSourcePatchChains,
   OBSERVATION_EXPORTS, OBSERVATION_SOURCE_PATHS, RUNTIME_WRITE_EXPORTS } from '../web-release-utils.mjs';
 import { patchAudioLifecycle } from '../patch-web-audio-lifecycle.mjs';
+import {getEngineProfile} from '../engine-profiles.mjs';
 import {workerBuildReportFixture} from '../../../apps/playground/scripts/fixtures/worker-build-report.mjs';
-import {propertiesProofFixture} from '../../../apps/playground/scripts/fixtures/runtime-properties-build-report.mjs';
+import {propertiesProofFixture,runtimeCallProofFixture} from '../../../apps/playground/scripts/fixtures/runtime-properties-build-report.mjs';
 
 test('composed native source patches require a continuous chain ending at the compiled snapshot',()=>{
  const first=digest('upstream'),middle=digest('lifecycle'),last=digest('worker imports');
@@ -150,6 +151,46 @@ test('portable properties evidence is checked against the actual ZIP and cannot 
  manifest.sourceReportSha256=manifest.files['engine-report.original.json'].sha256;
  await writeJson(resolve(out,'artifact.json'),manifest);
  await assert.rejects(inspectBrowserEngineArtifact(out),/E_RUNTIME_PROPERTIES_BUILD_PROOF|E_RUNTIME_OBSERVATION_BUILD_PROOF/);
+});
+
+test('runtime call rejects old JavaScript in a ZIP with the same WASM and updated archive hashes',async t=>{
+  const f=await fixture(t,true),engine=resolve(f.root,'engine');
+  const assets=await Promise.all(['godot.wasm','godot.js'].map(async path=>{
+    const bytes=await readFile(resolve(engine,path));
+    return {path,bytes:bytes.length,sha256:digest(bytes)};
+  }));
+  const [wasm,javascript]=assets;
+  const profile=getEngineProfile('full-engine-v1');
+  const report={...f.report,...runtimeCallProofFixture({wasmSha256:wasm.sha256,javascriptSha256:javascript.sha256}),
+    modules:[...profile.modules],resolvedFeatures:{...profile.features},
+    template:{...f.report.template,assets}};
+  const reportPath=f.configuration['engine-report'],out=resolve(f.root,'call-portable');
+  await writeJson(reportPath,report);
+  const {manifest}=await packageBrowserEngineArtifact({report:reportPath,out});
+  assert.equal((await inspectBrowserEngineArtifact(out)).report.runtimeAbi.runtimeCall,1);
+
+  await writeFile(resolve(engine,'godot.js'),'/* stale bridge */');
+  const mixedArchive=resolve(f.root,'mixed.zip');
+  const zipped=spawnSync('zip',['-q',mixedArchive,'godot.js','godot.wasm','godot.audio.worklet.js','godot.audio.position.worklet.js'],{cwd:engine});
+  assert.equal(zipped.status,0);
+  const mixedBytes=await readFile(mixedArchive);
+  const mixedReport={...report,template:{...report.template,path:mixedArchive,sha256:digest(mixedBytes),bytes:mixedBytes.length}};
+  await writeJson(reportPath,mixedReport);
+  await assert.rejects(packageBrowserEngineArtifact({report:reportPath,out:resolve(f.root,'mixed-portable')}),/E_RUNTIME_CALL_BUILD_PROOF/);
+  await assert.rejects(buildRelease(f.configuration),/E_RUNTIME_CALL_BUILD_PROOF/);
+
+  await writeFile(resolve(out,'engine-template.zip'),mixedBytes);
+  manifest.files['engine-template.zip']={sha256:digest(mixedBytes),bytes:mixedBytes.length};
+  for(const [name,value] of [['engine-report.original.json',mixedReport],
+    ['engine-report.json',{...mixedReport,template:{...mixedReport.template,path:'engine-template.zip'}}]]){
+    const filename=resolve(out,name);
+    await writeJson(filename,value);
+    const bytes=await readFile(filename);
+    manifest.files[name]={sha256:digest(bytes),bytes:bytes.length};
+  }
+  manifest.sourceReportSha256=manifest.files['engine-report.original.json'].sha256;
+  await writeJson(resolve(out,'artifact.json'),manifest);
+  await assert.rejects(inspectBrowserEngineArtifact(out),/E_RUNTIME_CALL_BUILD_PROOF/);
 });
 
 test('native source snapshot includes SCsub preset bundles while excluding unrelated generated outputs', async t => {

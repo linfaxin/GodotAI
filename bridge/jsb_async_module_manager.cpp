@@ -116,6 +116,7 @@ namespace jsb
             }
             else
             {
+                ScriptClassInfo::revoke_runtime_methods(env, *module);
                 module_obj = module->module.Get(isolate);
             }
             module->mark_as_reloaded();
