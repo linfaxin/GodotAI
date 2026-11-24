@@ -35,7 +35,7 @@ export interface ConsoleOperation {
   readonly description: string;
   readonly binding: ConsoleBinding;
   readonly acceptsSignal: boolean;
-  readonly resultKind: 'json' | 'game-screenshot';
+  readonly resultKind: 'json' | 'game-screenshot' | 'game-probe';
   readonly parameters: readonly OperationParameter[];
   readonly limitations: readonly string[];
   createPreset(context?: ConsolePresetContext): ConsolePreset;
@@ -46,7 +46,7 @@ function summer(id: SummerOperation, binding: ConsoleBinding, acceptsSignal = fa
   const data = SUMMER_OPERATION_SPECS[id];
   return Object.freeze({
     id, name: id, family: 'summer' as const, title: data.title, description: data.description,
-    binding, acceptsSignal, resultKind: id === 'engine.screenshot' ? 'game-screenshot' as const : 'json' as const,
+    binding, acceptsSignal, resultKind: id === 'engine.screenshot' ? 'game-screenshot' as const : id === 'engine.game_probe' ? 'game-probe' as const : 'json' as const,
     parameters: data.parameters,
     limitations: Object.freeze([...data.limitations, ...(data.unsupported.length ? [`不支持参数：${data.unsupported.join('、')}。`] : [])]),
     createPreset(context: ConsolePresetContext = {}): ConsolePreset {
@@ -210,6 +210,7 @@ export const CONSOLE_OPERATIONS: readonly ConsoleOperation[] = Object.freeze([
   summer('engine.runtime_set', 'runtime', true),
   summer('engine.runtime_call', 'runtime', true),
   summer('engine.screenshot', 'runtime', true),
+  summer('engine.game_probe', 'runtime', true),
   ...localOperations.map(operation => Object.freeze(operation)),
 ]);
 

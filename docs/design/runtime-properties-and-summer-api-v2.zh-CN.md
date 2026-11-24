@@ -6,7 +6,7 @@
 
 本方案取代[V1](runtime-properties-and-summer-api.zh-CN.md)，将原先留给 G0 的输入、结果、序号、预算、适配路由和验收决定写入正文。以下名称和类型作为实现合同保留；交付状态与实际证据见文末实施记录。
 
-实施结论：A–F 已完成本期工作。新旧 full/debug 模板、同批冻结 SDK 的两个完整站点、来源证明及七项真实浏览器专项均已验收通过。当前交付和证据见第十五节；开工、实现和真实验收的门禁仍分别保留。
+V2 运行时属性阶段已完成 A–F。新旧 full/debug 模板、同批冻结 SDK 的两个完整站点、来源证明及七项真实浏览器专项均已验收通过，交付证据见第十五节。后续增加的 `engine.game_probe` 的用法、支持条件和验收命令见[第十六节](#十六-enginegame_probe-同帧采样)。
 
 ## 一 评审决定与本期范围
 
@@ -399,7 +399,7 @@ not_written/not_applied 是已知结算业务结果，保留成功信封；uncon
 
 已核验固定 Summer 客户端参数、请求构造与工具声明的预期字段；客户端只发一次 SetRuntimeProp，不代表已验证其原生绑定检查、实际值编码、transport 枚举或帧关系。本期的 native before/set/readback 由本地新 ABI 自己保证。严格 wire 兼容需要固定版本原生黄金样例和逐字段契约测试，列为后续兼容级别，不阻塞本期输入子集/本地语义演示。
 
-属性发现/批读、check、wait、输入与旧运行负测使用明确的 GodotAI 本地原语，不伪装成 engine.runtime_get。engine.inspect 不自动执行 script getter。game_input/wait_for_event 的 Summer 脚本输入/事件游标、runtime_call/game_probe/game_control 全部本期 unsupported。MCP content 是未来对 dispatcher 的外壳；本期不要求安装 MCP server 或连接 Summer 应用。
+属性发现/批读、check、wait、输入与旧运行负测使用明确的 GodotAI 本地原语，不伪装成 engine.runtime_get。engine.inspect 不自动执行 script getter。最初的 V2 运行时属性阶段将 `game_input` 和 `wait_for_event` 的 Summer 脚本输入与事件游标，以及 `runtime_call`、`game_probe` 和 `game_control` 列在交付范围之外。后续 `game_probe` 的支持条件见[第十六节](#十六-enginegame_probe-同帧采样)。MCP content 是未来对 dispatcher 的外壳；本期不要求安装 MCP server 或连接 Summer 应用。
 
 ## 九 Playground 与证据
 
@@ -589,3 +589,13 @@ source /workspace/.godotai-tools/web-env.sh
 PLAYGROUND_DIRECTORY=/workspace/.godotai-sites/runtime-properties-new PORT=4173 \
   node apps/playground/scripts/serve.mjs
 ```
+
+## 十六 `engine.game_probe` 同帧采样
+
+`summer_call({op: 'engine.game_probe', input})` 接受 `instance: 'main'`、`tree`、`props`、`screenshot` 与 `max_dim`。`tree` 可指定绝对路径，深度范围 1–8，默认 2，节点上限范围 1–500，默认 200。`props` 最多 16 项，格式为 `'/root/Main/Player:position'`。`screenshot` 默认开启，`max_dim` 是 PNG 长边上限，范围 16–1024，默认 1024。SDK `gameProbe` 和 Playground `game_probe` 要求显式 `runId`，使用 `{path, property}` 和 `maxDimension`，并支持 `timeoutMs` 和 `AbortSignal`。
+
+图像模式从主视口一次实际成功的自动绘制提交读取树、纯原生属性和 PNG。快照与 Canvas 副本先于 `frame_post_draw`，迭代结束时才确认提交次数和退出意图，再启动 PNG 编码。普通截图与图像 probe 共用一个物理捕获槽。取消或超时可以先结束调用者的等待，捕获槽在实际结果到达或运行销毁后释放。`screenshot: false` 在原生迭代末尾获取数据，结果的 `image` 为 `null`。两种模式均返回运行身份、发布身份和请求 ID，图像模式还返回渲染序号与几何。
+
+属性范围为 `Node2D.position`、`Node2D.rotation` 和 `CanvasItem.visible`，其他属性按项返回 `unavailable`。树结果包含节点实例 ID 和截断信息。仅源证明和实际导出均匹配的 Full Engine debug 单线程模板声明 `gameProbe: 1`。Chromium Worker Direct 运行就绪后才接受采样。旧模板通过同一新 SDK 返回 `unsupported`，无需向 Worker 发送 probe 请求。
+
+Playground 的 **API 调用 → engine.game_probe → 打开独立示例** 包含定位、采样、移动、复采样、退出和重启。载入历史来源仅填充当前草稿。使用 `browser-game-probe-g0.mjs` 运行最小 PCK 专项，用 `test:browser:game-probe` 对匹配新旧模板的完整站点执行验收。

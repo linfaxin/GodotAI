@@ -9,12 +9,13 @@ import type {
 } from '@godot-js/engine/browser/dedicated/worker-runner';
 import type {CallMethodInput, DescribeMethodsInput, MethodCallResult, MethodDescriptionResult, MethodFailure,
   RuntimeCallState, RuntimeMethodScalar, MethodOutcome} from '@godot-js/engine/browser/dedicated/worker-runner';
+import {readGameProbeQuery, type GameProbeInput, type GameProbeResult} from '@godot-js/engine/browser/dedicated/worker-runner';
 import {sameWorkerRun, type WorkerRunIdentity} from '@godot-js/engine/browser/dedicated/worker-protocol';
 import type {ProjectContextData, StopResult} from './playground-api';
 import {SUMMER_OPERATION_SPECS as rules, SUMMER_TREE_LIMITS, SUMMER_COMPATIBILITY, type SummerOperation} from './summer-operation-spec.ts';
 export {SUMMER_COMPATIBILITY} from './summer-operation-spec.ts';
 
-type BackendFailure = Extract<RuntimeSetResult | ObservationResult<unknown> | InteractionResult<unknown> | StopResult | PublicResult<unknown> | MethodFailure, {ok: false}>;
+type BackendFailure = Extract<RuntimeSetResult | ObservationResult<unknown> | InteractionResult<unknown> | StopResult | PublicResult<unknown> | MethodFailure | GameProbeResult, {ok: false}>;
 export type BackendError = {code: BackendFailure['error']['code']; message: string; source?: AccessError['source']; [key: string]: unknown};
 export type FacadeErrorCode = BackendError['code'] | 'outcome_unknown' | 'call_error' | 'result_unavailable';
 export type BackendReply<T> = {ok: true; result: T} | {ok: false; error: BackendError};
@@ -26,6 +27,7 @@ export interface SummerContext {
 }
 export interface SummerRun {
   state: string;
+  projectId?: string;
   runtimeProperties?: RuntimePropertiesState;
   runtimeWrite?: {supported: boolean | null; ready: boolean};
 }
@@ -40,6 +42,7 @@ export interface SummerMethodBackend {
   invoke(input: CallMethodInput, signal: AbortSignal | undefined, deadline: number): Promise<MethodCallResult>;
 }
 export interface SummerBackend {
+  gameProbe?(input: GameProbeInput, signal?: AbortSignal): Promise<GameProbeResult>;
   runtimeMethods?: SummerMethodBackend;
   captureContext(): SummerContext;
   getProjectContext(): BackendReply<ProjectContextData>;
@@ -65,12 +68,12 @@ export type RunningData = {playing: boolean; capturedRunId: string | null; pendi
 export type StopData = {accepted: true; cancelledAttemptId: string | null; capturedRunId: string | null; pendingAttemptId: string | null;
   runs: {runId: string; receipt: StopResult}[]; no_target: boolean};
 export type CallData = {route: 'runtime_call'; payload: {ok: true; receipt: Extract<MethodCallResult, {ok: true}>['receipt']; result: Extract<MethodOutcome, {outcome: 'returned'}>}};
-export type SummerData = CallData | ProjectContextData | RuntimeTreeSnapshot | RuntimeNodeSnapshot | GameScreenshot | WriteData | PlayData | RunningData | StopData;
+export type SummerData = Extract<GameProbeResult, {ok: true}>['result'] | CallData | ProjectContextData | RuntimeTreeSnapshot | RuntimeNodeSnapshot | GameScreenshot | WriteData | PlayData | RunningData | StopData;
 export type FacadeSuccess<T = SummerData> = {ok: true; status: 'done'; result: {data: T; godotai: {compatibility: typeof SUMMER_COMPATIBILITY}}};
 export type FacadeFailure = {ok: false; error: {code: FacadeErrorCode; message: string; source?: AccessError['source']; retry: 'no';
   details: {godotai: {compatibility: typeof SUMMER_COMPATIBILITY; route?: 'runtime_properties' | 'legacy_write' | 'runtime_call';
     stage?: 'resolve' | 'describe' | 'invoke';
-    receipt?: PublicResult<WriteResult> | RuntimeSetResult | MethodCallResult | MethodDescriptionResult; backendError?: BackendError;
+    receipt?: NonNullable<Extract<GameProbeResult, {ok: false}>['receipt']> | PublicResult<WriteResult> | RuntimeSetResult | MethodCallResult | MethodDescriptionResult; backendError?: BackendError;
     parameter?: string; unknownKeys?: string[]}}}};
 export type FacadeReply<T = SummerData> = FacadeSuccess<T> | FacadeFailure;
 export type SummerCallInput = {op: string; input?: Record<string, unknown>};
@@ -108,6 +111,30 @@ function validate(raw: unknown): Validated | FacadeFailure {
     if (op === 'engine.inspect_runtime_node' || op === 'engine.runtime_set' || op === 'engine.runtime_call' || Object.hasOwn(input, 'path')) {
       if (!pathIsCanonical(input.path)) return localError('invalid_input', 'path');
     }
+    if (op === 'engine.game_probe') {
+      const owned = snapshotRuntimePropertyData(input);
+      if (!propertyRecord(owned)) return localError('invalid_input', 'input');
+      const {props = [], tree, screenshot, max_dim: maxDimension} = owned;
+      if (!Array.isArray(props) || props.length > 64) return localError('invalid_input', 'props');
+      const properties = [];
+      for (const prop of props) {
+        if (typeof prop !== 'string') return localError('invalid_input', 'props');
+        const [path, property, ...extra] = prop.split(':');
+        if (extra.length || !pathIsCanonical(path) || !validPropertyName(property))
+          return localError('invalid_input', 'props');
+        properties.push({path, property});
+      }
+      if (props.length > 16) return localError('unsupported', 'props');
+      if (maxDimension !== undefined) {
+        if (typeof maxDimension !== 'number' || !Number.isSafeInteger(maxDimension) || maxDimension < 16 || maxDimension > 4096)
+          return localError('invalid_input', 'max_dim');
+        if (maxDimension > 1024) return localError('unsupported', 'max_dim');
+      }
+      if (propertyRecord(tree) && typeof tree.limit === 'number' && Number.isInteger(tree.limit) && tree.limit > 500 && tree.limit <= 4000)
+        return localError('unsupported', 'tree.limit');
+      const query = readGameProbeQuery({props: properties, screenshot, maxDimension, ...(tree !== undefined ? {tree} : {})});
+      return query ? {op, input: query} : localError('invalid_input', 'input', '请检查探测参数和 4 KiB 的原生请求上限');
+    }
     if (op === 'engine.get_runtime_tree') {
       for (const key of ['depth', 'limit'] as const) {
         const bounds = SUMMER_TREE_LIMITS[key];
@@ -133,6 +160,11 @@ function validate(raw: unknown): Validated | FacadeFailure {
     }
     return {op, input: {...input}};
   } catch {return localError('invalid_input', 'input');}
+}
+
+export function summerGameProbeInputError(input: unknown): FacadeFailure['error'] | undefined {
+  const checked = validate({op: 'engine.game_probe', input});
+  return 'ok' in checked ? checked.error : undefined;
 }
 
 export function parseSummerValue(type: RuntimeType, value: unknown): RuntimeValue | undefined {
@@ -267,6 +299,12 @@ export function createSummerDispatcher(backend: SummerBackend) {
     const run = backend.getRun({runId});
     if (!run.ok) return backendFailure(run);
     if (run.result.state === 'stopping' || run.result.state === 'exited') return localError('run_ended', 'run');
+    if (op === 'engine.game_probe') {
+      if (!context.projectId || run.result.projectId !== context.projectId) return localError('revision_conflict', 'run');
+      if (!backend.gameProbe) return localError('unsupported', 'gameProbe');
+      const response = await backend.gameProbe({runId, ...input}, signal);
+      return response.ok ? done(response.result) : backendFailure(response, {...(response.receipt ? {receipt: response.receipt} : {})});
+    }
     if (op === 'engine.get_runtime_tree') {
       const response = await backend.getRuntimeTree({runId, ...(input.path ? {path: input.path as string} : {}),
         depth: (input.depth ?? SUMMER_TREE_LIMITS.depth.default) as number, limit: (input.limit ?? SUMMER_TREE_LIMITS.limit.default) as number}, signal);

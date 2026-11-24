@@ -70,3 +70,38 @@ test('capture cancellation settles after encoding returns its single physical cr
   assert.deepEqual(results.at(-1), {id: 'c', frame: undefined, error: 'capture_failed'});
   assert.equal(copies, 1);
 });
+
+test('probe and screenshot share capture credit through commit confirmation and encoding', async t => {
+  const receipts = [], original = globalThis.OffscreenCanvas;
+  let copies = 0, complete;
+  t.after(() => { globalThis.OffscreenCanvas = original; });
+  globalThis.OffscreenCanvas = class {
+    getContext() { return {drawImage() { copies++; }}; }
+    convertToBlob() { return new Promise(resolve => { complete = resolve; }); }
+  };
+  const geometry = {width: 200, height: 100, dpr: 1, epoch: 3};
+  const canvas = {width: 200, height: 100, GLctxObject: {GLctx: {isContextLost: () => false}}};
+  const capture = createWorkerCapture(canvas, () => true, (id, frame, error, kind) => {
+    receipts.push({id, frame, error, kind});
+  });
+  assert.equal(capture.request('probe-1', enter(), 'probe', 64), true);
+  assert.equal(capture.request('probe-1', enter(), 'probe', 64), false);
+  assert.deepEqual(receipts, []);
+  assert.equal(capture.request('screenshot-1', enter()), false);
+  assert.equal(receipts[0].error, 'busy');
+  assert.equal(capture.freezeProbe('probe-1', 2, 3, geometry), true);
+  assert.equal(capture.freezeProbe('probe-1', 3, 4, geometry), false);
+  assert.equal(copies, 1);
+  assert.equal(complete, undefined);
+  capture.finishProbe('probe-1');
+  await Promise.resolve();
+  capture.cancel('probe-1', 'probe');
+  assert(capture.reservedBytes > 0);
+  assert.equal(capture.request('screenshot-2', enter()), false);
+  complete(new Blob(['png'], {type: 'image/png'}));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(receipts.at(-1).error, 'cancelled');
+  assert.equal(receipts.at(-1).kind, 'probe');
+  assert.equal(capture.busy, false);
+  assert.equal(capture.reservedBytes, 0);
+});

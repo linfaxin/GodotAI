@@ -53,7 +53,7 @@ function assertLifecycleProof(report) {
     const latest = edges.at(-1), file = proof.files[path];
     const allowed = path === 'platform/web/web_main.cpp' ? ['godotjs-web-lifecycle-v1', 'godotjs-web-worker-runtime-v1'] : ['godotjs-web-lifecycle-v1'];
     const applied=edges.findLast(edge=>allowed.includes(edge.patchId));
-    if (!latest || !applied || (!allowed.includes(latest.patchId)&&!(path==='scene/main/scene_tree.cpp'&&latest.patchId==='godotjs-managed-shutdown-queue-v1')&&!(path==='scene/main/scene_tree.h'&&latest.patchId==='godotjs-runtime-properties-quit-v1')) || !hash(file?.sha256) || file.sha256 !== latest.afterSha256 || report.godotSource?.inputs?.[path] !== file.sha256) reject('Native lifecycle source differs: ' + path);
+    if (!latest || !applied || (!allowed.includes(latest.patchId)&&!(path==='platform/web/web_main.cpp'&&latest.patchId==='godotjs-web-game-probe-v1')&&!(path==='scene/main/scene_tree.cpp'&&latest.patchId==='godotjs-managed-shutdown-queue-v1')&&!(path==='scene/main/scene_tree.h'&&latest.patchId==='godotjs-runtime-properties-quit-v1')) || !hash(file?.sha256) || file.sha256 !== latest.afterSha256 || report.godotSource?.inputs?.[path] !== file.sha256) reject('Native lifecycle source differs: ' + path);
     const implementation = file.implementation;
     if (!implementation || !hash(implementation.sha256) || implementation.path !== applied.implementation?.path || implementation.sha256 !== applied.implementation?.sha256 || report.source?.inputs?.[implementation.path] !== implementation.sha256) reject('Native lifecycle implementation differs: ' + path);
     let previous;

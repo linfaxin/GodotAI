@@ -5,7 +5,7 @@ import type {
 import {snapshotRuntimePropertyData, prepareRuntimeProperties, runtimePropertiesError, type DescribeInput, type ReadInput, type WriteInput, type PropertyKind, type PropertyResult, prepareRuntimeObservation, prepareRuntimeSet, runtimeWriteError, type GameInput, type GameScreenshot, type InteractionResult,
   type ObservationResult, type PreparedRuntimeObservation, type RuntimeNodeInput, type RuntimeTreeInput, type ScreenshotInput,
   type RuntimeSetInput, type RuntimeSetResult, type WaitForInput, type WorkerPreviewRunner,
-  runtimeMethodError, type DescribeMethodsInput, type CallMethodInput} from '@godot-js/engine/browser/dedicated/worker-runner';
+  gameProbeError, prepareGameProbe, type GameProbeInput, type GameProbeResult, runtimeMethodError, type DescribeMethodsInput, type CallMethodInput} from '@godot-js/engine/browser/dedicated/worker-runner';
 
 type Recorder = ReturnType<typeof createDebugRecorder>;
 type ErrorCode = 'invalid_input' | 'not_found' | 'invalid_cursor' | 'revision_conflict' |
@@ -42,6 +42,7 @@ interface Actions {
   observation?(): Observation | undefined;
   runtimeWrite?(): Pick<WorkerPreviewRunner, 'runtimeWriteState' | 'setRuntimeProperty'> | undefined;
   runtimeProperties?(): Pick<WorkerPreviewRunner, 'runtimePropertiesState' | 'describeRuntimeProperties' | 'readRuntimeProperties' | 'writeRuntimeProperty'> | undefined;
+  gameProbe?(): Pick<WorkerPreviewRunner, 'gameProbe' | 'gameProbeState'> | undefined;
   runtimeCall?(): Pick<WorkerPreviewRunner, 'runtimeCallState' | 'describeRuntimeMethods' | 'callRuntimeMethod' | 'getRuntimeTree'> | undefined;
   summerCall?(input: unknown, signal?: AbortSignal, selected?: SelectedRuntimeMethod): Promise<FacadeReply>;
 }
@@ -283,6 +284,21 @@ export function createPlaygroundApi(recorder: Recorder, actions: Actions) {
     describe_runtime_properties: tool('describe_runtime_properties', (input: DescribeInput, signal?: AbortSignal) => accessProperties('describe', input, signal)),
     read_runtime_properties: tool('read_runtime_properties', (input: ReadInput, signal?: AbortSignal) => accessProperties('read', input, signal)),
     write_runtime_property: tool('write_runtime_property', (input: WriteInput, signal?: AbortSignal) => accessProperties('write', input, signal)),
+    game_probe: tool('game_probe', async (input: GameProbeInput, signal?: AbortSignal): Promise<GameProbeResult> => {
+      const prepared = prepareGameProbe(input, signal);
+      if (!prepared.ok) return prepared;
+      const {runId, query, timeoutMs} = prepared.result;
+      const run = debug.getRun(runId);
+      if (!run.ok) return gameProbeError('not_found');
+      if (run.result.exit || run.result.state === 'stopping' || run.result.state === 'exited')
+        return gameProbeError('run_ended');
+      const runner = actions.gameProbe?.();
+      return runner?.gameProbe({runId, ...query, timeoutMs}, signal) ?? gameProbeError('unsupported');
+    }, result => {
+      if (!result.ok || !result.result.image) return result;
+      const {bytes, ...metadata} = result.result.image;
+      return ok({...result.result, image: {...metadata, byteLength: bytes.byteLength}});
+    }),
     summer_call: (input: unknown, signal?: AbortSignal) => summerCall(input, signal),
     get_project_context: tool('get_project_context', getProjectContext),
     check: tool('check', async (input: ProjectInput) => {
@@ -319,6 +335,7 @@ export function createPlaygroundApi(recorder: Recorder, actions: Actions) {
         runtimeWrite: actions.runtimeWrite?.()?.runtimeWriteState(runId) ?? {supported: false, ready: false},
         runtimeProperties: actions.runtimeProperties?.()?.runtimePropertiesState(runId) ?? {supported: false, ready: false},
         runtimeCall: actions.runtimeCall?.()?.runtimeCallState(runId) ?? {supported: false, ready: false},
+        gameProbe: actions.gameProbe?.()?.gameProbeState(runId) ?? {supported: false, ready: false},
       });
     }),
     read_run_events: tool('read_run_events', (input: {runId: string} & ReadRunEventsOptions) => {

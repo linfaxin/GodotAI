@@ -103,6 +103,19 @@ export const SUMMER_OPERATION_SPECS = Object.freeze({
     defaultInput: {args: []},
     limitations: ['只支持明确登记的同步标量签名。', '超时或取消可能留下未确认结果，请先独立观察。'],
   }),
+  'engine.game_probe': spec({
+    title: '探测游戏帧', description: '读取一次正常渲染提交的节点状态和 PNG，或单独读取迭代结束时的状态。',
+    allowed: ['instance', 'tree', 'props', 'screenshot', 'max_dim'], unsupported: [],
+    parameters: [
+      {name: 'instance', description: '省略或 main。'},
+      {name: 'tree', description: '可选子树 {path?, depth?, limit?}。'},
+      {name: 'props', description: '最多 16 个绝对路径:属性名，支持 position、rotation、visible。'},
+      {name: 'screenshot', description: '默认 true。false 只读取状态。'},
+      {name: 'max_dim', description: '图像最长边 16–1024 像素，默认 1024。'},
+    ],
+    defaultInput: {screenshot: true},
+    limitations: ['需要匹配的 Full/debug Worker Direct 预览。'],
+  }),
   'engine.screenshot': spec({
     title: '截取游戏画面', description: '等待当前运行的新渲染提交，返回实际 PNG 字节与画面身份。',
     allowed: ['target'], unsupported: ['scenePath', 'framing', 'bookmark_name', 'size', 'nodePath', 'camera_path', 'camera_position', 'camera_look_at', 'fov', 'marks', 'max_marks', 'compare_previous', 'update_previous'],

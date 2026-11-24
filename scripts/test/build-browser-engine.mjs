@@ -10,9 +10,10 @@ import { canonical, digest, fail, options, required, writeJson,
   OBSERVATION_READER_SOURCE, OBSERVATION_SOURCE_PATHS, OBSERVATION_EXPORTS, assertRuntimeObservationBuildProof,
   RUNTIME_WRITE_EXPORTS, assertRuntimeWriteBuildProof, runtimeWriteBuildTarget,
   RUNTIME_PROPERTIES_EXPORTS, RUNTIME_PROPERTIES_SOURCE_PATHS, assertRuntimePropertiesBuildProof,
-  assertRuntimeCallBuildProof,
+  assertRuntimeCallBuildProof, GAME_PROBE_EXPORTS, assertGameProbeBuildProof,
 } from '../release/web-release-utils.mjs';
 import { applyWebEnginePatches } from '../release/patch-web-engine.mjs';
+import { GAME_PROBE_PATCH } from '../release/patch-web-game-probe.mjs';
 import {getEngineProfile,engineExecution,engineBuildArgs,validateEngineProfile,validateEngineExecution} from '../release/engine-profiles.mjs';
 import {workerRuntimeBuildProof} from '../release/patch-web-worker-runtime.mjs';
 import {webLifecycleBuildProof} from '../release/patch-web-lifecycle.mjs';
@@ -99,16 +100,21 @@ function bindRuntimeObservation(report, template, assets, python) {
   if (includeProperties && !RUNTIME_PROPERTIES_SOURCE_PATHS.every(path => Object.hasOwn(report.source.inputs, path)))
     fail('E_RUNTIME_PROPERTIES_SOURCE', 'Runtime property source closure is incomplete');
   const includeCall = includeWrite && Object.hasOwn(report.source.inputs, 'bridge/jsb_runtime_call.cpp');
+  const probePatched = report.recipe.patches.some(patch => patch.patchId === GAME_PROBE_PATCH);
+
   const requiredSymbols = [...OBSERVATION_EXPORTS, ...(includeWrite ? RUNTIME_WRITE_EXPORTS : []),
     ...(includeProperties ? RUNTIME_PROPERTIES_EXPORTS : []),
-    ...(includeCall ? ['_godotjs_runtime_call_abi', '_godotjs_runtime_call_execute', 'IsRuntimeCallValue'] : [])];
+    ...(includeCall ? ['_godotjs_runtime_call_abi', '_godotjs_runtime_call_execute', 'IsRuntimeCallValue'] : []), ...(probePatched ? GAME_PROBE_EXPORTS : [])];
   const inspect = spawnSync(python, ['-c', [
     'import re, sys, zipfile',
+    'required, forbidden = sys.argv[2].split(), sys.argv[3].split()',
     'with zipfile.ZipFile(sys.argv[1]) as z:',
     ' data = z.read("godot.js")',
-    ' for name in sys.argv[2:]:',
-    '  if not re.search(rb"\\b" + name.encode() + rb"\\b", data): sys.exit("Missing runtime bridge symbol: " + name)',
-  ].join('\n'), template, ...requiredSymbols], {encoding: 'utf8'});
+    ' for names, expected in [(required, True), (forbidden, False)]:',
+    '  for name in names:',
+    '   if bool(re.search(rb"\\b" + name.encode() + rb"\\b", data)) != expected:',
+    '    sys.exit(("Missing" if expected else "Unexpected") + " runtime bridge symbol: " + name)',
+  ].join('\n'), template, requiredSymbols.join(' '), probePatched ? '' : GAME_PROBE_EXPORTS.join(' ')], {encoding: 'utf8'});
   if (inspect.error || inspect.status !== 0)
     fail('E_RUNTIME_OBSERVATION_EXPORT', inspect.error?.message ?? inspect.stderr.trim());
   report.runtimeAbi = {...report.runtimeAbi, observation: 1};
@@ -135,6 +141,13 @@ function bindRuntimeObservation(report, template, assets, python) {
       javascriptSha256: assets.find(asset => asset.path === 'godot.js').sha256};
     assertRuntimeCallBuildProof(report);
   }
+  if (includeWrite && probePatched) {
+    report.runtimeAbi.gameProbe = 1;
+    report.gameProbe = {abi: 1, exports: [...GAME_PROBE_EXPORTS], wasmSha256: report.runtimeObservation.wasmSha256,
+      javascriptSha256: assets.find(asset => asset.path === 'godot.js').sha256};
+    assertGameProbeBuildProof(report);
+  }
+
 }
 async function execute(command, args, cwd, logPath) {
   await mkdir(dirname(logPath), { recursive: true });
@@ -186,6 +199,8 @@ export async function buildBrowserEngine(configuration) {
   }
   const sourceRoot = resolve(required(configuration['godot-source'], '--godot-source'));
   const destination = resolve(required(configuration['build-dir'], '--build-dir'));
+  const target = configuration.target ?? 'template_debug';
+  if (!['template_debug', 'template_release'].includes(target)) fail('E_BROWSER_TARGET', 'Only template_debug/template_release are supported');
   if (!existsSync(resolve(sourceRoot, 'SConstruct'))) fail('E_BROWSER_SOURCE', 'Godot source must contain SConstruct');
   for (const source of [sourceRoot, moduleRoot]) {
     if (source === destination || destination.startsWith(`${source}${sep}`) || source.startsWith(`${destination}${sep}`)) fail('E_BROWSER_BUILD_DIR', '--build-dir must be independent of both source trees');
@@ -207,7 +222,8 @@ export async function buildBrowserEngine(configuration) {
     !excluded.has(basename(path)) && !generated.test(basename(path)) &&
     relative(moduleRoot, path).split(sep).join('/') !== webBridgeBundle });
   await generateEngineJavaScript(destinationModule, reportFile);
-  const patches = await applyWebEnginePatches(destination, { python: configuration.python ?? 'python3', executionModel: execution.executionModel });
+  const patches = await applyWebEnginePatches(destination, { python: configuration.python ?? 'python3', executionModel: execution.executionModel,
+    gameProbe: runtimeProfile === 'full-engine-v1' && target === 'template_debug' });
   const lifecycleProof=webLifecycleBuildProof(patches);
   const artifactSetProof={...artifactSetMountBuildProof(patches),...nativeObserverBuildProof(patches),...hostResourceBuildProof(patches),...managedShutdownBuildProof(patches)};
   execution={...execution,lifecycleAbi:lifecycleProof.lifecycleAbi,artifactSetAbi:artifactSetProof.artifactSetAbi,hostResourceAbi:artifactSetProof.hostResourceAbi,shutdownQueueAbi:artifactSetProof.shutdownQueueAbi};
@@ -223,8 +239,6 @@ export async function buildBrowserEngine(configuration) {
   source.commit = git(moduleRoot, ['rev-parse', 'HEAD'])?.trim() ?? 'unknown'; source.dirty = git(moduleRoot, ['status', '--porcelain'])?.trim() ?? 'unknown';
   const godotSource = await snapshotBrowserSources(destination);
   godotSource.commit = git(sourceRoot, ['rev-parse', 'HEAD'])?.trim() ?? 'unknown'; godotSource.dirty = git(sourceRoot, ['status', '--porcelain'])?.trim() ?? 'unknown';
-  const target = configuration.target ?? 'template_debug';
-  if (!['template_debug', 'template_release'].includes(target)) fail('E_BROWSER_TARGET', 'Only template_debug/template_release are supported');
   const scons = configuration.scons ?? 'scons';
   const args=engineBuildArgs({profile:runtimeProfile,target,jobs:configuration.jobs??4,lto:configuration.lto??'none',moduleMode:configuration['module-mode']??'baseline',executionModel:execution.executionModel});
   const environment=Object.fromEntries(['EMCC_CORES','BINARYEN_CORES'].filter(name=>process.env[name]!==undefined).map(name=>[name,process.env[name]]));

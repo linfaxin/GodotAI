@@ -117,18 +117,23 @@ export function assembleFullEngineRelease({engine,ir,capture,irBytes,declaration
   if(runtimeAbi.runtimeCall!==undefined&&build.sourceCertified!==true){
    runtimeAbi={...runtimeAbi};delete runtimeAbi.runtimeCall;
   }
+  if(runtimeAbi.gameProbe!==undefined&&build.sourceCertified!==true){
+   runtimeAbi={...runtimeAbi};delete runtimeAbi.gameProbe;
+  }
   build={...build,workerPatch:engineBuildReport.workerPatch,engineRecipe:engineBuildReport.recipe};
   if(runtimeAbi.runtimeProperties!==1)delete build.runtimeProperties;
   if(runtimeAbi.runtimeCall!==1)delete build.runtimeCall;
+  if(runtimeAbi.gameProbe!==1)delete build.gameProbe;
   // Keep the original receipts with every declared native capability. The
   // site verifier reconstructs this same report from the sealed release.
   for(const field of ['lifecycleAbi','lifecyclePatch','artifactSetAbi','artifactSetPatch','observerAbi','nativeObserverPatch','hostResourceAbi','hostResourcePatch','shutdownQueueAbi','shutdownQueuePatch','runtimeObservation'])if(engineBuildReport[field]!==undefined)build[field]=engineBuildReport[field];
   if(runtimeAbi.runtimeProperties===1)build.runtimeProperties=engineBuildReport.runtimeProperties;
   if(runtimeAbi.runtimeCall===1)build.runtimeCall=engineBuildReport.runtimeCall;
+  if(runtimeAbi.gameProbe===1)build.gameProbe=engineBuildReport.gameProbe;
   if(runtimeAbi.runtimeWrite===1){
    build.runtimeWrite=engineBuildReport.runtimeWrite;
   }
-  if(runtimeAbi.runtimeProperties===1||runtimeAbi.runtimeCall===1)build.resolvedBuildOptions={...engineBuildReport.resolvedBuildOptions};
+  if(runtimeAbi.runtimeProperties===1||runtimeAbi.runtimeCall===1||runtimeAbi.gameProbe===1)build.resolvedBuildOptions={...engineBuildReport.resolvedBuildOptions};
   else if(runtimeAbi.runtimeWrite===1)build.resolvedBuildOptions={target:engineBuildReport.resolvedBuildOptions.target};
  }
  const definition=getEngineProfile(runtimeProfile);

@@ -95,7 +95,7 @@ await runReportedBrowserTest({scope, reportFile: process.env.PLAYGROUND_API_CONS
 
   await step('directory-drafts-shortcuts-and-modes', async () => {
     const entries = page.locator('#api-list [data-api-operation]');
-    assert.equal(await entries.count(), 16);
+    assert.equal(await entries.count(), 17);
     assert.equal(await page.locator('#api-list .api-list-group').count(), 2);
     for (const entry of await entries.all()) {
       assert.equal(await entry.locator('.api-list-name').textContent(), await entry.getAttribute('data-api-operation'));

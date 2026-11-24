@@ -11,8 +11,8 @@ import { createWorkerXRHost } from './worker-xr-host.js';
 import { WorkerProjectCommandCredits,workerProjectCommandBytes } from './worker-project-channel.js';
 import {assertArtifactSet,artifactSetTransfers} from '../../artifact-set.js';
 import {assertArtifactSetTarget} from '../artifact-input.js';
-import {INTERACTION_VERSION, interactionNow, isCapturedFrame, readGesture, readInputEvidence, undispatched,
-  validInteractionId, validInteractionSequence} from './worker-interaction.js';
+import {createInteractionResultSender, INTERACTION_VERSION, interactionNow, isCapturedFrame, readGesture, readInputEvidence, undispatched,
+  validInteractionId, validInteractionSequence, type CapturedFrame, type InteractionError} from './worker-interaction.js';
 import {
   RUNTIME_OBSERVATION_VERSION, observationError, supportsWorkerObservation,
 } from './worker-runtime-observation.js';
@@ -21,6 +21,8 @@ import {RUNTIME_WRITE_VERSION, supportsWorkerRuntimeWrite} from './worker-runtim
 import {createRuntimeAccessRelay, readAccessId, runtimeAccessFamily} from './worker-runtime-access-transport.js';
 import {RUNTIME_PROPERTIES_VERSION, supportsWorkerRuntimeProperties} from './worker-runtime-properties.js';
 import {RUNTIME_CALL_VERSION, supportsWorkerRuntimeCall} from './worker-runtime-call.js';
+
+import {GAME_PROBE_VERSION, gameProbeError, readGameProbeRequest, readGameProbeSequence, readGameProbeWireResult, supportsGameProbe} from './worker-game-probe.js';
 
 export interface WorkerPreviewHostOptions {
   canvas: HTMLCanvasElement;
@@ -41,6 +43,9 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
   let runtimeWriteReady = false;
   let runtimePropertiesReady = false;
   let runtimeCallReady = false;
+  let gameProbeReady = false;
+  let lastProbeSequence = 0;
+  let probe: (NonNullable<ReturnType<typeof readGameProbeRequest>> & {minGeometryEpoch: number}) | undefined;
   let captureRequest: string | undefined, inputOperation: string | undefined;
   let configuration: Readonly<WorkerRunConfiguration> | undefined;
   let runtime: Awaited<ReturnType<typeof loadVerifiedRuntimeWorker>> | undefined;
@@ -79,6 +84,16 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
   const post = (fields: object, transfer: Transferable[] = []) => {
     if (!finalized) editorPort.postMessage({ ...identity, protocolVersion: WORKER_PROTOCOL, ...fields }, transfer);
   };
+  const sendInteractionResult = createInteractionResultSender(post, fail);
+  function postCapture(requestId: string, frame: CapturedFrame | undefined, error: InteractionError | undefined) {
+    sendInteractionResult({type: 'capture-result', requestId, frame, error},
+      {error: error ?? 'capture_failed'}, frame ? [frame.bytes] : []);
+  }
+  function postProbe(requestId: string, result: NonNullable<ReturnType<typeof readGameProbeWireResult>>) {
+    const image = result.ok ? result.result.image : null;
+    sendInteractionResult({type: 'game-probe-result', requestId, result},
+      {result: result.ok ? gameProbeError('probe_failed', 'dispatch_failed') : result}, image ? [image.bytes] : []);
+  }
   const toWorker = (fields: object) => control?.postMessage({ ...identity, protocolVersion: WORKER_PROTOCOL, ...fields });
   const toData = (fields: object, optional = false): boolean => {
     const packet=fields as {type?:string;state?:{requestId?:unknown}};
@@ -127,15 +142,15 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
         current.left === rect.left && current.top === rect.top && current.dpr === dpr) return current;
     return { width: Math.max(0, rect.width), height: Math.max(0, rect.height), left: rect.left, top: rect.top, dpr, epoch: geometryEpoch + 1 };
   }
-  function applyGeometry(next: CanvasGeometry): void {
-    if (!presentation) return;
+  function applyGeometry(next: CanvasGeometry): boolean {
+    if (!presentation) return false;
     try {
-      if (!presentation.resize(next)) return;
+      if (!presentation.resize(next)) return false;
       geometryEpoch = next.epoch;
       input?.resize(next);
-      toData({type: 'geometry', geometry: next});
+      return toData({type: 'geometry', geometry: next});
     }
-    catch (error) { fail(error); }
+    catch (error) { fail(error); return false; }
   }
   const resize = () => { if (lease.active && presentation && !xr?.active) applyGeometry(geometry()); };
   function refreshInteractionGeometry(): boolean {
@@ -145,7 +160,7 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
     // A resize publishes a screen state and a geometry packet before the interaction.
     const required = changed ? (input ? 3 : 2) : 1;
     if (pendingData.size + required > (configuration?.budgets.maxInputEvents ?? 1024)) return false;
-    if (changed) applyGeometry(next);
+    if (changed && !applyGeometry(next)) return false;
     return lease.active;
   }
   function fail(error: unknown): void {
@@ -269,17 +284,47 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
         !(family === 'write' ? runtimeWriteReady : family === 'method' ? runtimeCallReady : runtimePropertiesReady) ? 'unsupported' : undefined);
       return;
     }
+    if (m.type === 'game-probe-cancel' && probe && m.requestId === probe.requestId) {
+      try { toData({type: m.type, requestId: probe.requestId}, true); } catch { /* Original deadline remains active. */ }
+      return;
+    }
+    if (m.type === 'game-probe-request') {
+      const sequence = readGameProbeSequence(m.requestId, identity.runId);
+      if (sequence === undefined || sequence <= lastProbeSequence) return;
+      lastProbeSequence = sequence;
+      const request = readGameProbeRequest(m);
+      const failProbe = (code: Parameters<typeof gameProbeError>[0]) =>
+        postProbe(m.requestId, gameProbeError(code));
+      if (!request) { failProbe('invalid_input'); return; }
+      if (!lease.active) { failProbe('run_ended'); return; }
+      if (!running) { failProbe('not_ready'); return; }
+      if (!gameProbeReady) { failProbe('unsupported'); return; }
+      if (request.deadline <= interactionNow()) { failProbe('timeout'); return; }
+      if (probe || request.query.screenshot && captureRequest) { failProbe('busy'); return; }
+      if (request.query.screenshot && (xr?.active || document.hidden)) { failProbe('not_ready'); return; }
+      if (request.query.screenshot && !refreshInteractionGeometry()) { failProbe('busy'); return; }
+      const minGeometryEpoch = request.query.screenshot ? geometryEpoch : 0;
+      try {
+        if (toData({type: m.type, ...request, minGeometryEpoch}, true)) {
+          probe = {...request, minGeometryEpoch};
+          return;
+        }
+      } catch { failProbe('probe_failed'); return; }
+      failProbe('busy');
+      return;
+    }
     if (m.type === 'capture-request' && validInteractionId(m.requestId)) {
+      if (captureRequest === m.requestId) return;
       const requestId = m.requestId;
       const error = !lease.active ? 'run_ended' : !interactionReady ? 'unsupported' :
-        xr?.active || document.hidden ? 'not_ready' : captureRequest ? 'busy' :
+        xr?.active || document.hidden ? 'not_ready' : captureRequest || probe?.query.screenshot ? 'busy' :
         !Number.isFinite(m.deadline) || m.deadline <= interactionNow() ? 'timeout' : undefined;
-      if (error) { post({type: 'capture-result', requestId, error}); return; }
-      if (!refreshInteractionGeometry()) { post({type: 'capture-result', requestId, error: 'busy'}); return; }
+      if (error) { postCapture(requestId, undefined, error); return; }
+      if (!refreshInteractionGeometry()) { postCapture(requestId, undefined, 'busy'); return; }
       try {
         if (toData({type: m.type, requestId, deadline: m.deadline}, true)) { captureRequest = requestId; return; }
       } catch { /* A failed send has no Worker side effects. */ }
-      post({type: 'capture-result', requestId, error: 'busy'});
+      postCapture(requestId, undefined, 'busy');
       return;
     }
     if (m.type === 'capture-cancel' && captureRequest && m.requestId === captureRequest) {
@@ -376,11 +421,21 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
           if (evidence) { inputOperation = undefined; post({type: m.type, operationId: m.operationId, evidence}); }
           return;
         }
+        if (m.type === 'game-probe-result' && probe && m.requestId === probe.requestId) {
+          const current = probe;
+          probe = undefined;
+          const result = (!lease.active ? gameProbeError('run_ended') :
+            interactionNow() >= current.deadline ? gameProbeError('timeout') :
+              readGameProbeWireResult(current.query, m.result, current.minGeometryEpoch)) ??
+            gameProbeError('probe_failed', 'invalid_result');
+          postProbe(current.requestId, result);
+          return;
+        }
         if (m.type === 'capture-result' && captureRequest && m.requestId === captureRequest) {
           captureRequest = undefined;
           const frame = lease.active && isCapturedFrame(m.frame) ? m.frame : undefined;
-          post({type: m.type, requestId: m.requestId, frame, error: frame ? undefined :
-            !lease.active ? 'run_ended' : ['timeout', 'cancelled', 'busy', 'not_ready', 'run_ended'].includes(m.error) ? m.error : 'capture_failed'}, frame ? [frame.bytes] : []);
+          postCapture(m.requestId, frame, frame ? undefined : !lease.active ? 'run_ended' :
+            ['timeout', 'cancelled', 'busy', 'not_ready', 'run_ended'].includes(m.error) ? m.error : 'capture_failed');
           return;
         }
         if(m.type==='project-command-receipt'&&Number.isSafeInteger(m.commandSequence)){
@@ -448,12 +503,16 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
             runtimeCallReady = callVersion !== undefined;
             running = true; workerState = 'running';
             interactionReady = configuration?.presentationBackend === 'direct' && m.interactionVersion === INTERACTION_VERSION;
+            const version = interactionReady && supportsGameProbe(release, configuration!.presentationBackend) ? GAME_PROBE_VERSION : undefined;
+            if (m.gameProbeVersion !== version) { fail(Error('E_GAME_PROBE_ABI')); return; }
+            gameProbeReady = version !== undefined;
           }
           post({type: 'phase', phase: m.phase, ...(interactionReady ? {interactionVersion: INTERACTION_VERSION} : {}),
             ...(observationReady ? {observationVersion: RUNTIME_OBSERVATION_VERSION} : {}),
             ...(runtimeWriteReady ? {runtimeWriteVersion: RUNTIME_WRITE_VERSION} : {}),
             ...(runtimePropertiesReady ? {runtimePropertiesVersion: RUNTIME_PROPERTIES_VERSION} : {}),
-            ...(runtimeCallReady ? {runtimeCallVersion: RUNTIME_CALL_VERSION} : {})});
+            ...(runtimeCallReady ? {runtimeCallVersion: RUNTIME_CALL_VERSION} : {}),
+            ...(gameProbeReady ? {gameProbeVersion: GAME_PROBE_VERSION} : {})});
           publish();
         }
       };

@@ -5,7 +5,7 @@ import {fileURLToPath} from 'node:url';
 const directory=fileURLToPath(new URL('../../',import.meta.url));
 const replacements={
  'verified-loader.js':'export function loadVerifiedWorkerEngine(...args){return globalThis.__load(...args);}',
- 'worker-presentation.js':'export function createWorkerPresentation(){return {dispose(){},resize(){},ack(){},checkpoint(){return {};},setVisible(){},stats(){return {};}};}export function installPresentationHooks(){}',
+ 'worker-presentation.js':'export function createWorkerPresentation(){return {dispose(){},resize(){},ack(){},checkpoint(){return {};},setVisible(){},stats(){return {};}};}export function installPresentationHooks(){} export function drawingBufferSize(){}',
  'worker-dom.js':'export function createWorkerDom(){return {window:{},dispose(){},revokeInput(){},resize(){},applyHostState(){}};}',
  'worker-audio.js':'export function createWorkerAudioBridge(){return {revoke(){}};}',
  'worker-xr.js':'export function createWorkerXRBridge(){return {active:false,dispose(){},snapshot(){return {};}};}',

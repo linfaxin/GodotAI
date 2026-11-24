@@ -100,6 +100,33 @@ test('tree and descriptor facts fill explicit node/type pairs without parsing di
   assert.equal(JSON.parse(f.session.snapshot().draft.inputText).runId,'run-1');f.session.dispose();
 });
 
+test('probe fill uses the expanded native request byte budget and leaves a rejected draft intact', async () => {
+  const f = createConsoleFixture();
+  f.session.selectOperation('engine.get_runtime_tree');
+  await f.session.submit();
+  const source = {sourceCallId: last(f).callId, nodePath: consoleNode.path, probeTarget: 'properties'};
+  const props = Array.from({length: 14}, (_, index) => '/root/Main/' + String(index).padStart(249, 'n') + ':position');
+  const withTarget = [...props, consoleNode.path + ':position', consoleNode.path + ':visible'];
+  const compact = JSON.stringify({props: withTarget, screenshot: true});
+  const expanded = JSON.stringify({props: withTarget.map(entry => {
+    const [path, property] = entry.split(':');
+    return {path, property};
+  }), screenshot: true, maxDimension: 1024});
+  assert(Buffer.byteLength(compact) < 4096 && Buffer.byteLength(expanded) > 4096);
+  const sourceText = JSON.stringify({props, screenshot: true});
+  f.session.loadPreset('engine.game_probe', sourceText);
+  f.session.updateTarget(source);
+  assert.equal(f.session.snapshot().draft.inputText, sourceText);
+  assert.match(f.session.snapshot().clientError.message, /4 KiB/);
+  props.pop();
+  f.session.updateDraft(JSON.stringify({props, screenshot: true}));
+  f.session.updateTarget(source);
+  assert.equal(f.session.snapshot().clientError, undefined);
+  assert.deepEqual(JSON.parse(f.session.snapshot().draft.inputText).props, withTarget.filter((_, index) => index !== 13));
+  assert.equal(f.calls.length, 1);
+  f.session.dispose();
+});
+
 test('manual method discovery binds its result to the submission context',async()=>{
   const f=createConsoleFixture(),work=deferred();
   f.session.selectOperation('describe_runtime_methods');

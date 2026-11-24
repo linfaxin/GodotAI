@@ -62,7 +62,7 @@ During framework development, rename supports ordinary scripts and text `.tscn` 
 
 ## Agent tools
 
-Expand **API 调用** in the sidebar to browse nine Summer-style operations and seven GodotAI helpers. Each entry shows the API name and a one-line summary. Open an API to edit its JSON input and inspect results or PNGs alongside the live preview. Each API has its own tab, draft and result view, with shared call history. Requests use the same `window.godotPlayground` API (`schemaVersion: 1`) as external callers. Ctrl/Cmd+Enter executes the active API draft in the request editor and builds the project in the code editor.
+Expand **API 调用** in the sidebar to browse ten Summer-style operations and seven GodotAI helpers. Each entry shows the API name and a one-line summary. Open an API to edit its JSON input and inspect results or PNGs alongside the live preview. Each API has its own tab, draft and result view, with shared call history. Requests use the same `window.godotPlayground` API (`schemaVersion: 1`) as external callers. Ctrl/Cmd+Enter executes the active API draft in the request editor and builds the project in the code editor.
 
 The console retains per-operation drafts and bounded in-memory history. Loading a preset or historical request never executes it. **更新目标 / 填入上下文** uses explicit project, run, node and method selections. PNGs are separate attachments and JSON results identify binary summaries. **打开独立示例** switches to the selected sample and ends the previous preview without automatically playing it. The lesson lists cover position changes, exported gameplay properties, and registered method calls. [Console design and lifecycle rules](../../docs/design/playground-api-console.zh-CN.md)
 
@@ -70,7 +70,7 @@ Open **API 调试** for the existing **自动验证** replays; these retain thei
 
 The runtime property workbench adds `describe_runtime_properties`, `read_runtime_properties`, `write_runtime_property` and `summer_call` to the same entry. The independent scripted sample exposes `health`, `move_step`, `can_move` and `display_name` using standard GodotJS export decorators. Its replay changes health and movement, checks actual values and PNGs, then restarts the same source to verify defaults return. Property access requires a matching Full/debug Worker Direct engine with `runtimeProperties: 1`; older write-capable templates continue to support the original position replay.
 
-`summer_call({op, input})` is a Summer 4.9.2-style input subset with explicitly labelled GodotAI typed results. It supports selected context, main play/stop/state, runtime tree, native node inspection, property writes, registered method calls and game screenshots. It does not claim full Summer wire compatibility. Script properties use explicit typed read operations; `engine.inspect_runtime_node` continues to use the native observation path. Game screenshots require an explicit `target: 'game'`. See the [supported parameters, result contracts and lifecycle rules](../../docs/design/runtime-properties-and-summer-api-v2.zh-CN.md).
+`summer_call({op, input})` accepts selected Summer 4.9.2-style inputs and returns GodotAI typed results. It supports selected context, main play/stop/state, runtime tree, native node inspection, property writes, registered method calls, game screenshots and game probes. Script properties use explicit typed read operations. `engine.inspect_runtime_node` uses the native observation path. Game screenshots require an explicit `target: 'game'`. See the [supported parameters, result contracts and lifecycle rules](../../docs/design/runtime-properties-and-summer-api-v2.zh-CN.md).
 
 On a Full Engine debug Worker Direct preview with `runtimeProperties: 1` and `runtimeCall: 1`, open **打开独立示例** from `engine.runtime_call` and follow **Summer：调用玩法方法** under **手工教学流程**. The sample registers `take_damage` on `/root/Main/Player` with `@bind.runtimeMethod({args: ['int'], returns: 'int'})`. Each step opens its API tab and loads a draft. When a step asks you to fill parameters from an earlier call, select the source in shared history and fill the current operation. Check the draft and then execute it. Read `health` and capture the game before and after `take_damage(25)` to verify `100 → 75`. Wait for the original run to exit. Start the same source and discover the player again to verify `100` and a full health bar in the new run.
 
@@ -84,6 +84,25 @@ await window.godotPlayground.summer_call({
 ```
 
 For a caller with an exact run and node instance, use `describe_runtime_methods` to obtain a method token and pass it to `call_runtime_method` with typed arguments. Tokens are scoped to the registered method, instance, run and release. If a call reports `outcome_unknown`, read the live state before deciding whether to call again. Older templates report `unsupported`. The generated `godot.annotations` declaration follows the annotation observed in the exact engine template.
+
+### Game probe
+
+On a Chromium Full Engine debug Dedicated Worker Direct preview with `gameProbe: 1`, open **打开独立示例** from `engine.game_probe`. The lesson discovers `/root/Main/Player`, captures its local position and PNG together, moves the player, and repeats the capture. After stopping and restarting the same source, it captures the starting position again. Filling a draft from run history requires a separate execution action.
+
+```js
+await window.godotPlayground.summer_call({
+  op: 'engine.game_probe',
+  input: {
+    tree: {path: '/root/Main', depth: 2, limit: 30},
+    props: ['/root/Main/Player:position'],
+    max_dim: 512,
+  },
+});
+```
+
+The PNG, tree and allowlisted native properties come from the next eligible automatic draw. The PNG and structured state share `frame.renderSerial`. Set `screenshot: false` to read state at the end of a native iteration and receive `image: null`. Supply up to 16 property queries. Tree depth ranges from 1 to 8 and node limit ranges from 1 to 500, with defaults of 2 and 200. The longest PNG dimension is capped by `max_dim`, which ranges from 16 to 1024 and defaults to 1024. A main viewport that renders directly to the screen returns `unsupported` with reason `direct_to_screen` for PNG probes.
+
+For an exact run, use `game_probe({runId, tree?, props?, screenshot?, maxDimension?, timeoutMs?}, signal?)` or `WorkerPreviewRunner.gameProbe(input, signal?)`. Each `props` entry takes `{path, property}`. Use `get_run({runId}).result.gameProbe` to check capability and readiness. Unsupported templates return `unsupported`. Live PNG captures share one slot with ordinary screenshots and can return `busy` until the previous capture drains.
 
 ```js
 const api = window.godotPlayground;

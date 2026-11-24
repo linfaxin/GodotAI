@@ -23,6 +23,24 @@ export type InteractionResult<T> = {ok: true; result: T} | {ok: false; error: {c
 export const interactionOk = <T>(result: T): InteractionResult<T> => ({ok: true, result});
 export const interactionError = (code: InteractionError): InteractionResult<never> => ({ok: false, error: {code, message: code}});
 
+type InteractionResultMessage = {type: 'capture-result' | 'game-probe-result'; requestId: string} & Record<string, unknown>;
+
+export function createInteractionResultSender(
+  post: (fields: object, transfer?: Transferable[]) => void,
+  onFailure: (error: Error) => void,
+) {
+  return (reply: InteractionResultMessage, fallback: object, transfer: Transferable[] = []) => {
+    try { post(reply, transfer); }
+    catch {
+      // The peer holds its request slot until it sees a terminal reply. Retry
+      // with a small error and no transferred data once the work has finished.
+      const {type, requestId} = reply;
+      try { post({type, requestId, ...fallback}); }
+      catch (error) { onFailure(new Error('E_INTERACTION_RESULT_TRANSPORT', {cause: error})); }
+    }
+  };
+}
+
 export type InputEdge = 'not_dispatched' | 'dispatched' | 'unconfirmed';
 export interface InputEvidence {
   down: InputEdge;

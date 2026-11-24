@@ -7,7 +7,8 @@ import {spawnSync} from 'node:child_process';
 import {createContext,runInContext} from 'node:vm';
 import {buildBrowserEngine} from '../../../scripts/test/build-browser-engine.mjs';
 import {applyWebEnginePatches} from '../../../scripts/release/patch-web-engine.mjs';
-import {digest,canonical} from '../../../scripts/release/web-release-utils.mjs';
+import {digest,canonical,assertSourcePatchChains} from '../../../scripts/release/web-release-utils.mjs';
+import {GAME_PROBE_PATCH,GAME_PROBE_PATHS,GAME_PROBE_REMOVAL_PATCH} from '../../../scripts/release/patch-web-game-probe.mjs';
 import {THREADLESS_GROUP_WAIT_ORIGINAL} from '../../../scripts/release/patch-web-threadless-groups.mjs';
 import {PROXY_ENTRY_ORIGINAL,patchProxyEntry} from '../../../scripts/release/patch-web-proxy-entry.mjs';
 import {patchShaderUtf8} from '../../../scripts/release/patch-web-shader-utf8.mjs';
@@ -28,6 +29,9 @@ async function fixture(root){
   'platform/web/js/engine/config.js':await readFile(new URL('../../../scripts/jsb.react-browser/test/fixtures/godot-4.6.1-config.js',import.meta.url),'utf8'),
   'servers/audio/audio_server.cpp':await readFile(new URL('../../../scripts/jsb.react-browser/test/fixtures/godot-4.6.1-audio-server.cpp',import.meta.url),'utf8'),
   'main/main.cpp':await readFile(new URL('../../../scripts/jsb.react-browser/test/fixtures/godot-4.6.1-main.cpp',import.meta.url),'utf8'),
+  'servers/rendering/rendering_server_default.cpp':'void RenderingServerDefault::draw(bool p_present, double frame_step) {\n\tif (create_thread) {\n\t} else {\n\t\t_draw(p_present, frame_step);\n\t}\n}\n',
+  'servers/rendering/renderer_viewport.cpp':'void RendererViewport::draw_viewports(bool p_swap_buffers) {\n\t\t\t// render standard mono camera\n\t\t\t_draw_viewport(vp);\n\t\t\t\t\tRSG::rasterizer->blit_render_targets_to_screen(vp->viewport_to_screen, &blit, 1);\n}\n',
+  'drivers/gles3/rasterizer_gles3.cpp':'void RasterizerGLES3::_blit_render_target_to_screen() {\n\tglBindTexture(GL_TEXTURE_2D, 0);\n}\n\n// is this p_screen useless\n',
   'platform/web/web_main.cpp':await readFile(new URL('../../../scripts/jsb.react-browser/test/fixtures/godot-4.6.1-web-main.cpp',import.meta.url),'utf8'),
   'scene/main/scene_tree.h':await readFile(new URL('../../../scripts/test/fixtures/godot-4.6.1-scene-tree.h',import.meta.url),'utf8'),
   'scene/main/scene_tree.cpp':await readFile(new URL('../../../scripts/test/fixtures/godot-4.6.1-scene-tree.cpp',import.meta.url),'utf8'),
@@ -59,7 +63,9 @@ test('local patch CLI and the actual CI snapshot builder produce identical engin
  const out=join(root,'report.json');
  await buildBrowserEngine({'godot-source':source,'build-dir':built,out,'snapshot-only':true,scons:process.execPath,emcc:process.execPath});
  const report=JSON.parse(await readFile(out,'utf8'));
- assert.equal(report.status,'snapshotted');assert.equal(report.recipe.patches.length,36);
+ assert.equal(report.status,'snapshotted');assert.equal(report.recipe.patches.length,42);
+ assert.equal(report.recipe.patches.filter(record=>record.patchId==='godotjs-web-game-probe-v1').length,6);
+ assert.match(await readFile(join(built,'platform/web/web_main.cpp'),'utf8'),/EMSCRIPTEN_KEEPALIVE uint32_t godotjs_game_probe_abi\(\)/);
  for(const id of ['godotjs-artifact-set-early-mount-v1','godotjs-host-resource-owner-v1','godotjs-native-observer-v1'])assert(report.recipe.patches.some(record=>record.patchId===id));
  assert.equal(report.execution.artifactSetAbi,1);assert.equal(report.execution.hostResourceAbi,1);assert.equal(report.nativeObserverPatch.abi,1);assert.equal(report.execution.shutdownQueueAbi,1);
  assert.deepEqual(report.runtimeAbi,{protocolVersion:2,host:1,audio:1,presentation:1,lifecycle:1});
@@ -159,8 +165,33 @@ test('ThinLTO worker cap and compiler environment are part of the attested recip
  const previous=Object.fromEntries(['EMCC_CORES','BINARYEN_CORES'].map(name=>[name,process.env[name]]));t.after(()=>{for(const [name,value]of Object.entries(previous)){if(value===undefined)delete process.env[name];else process.env[name]=value;}});process.env.EMCC_CORES='4';process.env.BINARYEN_CORES='4';
  const out=join(root,'report.json');await buildBrowserEngine({'godot-source':source,'build-dir':built,out,profile:'engine-2d-v1',target:'template_release',lto:'thin',jobs:4,'snapshot-only':true,scons:process.execPath,emcc:process.execPath});const report=JSON.parse(await readFile(out,'utf8'));
  assert(report.recipe.args.includes('linkflags=-Wl,--thinlto-jobs=4'));assert.deepEqual(report.recipe.environment,{EMCC_CORES:'4',BINARYEN_CORES:'4'});assert.deepEqual(report.toolchains.environment,report.recipe.environment);assert.equal(report.recipeSha256,digest(canonical(report.recipe)));
+ assert(!report.recipe.patches.some(record=>record.patchId==='godotjs-web-game-probe-v1'));
+ assert.doesNotMatch(await readFile(join(built,'platform/web/web_main.cpp'),'utf8'),/godotjs_game_probe_abi/);
  assert.notEqual(report.recipeSha256,digest(canonical({...report.recipe,args:report.recipe.args.map(arg=>arg==='linkflags=-Wl,--thinlto-jobs=4'?'linkflags=-Wl,--thinlto-jobs=8':arg)})));assert.notEqual(report.recipeSha256,digest(canonical({...report.recipe,environment:{...report.recipe.environment,EMCC_CORES:'8'}})));
  assert.match(await readFile(join(built,'SConstruct'),'utf8'),/resolvedLinkFlags/);assert(report.godotSource.inputs.SConstruct);
+});
+
+test('2D release strips all Game Probe changes from a previously patched source',async t=>{
+ const root=await mkdtemp(join(tmpdir(),'engine-game-probe-profile-'));t.after(()=>rm(root,{recursive:true,force:true}));
+ const clean=join(root,'clean'),source=join(root,'patched'),built=join(root,'build'),out=join(root,'report.json');
+ await fixture(clean);await cp(clean,source,{recursive:true});
+ await applyWebEnginePatches(source);
+ await applyWebEnginePatches(clean,{gameProbe:false});
+
+ await buildBrowserEngine({'godot-source':source,'build-dir':built,out,profile:'engine-2d-v1',target:'template_release',
+  'snapshot-only':true,scons:process.execPath,emcc:process.execPath});
+ const report=JSON.parse(await readFile(out,'utf8'));
+ assert(!report.recipe.patches.some(patch=>patch.patchId===GAME_PROBE_PATCH));
+ const removed=report.recipe.patches.filter(patch=>patch.patchId===GAME_PROBE_REMOVAL_PATCH);
+ assert.deepEqual(removed.map(patch=>patch.path),GAME_PROBE_PATHS);
+ assertSourcePatchChains(report);
+ for(const path of GAME_PROBE_PATHS){
+  const original=await readFile(join(source,path));
+  const expected=await readFile(join(clean,path));
+  assert.notDeepEqual(original,expected,path);
+  assert.deepEqual(await readFile(join(built,path)),expected,path);
+  assert.equal(report.godotSource.inputs[path],digest(expected),path);
+ }
 });
 
 

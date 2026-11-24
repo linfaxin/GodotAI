@@ -49,7 +49,7 @@ const set = (property = 'health', value = 40, extra = {}) => ({op: 'engine.runti
 test('unsupported and malformed parameters are rejected before any backend call', async () => {
   const {dispatch, calls} = fixture();
   const cases = [
-    [{op: 'engine.game_probe'}, 'unsupported'],
+    [{op: 'engine.game_probe', input: {props: ['relative:position']}}, 'invalid_input'],
     [{op: 'engine.play', input: {focus: false}}, 'unsupported'],
     [{op: 'engine.get_runtime_tree', input: {maxCharacters: 4000}}, 'unsupported'],
     [{op: 'engine.get_runtime_tree', input: {depth: 0}}, 'invalid_input'],
@@ -157,4 +157,25 @@ test('literal parsing is type-directed and never coerces scalar strings or evalu
   for (const value of ['Vector2(1,2);alert(1)', 'Vector2(1,2)\n', 'Vector2(NaN,1)', 'Vector2(1e999,2)', 'Vector3(1,2,3)', {x:1,y:2}]) assert.equal(parseSummerValue('vector2', value), undefined);
   assert.equal(parseSummerValue('int', '40'), undefined);
   assert.equal(parseSummerValue('bool', 1), undefined);
+});
+
+test('game probe binds its request before awaiting and rejects a foreign main run', async () => {
+  const {context, backend, dispatch} = fixture();
+  const calls = [];
+  backend.getRun = () => ok({state: 'running', projectId: 'foreign'});
+  backend.gameProbe = async input => {
+    calls.push(input);
+    context.activeRunId = 'replacement';
+    return ok({mode: 'state', run: identity, releaseId, requestId: 'probe',
+      frame: {iteration: 1}, image: null, tree: {status: 'not_requested'}, properties: []});
+  };
+  const input = {op: 'engine.game_probe', input: {screenshot: false, max_dim: 64}};
+  assert.equal((await dispatch(input)).error.code, 'revision_conflict');
+  assert.deepEqual(calls, []);
+  backend.getRun = () => ok({state: 'running', projectId: context.projectId});
+  const result = await dispatch(input);
+  assert.equal(result.ok, true);
+  assert.equal(result.result.data.run.runId, identity.runId);
+  assert.deepEqual(calls, [{runId: identity.runId, screenshot: false, maxDimension: 64, props: []}]);
+  assert.equal((await dispatch({op: 'engine.game_probe', input: {max_dim: 2048}})).error.code, 'unsupported');
 });

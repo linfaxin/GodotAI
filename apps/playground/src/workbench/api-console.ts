@@ -140,7 +140,7 @@ function createApiConsoleCard(container: HTMLElement, session: ConsoleSession, o
   const contextRows = ['编辑项目 / 版本', '主运行 / 源码版本', '运行归属 / 阶段', '待启动 attempt'].map(contextRow);
   const capabilityRows = ([
     ['observation', '运行时观察'], ['runtimeWrite', '原生属性写入'],
-    ['runtimeProperties', '公开属性访问'], ['runtimeCall', '公开方法调用'], ['interaction', '截图与输入'],
+    ['runtimeProperties', '公开属性访问'], ['runtimeCall', '公开方法调用'], ['gameProbe', '游戏帧探测'], ['interaction', '截图与输入'],
   ] as const).map(([key, label]) => ({key, value: contextRow(label)}));
   const compatibility = element('p', 'api-console-note', operation.family === 'summer'
     ? 'Summer 风格输入子集 · 部分语义 · GodotAI typed-v1 结果' : 'GodotAI 本地辅助');
@@ -267,7 +267,7 @@ function createApiConsoleCard(container: HTMLElement, session: ConsoleSession, o
   function renderSources(call?: ConsoleCall) {
     const facts = call?.resultFacts;
     const kind = consoleResultSource(operation.id, facts);
-    const key = kind && call ? `${call.callId}:${kind}` : '';
+    const key = kind && call ? `${call.callId}:${kind}:${operation.id}` : '';
     if (key === sourcesKey) return;
     readSourceSelection = undefined;
     sourcesKey = key; sources.replaceChildren(); sources.hidden = !kind;
@@ -275,7 +275,7 @@ function createApiConsoleCard(container: HTMLElement, session: ConsoleSession, o
     const sourceCallId = call.callId;
     const saved = savedSourceSelection?.sourceCallId === sourceCallId ? savedSourceSelection : undefined;
     sources.append(element('h4', '', '使用此结果填参'), element('p', 'api-console-note', `来源 ${sourceCallId}；只填入当前所选操作，不会执行。`));
-    let node: HTMLSelectElement | undefined, method: HTMLSelectElement | undefined, properties: HTMLSelectElement | undefined, stopped: HTMLSelectElement | undefined;
+    let node: HTMLSelectElement | undefined, probeTarget: HTMLSelectElement | undefined, method: HTMLSelectElement | undefined, properties: HTMLSelectElement | undefined, stopped: HTMLSelectElement | undefined;
     function select(label: string, name: string) {
       const text = element('label', 'api-console-label', label), value = test(element('select'), name);
       text.append(value); sources.append(text); return value;
@@ -287,6 +287,13 @@ function createApiConsoleCard(container: HTMLElement, session: ConsoleSession, o
         const option = element('option', '', `${target.path} · ${target.type} · #${target.instanceId}`); option.value = target.path; node.append(option);
       }
       node.value = saved?.nodePath ?? '';
+      if (operation.id === 'engine.game_probe') {
+        probeTarget = select('填入范围', 'probe-target');
+        const properties = element('option', '', '追加 position 和 visible'); properties.value = 'properties';
+        const tree = element('option', '', '树根路径'); tree.value = 'tree';
+        probeTarget.append(properties, tree);
+        probeTarget.value = saved?.probeTarget ?? 'properties';
+      }
     }
     if (kind === 'method' && facts.methods) {
       method = select('方法（明确选择登记签名）', 'source-method');
@@ -317,6 +324,7 @@ function createApiConsoleCard(container: HTMLElement, session: ConsoleSession, o
     function readSelection(): ConsoleFillSelection {
       const selection: ConsoleFillSelection = {sourceCallId};
       if (node) selection.nodePath = node.value;
+      if (probeTarget) selection.probeTarget = probeTarget.value === 'tree' ? 'tree' : 'properties';
       if (method) selection.methodName = method.value;
       if (properties) selection.propertyNames = Array.from(properties.selectedOptions, option => option.value);
       if (stopped) selection.stoppedRunId = stopped.value;
