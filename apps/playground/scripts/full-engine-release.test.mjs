@@ -94,7 +94,7 @@ test('Worker release retains composed native ABI receipts for later verification
  assert.equal(manifest.build.resolvedBuildOptions.target,'template_debug');
  assert.doesNotThrow(()=>assertWorkerBuildProof({...manifest.build,kind:report.kind,status:report.status,
   runtimeProfile:manifest.runtimeProfile,engineTarget:report.engineTarget,runtimeAbi:manifest.runtimeAbi,
-  execution:manifest.execution,source:manifest.build.engineSource,recipe:manifest.build.engineRecipe},input.engine.wasm.sha256));
+  execution:manifest.execution,source:manifest.build.engineSource,recipe:manifest.build.engineRecipe},input.engine));
  const development=assembleFullEngineRelease({...input,build:{...input.build,sourceCertified:false}}).manifest;
  assert.equal(development.runtimeAbi.runtimeWrite,undefined);
  assert.equal(development.build.runtimeWrite,undefined);
@@ -125,7 +125,7 @@ test('properties capability and its complete source proof survive the Playground
  assert.deepEqual(manifest.build.runtimeProperties,report.runtimeProperties);
  assert.doesNotThrow(()=>assertWorkerBuildProof({...manifest.build,kind:report.kind,status:report.status,
   runtimeProfile:manifest.runtimeProfile,engineTarget:report.engineTarget,runtimeAbi:manifest.runtimeAbi,
-  execution:manifest.execution,source:manifest.build.engineSource,recipe:manifest.build.engineRecipe},input.engine.wasm.sha256));
+  execution:manifest.execution,source:manifest.build.engineSource,recipe:manifest.build.engineRecipe},input.engine));
  const development=assembleFullEngineRelease({...input,build:{...input.build,sourceCertified:false,runtimeProperties:report.runtimeProperties}}).manifest;
  assert.equal(development.runtimeAbi.runtimeProperties,undefined);
  assert.equal(development.build.runtimeProperties,undefined);

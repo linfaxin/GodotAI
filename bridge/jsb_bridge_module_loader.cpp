@@ -437,6 +437,27 @@ namespace jsb
 #endif
         }
 
+        void _add_script_runtime_methods(const v8::FunctionCallbackInfo<v8::Value>& info)
+        {
+            v8::Isolate* isolate = info.GetIsolate();
+            v8::HandleScope scope(isolate);
+            const auto context = isolate->GetCurrentContext();
+            if (info.Length() != 2 || !info[0]->IsFunction() || !info[1]->IsArray())
+            {
+                jsb_throw(isolate, "Invalid runtime method declarations");
+                return;
+            }
+            const auto owner = info[0].As<v8::Object>();
+            Environment* environment = Environment::wrap(isolate);
+            const auto symbol = jsb_symbol(environment, ClassRuntimeMethods);
+            if (owner->HasOwnProperty(context, symbol).FromMaybe(true) ||
+                !owner->DefineOwnProperty(context, symbol, info[1],
+                    static_cast<v8::PropertyAttribute>(v8::ReadOnly | v8::DontEnum | v8::DontDelete)).FromMaybe(false))
+            {
+                jsb_throw(isolate, "Could not register runtime methods");
+            }
+        }
+
         // function add_script_property(prototype: GObject, details: ScriptPropertyInfo): void
         void _add_script_property(const v8::FunctionCallbackInfo<v8::Value>& info)
         {
@@ -674,6 +695,7 @@ namespace jsb
 
                 internal_obj->Set(context, impl::Helper::new_string_ascii(isolate, "add_script_signal"), JSB_NEW_FUNCTION(context, _add_script_signal, {})).Check();
                 internal_obj->Set(context, impl::Helper::new_string_ascii(isolate, "add_script_property"), JSB_NEW_FUNCTION(context, _add_script_property, {})).Check();
+                internal_obj->Set(context, impl::Helper::new_string_ascii(isolate, "add_script_runtime_methods"), JSB_NEW_FUNCTION(context, _add_script_runtime_methods, {})).Check();
                 internal_obj->Set(context, impl::Helper::new_string_ascii(isolate, "add_script_ready"), JSB_NEW_FUNCTION(context, _add_script_ready, {})).Check();
                 internal_obj->Set(context, impl::Helper::new_string_ascii(isolate, "add_script_tool"), JSB_NEW_FUNCTION(context, _add_script_tool, {})).Check();
                 internal_obj->Set(context, impl::Helper::new_string_ascii(isolate, "add_script_icon"), JSB_NEW_FUNCTION(context, _add_script_icon, {})).Check();

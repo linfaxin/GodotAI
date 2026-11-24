@@ -14,7 +14,7 @@ test('native API capture retries rejected chunks on later frames and exits only 
  // Keep the actual generated project and transport loop. The expensive native
  // binding audit is independent of queue admission and is replaced at its call.
  source=source.replace(/const bindingAudit=\([^]*?\)\(G,J\);/,"const bindingAudit=globalThis.audit();");
- const scope={require:id=>id==='godot'?G:J,exports:{},__godotjsRuntimeHost:host,console:{error:message=>logs.push(message)},audit(){auditCalls++;return{status:'passed'};}};
+ const scope={require:id=>id==='godot'?G:id==='godot.annotations'?{createClassBinder:()=>Object.assign(()=>{}, {export(){}})}:J,exports:{},__godotjsRuntimeHost:host,console:{error:message=>logs.push(message)},audit(){auditCalls++;return{status:'passed'};}};
  vm.runInNewContext(source,scope);
  const project=new scope.exports.default();project.get_tree=()=>({quit:code=>quit.push(code)});
  project._ready();assert.equal(auditCalls,1);assert.deepEqual(attempts,[]);assert.deepEqual(quit,[]);
@@ -35,8 +35,8 @@ test('native API capture delivers the standalone Window bridge and exits normall
  const G={Node:class{},ClassDB:{class_exists:()=>false},JavaScriptBridge:{get_interface:name=>{assert.equal(name,'window');return window;}}};
  let source=new TextDecoder().decode(engineApiCaptureFiles('camel').get('res://.godot/GodotJS/src/EngineApiCapture.js'));
  source=source.replace(/const bindingAudit=\([^]*?\)\(G,J\);/,"const bindingAudit={status:'passed'};");
- const scope={require:id=>id==='godot'?G:J,exports:{},console:{error:message=>{throw Error(message);}}};vm.runInNewContext(source,scope);
+ const scope={require:id=>id==='godot'?G:id==='godot.annotations'?{createClassBinder:()=>Object.assign(()=>{}, {export(){}})}:J,exports:{},console:{error:message=>{throw Error(message);}}};vm.runInNewContext(source,scope);
  const project=new scope.exports.default();project.get_tree=()=>({quit:code=>quit.push(code)});project._ready();
- assert.equal(received.length,1);assert.deepEqual(received[0].ir,ir);
+ assert.equal(received.length,1);assert.deepEqual(received[0].ir,ir);assert.deepEqual(received[0].audit.authoring,{version:1,runtimeMethod:false});
  project._process();project._process();assert.deepEqual(quit,[]);project._process();assert.deepEqual(quit,[0]);
 });

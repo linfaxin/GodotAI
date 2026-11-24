@@ -220,6 +220,14 @@ namespace jsb
         jsb_force_inline bool is_abstract() const { return flags & ScriptClassFlags::Abstract; }
     };
 
+    struct RuntimeMethodInfo
+    {
+        Vector<Variant::Type> parameter_types;
+        Variant::Type return_type = Variant::NIL;
+        uint64_t registration = 0;
+        v8::Global<v8::Function> function;
+    };
+
     struct ScriptClassInfo : StatelessScriptClassInfo
     {
         // Runtime inspection only consumes committed, own declarations. The
@@ -228,6 +236,9 @@ namespace jsb
         bool runtime_metadata_ready = false;
         HashMap<StringName, RuntimeExportInfo> own_runtime_exports;
         StringName runtime_base_script_module_id;
+        bool runtime_methods_ready = false;
+        internal::TypeGen<StringName, RuntimeMethodInfo>::UnorderedMap own_runtime_methods;
+        static void revoke_runtime_methods(Environment* environment, const JavaScriptModule& module);
 
         // the native class id the current class inherits from.
         NativeClassID native_class_id;

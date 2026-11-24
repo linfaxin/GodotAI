@@ -16,10 +16,8 @@ void GodotJSScriptInstance::publish_runtime_binding() {
     ticket->runtime_script_ready = runtime_instance_token_ != 0 && ticket->runtime_script_generation != 0;
 }
 
-const char* GodotJSScriptInstance::capture_runtime(Object* owner, jsb::RuntimeScriptSnapshot& snapshot,
-    jsb::RuntimeScriptMetadata& metadata, int max_entries, int max_levels, const Vector<StringName>* requested_names) {
+const char* GodotJSScriptInstance::capture_runtime_binding(Object* owner, jsb::RuntimeScriptSnapshot& snapshot) {
     snapshot = {};
-    metadata = {};
     if (!owner) return "node_not_found";
     ScriptInstance* raw = owner->get_script_instance();
     if (!raw || raw->is_placeholder() || raw->get_language() != GodotJSScriptLanguage::get_singleton()) return "unsupported";
@@ -39,6 +37,14 @@ const char* GodotJSScriptInstance::capture_runtime(Object* owner, jsb::RuntimeSc
     snapshot.binding_generation = ticket->runtime_script_generation;
     snapshot.class_id = ticket->runtime_bound_class_id;
 
+    return nullptr;
+}
+
+const char* GodotJSScriptInstance::capture_runtime(Object* owner, jsb::RuntimeScriptSnapshot& snapshot,
+    jsb::RuntimeScriptMetadata& metadata, int max_entries, int max_levels, const Vector<StringName>* requested_names) {
+    metadata = {};
+    if (const char* failure = capture_runtime_binding(owner, snapshot)) return failure;
+    const auto& env = snapshot.environment;
     jsb::ScriptClassID current = snapshot.class_id;
     HashSet<StringName> names;
     HashSet<StringName> modules;

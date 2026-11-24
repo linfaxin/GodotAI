@@ -18,8 +18,9 @@ import {
 } from './worker-runtime-observation.js';
 import {createRuntimeObservationRelay, readRuntimeObservationRequest} from './worker-runtime-observation-transport.js';
 import {RUNTIME_WRITE_VERSION, supportsWorkerRuntimeWrite} from './worker-runtime-write.js';
-import {createRuntimeAccessRelay, readAccessId} from './worker-runtime-access-transport.js';
+import {createRuntimeAccessRelay, readAccessId, runtimeAccessFamily} from './worker-runtime-access-transport.js';
 import {RUNTIME_PROPERTIES_VERSION, supportsWorkerRuntimeProperties} from './worker-runtime-properties.js';
+import {RUNTIME_CALL_VERSION, supportsWorkerRuntimeCall} from './worker-runtime-call.js';
 
 export interface WorkerPreviewHostOptions {
   canvas: HTMLCanvasElement;
@@ -39,6 +40,7 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
   let observationReady = false;
   let runtimeWriteReady = false;
   let runtimePropertiesReady = false;
+  let runtimeCallReady = false;
   let captureRequest: string | undefined, inputOperation: string | undefined;
   let configuration: Readonly<WorkerRunConfiguration> | undefined;
   let runtime: Awaited<ReturnType<typeof loadVerifiedRuntimeWorker>> | undefined;
@@ -106,7 +108,7 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
   const runtimeAccess = createRuntimeAccessRelay(postRuntimeData, response => {
     const {family, sequence, ...payload} = response;
     post(family === 'write' ? {type: 'runtime-write-result', ...payload, writeSequence: sequence} :
-      {type: 'runtime-property-result', ...payload, accessSequence: sequence});
+      {type: 'runtime-' + family + '-result', ...payload, accessSequence: sequence});
   });
   function publish(): void {
     snapshot = Object.freeze({ schemaVersion: 1, ...identity, executionBackend: 'worker', presentationBackend: configuration?.presentationBackend ?? null,
@@ -259,12 +261,12 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
       observation.cancel(m.requestId);
       return;
     }
-    if (['runtime-write-request', 'runtime-write-cancel', 'runtime-property-request', 'runtime-property-cancel'].includes(m.type)) {
-      const family = m.type.startsWith('runtime-write-') ? 'write' : 'property';
+    const family = runtimeAccessFamily(m.type);
+    if (family && !m.type.endsWith('-result')) {
       const id = readAccessId(family, m, identity.runId);
       if (id && m.type.endsWith('-cancel')) runtimeAccess.cancel(id);
       else if (id) runtimeAccess.request(id, m, !lease.active ? 'run_ended' : !running ? 'not_ready' :
-        !(family === 'write' ? runtimeWriteReady : runtimePropertiesReady) ? 'unsupported' : undefined);
+        !(family === 'write' ? runtimeWriteReady : family === 'method' ? runtimeCallReady : runtimePropertiesReady) ? 'unsupported' : undefined);
       return;
     }
     if (m.type === 'capture-request' && validInteractionId(m.requestId)) {
@@ -363,8 +365,9 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
           observation.reply(m);
           return;
         }
-        if (m.type === 'runtime-write-result' || m.type === 'runtime-property-result') {
-          const id = readAccessId(m.type === 'runtime-write-result' ? 'write' : 'property', m, identity.runId);
+        const family = runtimeAccessFamily(m.type);
+        if (family && m.type.endsWith('-result')) {
+          const id = readAccessId(family, m, identity.runId);
           if (id) runtimeAccess.reply(id, m.result, m.kind);
           return;
         }
@@ -437,13 +440,20 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
               return;
             }
             runtimePropertiesReady = propertiesVersion !== undefined;
+            const callVersion = supportsWorkerRuntimeCall(release, configuration!.presentationBackend) ? RUNTIME_CALL_VERSION : undefined;
+            if (m.runtimeCallVersion !== callVersion) {
+              fail(Error('E_RUNTIME_CALL_ABI'));
+              return;
+            }
+            runtimeCallReady = callVersion !== undefined;
             running = true; workerState = 'running';
             interactionReady = configuration?.presentationBackend === 'direct' && m.interactionVersion === INTERACTION_VERSION;
           }
           post({type: 'phase', phase: m.phase, ...(interactionReady ? {interactionVersion: INTERACTION_VERSION} : {}),
             ...(observationReady ? {observationVersion: RUNTIME_OBSERVATION_VERSION} : {}),
             ...(runtimeWriteReady ? {runtimeWriteVersion: RUNTIME_WRITE_VERSION} : {}),
-            ...(runtimePropertiesReady ? {runtimePropertiesVersion: RUNTIME_PROPERTIES_VERSION} : {})});
+            ...(runtimePropertiesReady ? {runtimePropertiesVersion: RUNTIME_PROPERTIES_VERSION} : {}),
+            ...(runtimeCallReady ? {runtimeCallVersion: RUNTIME_CALL_VERSION} : {})});
           publish();
         }
       };

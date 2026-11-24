@@ -83,6 +83,7 @@ JSBROWSER_API void jsbi_GetStatistics(jsb::impl::JSRuntime engine_id, void* ptr)
 JSBROWSER_API jsb::impl::StackPosition jsbi_CompileFunctionSource(jsb::impl::JSRuntime engine_id, const char* id, const char* source);
 JSBROWSER_API jsb::impl::StackPosition jsbi_Eval(jsb::impl::JSRuntime engine_id, const char* id, const char* source);
 JSBROWSER_API jsb::impl::StackPosition jsbi_Call(jsb::impl::JSRuntime engine_id, jsb::impl::StackPosition this_sp, jsb::impl::StackPosition func_sp, int argc, jsb::impl::StackPosition* argv);
+JSBROWSER_API int32_t jsbi_RuntimeCall(jsb::impl::JSRuntime engine_id, jsb::impl::StackPosition this_sp, jsb::impl::StackPosition func_sp, int argc, jsb::impl::StackPosition* argv);
 JSBROWSER_API jsb::impl::StackPosition jsbi_CallAsConstructor(jsb::impl::JSRuntime engine_id, jsb::impl::StackPosition func_sp, int argc, jsb::impl::StackPosition* argv);
 JSBROWSER_API jsb::impl::StackPosition jsbi_ParseJSON(jsb::impl::JSRuntime engine_id, const char* data, int len);
 JSBROWSER_API jsb::impl::StackPosition jsbi_JSONStringify(jsb::impl::JSRuntime engine_id, jsb::impl::StackPosition value_sp);

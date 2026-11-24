@@ -599,6 +599,8 @@ if is_defined("JSB_WITH_WEB"):
             "_godotjs_runtime_write_execute",
             "_godotjs_runtime_properties_abi",
             "_godotjs_runtime_properties_execute",
+            "_godotjs_runtime_call_abi",
+            "_godotjs_runtime_call_execute",
         ]
 
     # this script is compiled from impl/web/bridge typescript source

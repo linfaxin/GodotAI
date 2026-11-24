@@ -34,7 +34,7 @@ for(const {name,budgets,texts,expected}of [
  class Scope{addEventListener(type,fn){listeners.set(type,fn);}removeEventListener(type){listeners.delete(type);}}
  class Engine{constructor(){engine=this;this.config={getModuleConfig(){return {};}};}async preloadFile(){}init(){this.rtenv=this.config.getModuleConfig();return initializing;}requestQuit(){} }
  const scope=new Scope();scope.WorkerGlobalScope=Scope;
- const context=vm.createContext({console:{log:(...args)=>originalLogs.push(args),warn(){},error(){}},crypto,MessagePort:Port,ArrayBuffer,Uint8Array,TextEncoder,AbortController,DOMException,queueMicrotask,setInterval(){return 1;},clearInterval(){},__Engine:Engine});
+ const context=vm.createContext({console:{log:(...args)=>originalLogs.push(args),warn(){},error(){}},crypto,MessagePort:Port,ArrayBuffer,Uint8Array,TextEncoder,TextDecoder,AbortController,AbortSignal,DOMException,queueMicrotask,setInterval(){return 1;},clearInterval(){},__Engine:Engine});
  vm.runInContext(code,context);
  const prepared=await context.RuntimeUnderTest.prepareWorkerRunConfiguration(vm.runInContext('('+JSON.stringify({budgets})+')',context));
  const control=new Port(),data=new Port(),boot=Object.assign(vm.runInContext('({})',context),{protocolVersion:2,type:'worker-connect',runId:'log-test',revision:1,generation:1,buildKey:'pack',documentId:'doc',workerId:'worker',runConfigurationHash:prepared.hash,
@@ -65,7 +65,7 @@ test('slow native initialization cannot make heartbeat memory observation termin
   async start(){}
   requestQuit(){}
  }
- const context=vm.createContext({console:{log(){},warn(){},error(){}},crypto,MessagePort:Port,ArrayBuffer,Uint8Array,TextEncoder,AbortController,DOMException,queueMicrotask,
+ const context=vm.createContext({console:{log(){},warn(){},error(){}},crypto,MessagePort:Port,ArrayBuffer,Uint8Array,TextEncoder,TextDecoder,AbortController,AbortSignal,DOMException,queueMicrotask,
   setInterval(callback){timers.push(callback);return timers.length;},clearInterval(){},__Engine:Engine});
  vm.runInContext(code,context);
  const configuration=(await context.RuntimeUnderTest.prepareWorkerRunConfiguration(vm.runInContext('({})',context)));
@@ -121,7 +121,7 @@ async function hostRuntimeFixture({onStart,onQuit,managed=false,waitPhase='runni
   async start(){await onStart?.(scope,this,clone);}
   requestQuit(){events.push('quit');if(onQuit)return onQuit(scope,this);scope.__godotjsRuntimeHost.endNativeEpoch('test-native-epoch');this.options.onExit(0);}
  }
- const context=vm.createContext({console:{log(){},warn(){},error:value=>consoleErrors.push(String(value))},crypto,MessagePort:Port,ArrayBuffer,Uint8Array,TextEncoder,AbortController,DOMException,queueMicrotask,performance,setTimeout,clearTimeout,
+ const context=vm.createContext({console:{log(){},warn(){},error:value=>consoleErrors.push(String(value))},crypto,MessagePort:Port,ArrayBuffer,Uint8Array,TextEncoder,TextDecoder,AbortController,AbortSignal,DOMException,queueMicrotask,performance,setTimeout,clearTimeout,
   ...(capture?{__captureTest:true,OffscreenCanvas:capture.Scratch}:{}),
   setInterval(callback){tasks.push(callback);return tasks.length;},clearInterval(){},__Engine:Engine});
  vm.runInContext(code,context);const clone=value=>vm.runInContext('('+JSON.stringify(value)+')',context);

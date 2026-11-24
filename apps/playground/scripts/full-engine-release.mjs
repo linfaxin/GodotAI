@@ -3,7 +3,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {createRequire} from 'node:module';
 import {createHash} from 'node:crypto';
-import {captureEngineApi} from './capture-engine-api.mjs';
+import {captureEngineApi,engineApiCapturePack} from './capture-engine-api.mjs';
 import {getEngineProfile,validateEngineProfile,assertWorkerRuntimeAbi} from '../../../scripts/release/engine-profiles.mjs';
 import {legacyExecution,validateExecutionContract} from '../../../scripts/release/execution-contract.mjs';
 import {createEngineIdentity,createExtensionIdentity,nativeEngineIdentityInputs} from '../../../scripts/release/release-identities.mjs';
@@ -75,6 +75,8 @@ export function validateProductionApiCapture(ir,capture,engine,runtimeProfile=FU
  try{validateEngineProfile(runtimeProfile,{modules:ir.modules,classes:ir.classes});}catch(error){throw Error('E_FULL_ENGINE_MODULES: '+error.message);}
  if(ir.instrumentation||ir.classes?.some(item=>/P0EngineApiProbe/.test(item.nativeName??item.name??'')))throw Error('E_FULL_ENGINE_INSPECTOR: Inspector API cannot be released');
  if(ir.schemaVersion!==1||ir.apiVersion!=='godotjs-engine-api/1'||!ir.engineVersion||!ir.bindingVersion||!['snake','camel'].includes(ir.bindingNaming))throw Error('E_FULL_ENGINE_API: Unsupported production API identity');
+ if(capture.authoring!==undefined&&(capture.authoring?.version!==1||typeof capture.authoring?.runtimeMethod!=='boolean'))
+  throw Error('E_FULL_ENGINE_AUTHORING: Invalid authoring evidence');
  validateBindingAudit(ir,capture);
 }
 
@@ -87,6 +89,8 @@ function validateGeneratedProfile({ir,capture,irBytes,declarations,namingVersion
  if(ir.namingVersion!==namingVersion)throw Error('E_FULL_ENGINE_VERSIONS: Native and generated naming versions differ');
  if(!/^[a-f0-9]{64}$/.test(actualAPIHash??''))throw Error('E_FULL_ENGINE_IDENTITY: Canonical API hash is required');
  if(!declarations?.files||!Object.keys(declarations.files).length||declarations.diagnostics?.some(item=>item.severity==='error'||item.code?.startsWith('E_')))throw Error('E_FULL_ENGINE_DECLARATIONS: Declaration generation failed');
+ const authoringType = /\bruntimeMethod\(signature:/.test(declarations.files['/godot.annotations/index.d.ts']??'');
+ if(authoringType!==(capture.authoring?.runtimeMethod===true))throw Error('E_FULL_ENGINE_AUTHORING: Declarations differ from captured runtime annotations');
  if(strictTypechecks?.status!=='passed')throw Error('E_FULL_ENGINE_TYPECHECK: Strict declaration and consumer checks did not pass for '+naming);
  const snapshotTypes=JSON.parse(Buffer.from(typeSnapshot).toString('utf8'));
  for(const required of ['/godot/index.d.ts','/godot-jsb/index.d.ts','/godot.annotations/index.d.ts'])if(!declarations.files[required])throw Error('E_FULL_ENGINE_DECLARATIONS: Missing '+required);
@@ -102,7 +106,7 @@ export function assembleFullEngineRelease({engine,ir,capture,irBytes,declaration
  if(engine.host&&(!/^[a-f0-9]{64}$/.test(engine.host.sha256??'')||!Number.isSafeInteger(engine.host.bytes)||engine.host.bytes<=0||!engine.host.path||engine.host.path.startsWith('/')||engine.host.path.split('/').some(part=>!part||part==='.'||part==='..')))throw Error('E_FULL_ENGINE_HOST: Invalid browser host asset');
 
  if(runtimeAbi){
-  assertWorkerRuntimeAbi(runtimeAbi);assertWorkerBuildProof(engineBuildReport,engine.wasm.decodedSha256??engine.wasm.sha256);assertWorkerSdkProof(build.sdkBuild);
+  assertWorkerRuntimeAbi(runtimeAbi);assertWorkerBuildProof(engineBuildReport,engine);assertWorkerSdkProof(build.sdkBuild);
   if(canonical(runtimeAbi)!==canonical(engineBuildReport.runtimeAbi))throw Error('E_WORKER_BUILD_ABI');
   if(runtimeAbi.runtimeWrite!==undefined&&build.sourceCertified!==true){
    runtimeAbi={...runtimeAbi};delete runtimeAbi.runtimeWrite;
@@ -110,22 +114,29 @@ export function assembleFullEngineRelease({engine,ir,capture,irBytes,declaration
   if(runtimeAbi.runtimeProperties!==undefined&&build.sourceCertified!==true){
    runtimeAbi={...runtimeAbi};delete runtimeAbi.runtimeProperties;
   }
+  if(runtimeAbi.runtimeCall!==undefined&&build.sourceCertified!==true){
+   runtimeAbi={...runtimeAbi};delete runtimeAbi.runtimeCall;
+  }
   build={...build,workerPatch:engineBuildReport.workerPatch,engineRecipe:engineBuildReport.recipe};
   if(runtimeAbi.runtimeProperties!==1)delete build.runtimeProperties;
+  if(runtimeAbi.runtimeCall!==1)delete build.runtimeCall;
   // Keep the original receipts with every declared native capability. The
   // site verifier reconstructs this same report from the sealed release.
   for(const field of ['lifecycleAbi','lifecyclePatch','artifactSetAbi','artifactSetPatch','observerAbi','nativeObserverPatch','hostResourceAbi','hostResourcePatch','shutdownQueueAbi','shutdownQueuePatch','runtimeObservation'])if(engineBuildReport[field]!==undefined)build[field]=engineBuildReport[field];
   if(runtimeAbi.runtimeProperties===1)build.runtimeProperties=engineBuildReport.runtimeProperties;
+  if(runtimeAbi.runtimeCall===1)build.runtimeCall=engineBuildReport.runtimeCall;
   if(runtimeAbi.runtimeWrite===1){
    build.runtimeWrite=engineBuildReport.runtimeWrite;
   }
-  if(runtimeAbi.runtimeProperties===1)build.resolvedBuildOptions={...engineBuildReport.resolvedBuildOptions};
+  if(runtimeAbi.runtimeProperties===1||runtimeAbi.runtimeCall===1)build.resolvedBuildOptions={...engineBuildReport.resolvedBuildOptions};
   else if(runtimeAbi.runtimeWrite===1)build.resolvedBuildOptions={target:engineBuildReport.resolvedBuildOptions.target};
  }
  const definition=getEngineProfile(runtimeProfile);
  const profiles={snake:{ir,capture,irBytes,declarations,namingVersion,codegenVersion,typeSnapshot,strictTypechecks,actualAPIHash:build.actualAPIHash},camel:namingProfiles?.camel};
  if(!profiles.camel)throw Error('E_FULL_ENGINE_NAMING: Both snake and camel captures are required');
  for(const [naming,profile]of Object.entries(profiles))validateGeneratedProfile(profile,engine,naming,runtimeProfile);
+ if(canonical(capture.authoring??null)!==canonical(profiles.camel.capture.authoring??null)||
+    runtimeAbi?.runtimeCall===1&&capture.authoring?.runtimeMethod!==true)throw Error('E_FULL_ENGINE_AUTHORING: Capture profiles disagree about runtime method authoring');
  for(const field of ['engineVersion','bindingVersion','namingVersion','platform'])if(ir[field]!==profiles.camel.ir[field])throw Error('E_FULL_ENGINE_IDENTITY: Naming profiles target different '+field);
  if(namingVersion!==profiles.camel.namingVersion||codegenVersion!==profiles.camel.codegenVersion)throw Error('E_FULL_ENGINE_VERSIONS: Naming profiles use different generators');
  if(canonical([...ir.modules].sort())!==canonical([...profiles.camel.ir.modules].sort()))throw Error('E_FULL_ENGINE_IDENTITY: Naming profiles target different modules');
@@ -149,7 +160,7 @@ export function assembleFullEngineRelease({engine,ir,capture,irBytes,declaration
   const coverage=add(prefix+'coverage.json',JSON.stringify({coverage:profile.declarations.coverage,diagnostics:profile.declarations.diagnostics??[]},null,2)+'\n');
   const strictChecks=add(prefix+'strict-typechecks.json',JSON.stringify({...profile.strictTypechecks,actualAPIHash:profile.actualAPIHash,declarationsHash:sha256(canonical(profile.declarations.files)),naming},null,2)+'\n');
   const snapshot=add(naming==='snake'?'types.json':'types.camel.json',profile.typeSnapshot);
-  apiProfiles[naming]={version:profile.ir.apiVersion,schemaVersion:profile.ir.schemaVersion,bindingVersion:profile.ir.bindingVersion,bindingNaming:naming,namingVersion:profile.namingVersion,codegenVersion:profile.codegenVersion,actualAPIHash:profile.actualAPIHash,ir:apiIr,capture:captureAsset,declarations:declarationFiles,declarationsSnapshot:declarationSnapshot,declarationsHash:sha256(canonical(profile.declarations.files)),coverage,strictTypechecks:strictChecks,typeSnapshot:snapshot,typeSnapshotHash:snapshot.sha256};
+  apiProfiles[naming]={version:profile.ir.apiVersion,schemaVersion:profile.ir.schemaVersion,bindingVersion:profile.ir.bindingVersion,bindingNaming:naming,namingVersion:profile.namingVersion,codegenVersion:profile.codegenVersion,actualAPIHash:profile.actualAPIHash,...(profile.capture.authoring?{authoring:profile.capture.authoring}:{}),ir:apiIr,capture:captureAsset,declarations:declarationFiles,declarationsSnapshot:declarationSnapshot,declarationsHash:sha256(canonical(profile.declarations.files)),coverage,strictTypechecks:strictChecks,typeSnapshot:snapshot,typeSnapshotHash:snapshot.sha256};
  }
  const vendorAsset=add('.playground/vendor.js',vendor,{sdkMode:'production'});
  const developmentVendorAsset=add('.playground/vendor.development.js',developmentVendor,{sdkMode:'development'});
@@ -175,14 +186,20 @@ export function assembleFullEngineRelease({engine,ir,capture,irBytes,declaration
 }
 
 export async function loadProductionApi({engineJs,engineWasm,irPath,reportPath,captureDirectory,naming='snake',execution}){
- if(!irPath){irPath=path.join(captureDirectory,'engine-ir.json');reportPath=irPath+'.capture.json';await captureEngineApi({engineJs,engineWasm,output:irPath,reportPath,naming,execution});}
- if(!reportPath)throw Error('E_FULL_ENGINE_CAPTURE: An existing IR requires its exact production capture report');
+ if(irPath&&!reportPath)throw Error('E_FULL_ENGINE_CAPTURE: An existing IR requires its exact production capture report');
+ const expectedPack = sha256(await engineApiCapturePack(naming));
+ if(!irPath || JSON.parse(await readFile(reportPath,'utf8')).authoring===undefined){
+  irPath=path.join(captureDirectory,'engine-ir.json');reportPath=irPath+'.capture.json';
+  await captureEngineApi({engineJs,engineWasm,output:irPath,reportPath,naming,execution});
+ }
  const [irBytes,captureBytes,api]=await Promise.all([readFile(irPath),readFile(reportPath),import(path.join(repo,'scripts/jsb.react-browser/dist/engine-api.js'))]);
  const ir=api.parseEngineApi(JSON.parse(irBytes.toString('utf8'))),capture=JSON.parse(captureBytes.toString('utf8'));
  if(ir.namingVersion!==api.ENGINE_NAMING_VERSION)throw Error('E_FULL_ENGINE_VERSIONS: Unsupported native naming version');
  if(ir.bindingNaming!==naming||capture.naming!==naming)throw Error('E_FULL_ENGINE_NAMING: Expected '+naming+' API capture');
- const declarations=api.generateEngineDeclarations(ir),{verifyEngineTypes}=await import('./engine-api-typecheck.mjs');
- const strictTypechecks=await verifyEngineTypes(ir,declarations.files);
+ if(capture.capturePackSha256!==expectedPack||capture.authoring?.version!==1||typeof capture.authoring.runtimeMethod!=='boolean')
+  throw Error('E_FULL_ENGINE_AUTHORING: Capture does not identify the production authoring probe');
+ const declarations=api.generateEngineDeclarations(ir,capture.authoring),{verifyEngineTypes}=await import('./engine-api-typecheck.mjs');
+ const strictTypechecks=await verifyEngineTypes(ir,declarations.files,capture.authoring);
  if(strictTypechecks.status!=='passed')throw Error('E_FULL_ENGINE_TYPECHECK: '+naming+' '+JSON.stringify(strictTypechecks));
  return {ir,capture,irBytes,declarations,strictTypechecks,namingVersion:api.ENGINE_NAMING_VERSION,codegenVersion:api.ENGINE_DECLARATIONS_VERSION,actualAPIHash:sha256(api.canonicalEngineApi(ir))};
 }

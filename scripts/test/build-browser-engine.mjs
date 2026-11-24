@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Build provenance is collected where SCons actually runs. Merely pointing at
 // a source header and an unrelated template is never source certification.
-import { readFile, writeFile, readdir, mkdir, rm, cp, lstat, readlink, copyFile } from 'node:fs/promises';
+import { readFile, writeFile, readdir, mkdir, rm, cp, lstat, readlink, symlink } from 'node:fs/promises';
 import { createWriteStream, existsSync } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
 import { dirname, resolve, basename, relative, sep } from 'node:path';
@@ -10,6 +10,7 @@ import { canonical, digest, fail, options, required, writeJson,
   OBSERVATION_READER_SOURCE, OBSERVATION_SOURCE_PATHS, OBSERVATION_EXPORTS, assertRuntimeObservationBuildProof,
   RUNTIME_WRITE_EXPORTS, assertRuntimeWriteBuildProof, runtimeWriteBuildTarget,
   RUNTIME_PROPERTIES_EXPORTS, RUNTIME_PROPERTIES_SOURCE_PATHS, assertRuntimePropertiesBuildProof,
+  assertRuntimeCallBuildProof,
 } from '../release/web-release-utils.mjs';
 import { applyWebEnginePatches } from '../release/patch-web-engine.mjs';
 import {getEngineProfile,engineExecution,engineBuildArgs,validateEngineProfile,validateEngineExecution} from '../release/engine-profiles.mjs';
@@ -22,10 +23,12 @@ import {managedShutdownBuildProof} from '../release/patch-managed-shutdown-queue
 
 const moduleRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const excluded = new Set(['.git', 'node_modules', '.godot', '__pycache__', 'bin', 'obj', 'out', 'dist', 'dist-conformance', 'dist-2d-debug', 'dist-2d-release', 'dist-full-release', 'work', '.browser-engine']);
-const generated = /(?:\.(?:o|os|obj|a|pdb|ilk|wasm|zip|tgz|pyc)$|\.gen\.(?:h|cpp)$|^\.scons)/;
+const generated = /(?:\.(?:o|os|obj|a|pdb|ilk|wasm|zip|tgz|pyc|tsbuildinfo)$|\.gen\.(?:h|cpp)$|^\.scons)/;
 // SCsub unconditionally reads both runtime/editor preset inputs while producing
 // jsb_project_preset.gen.cpp, including skip_js_runtime=yes template builds.
-const nativeBundles = ['jsb.runtime.bundle.js', 'jsb.editor.bundle.js', 'jsb.runtime.bundle.d.ts', 'jsb.runtime.bundle.js.map', 'jsb.editor.bundle.d.ts', 'jsb.editor.bundle.js.map'];
+const nativeBundles = ['jsb.runtime.bundle.js', 'jsb.editor.bundle.js', 'jsb.runtime.bundle.d.ts',
+  'jsb.runtime.bundle.js.map', 'jsb.editor.bundle.d.ts', 'jsb.editor.bundle.js.map'];
+const webBridgeBundle = 'impl/web/js/jsbb.impl.js';
 function godotIgnored(key, name) {
   // Upstream misc/dist is source, as are nested third-party directories named
   // bin/out/dist. Only root build outputs and universal caches are excluded.
@@ -95,14 +98,17 @@ function bindRuntimeObservation(report, template, assets, python) {
   const includeProperties = includeWrite && Object.hasOwn(report.source.inputs, 'bridge/jsb_runtime_properties.cpp');
   if (includeProperties && !RUNTIME_PROPERTIES_SOURCE_PATHS.every(path => Object.hasOwn(report.source.inputs, path)))
     fail('E_RUNTIME_PROPERTIES_SOURCE', 'Runtime property source closure is incomplete');
-  const requiredExports = [...OBSERVATION_EXPORTS, ...(includeWrite ? RUNTIME_WRITE_EXPORTS : []), ...(includeProperties ? RUNTIME_PROPERTIES_EXPORTS : [])];
+  const includeCall = includeWrite && Object.hasOwn(report.source.inputs, 'bridge/jsb_runtime_call.cpp');
+  const requiredSymbols = [...OBSERVATION_EXPORTS, ...(includeWrite ? RUNTIME_WRITE_EXPORTS : []),
+    ...(includeProperties ? RUNTIME_PROPERTIES_EXPORTS : []),
+    ...(includeCall ? ['_godotjs_runtime_call_abi', '_godotjs_runtime_call_execute', 'IsRuntimeCallValue'] : [])];
   const inspect = spawnSync(python, ['-c', [
     'import re, sys, zipfile',
     'with zipfile.ZipFile(sys.argv[1]) as z:',
     ' data = z.read("godot.js")',
     ' for name in sys.argv[2:]:',
-    '  if not re.search(rb"\\b" + name.encode() + rb"\\b", data): sys.exit("Missing runtime bridge export: " + name)',
-  ].join('\n'), template, ...requiredExports], {encoding: 'utf8'});
+    '  if not re.search(rb"\\b" + name.encode() + rb"\\b", data): sys.exit("Missing runtime bridge symbol: " + name)',
+  ].join('\n'), template, ...requiredSymbols], {encoding: 'utf8'});
   if (inspect.error || inspect.status !== 0)
     fail('E_RUNTIME_OBSERVATION_EXPORT', inspect.error?.message ?? inspect.stderr.trim());
   report.runtimeAbi = {...report.runtimeAbi, observation: 1};
@@ -123,6 +129,12 @@ function bindRuntimeObservation(report, template, assets, python) {
     report.runtimeProperties = {abi: 1, sources: Object.fromEntries(RUNTIME_PROPERTIES_SOURCE_PATHS.map(path => [path, report.source.inputs[path]])), exports: [...RUNTIME_PROPERTIES_EXPORTS], wasmSha256: report.runtimeObservation.wasmSha256};
     assertRuntimePropertiesBuildProof(report, report.runtimeProperties.wasmSha256);
   }
+  if (includeCall) {
+    report.runtimeAbi.runtimeCall = 1;
+    report.runtimeCall = {abi: 1, wasmSha256: report.runtimeObservation.wasmSha256,
+      javascriptSha256: assets.find(asset => asset.path === 'godot.js').sha256};
+    assertRuntimeCallBuildProof(report);
+  }
 }
 async function execute(command, args, cwd, logPath) {
   await mkdir(dirname(logPath), { recursive: true });
@@ -135,6 +147,27 @@ async function execute(command, args, cwd, logPath) {
     child.once('close', code => { log.end(() => resolveResult(code)); });
   });
 }
+
+async function generateEngineJavaScript(destinationModule, reportFile) {
+  for (const project of ['scripts/jsb.runtime', 'scripts/jsb.editor', 'impl/web/bridge']) {
+    const installed = resolve(moduleRoot, project, 'node_modules');
+    const compiler = resolve(installed, 'typescript/bin/tsc');
+    if (!existsSync(compiler)) fail('E_BROWSER_TYPESCRIPT', `Run pnpm install --frozen-lockfile first: TypeScript is missing for ${project}`);
+    const cwd = resolve(destinationModule, project);
+    const dependencies = resolve(cwd, 'node_modules');
+    // Resolve installed type dependencies while compiling the copied sources.
+    // The dependency link is removed before hashing the native build inputs.
+    await symlink(installed, dependencies, 'junction');
+    try {
+      const log = `${reportFile}.${basename(project)}.log`;
+      if (await execute(process.execPath, [compiler, '--project', 'tsconfig.json', '--noEmitOnError'], cwd, log) !== 0)
+        fail('E_BROWSER_TYPESCRIPT', `Could not compile ${project}; see ${log}`);
+    } finally {
+      await rm(dependencies);
+    }
+  }
+}
+
 export async function buildBrowserEngine(configuration) {
   const runtimeProfile=getEngineProfile(configuration.profile??configuration.runtimeProfile??'full-engine-v1').id;
   let execution=engineExecution(configuration['execution-model']??configuration.executionModel??'window');
@@ -170,14 +203,10 @@ export async function buildBrowserEngine(configuration) {
   await rm(resolve(destination, 'modules/godotai_api_probe'), { recursive: true, force: true });
   const destinationModule = resolve(destination, 'modules/GodotJS');
   await rm(destinationModule, { recursive: true, force: true });
-  await cp(moduleRoot, destinationModule, { recursive: true, preserveTimestamps: true, filter: path => !excluded.has(basename(path)) && !generated.test(basename(path)) });
-  await mkdir(resolve(destinationModule, 'scripts/out'), { recursive: true });
-  for (const name of nativeBundles) {
-    const input = resolve(moduleRoot, 'scripts/out', name);
-    if (!existsSync(input)) fail('E_BROWSER_RUNTIME_BUNDLE', `Run pnpm build first: SCsub requires scripts/out/${name}`);
-    await copyFile(input, resolve(destinationModule, 'scripts/out', name));
-  }
-  if (!existsSync(resolve(destinationModule, 'impl/web/js/jsbb.impl.js'))) fail('E_BROWSER_BRIDGE', 'Build @godot-js/web-bridge first; generated impl/web/js/jsbb.impl.js is a required snapshotted build input');
+  await cp(moduleRoot, destinationModule, { recursive: true, preserveTimestamps: true, filter: path =>
+    !excluded.has(basename(path)) && !generated.test(basename(path)) &&
+    relative(moduleRoot, path).split(sep).join('/') !== webBridgeBundle });
+  await generateEngineJavaScript(destinationModule, reportFile);
   const patches = await applyWebEnginePatches(destination, { python: configuration.python ?? 'python3', executionModel: execution.executionModel });
   const lifecycleProof=webLifecycleBuildProof(patches);
   const artifactSetProof={...artifactSetMountBuildProof(patches),...nativeObserverBuildProof(patches),...hostResourceBuildProof(patches),...managedShutdownBuildProof(patches)};

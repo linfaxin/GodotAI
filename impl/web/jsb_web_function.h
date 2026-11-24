@@ -26,6 +26,8 @@ namespace v8
             Local<Value> recv, int argc,
             Local<Value> argv[]);
 
+        MaybeLocal<Value> CallRuntime(Local<Value> recv, int argc, Local<Value> argv[], bool& threw);
+
         static MaybeLocal<Function> New(
             Local<Context> context, FunctionCallback callback,
             Local<Value> data = Local<Value>(),

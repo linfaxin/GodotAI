@@ -25,8 +25,6 @@ if ! mkdir "$task_lock"; then
 fi
 trap 'rmdir "$task_lock"' EXIT
 task_build_report="$task_build_dir/bin/godotjs-web-build-report-$$.json"
-# Set this only after building and freezing shared SDK inputs for a build matrix.
-if [ "${SKIP_ENGINE_JS_BUILD:-0}" != 1 ]; then pnpm build:engine-js; fi
 node scripts/test/build-browser-engine.mjs \
   --godot-source "$GODOT_SOURCE" --build-dir "$task_build_dir" \
   --out "$task_build_report" --profile "$task_profile" --target "$task_target" \

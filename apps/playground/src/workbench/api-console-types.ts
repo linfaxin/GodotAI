@@ -1,7 +1,8 @@
-import type {GameScreenshot} from '@godot-js/engine/browser/dedicated/worker-runner';
+import type {GameScreenshot, RuntimeMethodToken} from '@godot-js/engine/browser/dedicated/worker-runner';
 import type {WorkerRunIdentity} from '@godot-js/engine/browser/dedicated/worker-protocol';
 import type {RunnerState} from '@godot-js/engine/browser/protocol';
 import type {RuntimeType} from '@godot-js/engine/browser/dedicated/worker-runtime-properties';
+import type {FacadeReply, SelectedRuntimeMethod} from '../summer-adapter';
 
 export interface ConsoleAnchor {
   editorProjectId: string | null;
@@ -15,14 +16,16 @@ export interface ConsoleCapability {supported: boolean | null; ready: boolean}
 export interface ConsoleEnvironment {
   anchor: ConsoleAnchor;
   activeRunState: RunnerState | null;
+  methodExampleAvailable?: boolean;
   capabilities?: {
     observation?: ConsoleCapability;
     runtimeWrite?: ConsoleCapability;
     runtimeProperties?: ConsoleCapability;
+    runtimeCall?: ConsoleCapability;
     interaction?: ConsoleCapability;
   };
 }
-export interface ConsoleDraft {operationId: string; inputText: string; anchor: ConsoleAnchor}
+export interface ConsoleDraft {operationId: string; inputText: string; anchor: ConsoleAnchor; selectedMethod?: SelectedRuntimeMethod}
 export interface ConsoleResultFacts {
   sourceCallId: string;
   sourceAnchor: ConsoleAnchor;
@@ -31,6 +34,7 @@ export interface ConsoleResultFacts {
   nodes?: {path: string; instanceId: string; type: string}[];
   propertyTarget?: {runId: string; path: string; expectedInstanceId: string};
   properties?: {name: string; type: RuntimeType}[];
+  methods?: {name: string; signature: string; token: RuntimeMethodToken; parameterTypes: SelectedRuntimeMethod['parameterTypes']}[];
   input?: {runId: string; operationId: string};
   stoppedRunIds?: string[];
   truncated?: true;
@@ -59,11 +63,13 @@ export interface ConsoleGate {
 export interface ConsoleHooks {
   readContext(): ConsoleEnvironment;
   subscribeContext(listener: () => void): () => void;
-  openExample(): Promise<string>;
+  callSelectedMethod(input: unknown, signal: AbortSignal | undefined, selected: SelectedRuntimeMethod): Promise<FacadeReply>;
+  openExample(operationId: string): Promise<string>;
 }
 export interface ConsoleFillSelection {
   sourceCallId: string;
   nodePath?: string;
+  methodName?: string;
   propertyNames?: readonly string[];
   stoppedRunId?: string;
 }

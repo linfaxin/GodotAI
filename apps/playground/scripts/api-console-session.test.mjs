@@ -100,6 +100,39 @@ test('tree and descriptor facts fill explicit node/type pairs without parsing di
   assert.equal(JSON.parse(f.session.snapshot().draft.inputText).runId,'run-1');f.session.dispose();
 });
 
+test('manual method discovery binds its result to the submission context',async()=>{
+  const f=createConsoleFixture(),work=deferred();
+  f.session.selectOperation('describe_runtime_methods');
+  const run={...consoleIdentity,runId:'run-2',revision:8};
+  const anchor={...consoleEnvironment.anchor,editorProjectId:'project-2',editorRevision:8,
+    activeRunId:run.runId,activeRunProjectId:'project-2',activeRunRevision:run.revision};
+  const current={...consoleEnvironment,anchor};
+  f.setContext(current);
+  const target={runId:run.runId,path:consoleNode.path,expectedInstanceId:consoleNode.instanceId};
+  const releaseId='b'.repeat(64),methodToken={version:1,runId:run.runId,releaseId,returnType:'int',stamp:'a'.repeat(64)};
+  f.session.updateDraft(JSON.stringify(target));
+  f.setReply('describe_runtime_methods',()=>work.promise);
+  const submitted=f.session.submit();
+  f.setContext({...current,anchor:{...anchor,editorRevision:9}});
+  work.resolve({ok:true,receipt:{...target,run,releaseId},result:{methods:[{method:'take_damage',parameterTypes:['int'],returnType:'int',methodToken}],truncated:false}});
+  await submitted;
+  const discovery=last(f);
+  assert.equal(discovery.draft.anchor.editorProjectId,'project-1');
+  assert.deepEqual(discovery.resultFacts.sourceAnchor,anchor);
+  f.session.loadPreset('engine.runtime_call','{"args":[25]}');
+  f.session.updateTarget({sourceCallId:discovery.callId,methodName:'take_damage'});
+  await f.session.submit();
+  assert.equal(f.session.snapshot().clientError.kind,'stale_target');
+  assert.equal(f.calls.length,1);
+
+  f.setContext(current);
+  await f.session.submit();
+  assert.deepEqual(f.calls.at(-1).input,{op:'engine.runtime_call',input:{path:target.path,method:'take_damage',args:[25]}});
+  assert.deepEqual(last(f).draft.selectedMethod.methodToken,methodToken);
+  assert.deepEqual(last(f).draft.selectedMethod.parameterTypes,['int']);
+  f.session.dispose();
+});
+
 test('loading historical parameters never invokes the API or rebinds an old Summer target',async()=>{
   const f=createConsoleFixture();f.session.selectOperation('engine.get_runtime_tree');await f.session.submit();const old=last(f);
   f.setContext(changeRun());f.session.loadHistory(old.callId);assert.equal(f.calls.length,1);assert.equal(f.session.snapshot().draft.anchor.activeRunId,'run-1');
@@ -172,6 +205,21 @@ test('bounded projections keep provenance facts and history eviction invalidates
   assert.equal(f.session.snapshot().clientError.kind,'missing_source');
   const newest=last(f).callId;assert.equal(f.session.hasCall(newest),true);
   f.session.clearSettled();assert.equal(f.session.hasCall(newest),false);f.session.dispose();
+});
+
+test('draft reformatting and result projection preserve signed zero and literal string keys and values',async()=>{
+  const f=createConsoleFixture();
+  const values={number:-0,values:['\0','\0\0','\\u0000',-0],'\0':'\0value','with"quote':'\0"value'};
+  f.session.loadPreset('check',`{"number":-0,"values":["\\u0000","\\u0000\\u0000","\\\\u0000",-0],"\\u0000":"\\u0000value","with\\"quote":"\\u0000\\"value"}`);
+  f.session.updateTarget();
+  const {projectId,expectedEditorRevision,...draft}=JSON.parse(f.session.snapshot().draft.inputText);
+  assert.equal(projectId,consoleEnvironment.anchor.editorProjectId);
+  assert.equal(expectedEditorRevision,consoleEnvironment.anchor.editorRevision);
+  assert.deepEqual(draft,values);
+  f.setReply('check',{ok:true,result:values});
+  await f.session.submit();
+  assert.deepEqual(JSON.parse(last(f).resultProjection).result,values);
+  f.session.dispose();
 });
 
 test('thrown calls and unconfirmed writes retain execution uncertainty, never retry',async()=>{

@@ -78,7 +78,8 @@ export function assertWorkerRuntimeAbi(value){
     (value.observation!==undefined&&(value.observation!==1||value.lifecycle!==1))||
     (value.runtimeWrite!==undefined&&(value.runtimeWrite!==1||value.observation!==1||value.lifecycle!==1))||
     (value.runtimeProperties!==undefined&&(value.runtimeProperties!==1||value.observation!==1||value.lifecycle!==1))||
-    Object.keys(value).some(key=>key!=='observation'&&key!=='runtimeWrite'&&key!=='runtimeProperties'&&!Object.hasOwn(WORKER_RUNTIME_ABI,key)))throw Error('E_WORKER_RUNTIME_ABI');
+    (value.runtimeCall!==undefined&&(value.runtimeCall!==1||value.observation!==1||value.lifecycle!==1))||
+    Object.keys(value).some(key=>key!=='observation'&&key!=='runtimeWrite'&&key!=='runtimeProperties'&&key!=='runtimeCall'&&!Object.hasOwn(WORKER_RUNTIME_ABI,key)))throw Error('E_WORKER_RUNTIME_ABI');
  return value;
 }
 export function getEngineProfile(id=FULL_ENGINE_PROFILE){if(!isEngineProfile(id))throw Error('E_ENGINE_PROFILE: Unsupported official engine profile '+String(id));return ENGINE_PROFILES[id];}

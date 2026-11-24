@@ -50,7 +50,6 @@ ENGINE_PROFILE=engine-2d-v1 \
 ENGINE_TARGET=template_debug \
 ENGINE_LTO=none \
 ENGINE_MODULE_MODE=baseline \
-SKIP_ENGINE_JS_BUILD=1 \
 bash apps/playground/scripts/build-web-engine.sh
 ```
 

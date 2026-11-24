@@ -1,10 +1,11 @@
-import type {FacadeReply} from './summer-adapter';
+import type {FacadeReply, SelectedRuntimeMethod, SummerMethodBackend} from './summer-adapter';
 import type {
   createDebugRecorder, DebugBuild, DebugCheck, DebugRun, DebugContext, DebugExit, ReadRunEventsOptions,
 } from './debug-api';
 import {snapshotRuntimePropertyData, prepareRuntimeProperties, runtimePropertiesError, type DescribeInput, type ReadInput, type WriteInput, type PropertyKind, type PropertyResult, prepareRuntimeObservation, prepareRuntimeSet, runtimeWriteError, type GameInput, type GameScreenshot, type InteractionResult,
   type ObservationResult, type PreparedRuntimeObservation, type RuntimeNodeInput, type RuntimeTreeInput, type ScreenshotInput,
-  type RuntimeSetInput, type RuntimeSetResult, type WaitForInput, type WorkerPreviewRunner} from '@godot-js/engine/browser/dedicated/worker-runner';
+  type RuntimeSetInput, type RuntimeSetResult, type WaitForInput, type WorkerPreviewRunner,
+  runtimeMethodError, type DescribeMethodsInput, type CallMethodInput} from '@godot-js/engine/browser/dedicated/worker-runner';
 
 type Recorder = ReturnType<typeof createDebugRecorder>;
 type ErrorCode = 'invalid_input' | 'not_found' | 'invalid_cursor' | 'revision_conflict' |
@@ -41,7 +42,8 @@ interface Actions {
   observation?(): Observation | undefined;
   runtimeWrite?(): Pick<WorkerPreviewRunner, 'runtimeWriteState' | 'setRuntimeProperty'> | undefined;
   runtimeProperties?(): Pick<WorkerPreviewRunner, 'runtimePropertiesState' | 'describeRuntimeProperties' | 'readRuntimeProperties' | 'writeRuntimeProperty'> | undefined;
-  summerCall?(input: unknown, signal?: AbortSignal): Promise<FacadeReply>;
+  runtimeCall?(): Pick<WorkerPreviewRunner, 'runtimeCallState' | 'describeRuntimeMethods' | 'callRuntimeMethod' | 'getRuntimeTree'> | undefined;
+  summerCall?(input: unknown, signal?: AbortSignal, selected?: SelectedRuntimeMethod): Promise<FacadeReply>;
 }
 
 export interface PlaygroundApiCall {
@@ -248,13 +250,40 @@ export function createPlaygroundApi(recorder: Recorder, actions: Actions) {
     return runner.writeRuntimeProperty(value as WriteInput, signal) as Promise<PropertyResult<K>>;
   }
 
+  const methodBackend: SummerMethodBackend = {
+    context() {
+      const context = debug.getContext().result;
+      return {projectId: context.projectId, editorRevision: context.editorRevision ?? 0,
+        activeRunId: context.activeRunId, pendingAttemptId: context.latestBuildAttemptId};
+    },
+    run(runId) {
+      const run = debug.getRun(runId);
+      if (!run.ok) return run;
+      return ok({...run.result, releaseId: run.result.release.releaseId,
+        runtimeCall: actions.runtimeCall?.()?.runtimeCallState(runId) ?? {supported: false, ready: false}});
+    },
+    tree: (input, signal, deadline) => actions.runtimeCall?.()?.getRuntimeTree(input, signal, deadline) ??
+      Promise.resolve(runtimeMethodError('unsupported')),
+    describe: (input, signal, deadline) => actions.runtimeCall?.()?.describeRuntimeMethods(input, signal, deadline) ??
+      Promise.resolve(runtimeMethodError('unsupported')),
+    invoke: (input, signal, deadline) => actions.runtimeCall?.()?.callRuntimeMethod(input, signal, deadline) ??
+      Promise.resolve(runtimeMethodError('unsupported')),
+  };
+
+  const summerCall = tool('summer_call', (input: unknown, signal?: AbortSignal, selected?: SelectedRuntimeMethod): Promise<FacadeReply> =>
+    actions.summerCall?.(input, signal, selected) ??
+    Promise.resolve({ok: false, error: {code: 'unsupported', message: 'Summer adapter is unavailable', retry: 'no', details: {godotai: {compatibility: {input: 'subset', semantics: 'partial', payload: 'godotai-typed-v1', summerNativeFixture: false}}}}}));
+
   const api = Object.freeze({
     schemaVersion: 1 as const,
+    describe_runtime_methods: tool('describe_runtime_methods', (input: DescribeMethodsInput, signal?: AbortSignal) =>
+      actions.runtimeCall?.()?.describeRuntimeMethods(input, signal) ?? Promise.resolve(runtimeMethodError('unsupported'))),
+    call_runtime_method: tool('call_runtime_method', (input: CallMethodInput, signal?: AbortSignal) =>
+      actions.runtimeCall?.()?.callRuntimeMethod(input, signal) ?? Promise.resolve(runtimeMethodError('unsupported'))),
     describe_runtime_properties: tool('describe_runtime_properties', (input: DescribeInput, signal?: AbortSignal) => accessProperties('describe', input, signal)),
     read_runtime_properties: tool('read_runtime_properties', (input: ReadInput, signal?: AbortSignal) => accessProperties('read', input, signal)),
     write_runtime_property: tool('write_runtime_property', (input: WriteInput, signal?: AbortSignal) => accessProperties('write', input, signal)),
-    summer_call: tool('summer_call', (input: unknown, signal?: AbortSignal): Promise<FacadeReply> => actions.summerCall?.(input, signal) ??
-      Promise.resolve({ok: false, error: {code: 'unsupported', message: 'Summer adapter is unavailable', retry: 'no', details: {godotai: {compatibility: {input: 'subset', semantics: 'partial', payload: 'godotai-typed-v1', summerNativeFixture: false}}}}})),
+    summer_call: (input: unknown, signal?: AbortSignal) => summerCall(input, signal),
     get_project_context: tool('get_project_context', getProjectContext),
     check: tool('check', async (input: ProjectInput) => {
       const rejected = admit(input, 'check');
@@ -289,6 +318,7 @@ export function createPlaygroundApi(recorder: Recorder, actions: Actions) {
         observation: actions.observation?.()?.observationState(runId) ?? {supported: false, ready: false},
         runtimeWrite: actions.runtimeWrite?.()?.runtimeWriteState(runId) ?? {supported: false, ready: false},
         runtimeProperties: actions.runtimeProperties?.()?.runtimePropertiesState(runId) ?? {supported: false, ready: false},
+        runtimeCall: actions.runtimeCall?.()?.runtimeCallState(runId) ?? {supported: false, ready: false},
       });
     }),
     read_run_events: tool('read_run_events', (input: {runId: string} & ReadRunEventsOptions) => {
@@ -327,7 +357,7 @@ export function createPlaygroundApi(recorder: Recorder, actions: Actions) {
   });
 
   return {
-    api,
+    api, methodBackend, summerCall,
     subscribe(observer: (call: PlaygroundApiCall) => void) {
       observers.add(observer);
       return () => { observers.delete(observer); };

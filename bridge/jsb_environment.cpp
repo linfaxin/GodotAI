@@ -1514,6 +1514,7 @@ namespace jsb
                     jsb_check(resolved_module->source_info.source_filepath == source_info.source_filepath);
 
                     JSB_LOG(VeryVerbose, "reload module %s", module_id);
+                    ScriptClassInfo::revoke_runtime_methods(this, *resolved_module);
                     resolved_module->mark_as_reloaded();
                     if (!resolver->load(this, source_info.source_filepath, *resolved_module))
                     {

@@ -1,6 +1,6 @@
 import {CONSOLE_OPERATIONS, getConsoleOperation, MAX_CONSOLE_READ_PROPERTIES, type ConsoleOperation, type ConsoleOperationId} from './api-console-catalog';
 import {CONSOLE_LESSONS, type ConsoleLessonStep} from './api-console-presets';
-import {consoleResultSource} from './api-console-session';
+import {consoleResultSource, stringifyConsoleJson} from './api-console-session';
 import type {ConsoleCall, ConsoleCapability, ConsoleFillSelection, ConsoleSession, ConsoleSnapshot} from './api-console-types';
 
 function element<K extends keyof HTMLElementTagNameMap>(tag: K, className = '', text?: string) {
@@ -140,7 +140,7 @@ function createApiConsoleCard(container: HTMLElement, session: ConsoleSession, o
   const contextRows = ['编辑项目 / 版本', '主运行 / 源码版本', '运行归属 / 阶段', '待启动 attempt'].map(contextRow);
   const capabilityRows = ([
     ['observation', '运行时观察'], ['runtimeWrite', '原生属性写入'],
-    ['runtimeProperties', '公开属性访问'], ['interaction', '截图与输入'],
+    ['runtimeProperties', '公开属性访问'], ['runtimeCall', '公开方法调用'], ['interaction', '截图与输入'],
   ] as const).map(([key, label]) => ({key, value: contextRow(label)}));
   const compatibility = element('p', 'api-console-note', operation.family === 'summer'
     ? 'Summer 风格输入子集 · 部分语义 · GodotAI typed-v1 结果' : 'GodotAI 本地辅助');
@@ -175,13 +175,13 @@ function createApiConsoleCard(container: HTMLElement, session: ConsoleSession, o
   const actions = element('div', 'api-console-actions');
   const preset = button('填入预设', 'preset', () => {
     const value = operation.createPreset(session.snapshot().environment.anchor);
-    session.loadPreset(operation.id, JSON.stringify(value.input, null, 2));
+    session.loadPreset(operation.id, stringifyConsoleJson(value.input));
     if (value.missing.length) message = `还需实际结果来源：${value.missing.join('、')}`;
   });
   const update = button('更新目标 / 填入上下文', 'update-target', () => session.updateTarget());
   const format = button('格式化 JSON', 'format', () => {
     const parsed: unknown = JSON.parse(input.value);
-    session.updateDraft(JSON.stringify(parsed, null, 2));
+    session.updateDraft(stringifyConsoleJson(parsed));
   });
   function submit() { selectedCallId = undefined; return session.submit(); }
   const execute = button('执行', 'execute', submit); execute.classList.add('api-console-primary');
@@ -241,7 +241,7 @@ function createApiConsoleCard(container: HTMLElement, session: ConsoleSession, o
   function requestText(draft: {operationId: string; inputText: string}) {
     try {
       const item = getConsoleOperation(draft.operationId), value: unknown = JSON.parse(draft.inputText);
-      return JSON.stringify(item?.family === 'summer' ? {op: item.name, input: value} : {method: item?.name ?? draft.operationId, input: value}, null, 2);
+      return stringifyConsoleJson(item?.family === 'summer' ? {op: item.name, input: value} : {method: item?.name ?? draft.operationId, input: value});
     } catch { return 'input JSON 尚未解析成功。'; }
   }
   function renderHistory(state: ConsoleSnapshot, selected?: ConsoleCall) {
@@ -275,7 +275,7 @@ function createApiConsoleCard(container: HTMLElement, session: ConsoleSession, o
     const sourceCallId = call.callId;
     const saved = savedSourceSelection?.sourceCallId === sourceCallId ? savedSourceSelection : undefined;
     sources.append(element('h4', '', '使用此结果填参'), element('p', 'api-console-note', `来源 ${sourceCallId}；只填入当前所选操作，不会执行。`));
-    let node: HTMLSelectElement | undefined, properties: HTMLSelectElement | undefined, stopped: HTMLSelectElement | undefined;
+    let node: HTMLSelectElement | undefined, method: HTMLSelectElement | undefined, properties: HTMLSelectElement | undefined, stopped: HTMLSelectElement | undefined;
     function select(label: string, name: string) {
       const text = element('label', 'api-console-label', label), value = test(element('select'), name);
       text.append(value); sources.append(text); return value;
@@ -287,6 +287,14 @@ function createApiConsoleCard(container: HTMLElement, session: ConsoleSession, o
         const option = element('option', '', `${target.path} · ${target.type} · #${target.instanceId}`); option.value = target.path; node.append(option);
       }
       node.value = saved?.nodePath ?? '';
+    }
+    if (kind === 'method' && facts.methods) {
+      method = select('方法（明确选择登记签名）', 'source-method');
+      const placeholder = element('option', '', '请选择方法…'); placeholder.value = ''; method.append(placeholder);
+      for (const entry of facts.methods) {
+        const option = element('option', '', entry.signature); option.value = entry.name; method.append(option);
+      }
+      method.value = saved?.methodName ?? '';
     }
     if (kind === 'properties' && facts.properties) {
       properties = select(`属性（每次最多 ${MAX_CONSOLE_READ_PROPERTIES} 项）`, 'source-properties');
@@ -309,11 +317,12 @@ function createApiConsoleCard(container: HTMLElement, session: ConsoleSession, o
     function readSelection(): ConsoleFillSelection {
       const selection: ConsoleFillSelection = {sourceCallId};
       if (node) selection.nodePath = node.value;
+      if (method) selection.methodName = method.value;
       if (properties) selection.propertyNames = Array.from(properties.selectedOptions, option => option.value);
       if (stopped) selection.stoppedRunId = stopped.value;
       return selection;
     }
-    if (node || properties || stopped) readSourceSelection = readSelection;
+    if (node || method || properties || stopped) readSourceSelection = readSelection;
     const use = button('填入当前操作', 'use-result', () => session.updateTarget(readSelection()));
     use.dataset.sourceId = sourceCallId;
     const propertyLimit = properties ? test(element('p', 'api-console-error', `每次最多 ${MAX_CONSOLE_READ_PROPERTIES} 项属性，请减少选择。`), 'source-property-limit') : undefined;
@@ -322,9 +331,9 @@ function createApiConsoleCard(container: HTMLElement, session: ConsoleSession, o
       const count = properties?.selectedOptions.length ?? 0;
       const overLimit = count > MAX_CONSOLE_READ_PROPERTIES;
       if (propertyLimit) propertyLimit.hidden = !overLimit;
-      use.disabled = !!node && !node.value || !!properties && (!count || overLimit) || !!stopped && !stopped.value;
+      use.disabled = !!node && !node.value || !!method && !method.value || !!properties && (!count || overLimit) || !!stopped && !stopped.value;
     };
-    for (const field of [node, properties, stopped]) if (field) field.onchange = readiness;
+    for (const field of [node, method, properties, stopped]) if (field) field.onchange = readiness;
     readiness(); sources.append(use);
     if (facts.truncated) sources.append(element('p', 'api-console-note', '来源列表已截断；这里只能使用已保留的事实。'));
   }
@@ -362,7 +371,11 @@ function createApiConsoleCard(container: HTMLElement, session: ConsoleSession, o
     contextRows[3].textContent = anchor.pendingAttemptId ?? '无';
     for (const {key, value} of capabilityRows) setText(value, capabilityText(state.environment.capabilities?.[key]));
     execute.disabled = state.owner !== null || !!state.pendingCallId;
-    open.disabled = state.owner !== null;
+    const methodExample = operation.id === 'engine.runtime_call' || operation.id === 'describe_runtime_methods';
+    open.disabled = state.owner !== null || methodExample && state.environment.methodExampleAvailable !== true;
+    if (methodExample) setText(exampleNote, state.environment.methodExampleAvailable === true
+      ? '打开玩法方法示例。选择方法和填参后，由你执行调用。'
+      : '当前引擎发布或呈现模式不支持玩法方法示例。');
     const pendingHere = state.history.some(call => call.callId === state.pendingCallId && call.draft.operationId === operation.id);
     cancel.hidden = !pendingHere || !state.cancellable;
     status.textContent = state.owner === 'replay' ? '自动验证正在运行；结束后可手工调用。'
@@ -399,11 +412,11 @@ function createApiConsoleCard(container: HTMLElement, session: ConsoleSession, o
     },
     loadLesson(step: ConsoleLessonStep) {
       act(() => {
-        if (step.input !== undefined) session.loadPreset(operation.id, JSON.stringify(step.input, null, 2));
+        if (step.input !== undefined) session.loadPreset(operation.id, stringifyConsoleJson(step.input));
         if (step.inputOverrides !== undefined) {
           const current: unknown = JSON.parse(session.snapshot().draft.inputText);
           if (!current || typeof current !== 'object' || Array.isArray(current)) throw new Error('请先准备有效的 input 对象。');
-          session.updateDraft(JSON.stringify({...current, ...step.inputOverrides}, null, 2));
+          session.updateDraft(stringifyConsoleJson({...current, ...step.inputOverrides}));
         }
         message = step.notes ?? '已载入步骤，请检查参数后手工执行。';
         lessons.open = true; input.focus();

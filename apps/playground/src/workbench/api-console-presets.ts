@@ -19,6 +19,21 @@ export interface ConsoleLesson {
 
 export const CONSOLE_LESSONS: readonly ConsoleLesson[] = [
   {
+    id: 'runtime-method',
+    title: 'Summer：调用玩法方法',
+    description: '从方法调用标签打开玩法方法示例。执行后先读回血量，再采集后续 PNG。',
+    steps: [
+      {id: 'play', label: '启动示例', operationId: 'engine.play', input: {}, notes: '等本次 attempt 进入 running。'},
+      {id: 'tree', label: '发现 Player', operationId: 'engine.get_runtime_tree', input: {depth: 3, limit: 50}},
+      {id: 'describe', label: '发现玩法方法', operationId: 'describe_runtime_methods', notes: '从本次树中选择 Player 的实际实例。'},
+      {id: 'invoke', label: '调用 take_damage(25)', operationId: 'engine.runtime_call', inputOverrides: {args: [25]}, notes: '从发现结果选择 take_damage，执行后核对返回 75。'},
+      {id: 'describe-health', label: '发现血量属性', operationId: 'describe_runtime_properties', inputOverrides: {names: ['health']}, notes: '从本次运行树选择 Player，执行后取得 health 的实际类型。'},
+      {id: 'read', label: '独立读回血量', operationId: 'read_runtime_properties', notes: '从属性发现结果选择 health 并填参，执行后核对血量为 75。'},
+      {id: 'screenshot', label: '观察血条缩短', operationId: 'engine.screenshot', input: {target: 'game'}},
+      {id: 'stop', label: '停止并确认原运行退出', operationId: 'engine.stop', input: {}},
+    ],
+  },
+  {
     id: 'summer-position',
     title: 'Summer：观察与修改位置',
     description: '先打开独立示例。每一步只填入请求，由你执行、阅读结果并继续；等待启动和退出使用明确标注的 GodotAI 辅助。',

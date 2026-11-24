@@ -200,6 +200,17 @@ const jsbb_console = {
 // opaque for UniversalBridgeClass
 const jsbb_opaque = Symbol();
 const jsbb_internal_field_count = Symbol();
+const jsbb_runtime_apply = Reflect.apply;
+const jsbb_runtime_object_create = Object.create;
+const jsbb_runtime_call_values = new WeakSet<object>();
+const jsbb_runtime_call_value_add = jsbb_runtime_call_values.add.bind(jsbb_runtime_call_values);
+const jsbb_runtime_call_value_has = jsbb_runtime_call_values.has.bind(jsbb_runtime_call_values);
+
+function jsbb_track_runtime_call_value(value: unknown): void {
+    // Rejection events identify real Promises by identity. Do not inspect an
+    // arbitrary return value or exception to decide whether it is a Promise.
+    if (value !== null && typeof value === "object") jsbb_runtime_call_value_add(value);
+}
 
 //TODO fastpath to verify a UniversalBridgeClass
 // const jsbb_hidden = Symbol();
@@ -546,6 +557,10 @@ class jsbb_Engine {
             }
 
             const ev = event as PromiseRejectionEvent;
+            if (jsbb_runtime_call_value_has(ev.promise)) {
+                ev.preventDefault();
+                return;
+            }
             jsbb_console.warn("unhandled_rejection", ev.promise, ev.reason);
             const stack = self._stack;
             stack.EnterScope();
@@ -1237,6 +1252,24 @@ class jsbb_Engine {
         }
     }
 
+    RuntimeCall(this_sp: StackPosition, func_sp: StackPosition, argc: number, argv: IntPtr): StackPosition {
+        const receiver = this._stack.GetValue(this_sp);
+        const fn = this._stack.GetValue(func_sp);
+        if (typeof fn !== "function" || argc < 0 || argc > 8) return -2;
+        const args = jsbb_runtime_object_create(null) as {length: number; [index: number]: unknown};
+        args.length = argc;
+        for (let i = 0; i < argc; ++i) args[i] = this._stack.GetValue(_jsbb_.i32[(argv >> 2) + i]);
+        let value: unknown;
+        try {
+            value = jsbb_runtime_apply(fn, receiver, args);
+        } catch (exception) {
+            jsbb_track_runtime_call_value(exception);
+            return -1;
+        }
+        jsbb_track_runtime_call_value(value);
+        return value === undefined ? jsbb_StackPos.Undefined : this._stack.Push(value);
+    }
+
     CallAsConstructor(func_sp: StackPosition, argc: number, argv: IntPtr): StackPosition {
         jsbb_console.trace("CallAsConstructor", func_sp, argc, argv);
 
@@ -1584,6 +1617,10 @@ class _jsbb_ {
     private static _routes = new Map<number, WorkerRuntime>();
     private static _relay_pending: WorkerMessage[] = [];
     private static _listening_workers = new WeakSet<Worker>();
+
+    static IsRuntimeCallValue(value: object): boolean {
+        return jsbb_runtime_call_value_has(value);
+    }
 
     static queue_worker_message(message: QueuedWorkerMessage): void {
         this._pending_worker_messages.push(message);

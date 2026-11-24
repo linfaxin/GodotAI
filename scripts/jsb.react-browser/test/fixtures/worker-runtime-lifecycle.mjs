@@ -22,7 +22,7 @@ export async function fixture(load){
  class Port{sent=[];onmessage=null;postMessage(value){this.sent.push(value);}start(){}}
  class Scope{closed=0;addEventListener(name,fn){if(!listeners.has(name))listeners.set(name,new Set());listeners.get(name).add(fn);}removeEventListener(name,fn){listeners.get(name)?.delete(fn);}close(){this.closed++;}}
  const scope=new Scope();scope.WorkerGlobalScope=Scope;
- const sandbox={console,crypto,MessagePort:Port,ArrayBuffer,Uint8Array,TextEncoder,AbortController,DOMException,queueMicrotask,__load:load,setInterval(){const id=++timer;timers.add(id);return id;},clearInterval:id=>timers.delete(id)};
+ const sandbox={console,crypto,MessagePort:Port,ArrayBuffer,Uint8Array,TextEncoder,TextDecoder,AbortController,AbortSignal,DOMException,queueMicrotask,__load:load,setInterval(){const id=++timer;timers.add(id);return id;},clearInterval:id=>timers.delete(id)};
  const context=vm.createContext(sandbox);vm.runInContext(code,context);const clone=value=>vm.runInContext('('+JSON.stringify(value)+')',context),prepared=await context.Runtime.prepareWorkerRunConfiguration(clone({}));
  const identity={runId:'preview-lifecycle',revision:1,generation:1,buildKey:'pack',documentId:'doc',workerId:'worker',runConfigurationHash:prepared.hash},control=new Port(),data=new Port();
  const boot=Object.assign(clone({...identity,protocolVersion:2,type:'worker-connect'}),{configuration:prepared.configuration,release:{runtimeAbi:{protocolVersion:2,host:1,audio:1,presentation:1}},pack:new Uint8Array([1]),canvas:{},geometry:{width:1,height:1,dpr:1,epoch:0},controlPort:control,dataPort:data});

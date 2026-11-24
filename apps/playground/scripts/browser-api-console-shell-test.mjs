@@ -65,7 +65,7 @@ await runReportedBrowserTest({scope: 'real-main-api-console-shell',
       await openConsoleOperation(page, 'engine.get_project_context');
       assert.equal(await page.locator('#api-console-pane').isVisible(), true);
       assert.equal(await page.locator('#code-pane').isVisible(), false);
-      assert.equal(await page.locator('#api-list .api-list-summary:visible').count(), 14);
+      assert.equal(await page.locator('#api-list .api-list-summary:visible').count(), 16);
       assert.equal(await page.locator('#api-list .api-list-group').count(), 2);
       assert(await page.locator('#api-list').evaluate(node => node.scrollWidth <= node.clientWidth));
       assert(await page.locator('.api-list-summary').evaluateAll(nodes => nodes.every(node => node.scrollWidth <= node.clientWidth)));

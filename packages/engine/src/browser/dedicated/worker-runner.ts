@@ -28,7 +28,11 @@ import {prepareRuntimeProperties, readNativePropertyResult, runtimePropertiesErr
   type PropertyKind, type PropertyCommand, type PropertyResult, type ResultByKind, type NativeResult,
   type RuntimePropertiesState, type AccessReason, type Correlation} from './worker-runtime-properties.js';
 import {readAccessId} from './worker-runtime-access-transport.js';
+import {prepareRuntimeMethod, publicMethodResult, readNativeMethodResult, RUNTIME_CALL_VERSION, runtimeMethodError, supportsWorkerRuntimeCall, uncertainMethod,
+  type CallMethodInput, type DescribeMethodsInput, type MethodCallResult, type MethodDescriptionResult,
+  type MethodKind, type MethodReceipt, type MethodUncertainReason, type NativeMethodResult, type RuntimeCallState} from './worker-runtime-call.js';
 export * from './worker-runtime-properties.js';
+export * from './worker-runtime-call.js';
 export {supportsWorkerInteraction} from './worker-interaction.js';
 export type {GameGesture, GameInput, GameScreenshot, InputReceipt, InteractionResult, ScreenshotInput, WaitForInput} from './worker-interaction.js';
 export {prepareRuntimeObservation, supportsWorkerObservation} from './worker-runtime-observation.js';
@@ -68,6 +72,9 @@ interface PendingRuntimeProperty {
   expire(): void;
   reply(value: unknown): void;
   retire(reason: 'run_ended' | 'transport_lost'): void;
+}
+interface PendingRuntimeMethod extends Omit<PendingRuntimeProperty, 'kind'> {
+  kind: MethodKind;
 }
 interface PendingRuntimeWrite extends RuntimeWriteId {
   expire(): void;
@@ -114,6 +121,7 @@ interface Session {
   runtimeWrite?: PendingRuntimeWrite;
   accessSequence: number;
   runtimeProperties?: PendingRuntimeProperty;
+  runtimeMethod?: PendingRuntimeMethod;
   input?: InputRecord;
   inputSequence: number;
   failure?: ReturnType<typeof previewDiagnostic>;
@@ -135,6 +143,7 @@ export class WorkerPreviewRunner {
   private readonly observationVersions = new Map<string, boolean | null>();
   private readonly runtimeWriteVersions = new Map<string, boolean | null>();
   private readonly runtimePropertiesVersions = new Map<string, boolean | null>();
+  private readonly runtimeCallVersions = new Map<string, boolean | null>();
   private inputWaiters = 0;
   private active?: Session;
   private sequence = 0;
@@ -185,6 +194,7 @@ export class WorkerPreviewRunner {
     s.observation?.finish(observationError('run_ended'));
     s.runtimeWrite?.retire(report.reason === 'forced-frame-disposal' || report.reason === 'crashed' ? 'transport_lost' : 'run_ended');
     s.runtimeProperties?.retire(report.reason === 'forced-frame-disposal' || report.reason === 'crashed' ? 'transport_lost' : 'run_ended');
+    s.runtimeMethod?.retire(report.reason === 'forced-frame-disposal' || report.reason === 'crashed' ? 'transport_lost' : 'run_ended');
     if (s.input) this.settleInput(s.input, {down: 'unconfirmed', up: 'unconfirmed', reason: 'run_ended'});
     s.projectQueue.length=0;s.projectBytes=0;s.commands.clear();
     clearTimeout(s.timer); clearInterval(s.watchdog);
@@ -246,6 +256,8 @@ export class WorkerPreviewRunner {
     this.runtimeWriteVersions.set(identity.runId, null);
     if (this.runtimeWriteVersions.size > MAX_RECEIPTS) this.runtimeWriteVersions.delete(this.runtimeWriteVersions.keys().next().value!);
     this.runtimePropertiesVersions.set(identity.runId, null);
+    this.runtimeCallVersions.set(identity.runId, null);
+    if (this.runtimeCallVersions.size > MAX_RECEIPTS) this.runtimeCallVersions.delete(this.runtimeCallVersions.keys().next().value!);
     if (this.runtimePropertiesVersions.size > MAX_RECEIPTS) this.runtimePropertiesVersions.delete(this.runtimePropertiesVersions.keys().next().value!);
     s.onVisibility=()=>{if(this.live(s)&&this.options.container.ownerDocument.visibilityState!=='hidden')s.lastWorkerBeat=now();};
     this.options.container.ownerDocument.addEventListener?.('visibilitychange',s.onVisibility);
@@ -260,6 +272,13 @@ export class WorkerPreviewRunner {
       if (m.type === 'runtime-property-result') {
         const id = readAccessId('property', m, identity.runId);
         const current = s.runtimeProperties;
+        if (id && current?.requestId === id.requestId && current.accessSequence === id.sequence && current.kind === m.kind)
+          current.reply(m.result);
+        return;
+      }
+      if (m.type === 'runtime-method-result') {
+        const id = readAccessId('method', m, identity.runId);
+        const current = s.runtimeMethod;
         if (id && current?.requestId === id.requestId && current.accessSequence === id.sequence && current.kind === m.kind)
           current.reply(m.result);
         return;
@@ -339,6 +358,12 @@ export class WorkerPreviewRunner {
             return;
           }
           this.runtimePropertiesVersions.set(identity.runId, propertiesVersion !== undefined);
+          const callVersion = supportsWorkerRuntimeCall(this.release, frozen.configuration.presentationBackend) ? RUNTIME_CALL_VERSION : undefined;
+          if (m.runtimeCallVersion !== callVersion) {
+            this.beginStop(s, 'runtime-failed', 'Runtime call ABI does not match the release');
+            return;
+          }
+          this.runtimeCallVersions.set(identity.runId, callVersion !== undefined);
           if (m.interactionVersion === INTERACTION_VERSION && frozen.configuration.presentationBackend === 'direct')
             s.interactionVersion = INTERACTION_VERSION;
           this.interactionVersions.set(identity.runId, s.interactionVersion === INTERACTION_VERSION);
@@ -402,6 +427,7 @@ export class WorkerPreviewRunner {
     s.observation?.finish(observationError('run_ended'));
     s.runtimeWrite?.retire(cause === 'unresponsive' ? 'transport_lost' : 'run_ended');
     s.runtimeProperties?.retire(cause === 'unresponsive' ? 'transport_lost' : 'run_ended');
+    s.runtimeMethod?.retire(cause === 'unresponsive' ? 'transport_lost' : 'run_ended');
     if (!this.transition(s, 'stopping')) return;
     s.capture?.finish(interactionError('run_ended'));
     if (before === 'loading-frame' || before === 'handshaking') { this.finishLocal(s, 'forced-frame-disposal', 'Cancelled before host connection'); return; }
@@ -438,8 +464,8 @@ export class WorkerPreviewRunner {
     return {supported, ready: this.observationSupport(runId) === 'available',
       ...(supported ? {version: RUNTIME_OBSERVATION_VERSION} : {})};
   }
-  getRuntimeTree(input: RuntimeTreeInput, signal?: AbortSignal): Promise<ObservationResult<RuntimeTreeSnapshot>> {
-    return this.observeRuntime('tree', input, signal);
+  getRuntimeTree(input: RuntimeTreeInput, signal?: AbortSignal, absoluteDeadline?: number): Promise<ObservationResult<RuntimeTreeSnapshot>> {
+    return this.observeRuntime('tree', input, signal, absoluteDeadline);
   }
   inspectRuntimeNode(input: RuntimeNodeInput, signal?: AbortSignal): Promise<ObservationResult<RuntimeNodeSnapshot>> {
     return this.observeRuntime('node', input, signal);
@@ -465,7 +491,8 @@ export class WorkerPreviewRunner {
     const session = this.active!;
     session.runtimeWrite?.expire();
     session.runtimeProperties?.expire();
-    if (session.runtimeWrite || session.runtimeProperties || session.accessSequence >= Number.MAX_SAFE_INTEGER) return Promise.resolve(runtimeWriteError('busy'));
+    session.runtimeMethod?.expire();
+    if (session.runtimeWrite || session.runtimeProperties || session.runtimeMethod || session.accessSequence >= Number.MAX_SAFE_INTEGER) return Promise.resolve(runtimeWriteError('busy'));
     const writeSequence = ++session.accessSequence, requestId = runId + ':' + writeSequence;
     const deadline = interactionNow() + timeoutMs;
     const envelope = {...session.identity, protocolVersion: WORKER_PROTOCOL, writeSequence, requestId};
@@ -538,8 +565,8 @@ export class WorkerPreviewRunner {
     const support = this.runtimePropertiesSupport(runId);
     if (support !== 'available') return Promise.resolve(runtimePropertiesError(support));
     const session = this.active!;
-    session.runtimeWrite?.expire(); session.runtimeProperties?.expire();
-    if (session.runtimeWrite || session.runtimeProperties || session.accessSequence >= Number.MAX_SAFE_INTEGER)
+    session.runtimeWrite?.expire(); session.runtimeProperties?.expire(); session.runtimeMethod?.expire();
+    if (session.runtimeWrite || session.runtimeProperties || session.runtimeMethod || session.accessSequence >= Number.MAX_SAFE_INTEGER)
       return Promise.resolve(runtimePropertiesError('busy'));
     const accessSequence = ++session.accessSequence, requestId = runId + ':' + accessSequence;
     const deadline = interactionNow() + timeoutMs;
@@ -587,9 +614,87 @@ export class WorkerPreviewRunner {
       catch {finish(runtimePropertiesError('dispatch_failed'), true);}
     });
   }
-  private observeRuntime(kind: 'tree', input: RuntimeTreeInput, signal?: AbortSignal): Promise<ObservationResult<RuntimeTreeSnapshot>>;
+  runtimeCallState(runId: string): RuntimeCallState {
+    const supported = this.runtimeCallVersions.get(runId) ?? null;
+    const ready = supported === true && this.active?.identity.runId === runId && this.active.state === 'running' && !this.active.settled;
+    return {supported, ready, ...(supported ? {version: RUNTIME_CALL_VERSION} : {})};
+  }
+
+  describeRuntimeMethods(input: DescribeMethodsInput, signal?: AbortSignal, absoluteDeadline?: number): Promise<MethodDescriptionResult> {
+    return this.accessRuntimeMethod('describe', input, signal, absoluteDeadline) as Promise<MethodDescriptionResult>;
+  }
+
+  callRuntimeMethod(input: CallMethodInput, signal?: AbortSignal, absoluteDeadline?: number): Promise<MethodCallResult> {
+    return this.accessRuntimeMethod('invoke', input, signal, absoluteDeadline) as Promise<MethodCallResult>;
+  }
+
+  private accessRuntimeMethod(kind: MethodKind, input: unknown, signal?: AbortSignal, absoluteDeadline?: number):
+    Promise<MethodDescriptionResult | MethodCallResult> {
+    const prepared = prepareRuntimeMethod(kind, input, this.release.releaseId, signal, absoluteDeadline);
+    if (!prepared.ok) return Promise.resolve(prepared);
+    const {runId, deadline, command} = prepared.result;
+    const session = this.active;
+    if (session?.identity.runId !== runId) return Promise.resolve(runtimeMethodError(this.runtimeCallVersions.has(runId) ? 'run_ended' : 'not_found'));
+    if (session.state === 'stopping' || session.settled) return Promise.resolve(runtimeMethodError('run_ended'));
+    if (session.state !== 'running') return Promise.resolve(runtimeMethodError('not_ready'));
+    if (!this.runtimeCallState(runId).ready) return Promise.resolve(runtimeMethodError('unsupported'));
+    if (interactionNow() >= deadline) return Promise.resolve(runtimeMethodError('timeout'));
+    session.runtimeWrite?.expire(); session.runtimeProperties?.expire(); session.runtimeMethod?.expire();
+    if (session.runtimeWrite || session.runtimeProperties || session.runtimeMethod || session.accessSequence >= Number.MAX_SAFE_INTEGER)
+      return Promise.resolve(runtimeMethodError('busy'));
+    const accessSequence = ++session.accessSequence, requestId = runId + ':' + accessSequence;
+    const envelope = {...session.identity, protocolVersion: WORKER_PROTOCOL, accessSequence, requestId};
+    const receipt: MethodReceipt = {requestId, accessSequence, run: {...session.identity}, releaseId: this.release.releaseId,
+      path: command.path, expectedInstanceId: command.expectedInstanceId, ...(command.method === undefined ? {} : {method: command.method})};
+    const cancellation = signal === undefined ? undefined : AbortSignal.any([signal]);
+    return new Promise(resolve => {
+      let settled = false, sent = false;
+      const finish = (value: NativeMethodResult, release: boolean) => {
+        if (release) {
+          if (session.runtimeMethod === pending) session.runtimeMethod = undefined;
+          cancelTimer();
+        }
+        if (settled) return;
+        settled = true;
+        cancellation?.removeEventListener('abort', onAbort);
+        const output = publicMethodResult(value, receipt);
+        resolve(new TextEncoder().encode(JSON.stringify(output)).byteLength <= 65_536 ? output :
+          publicMethodResult(uncertainMethod(command, 'transport_lost', 'sdk'), receipt));
+      };
+      const uncertain = (reason: MethodUncertainReason, release: boolean) =>
+        finish(sent ? uncertainMethod(command, reason, 'sdk') : runtimeMethodError(reason === 'transport_lost' ? 'dispatch_failed' : reason), release);
+      const timeout = () => uncertain('timeout', true);
+      const onAbort = () => {
+        if (interactionNow() >= deadline) {timeout(); return;}
+        uncertain('cancelled', !sent);
+        if (sent) {
+          try {session.port.postMessage({...envelope, type: 'runtime-method-cancel'});} catch { /* Original deadline still applies. */ }
+        }
+      };
+      const pending: PendingRuntimeMethod = {requestId, accessSequence, kind,
+        expire: () => {if (interactionNow() >= deadline) timeout();},
+        retire: reason => uncertain(reason, true),
+        reply: raw => {
+          if (interactionNow() >= deadline) {timeout(); return;}
+          const result = readNativeMethodResult(command, raw, true);
+          if (result) finish(result, true);
+        },
+      };
+      const cancelTimer = scheduleRuntimeWriteDeadline(deadline, timeout);
+      session.runtimeMethod = pending;
+      if (cancellation?.aborted) {onAbort(); return;}
+      cancellation?.addEventListener('abort', onAbort, {once: true});
+      if (interactionNow() >= deadline) {timeout(); return;}
+      try {
+        session.port.postMessage({...envelope, type: 'runtime-method-request', command, deadline});
+        sent = true;
+      } catch {finish(runtimeMethodError('dispatch_failed'), true);}
+    });
+  }
+
+  private observeRuntime(kind: 'tree', input: RuntimeTreeInput, signal?: AbortSignal, absoluteDeadline?: number): Promise<ObservationResult<RuntimeTreeSnapshot>>;
   private observeRuntime(kind: 'node', input: RuntimeNodeInput, signal?: AbortSignal): Promise<ObservationResult<RuntimeNodeSnapshot>>;
-  private observeRuntime(kind: RuntimeObservationQuery['kind'], input: RuntimeTreeInput | RuntimeNodeInput, signal?: AbortSignal):
+  private observeRuntime(kind: RuntimeObservationQuery['kind'], input: RuntimeTreeInput | RuntimeNodeInput, signal?: AbortSignal, absoluteDeadline?: number):
     Promise<ObservationResult<ObservationSnapshot>> {
     const prepared = prepareRuntimeObservation(kind, input, signal);
     if (!prepared.ok) return Promise.resolve(prepared);
@@ -598,7 +703,9 @@ export class WorkerPreviewRunner {
     if (support !== 'available') return Promise.resolve(observationError(support));
     const session = this.active!;
     if (session.observation) return Promise.resolve(observationError('busy'));
-    const id = crypto.randomUUID(), deadline = interactionNow() + timeoutMs;
+    const id = crypto.randomUUID(), started = interactionNow(), deadline = absoluteDeadline ?? started + timeoutMs;
+    if (!Number.isFinite(deadline) || deadline > started + 30_000) return Promise.resolve(observationError('invalid_input'));
+    if (deadline <= started) return Promise.resolve(observationError('timeout'));
     const envelope = {...session.identity, protocolVersion: WORKER_PROTOCOL, requestId: id};
     return new Promise(resolve => {
       const finish = (result: ObservationResult<ObservationSnapshot>): boolean => {
@@ -614,7 +721,7 @@ export class WorkerPreviewRunner {
         try { session.port.postMessage({...envelope, type: 'runtime-observation-cancel'}); }
         catch { /* Host and Worker still retire the expired request independently. */ }
       };
-      const timer = setTimeout(() => finish(observationError('timeout')), timeoutMs);
+      const timer = setTimeout(() => finish(observationError('timeout')), Math.max(0, deadline - interactionNow()));
       session.observation = {id, deadline, query, finish};
       if (signal) EventTarget.prototype.addEventListener.call(signal, 'abort', onAbort, {once: true});
       try { session.port.postMessage({...envelope, type: 'runtime-observation-request', query, deadline}); }

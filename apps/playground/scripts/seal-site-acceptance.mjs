@@ -38,8 +38,12 @@ export async function sealSiteAcceptance(directory,reports,{verify=false,begin=f
  const manifest=worker?await json(path.join(directory,'manifest.json')):undefined;
  if(release.schemaVersion!==2||!isEngineProfile(release.runtimeProfile))throw Error('E_SITE_PROFILE');
  if(release.build?.sourceCertified!==true)throw Error('E_SITE_UNCERTIFIED_SOURCE');
- if(worker)assertWorkerBuildProof({...release.build,kind:'godot-js-browser-engine-build',status:'built',runtimeProfile:release.runtimeProfile,engineTarget:manifest.engineTarget,runtimeAbi:release.runtimeAbi,execution:release.execution,source:release.build.engineSource,recipe:release.build.engineRecipe},release.engine.wasm?.decodedSha256??release.engine.wasm?.sha256);
- if(worker)await assertWorkerSdkSources(repo,release.build.sdkBuild);
+ const payloads=await sitePayloads(directory);
+ if(worker){
+  const engine={wasm:release.engine.wasm,javascript:payloads[release.engine.javascript?.path]};
+  assertWorkerBuildProof({...release.build,kind:'godot-js-browser-engine-build',status:'built',runtimeProfile:release.runtimeProfile,engineTarget:manifest.engineTarget,runtimeAbi:release.runtimeAbi,execution:release.execution,source:release.build.engineSource,recipe:release.build.engineRecipe},engine);
+  await assertWorkerSdkSources(repo,release.build.sdkBuild);
+ }
  const resources=await json(path.join(directory,'resource-build.json'));
  if(resources.runtimeProfile!==release.runtimeProfile||resources.engineReleaseId!==release.id)throw Error('E_SITE_RESOURCE_IDENTITY');
  const identity=structuredClone(release);delete identity.id;delete identity.verifiedRelease.releaseId;
@@ -61,7 +65,6 @@ export async function sealSiteAcceptance(directory,reports,{verify=false,begin=f
   if(index<0)throw Error('E_SITE_ENTRY: '+entry);
   sources[entry]=digest(map.sourcesContent[index]);
  }
- const payloads=await sitePayloads(directory);
  if(worker){
   assertWorkerCandidate(manifest,release,payloads);
   // Check every repository-owned source in all executable runtime bundles,

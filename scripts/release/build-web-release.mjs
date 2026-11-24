@@ -6,7 +6,7 @@ import { dirname, resolve, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { gzipSync } from 'node:zlib';
-import { canonical, digest, fail, options, required, json, writeJson, filesIn, relativePath, safePath, within, identity, assertCommit, assertHash, inspectRelease, assertSourcePatchChains, assertRuntimeWriteBuildProof, assertRuntimePropertiesBuildProof } from './web-release-utils.mjs';
+import { canonical, digest, fail, options, required, json, writeJson, filesIn, relativePath, safePath, within, identity, assertCommit, assertHash, inspectRelease, assertSourcePatchChains, assertRuntimeWriteBuildProof, assertRuntimePropertiesBuildProof, assertRuntimeCallBuildProof } from './web-release-utils.mjs';
 import { patchOptionalPwa, OPTIONAL_PWA_PATCH } from './patch-web-optional-pwa.mjs';
 import { patchAudioLifecycle, AUDIO_LIFECYCLE_PATCH } from './patch-web-audio-lifecycle.mjs';
 import {loadProductionApiProfiles,buildEngineVendor,assembleFullEngineRelease} from '../../apps/playground/scripts/full-engine-release.mjs';
@@ -41,6 +41,7 @@ export async function buildRelease(configuration) {
   const sourceCertified = !configuration.development && !!isSourceCertified(report);
   assertRuntimeWriteBuildProof(report);
   assertRuntimePropertiesBuildProof(report);
+  assertRuntimeCallBuildProof(report);
   const sourceExecution = report.execution || report.status === 'built' ? executionFromReport(report) : legacyExecution();
   if (configuration['raw-wasm'] && !configuration.development) fail('E_RELEASE_ENCODING', '--raw-wasm is reserved for development compatibility');
   if (!sourceCertified && !configuration.development) fail('E_RELEASE_SOURCE', 'A source-certified engine build report is required; use --development for an explicitly uncertified local template');
@@ -63,13 +64,18 @@ export async function buildRelease(configuration) {
     }
     async function input(path, source, kind, extra) { await asset(path, await readFile(resolve(root, source)), kind, extra); }
     const entries = run('unzip', ['-Z1', archive]).trim().split('\n');
-    for (const name of ['godot.js', 'godot.wasm', 'godot.audio.worklet.js', 'godot.audio.position.worklet.js']) {
+    let wasmSha256;
+    for (const name of ['godot.wasm', 'godot.js', 'godot.audio.worklet.js', 'godot.audio.position.worklet.js']) {
       const matches = entries.filter(path => path === name || path.endsWith(`/${name}`));
       if (matches.length !== 1) fail('E_RELEASE_ENGINE', `Template must contain exactly one ${name}`);
       let bytes = run('unzip', ['-p', archive, matches[0]], { encoding: null });
       if (nativeEngine && name === 'godot.wasm') { await mkdir(resolve(staging, '.production-capture'), { recursive: true }); await writeFile(resolve(staging, '.production-capture/godot.wasm'), bytes); }
-      if (name === 'godot.wasm' && !Buffer.from(bytes).subarray(0, 8).equals(Buffer.from([0, 97, 115, 109, 1, 0, 0, 0]))) fail('E_RELEASE_ENGINE', 'Template does not contain a WebAssembly module');
+      if (name === 'godot.wasm') {
+        if (!Buffer.from(bytes).subarray(0, 8).equals(Buffer.from([0, 97, 115, 109, 1, 0, 0, 0]))) fail('E_RELEASE_ENGINE', 'Template does not contain a WebAssembly module');
+        wasmSha256 = digest(bytes);
+      }
       if (name === 'godot.js') {
+        assertRuntimeCallBuildProof(report, {wasmSha256, javascriptSha256: digest(bytes)});
         for (const [apply, patchId] of [[patchOptionalPwa, OPTIONAL_PWA_PATCH], [patchAudioLifecycle, AUDIO_LIFECYCLE_PATCH]]) {
           const beforeSha256 = digest(bytes);
           const sourcePatch = report.recipe?.patches?.find(patch => patch.patchId === patchId);
@@ -85,7 +91,7 @@ export async function buildRelease(configuration) {
         }
       }
       if (name === 'godot.wasm' && !configuration['raw-wasm']) {
-        await asset('assets/godot.wasm.gz', gzipSync(bytes, { level: 9 }), 'engine-wasm', { encoding: 'gzip', decodedSha256: digest(bytes), decodedBytes: bytes.length });
+        await asset('assets/godot.wasm.gz', gzipSync(bytes, { level: 9 }), 'engine-wasm', { encoding: 'gzip', decodedSha256: wasmSha256, decodedBytes: bytes.length });
       } else await asset(`assets/${name}`, bytes, name.endsWith('.wasm') ? 'engine-wasm' : name === 'godot.js' ? 'engine-js' : 'engine-worklet');
     }
     // Seal every external pthread helper. Embedded bootstraps reuse the sealed
@@ -178,7 +184,7 @@ export async function buildRelease(configuration) {
       recipeSha256: report.recipeSha256 ?? digest(canonical(report.recipe)), builder: report.builder,
       toolchains: report.toolchains, versionEvidence: report.versionEvidence,
       engineReportSha256: digest(await readFile(reportPath)), templateSha256: report.template.sha256,
-      ...Object.fromEntries(['engineTarget','runtimeAbi','workerPatch','lifecycleAbi','lifecyclePatch','artifactSetAbi','artifactSetPatch','observerAbi','nativeObserverPatch','hostResourceAbi','hostResourcePatch','shutdownQueueAbi','shutdownQueuePatch','runtimeObservation','runtimeWrite','runtimeProperties'].filter(field=>report[field]!==undefined).map(field=>[field,report[field]])),
+      ...Object.fromEntries(['engineTarget','runtimeAbi','workerPatch','lifecycleAbi','lifecyclePatch','artifactSetAbi','artifactSetPatch','observerAbi','nativeObserverPatch','hostResourceAbi','hostResourcePatch','shutdownQueueAbi','shutdownQueuePatch','runtimeObservation','runtimeWrite','runtimeProperties','runtimeCall'].filter(field=>report[field]!==undefined).map(field=>[field,report[field]])),
       sourceCertified, requestedArgs:report.requestedArgs??report.recipe?.args, resolvedFeatures:report.resolvedFeatures, resolvedBuildOptions:report.resolvedBuildOptions??report.resolvedOptions, execution:sourceExecution, featuresEvidence:report.featuresEvidence, modulesEvidence:report.modulesEvidence, modules:report.modules, runtimeProfile, jsGluePatches, notes: sourceCertified ? [] : ['Development template; source-to-template provenance was not established.'],
     };
     if (!sourceCertified && attestation.runtimeAbi?.runtimeWrite !== undefined) {
@@ -190,6 +196,11 @@ export async function buildRelease(configuration) {
       attestation.runtimeAbi = {...attestation.runtimeAbi};
       delete attestation.runtimeAbi.runtimeProperties;
       delete attestation.runtimeProperties;
+    }
+    if (!sourceCertified && attestation.runtimeAbi?.runtimeCall !== undefined) {
+      attestation.runtimeAbi = {...attestation.runtimeAbi};
+      delete attestation.runtimeAbi.runtimeCall;
+      delete attestation.runtimeCall;
     }
     await asset('attestation.json', `${JSON.stringify(attestation, null, 2)}\n`, 'attestation');
     files.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);

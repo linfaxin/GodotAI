@@ -1245,6 +1245,10 @@ declare module "godot.annotations" {
             _target: unknown,
             context: Context,
         ) => ClassMemberDecoratorReturn<Context>;
+        runtimeMethod: (signature: {
+            readonly args: readonly ("bool" | "int" | "float" | "string")[];
+            readonly returns: "bool" | "int" | "float" | "string" | "void";
+        }) => (_target: Function, context: ClassMethodDecoratorContext) => void;
         rpc: (config?: RPCConfig) => (_target: Function, context: string | ClassMethodDecoratorContext) => void;
         onready: (
             evaluator: string | GodotJsb.internal.OnReadyEvaluatorFunc,

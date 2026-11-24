@@ -5,11 +5,30 @@
 #include "core/os/thread.h"
 #include "main/main.h"
 #include "scene/main/window.h"
+#include <cmath>
+#include <cstdlib>
 #include <cstring>
-#include <locale>
-#include <sstream>
+#include <locale.h>
+#if defined(__APPLE__)
+#include <xlocale.h>
+#endif
 namespace jsb::runtime_access {
-namespace { constexpr int MAX_PATH_BYTES = 2048; constexpr int MAX_PATH_COMPONENTS = 128; }
+namespace {
+constexpr int MAX_PATH_BYTES = 2048;
+constexpr int MAX_PATH_COMPONENTS = 128;
+
+struct JsonNumberLocale {
+#ifdef WINDOWS_ENABLED
+    const _locale_t value = _create_locale(LC_NUMERIC, "C");
+    ~JsonNumberLocale() { if (value) _free_locale(value); }
+    double parse(const char* text, char** end) const { return _strtod_l(text, end, value); }
+#else
+    const locale_t value = newlocale(LC_NUMERIC_MASK, "C", nullptr);
+    ~JsonNumberLocale() { if (value) freelocale(value); }
+    double parse(const char* text, char** end) const { return strtod_l(text, end, value); }
+#endif
+};
+}
 Dictionary error_reply(const char* code, const char* message) {
     Dictionary error;
     error["code"] = code;
@@ -107,6 +126,8 @@ bool read_instance_id(const Variant& raw, String& id) {
 }
 
 bool index_json_numbers(const char* request, uint32_t size, std::string& json, std::vector<double>& numbers) {
+    static const JsonNumberLocale locale;
+    if (!locale.value) return false;
     const char* end = request + size;
     bool in_string = false;
     for (const char* cursor = request; cursor != end;) {
@@ -125,10 +146,12 @@ bool index_json_numbers(const char* request, uint32_t size, std::string& json, s
         const char* start = cursor - 1;
         while (cursor != end && std::strchr("0123456789.+-eE", *cursor)) ++cursor;
         if (cursor != end && !std::strchr(" \t\r\n,]}", *cursor)) return false;
-        std::istringstream token(std::string(start, cursor));
-        token.imbue(std::locale::classic());
-        double number;
-        if (!(token >> number) || !token.eof()) return false;
+        const std::string token(start, cursor);
+        char* parsed_end = nullptr;
+        // strtod_l may set ERANGE for a representable subnormal. Reject
+        // overflow by checking the result, rather than the range flag.
+        const double number = locale.parse(token.c_str(), &parsed_end);
+        if (parsed_end != token.c_str() + token.size() || !Math::is_finite(number)) return false;
         json += std::to_string(numbers.size());
         numbers.push_back(number);
     }
@@ -310,6 +333,218 @@ bool parse_properties_request(const char* request, uint32_t size, Dictionary& pa
     if (!restore_strings(structure, strings, restored)) return false;
     parsed = restored;
     return true;
+}
+namespace { constexpr double MAX_SAFE_INTEGER = 9007199254740991.0; }
+Dictionary frame() {
+    Engine* engine = Engine::get_singleton();
+    Dictionary result;
+    result["process"] = uitos(engine ? engine->get_process_frames() : 0);
+    result["physics"] = uitos(engine ? engine->get_physics_frames() : 0);
+    result["drawn"] = uitos(engine ? engine->get_frames_drawn() : 0);
+    return result;
+}
+Dictionary maximum_frame() {
+    Dictionary result;
+    result["process"] = "18446744073709551615";
+    result["physics"] = "18446744073709551615";
+    result["drawn"] = "18446744073709551615";
+    return result;
+}
+static bool append_json_string(std::string& output, const String& value) {
+    static const char hex[] = "0123456789abcdef";
+    output += '"';
+    for (int index = 0; index < value.length(); ++index) {
+        const uint32_t code = value[index];
+        if (code < 0x20) {
+            output += "\\u00"; output += hex[code >> 4]; output += hex[code & 15];
+        } else if (code == '"' || code == '\\') {
+            output += '\\'; output += static_cast<char>(code);
+        } else if (code < 0x80) output += static_cast<char>(code);
+        else if (code < 0x800) {
+            output += static_cast<char>(0xc0 | (code >> 6));
+            output += static_cast<char>(0x80 | (code & 63));
+        } else if (code >= 0xd800 && code <= 0xdfff) return false;
+        else if (code < 0x10000) {
+            output += static_cast<char>(0xe0 | (code >> 12));
+            output += static_cast<char>(0x80 | ((code >> 6) & 63));
+            output += static_cast<char>(0x80 | (code & 63));
+        } else if (code <= 0x10ffff) {
+            output += static_cast<char>(0xf0 | (code >> 18));
+            output += static_cast<char>(0x80 | ((code >> 12) & 63));
+            output += static_cast<char>(0x80 | ((code >> 6) & 63));
+            output += static_cast<char>(0x80 | (code & 63));
+        } else return false;
+    }
+    output += '"';
+    return true;
+}
+static bool append_json(std::string& output, const Variant& value, int depth = 0) {
+    if (depth > 64) return false;
+    switch (value.get_type()) {
+        case Variant::NIL: output += "null"; return true;
+        case Variant::BOOL: output += bool(value) ? "true" : "false"; return true;
+        case Variant::FLOAT:
+            if (const double number = value; number == 0.0 && std::signbit(number)) {
+                output += "-0.0";
+                return true;
+            }
+            [[fallthrough]];
+        case Variant::INT: {
+            const CharString number = JSON::stringify(value, "", false, true).utf8();
+            output.append(number.get_data(), number.length()); return true;
+        }
+        case Variant::STRING: return append_json_string(output, value);
+        case Variant::ARRAY: {
+            output += '[';
+            const Array items = value;
+            for (int index = 0; index < items.size(); ++index) {
+                if (index) output += ',';
+                if (!append_json(output, items[index], depth + 1)) return false;
+            }
+            output += ']'; return true;
+        }
+        case Variant::DICTIONARY: {
+            output += '{';
+            const Dictionary object = value;
+            const Array names = object.keys();
+            for (int index = 0; index < names.size(); ++index) {
+                if (index) output += ',';
+                if (names[index].get_type() != Variant::STRING || !append_json_string(output, names[index])) return false;
+                output += ':';
+                if (!append_json(output, object[names[index]], depth + 1)) return false;
+            }
+            output += '}'; return true;
+        }
+        default: return false;
+    }
+}
+CharString stringify(const Variant& value) {
+    std::string output;
+    if (!append_json(output, value)) return CharString();
+    CharString result;
+    result.resize_uninitialized(output.size() + 1);
+    std::memcpy(result.ptrw(), output.data(), output.size());
+    result.ptrw()[output.size()] = 0;
+    return result;
+}
+int json_size(const Variant& value) {
+    const CharString bytes = stringify(value);
+    return bytes.length() ? bytes.length() : 1000000000;
+}
+bool scalar_type(Variant::Type type) { return type == Variant::BOOL || type == Variant::INT || type == Variant::FLOAT || type == Variant::STRING; }
+String wire_type(Variant::Type type) {
+    switch (type) {
+        case Variant::BOOL: return "bool";
+        case Variant::INT: return "int";
+        case Variant::FLOAT: return "float";
+        case Variant::STRING: return "string";
+        case Variant::VECTOR2: return "vector2";
+        default: return String();
+    }
+}
+Variant::Type variant_type(const String& type) {
+    if (type == "bool") return Variant::BOOL;
+    if (type == "int") return Variant::INT;
+    if (type == "float") return Variant::FLOAT;
+    if (type == "string") return Variant::STRING;
+    if (type == "vector2") return Variant::VECTOR2;
+    return Variant::NIL;
+}
+bool keys(const Dictionary& object, std::initializer_list<const char*> required, std::initializer_list<const char*> optional) {
+    for (const char* key : required) if (!object.has(key)) return false;
+    for (const Variant& raw : object.keys()) {
+        if (raw.get_type() != Variant::STRING) return false;
+        const String key = raw;
+        bool found = false;
+        for (const char* allowed : required) if (key == allowed) found = true;
+        for (const char* allowed : optional) if (key == allowed) found = true;
+        if (!found) return false;
+    }
+    return true;
+}
+bool valid_name(const Variant& raw, String& name) {
+    if (raw.get_type() != Variant::STRING) return false;
+    name = raw;
+    if (name.is_empty() || name.utf8().length() > 256) return false;
+    for (int i = 0; i < name.length(); ++i) if (name[i] == 0 || (name[i] >= 0xd800 && name[i] <= 0xdfff)) return false;
+    return true;
+}
+// The structure parser replaces every numeric token with an exact small index.
+bool indexed_number(const Variant& indexed, const std::vector<double>& numbers, double& result) {
+    if (indexed.get_type() != Variant::INT && indexed.get_type() != Variant::FLOAT) return false;
+    const double index = indexed;
+    if (index < 0 || index >= numbers.size() || std::floor(index) != index) return false;
+    result = numbers[static_cast<size_t>(index)];
+    return Math::is_finite(result);
+}
+bool integer(const Variant& indexed, const std::vector<double>& numbers, int minimum, int maximum, int& result) {
+    double value;
+    if (!indexed_number(indexed, numbers, value) || std::floor(value) != value || value < minimum || value > maximum) return false;
+    result = static_cast<int>(value); return true;
+}
+bool unicode_escapes_valid(const char* data, uint32_t size) {
+    auto hex = [](char ch) -> int { if (ch >= '0' && ch <= '9') return ch - '0'; if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10; if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10; return -1; };
+    bool quoted = false;
+    for (uint32_t i = 0; i < size; ++i) {
+        if (data[i] == '"') { quoted = !quoted; continue; }
+        if (!quoted || data[i] != '\\') continue;
+        if (++i >= size) return false;
+        if (data[i] != 'u') continue;
+        if (i + 4 >= size) return false;
+        int code = 0;
+        for (int n = 0; n < 4; ++n) { const int digit = hex(data[++i]); if (digit < 0) return false; code = code * 16 + digit; }
+        if (code >= 0xdc00 && code <= 0xdfff) return false;
+        if (code >= 0xd800 && code <= 0xdbff) {
+            if (i + 6 >= size || data[i + 1] != '\\' || data[i + 2] != 'u') return false;
+            i += 2; int low = 0;
+            for (int n = 0; n < 4; ++n) { const int digit = hex(data[++i]); if (digit < 0) return false; low = low * 16 + digit; }
+            if (low < 0xdc00 || low > 0xdfff) return false;
+        }
+    }
+    return true;
+}
+Dictionary typed(const Variant& value) {
+    Dictionary result;
+    result["type"] = wire_type(value.get_type());
+    result["value"] = value.get_type() == Variant::VECTOR2 ? Variant(coordinates(value)) : value;
+    return result;
+}
+const char* decode_value(const Variant& raw, const std::vector<double>& numbers, Variant& value) {
+    if (raw.get_type() != Variant::DICTIONARY) return "invalid_input";
+    const Dictionary object = raw;
+    if (!keys(object, {"type", "value"}) || object["type"].get_type() != Variant::STRING) return "invalid_input";
+    const Variant::Type type = variant_type(object["type"]);
+    const Variant payload = object["value"];
+    if (type == Variant::BOOL) {
+        if (payload.get_type() != Variant::BOOL) return "type_mismatch";
+        value = payload; return nullptr;
+    }
+    if (type == Variant::STRING) {
+        if (payload.get_type() != Variant::STRING) return "type_mismatch";
+        const String text = payload;
+        if (text.utf8().length() > 1024) return "out_of_range";
+        value = text; return nullptr;
+    }
+    if (type == Variant::INT || type == Variant::FLOAT) {
+        double parsed;
+        if (!indexed_number(payload, numbers, parsed)) return "type_mismatch";
+        if (type == Variant::INT) {
+            if (std::floor(parsed) != parsed || parsed < -MAX_SAFE_INTEGER || parsed > MAX_SAFE_INTEGER) return "out_of_range";
+            value = static_cast<int64_t>(parsed);
+        } else value = parsed;
+        return nullptr;
+    }
+    if (type == Variant::VECTOR2) {
+        if (payload.get_type() != Variant::DICTIONARY) return "type_mismatch";
+        const Dictionary position = payload;
+        double x, y;
+        if (!keys(position, {"x", "y"}) || !indexed_number(position["x"], numbers, x) || !indexed_number(position["y"], numbers, y)) return "type_mismatch";
+        const double maximum = std::numeric_limits<real_t>::max();
+        if (std::abs(x) > maximum || std::abs(y) > maximum) return "out_of_range";
+        value = Vector2(static_cast<real_t>(x), static_cast<real_t>(y));
+        return nullptr;
+    }
+    return "unsupported";
 }
 #if JSB_WITH_WEB && !defined(THREADS_ENABLED)
 namespace { char shared_buffer[RUNTIME_OBSERVATION_RESULT_BYTES]; bool buffer_in_use = false; }

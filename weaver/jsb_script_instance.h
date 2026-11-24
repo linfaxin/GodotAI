@@ -167,6 +167,7 @@ private:
     void postbind();
     void cache_property(const StringName& name, const Variant& value);
     void publish_runtime_binding();
+    static const char* capture_runtime_binding(Object* owner, jsb::RuntimeScriptSnapshot& snapshot);
     static const char* capture_runtime(Object* owner, jsb::RuntimeScriptSnapshot& snapshot,
         jsb::RuntimeScriptMetadata& metadata, int max_entries = 512, int max_levels = 16,
         const Vector<StringName>* names = nullptr);

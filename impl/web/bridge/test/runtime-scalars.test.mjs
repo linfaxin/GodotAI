@@ -33,3 +33,43 @@ test('runtime strings preserve embedded NUL and reject malformed or excessive un
   assert(context.HEAP32[2]<0);
  }
 });
+test('runtime call tracks returned and thrown Promises without reading properties and filters only their rejections',()=>{
+ const {context,run}=runtime();
+ const listeners=[];
+ context.addEventListener=(...args)=>listeners.push(args);
+ context.console={...console,warn(){}};
+ run(`
+  globalThis.forwarded=0;
+  _jsbb_.interop={unhandled_rejection(){forwarded++}};
+  globalThis.callEngine=new jsbb_Engine(0,1);
+  globalThis.returned=Promise.resolve(1);
+  globalThis.thrown=Promise.resolve(2);
+  Object.defineProperties(returned,{
+   then:{get(){throw Error('read then')}},
+   constructor:{get(){throw Error('read constructor')}}
+  });
+  const receiver=callEngine.stack.Push({});
+  const method=callEngine.stack.Push(()=>returned);
+  const throwingMethod=callEngine.stack.Push(()=>{throw thrown});
+  callEngine.SetHostPromiseRejectionTracker(1,0);
+  globalThis.result=callEngine.stack.GetValue(callEngine.RuntimeCall(receiver,method,0,0));
+  globalThis.exceptionStatus=callEngine.RuntimeCall(receiver,throwingMethod,0,0);
+ `);
+ assert.equal(context.result,context.returned);
+ assert.equal(context.exceptionStatus,-1);
+ assert(run('_jsbb_.IsRuntimeCallValue(returned)'));
+ assert(run('_jsbb_.IsRuntimeCallValue(thrown)'));
+ assert(!run('_jsbb_.IsRuntimeCallValue(Promise.resolve(2))'));
+ assert.equal(listeners.length,1);
+ const [type,listener]=listeners[0];
+ assert.equal(type,'unhandledrejection');
+ let prevented=0;
+ for(const promise of [context.returned,context.thrown]) {
+  listener({promise, get reason(){throw Error('read rejected reason')}, preventDefault(){prevented++}});
+ }
+ assert.equal(prevented,2);
+ assert.equal(context.forwarded,0);
+ listener({promise:Promise.resolve(2), reason:'unrelated', preventDefault(){prevented++}});
+ assert.equal(prevented,2);
+ assert.equal(context.forwarded,1);
+});

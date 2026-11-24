@@ -4,7 +4,7 @@ import {SUMMER_OPERATION_SPECS, type SummerOperation, type OperationParameter} f
 
 export const MAX_CONSOLE_READ_PROPERTIES = 16;
 
-export type LocalConsoleOperation = 'check' | 'wait_for_event' | 'describe_runtime_properties' |
+export type LocalConsoleOperation = 'check' | 'wait_for_event' | 'describe_runtime_properties' | 'describe_runtime_methods' |
   'read_runtime_properties' | 'game_input' | 'wait_for_input';
 export type ConsoleOperationId = SummerOperation | LocalConsoleOperation;
 export const DEFAULT_CONSOLE_OPERATION: ConsoleOperationId = 'engine.get_project_context';
@@ -74,6 +74,21 @@ function targetInput(context: ConsolePresetContext, input: Record<string, unknow
 }
 
 const localOperations: readonly ConsoleOperation[] = [
+  {
+    id: 'describe_runtime_methods', name: 'describe_runtime_methods', family: 'local', title: '发现公开方法',
+    description: '读取当前节点已登记的方法与类型签名。', binding: 'explicit', acceptsSignal: true, resultKind: 'json',
+    parameters: [
+      {name: 'runId / path / expectedInstanceId', description: '来自同一次真实运行树。', required: true},
+      {name: 'method / limit', description: '可选的精确方法名或枚举上限，两者互斥。'},
+    ],
+    limitations: ['只读取已发布登记；调用需要本次发现的方法 token。'],
+    createPreset(context = {}) {
+      const input: Record<string, unknown> = {}, missing: string[] = [];
+      targetInput(context, input, missing);
+      return {input, missing};
+    },
+    invoke: (api, input, signal) => api.describe_runtime_methods(input as Parameters<PlaygroundApi['describe_runtime_methods']>[0], signal),
+  },
   {
     id: 'check', name: 'check', family: 'local', title: '检查当前编辑项目',
     description: '对指定项目与编辑版本做 TypeScript 检查。', binding: 'project', acceptsSignal: false, resultKind: 'json',
@@ -193,6 +208,7 @@ export const CONSOLE_OPERATIONS: readonly ConsoleOperation[] = Object.freeze([
   summer('engine.get_runtime_tree', 'runtime', true),
   summer('engine.inspect_runtime_node', 'runtime', true),
   summer('engine.runtime_set', 'runtime', true),
+  summer('engine.runtime_call', 'runtime', true),
   summer('engine.screenshot', 'runtime', true),
   ...localOperations.map(operation => Object.freeze(operation)),
 ]);

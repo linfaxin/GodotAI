@@ -134,7 +134,7 @@ export interface EngineDeclarations {
   diagnostics: { code: string; message: string; nativeName?: string }[];
 }
 
-export function generateEngineDeclarations(input: EngineApiIR): EngineDeclarations {
+export function generateEngineDeclarations(input: EngineApiIR, authoring: {runtimeMethod?: boolean} = {}): EngineDeclarations {
   const api = JSON.parse(canonicalEngineApi(parseEngineApi(input))) as EngineApiIR;
   const diagnostics: EngineDeclarations['diagnostics'] = [];
   const coverage = { classes: 0, builtins: 0, properties: 0, methods: 0, signals: 0, utilities: 0, singletons: 0, enums: 0, operators: 0 };
@@ -426,6 +426,7 @@ export interface ExportOptions {class?: unknown; hint?: G.PropertyHint; ${api.bi
 export interface RPCConfig {mode?: number; sync?: "call_remote"|"call_local"; transfer_mode?: number; transfer_channel?: number}
 export interface ModernRPCConfig {mode?: number; sync?: "call_remote"|"call_local"; ${api.bindingNaming==='camel'?'transferMode':'transfer_mode'}?: number; ${api.bindingNaming==='camel'?'transferChannel':'transfer_channel'}?: number}
 export interface ClassBinder {
+${authoring.runtimeMethod ? 'runtimeMethod(signature: {readonly args: readonly ("bool" | "int" | "float" | "string")[]; readonly returns: "bool" | "int" | "float" | "string" | "void"}): (method: Function, context: ClassMethodDecoratorContext) => void;' : ''}
 (): <T extends NativeClass>(value:T, context:ClassDecoratorContext<T>)=>void;
 tool(): <T extends NativeClass>(value:T, context:ClassDecoratorContext<T>)=>void;
 icon(path:string): <T extends NativeClass>(value:T, context:ClassDecoratorContext<T>)=>void;

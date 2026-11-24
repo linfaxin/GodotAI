@@ -14,7 +14,8 @@ const MAX_HISTORY = 20, MAX_IMAGES = 4, IMAGE_BYTES = 20 * 1024 * 1024;
 const copy = <T>(value: T): T => structuredClone(value);
 const object = (value: unknown): value is Record<string, any> => !!value && typeof value === 'object' && !Array.isArray(value);
 const nonempty = (value: unknown): value is string => typeof value === 'string' && value.length > 0;
-const runtimeTypes = new Set(['bool', 'int', 'float', 'string', 'vector2']);
+const methodTypes = new Set(['bool', 'int', 'float', 'string']);
+const runtimeTypes = new Set([...methodTypes, 'vector2']);
 function notify(listeners: Set<() => void>) {for (const listener of [...listeners]) {try {listener();} catch { /* UI observers do not change execution. */ }}}
 
 export function createConsoleGate(): ConsoleGate {
@@ -33,10 +34,27 @@ function identity(value: unknown): WorkerRunIdentity | undefined {
   return {runId:value.runId,buildKey:value.buildKey,documentId:value.documentId,workerId:value.workerId,
     runConfigurationHash:value.runConfigurationHash,revision:value.revision,generation:value.generation};
 }
+export function stringifyConsoleJson(value: unknown, project: (entry: unknown) => unknown = entry => entry): string {
+  const marker = '\0', quotedMarker = '"\\u0000';
+  let escaped = false;
+  const text = JSON.stringify(value, (_key, item) => {
+    const entry = project(item);
+    if (Object.is(entry, -0)) {escaped = true; return marker;}
+    if (typeof entry === 'string' && entry.startsWith(marker)) {escaped = true; return marker + entry;}
+    return entry;
+  }, 2);
+  if (!escaped) return text;
+  // Scan whole JSON string tokens. Leave object keys alone and unescape any
+  // original string value that starts with the same marker.
+  return text.replace(/"(?:[^"\\]|\\.)*"/g, (token, offset: number) => {
+    if (!token.startsWith(quotedMarker) || text[offset + token.length] === ':') return token;
+    return token === quotedMarker + '"' ? '-0' : '"' + token.slice(quotedMarker.length);
+  });
+}
 function projection(reply: unknown): {text: string; truncated: boolean} {
   let text: string;
-  try {text = JSON.stringify(reply, (_key, value) => value instanceof ArrayBuffer ? {kind:'ArrayBuffer',byteLength:value.byteLength} :
-    ArrayBuffer.isView(value) ? {kind:value.constructor.name,byteLength:value.byteLength} : value, 2) ?? 'undefined';}
+  try {text = stringifyConsoleJson(reply, value => value instanceof ArrayBuffer ? {kind:'ArrayBuffer',byteLength:value.byteLength} :
+    ArrayBuffer.isView(value) ? {kind:value.constructor.name,byteLength:value.byteLength} : value) ?? 'undefined';}
   catch {text = '返回值无法投影为 JSON';}
   if (encoder.encode(text).byteLength <= RESULT_BYTES) return {text,truncated:false};
   // UTF-8 truncation without leaving half a surrogate pair in the displayed text.
@@ -52,7 +70,13 @@ function dataFor(operationId: string, reply: unknown): Record<string, any> | und
 }
 function resultSummary(operationId: string, reply: unknown): string {
   if (!object(reply)) return '调用已结算';
-  if (reply.ok === false) return reply.error?.code === 'outcome_unknown' ? '结果未确认；不得自动重试' : `API 拒绝：${reply.error?.code ?? 'unknown'}`;
+  if (reply.ok === false) {
+    const code = reply.error?.code;
+    if (code === 'outcome_unknown') return operationId === 'engine.runtime_call' ? '结果未确认；请先独立观察' : '结果未确认；不得自动重试';
+    if (code === 'call_error') return '脚本方法已执行并抛出异常';
+    if (code === 'result_unavailable') return '脚本方法已返回，返回值无法编码';
+    return `API 拒绝：${code ?? 'unknown'}`;
+  }
   const data = dataFor(operationId,reply);
   if (!data) return '调用已结算';
   if (operationId === 'check') return data.status === 'completed' && data.diagnostics?.counts?.error === 0 ? '类型检查通过' : '检查已结算，请查看诊断';
@@ -67,15 +91,17 @@ function resultSummary(operationId: string, reply: unknown): string {
   if (typeof outcome === 'string') return `执行结果：${outcome}`;
   return operationId === 'engine.screenshot' ? '已取得游戏 PNG' : '调用已结算';
 }
-function resultFacts(call: ConsoleCall, input: unknown, reply: unknown): ConsoleResultFacts | undefined {
+function resultFacts(call: ConsoleCall, input: unknown, reply: unknown, submittedAnchor: ConsoleAnchor): ConsoleResultFacts | undefined {
   const op = call.draft.operationId, data = dataFor(op,reply);
   if (!data) return;
-  const facts: ConsoleResultFacts = {sourceCallId:call.callId,sourceAnchor:copy(call.draft.anchor)};
+  // Explicit discovery can submit a current run ID from an older draft.
+  const anchor = op === 'describe_runtime_methods' ? submittedAnchor : call.draft.anchor;
+  const facts: ConsoleResultFacts = {sourceCallId:call.callId,sourceAnchor:copy(anchor)};
   let run = identity(data.run);
   if (op === 'wait_for_event' && data.outcome !== 'reached') run = undefined;
   if (run) {
     const projectId = nonempty(data.run.projectId) ? data.run.projectId :
-      call.draft.anchor.activeRunId === run.runId ? call.draft.anchor.activeRunProjectId ?? undefined : undefined;
+      anchor.activeRunId === run.runId ? anchor.activeRunProjectId ?? undefined : undefined;
     facts.run = {identity:run,...(projectId ? {projectId} : {}),...(nonempty(data.run.attemptId) ? {attemptId:data.run.attemptId} : {})};
     facts.sourceAnchor.activeRunId = run.runId;facts.sourceAnchor.activeRunRevision = run.revision;
     facts.sourceAnchor.activeRunProjectId = projectId ?? null;
@@ -86,11 +112,11 @@ function resultFacts(call: ConsoleCall, input: unknown, reply: unknown): Console
       .slice(0,500).map((node:any)=>({path:node.path,instanceId:node.instanceId,type:node.type}));
     if(data.nodes.length>500)facts.truncated=true;
   }
-  if (op === 'describe_runtime_properties' && object(reply) && object(reply.receipt) && object(input) &&
+  if ((op === 'describe_runtime_properties' || op === 'describe_runtime_methods') && object(reply) && object(reply.receipt) && object(input) &&
       reply.receipt.run?.runId === input.runId && reply.receipt.path === input.path && reply.receipt.expectedInstanceId === input.expectedInstanceId) {
     const receiptRun=identity(reply.receipt.run);
     if(receiptRun) {
-      facts.run={identity:receiptRun,...(call.draft.anchor.activeRunId===receiptRun.runId&&call.draft.anchor.activeRunProjectId ? {projectId:call.draft.anchor.activeRunProjectId} : {})};
+      facts.run={identity:receiptRun,...(anchor.activeRunId===receiptRun.runId&&anchor.activeRunProjectId ? {projectId:anchor.activeRunProjectId} : {})};
       facts.propertyTarget={runId:input.runId,path:input.path,expectedInstanceId:input.expectedInstanceId};
       facts.sourceAnchor.activeRunId=receiptRun.runId;facts.sourceAnchor.activeRunRevision=receiptRun.revision;
       facts.sourceAnchor.activeRunProjectId=facts.run.projectId??null;
@@ -99,6 +125,22 @@ function resultFacts(call: ConsoleCall, input: unknown, reply: unknown): Console
         .filter((item:any)=>object(item)&&nonempty(item.name)&&runtimeTypes.has(item.type)).slice(0,64)
         .map((item:any)=>({name:item.name,type:item.type as RuntimeType}));
       if(descriptors.length>64)facts.truncated=true;
+      if (op === 'describe_runtime_methods' && Array.isArray(data.methods)) {
+        facts.methods = [];
+        for (const item of data.methods.slice(0,64)) {
+          if (!object(item) || !nonempty(item.method) || !Array.isArray(item.parameterTypes) || item.parameterTypes.length > 8 ||
+              !item.parameterTypes.every((type: string) => methodTypes.has(type)) ||
+              (item.returnType !== 'void' && !methodTypes.has(item.returnType))) continue;
+          const token = item.methodToken;
+          if (!object(token) || token.version !== 1 || token.runId !== receiptRun.runId ||
+              typeof token.releaseId !== 'string' || token.releaseId !== reply.receipt.releaseId ||
+              token.returnType !== item.returnType || typeof token.stamp !== 'string' || !/^[a-f0-9]{64}$/.test(token.stamp)) continue;
+          facts.methods.push({name: item.method, signature: `${item.method}(${item.parameterTypes.join(', ')}) → ${item.returnType}`,
+            parameterTypes: [...item.parameterTypes],
+            token: {version:1,runId:token.runId,releaseId:token.releaseId,returnType:token.returnType,stamp:token.stamp}});
+        }
+        if (data.truncated) facts.truncated = true;
+      }
     }
   }
   if (op === 'game_input' && object(input) && nonempty(input.runId) && nonempty(data.operationId)) facts.input={runId:input.runId,operationId:data.operationId};
@@ -123,6 +165,10 @@ export function consoleResultSource(operationId: string, facts: ConsoleResultFac
     case 'engine.get_runtime_tree':
     case 'engine.inspect_runtime_node':
     case 'engine.runtime_set':
+      return hasNode ? 'node' : undefined;
+    case 'engine.runtime_call':
+      return facts.propertyTarget && facts.methods?.length ? 'method' : undefined;
+    case 'describe_runtime_methods':
       return hasNode ? 'node' : undefined;
     case 'describe_runtime_properties':
       return hasNode ? 'node' : facts.propertyTarget ? 'property-target' : undefined;
@@ -152,7 +198,7 @@ export function createApiConsoleSession(api: PlaygroundApi, hooks: ConsoleHooks,
   function draft(){
     let value=drafts.get(operationId);
     if(!value){const context=environment();const preset=getConsoleOperation(operationId)!.createPreset(context.anchor);
-      value={operationId,inputText:JSON.stringify(preset.input,null,2),anchor:context.anchor};drafts.set(operationId,value);}
+      value={operationId,inputText:stringifyConsoleJson(preset.input),anchor:context.anchor};drafts.set(operationId,value);}
     return value;
   }
   function dropAttachment(id:string){attachments.delete(id);const row=history.find(item=>item.attachmentId===id);if(row)row.attachmentReleased=true;}
@@ -184,7 +230,9 @@ export function createApiConsoleSession(api: PlaygroundApi, hooks: ConsoleHooks,
       if(now.activeRunId&&now.activeRunProjectId!==now.editorProjectId){error('wrong_project','主运行不属于当前编辑项目');return false;}
       if(now.activeRunId&&(current.activeRunState==='stopping'||current.activeRunState==='exited'))return stale();
     }
-    if(['describe_runtime_properties','read_runtime_properties','game_input'].includes(operationId)&&object(input)&&
+    const bound = draft().selectedMethod;
+    if (bound && (!object(input) || input.path !== bound.path || input.method !== bound.method)) return stale();
+    if(['describe_runtime_properties','describe_runtime_methods','read_runtime_properties','game_input'].includes(operationId)&&object(input)&&
       input.runId===now.activeRunId&&now.activeRunId&&current.activeRunState!=='exited'&&now.activeRunProjectId!==now.editorProjectId){
       error('wrong_project','指定运行不属于当前编辑项目');return false;
     }
@@ -205,7 +253,10 @@ export function createApiConsoleSession(api: PlaygroundApi, hooks: ConsoleHooks,
       clearError();
       const input=parsed();if(clientErrors.has(operationId))return;
       const current=environment(),id=operationId;
-      if(id.startsWith('engine.')&&!selection){draft().anchor=current.anchor;emit();return;}
+      if(id.startsWith('engine.')&&!selection){
+        if(draft().selectedMethod){error('missing_source','请从当前运行的发现结果重新选择方法');return;}
+        draft().anchor=current.anchor;emit();return;
+      }
       if(!object(input)){error('missing_source','更新目标需要 input 对象；原文已保留');return;}
       const source=selection?history.find(call=>call.callId===selection.sourceCallId)?.resultFacts:undefined;
       if(selection&&!source){error('missing_source','来源记录已释放或没有可填参事实');return;}
@@ -231,7 +282,14 @@ export function createApiConsoleSession(api: PlaygroundApi, hooks: ConsoleHooks,
           else if(!source&&current.anchor.activeRunId){delete next.attemptId;next.runId=current.anchor.activeRunId;}
           else {missing('尚缺 attempt 或 run 来源');return;}
         }
-      }else if(id==='describe_runtime_properties'||id==='read_runtime_properties'){
+      }else if(id==='engine.runtime_call'){
+        const method=source?.methods?.find(item=>item.name===selection?.methodName);
+        if(!target||!method||target.runId!==current.anchor.activeRunId){
+          missing('请从当前运行的发现结果选择方法');return;
+        }
+        next.path=target.path;next.method=method.name;
+        draft().selectedMethod={...target,method:method.name,methodToken:copy(method.token),parameterTypes:copy(method.parameterTypes)};
+      }else if(id==='describe_runtime_properties'||id==='describe_runtime_methods'||id==='read_runtime_properties'){
         const changesTarget=target&&(target.runId!==next.runId||target.path!==next.path||target.expectedInstanceId!==next.expectedInstanceId);
         if(id==='read_runtime_properties'&&!source?.properties&&(changesTarget||!Array.isArray(next.properties)||next.properties.length===0)){
           missing('请先 describe 新目标，选择实际属性类型后再读取');return;
@@ -257,7 +315,7 @@ export function createApiConsoleSession(api: PlaygroundApi, hooks: ConsoleHooks,
         if(!node||!source?.run){missing('请从运行树选择实际节点');return;}
         next.path=node.path;
       }
-      draft().inputText=JSON.stringify(next,null,2);draft().anchor=copy(anchor);emit();
+      draft().inputText=stringifyConsoleJson(next);draft().anchor=copy(anchor);emit();
     },
     async submit(){
       if(disposed)return;
@@ -272,12 +330,13 @@ export function createApiConsoleSession(api: PlaygroundApi, hooks: ConsoleHooks,
         history.push(call);
         const controller=selected.acceptsSignal?new AbortController():undefined;pending={callId:call.callId,controller};
         // Keep the last target check and API submission in the same synchronous turn.
-        const returned=selected.invoke(api,input,controller?.signal);emit();
+        const bound = call.draft.selectedMethod;
+        const returned=bound ? hooks.callSelectedMethod(input,controller?.signal,bound) : selected.invoke(api,input,controller?.signal);emit();
         const reply=await returned;
         if(disposed)return;
         const projected=projection(reply);call.phase='settled';call.settledAt=Date.now();call.summary=resultSummary(call.draft.operationId,reply);
         call.resultProjection=projected.text;if(projected.truncated)call.truncated=true;
-        call.resultFacts=resultFacts(call,input,reply);storeImage(call,reply);
+        call.resultFacts=resultFacts(call,input,reply,current.anchor);storeImage(call,reply);
       }catch(caught){
         if(!disposed&&call){call.phase='thrown';call.settledAt=Date.now();call.summary='调用异常；不代表未执行';
           call.resultProjection=projection({exception:caught instanceof Error?caught.message:typeof caught==='string'?caught:'未知调用异常'}).text;}
@@ -287,7 +346,7 @@ export function createApiConsoleSession(api: PlaygroundApi, hooks: ConsoleHooks,
     async openExample(){
       if(disposed)return;const token=gate.acquire('open-example');if(!token){error('missing_source','调用或自动验证结束后才能打开示例');return;}
       const id=operationId;clearError();
-      try{await hooks.openExample();}catch(caught){if(!disposed)error('missing_source',caught instanceof Error?caught.message:'打开示例失败',id);}
+      try{await hooks.openExample(id);}catch(caught){if(!disposed)error('missing_source',caught instanceof Error?caught.message:'打开示例失败',id);}
       finally{gate.release(token);emit();}
     },
     hasCall(callId){return history.some(call=>call.callId===callId);},

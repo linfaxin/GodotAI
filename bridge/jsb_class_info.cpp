@@ -1,6 +1,7 @@
 #include "jsb_class_info.h"
 #include "jsb_object_bindings.h"
 #include "jsb_type_convert.h"
+#include "jsb_runtime_access_common.h"
 
 //TODO it breaks the isolation of 'bridge'
 #include "../weaver/jsb_script.h"
@@ -354,9 +355,86 @@ namespace jsb
         }
     }
 
+    void ScriptClassInfo::revoke_runtime_methods(Environment* environment, const JavaScriptModule& module)
+    {
+        if (auto current = environment->find_script_class(module.script_class_id))
+        {
+            current->runtime_methods_ready = false;
+            current->own_runtime_methods.clear();
+        }
+    }
+
+#if !JSB_WITH_JAVASCRIPTCORE
+    static bool parse_runtime_methods(Environment* environment, const v8::Local<v8::Context>& context,
+        const v8::Local<v8::Object>& owner, const v8::Local<v8::Object>& prototype, ScriptClassInfo& info)
+    {
+        const auto symbol = jsb_symbol(environment, ClassRuntimeMethods);
+        const auto has_declaration = owner->HasOwnProperty(context, symbol);
+        if (has_declaration.IsNothing()) return false;
+        if (!has_declaration.FromMaybe(false)) return true;
+        v8::Local<v8::Value> data, registered_owner, entries;
+        if (!owner->Get(context, symbol).ToLocal(&data) || !data->IsArray()) return false;
+        const auto declaration = data.As<v8::Array>();
+        if (declaration->Length() != 2 || !declaration->Get(context, 0).ToLocal(&registered_owner) ||
+            !registered_owner->IsObject() || registered_owner.As<v8::Object>() != owner ||
+            !declaration->Get(context, 1).ToLocal(&entries) || !entries->IsArray()) return false;
+        const auto list = entries.As<v8::Array>();
+        if (list->Length() > 64) return false;
+        decltype(info.own_runtime_methods) methods;
+        for (uint32_t index = 0; index < list->Length(); ++index)
+        {
+            v8::HandleScope scope(context->GetIsolate());
+            v8::Local<v8::Value> raw, name, function, args, result;
+            if (!list->Get(context, index).ToLocal(&raw) || !raw->IsArray()) return false;
+            const auto row = raw.As<v8::Array>();
+            if (row->Length() != 4 || !row->Get(context, 0).ToLocal(&name) || !name->IsString() ||
+                !row->Get(context, 1).ToLocal(&function) || !function->IsFunction() ||
+                !row->Get(context, 2).ToLocal(&args) || !args->IsArray() ||
+                !row->Get(context, 3).ToLocal(&result) || !result->IsString()) return false;
+            Variant decoded;
+            const char* reason = nullptr;
+            String checked_name;
+            if (!runtime_scalar_from_js(environment, name, Variant::STRING, decoded, reason) ||
+                !runtime_access::valid_name(decoded, checked_name) ||
+                checked_name == "constructor" || methods.find(StringName(checked_name)) != methods.end()) return false;
+            v8::Local<v8::Value> descriptor, finalized_function;
+            const auto key = name.As<v8::String>();
+            const auto value_key = jsb_name(environment, value);
+            if (!prototype->HasOwnProperty(context, key).FromMaybe(false) ||
+                !prototype->GetOwnPropertyDescriptor(context, key).ToLocal(&descriptor) || !descriptor->IsObject() ||
+                !descriptor.As<v8::Object>()->HasOwnProperty(context, value_key).FromMaybe(false) ||
+                !descriptor.As<v8::Object>()->Get(context, value_key).ToLocal(&finalized_function) ||
+                !finalized_function->IsFunction() || finalized_function.As<v8::Function>() != function.As<v8::Function>()) return false;
+            RuntimeMethodInfo method;
+            const auto params = args.As<v8::Array>();
+            if (params->Length() > 8) return false;
+            for (uint32_t param = 0; param < params->Length(); ++param)
+            {
+                v8::Local<v8::Value> value;
+                if (!params->Get(context, param).ToLocal(&value) ||
+                    !runtime_scalar_from_js(environment, value, Variant::STRING, decoded, reason)) return false;
+                const auto type = runtime_access::variant_type(decoded);
+                if (!runtime_access::scalar_type(type)) return false;
+                method.parameter_types.push_back(type);
+            }
+            if (!runtime_scalar_from_js(environment, result, Variant::STRING, decoded, reason)) return false;
+            const String return_type = decoded;
+            method.return_type = runtime_access::variant_type(return_type);
+            if (return_type != "void" && !runtime_access::scalar_type(method.return_type)) return false;
+            method.registration = next_runtime_script_identity();
+            if (!method.registration) return false;
+            method.function.Reset(context->GetIsolate(), function.As<v8::Function>());
+            methods.emplace(StringName(checked_name), std::move(method));
+        }
+        info.own_runtime_methods = std::move(methods);
+        return true;
+    }
+#endif
+
     bool ScriptClassInfo::_parse_script_class(const v8::Local<v8::Context>& p_context, JavaScriptModule& p_module)
     {
         Environment* environment = Environment::wrap(p_context->GetIsolate());
+        revoke_runtime_methods(environment, p_module);
         // Invalidate before any user-observable parse operation. Failed reloads
         // must not leave the previous metadata authorized for runtime access.
         {
@@ -478,6 +556,10 @@ namespace jsb
         const bool parsed = _parse_script_class_iterate(p_context, existed_class_info, class_obj, runtime_exports_complete);
         existed_class_info->runtime_metadata_ready = parsed && runtime_exports_complete && !own_base_module.IsNothing()
             && (runtime_native_base || runtime_script_base) && existed_class_info->runtime_metadata_revision != 0;
+#if !JSB_WITH_JAVASCRIPTCORE
+        existed_class_info->runtime_methods_ready = parsed &&
+            parse_runtime_methods(environment, p_context, class_obj, prototype_val.As<v8::Object>(), *existed_class_info);
+#endif
         return parsed;
     }
 
