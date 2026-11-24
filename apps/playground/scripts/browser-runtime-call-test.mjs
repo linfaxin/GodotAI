@@ -66,11 +66,11 @@ await runReportedBrowserTest({scope: title, reportFile, run: async test => {
     await page.waitForFunction(id=>window.godotPlayground.get_project_context().result.projectId!==id, previous);
     await ready();
   }
-  async function play() {
-    const {attemptId} = summerResult(await call('engine.play', {}));
-    const observation = consoleResult(await call('wait_for_event', {attemptId,until:'running',timeoutMs:60000}));
+  async function recordRunning(attemptId, reply) {
+    const observation = consoleResult(reply);
     assert.equal(observation.outcome,'reached');
     const run = observation.run;
+    assert.equal(run.attemptId,attemptId);
     assert.equal(run.release.releaseId,release.id);
     const build = consoleResult(await api('get_build',{attemptId}));
     assert.match(build.sourceHash,/^[a-f0-9]{64}$/);
@@ -78,22 +78,36 @@ await runReportedBrowserTest({scope: title, reportFile, run: async test => {
     test.checkpoint({engineExecuted:true,runs,images,calls});
     return run;
   }
-  async function findPlayer(run) {
-    const tree = summerResult(await call('engine.get_runtime_tree',{depth:3,limit:50}));
+  async function play() {
+    const {attemptId} = summerResult(await call('engine.play', {}));
+    return recordRunning(attemptId, await call('wait_for_event', {attemptId,until:'running',timeoutMs:60000}));
+  }
+  function playerFromTree(run, reply) {
+    const tree = summerResult(reply);
     assert.equal(tree.run.runId,run.runId);
     const [node] = tree.nodes.filter(item => item.path === '/root/Main/Player');
     assert(node);
-    return {target:{runId:run.runId,path:node.path,expectedInstanceId:node.instanceId}, treeCallId:calls.at(-1).callId};
+    return {runId:run.runId,path:node.path,expectedInstanceId:node.instanceId};
+  }
+  async function findPlayer(run) {
+    const target = playerFromTree(run, await call('engine.get_runtime_tree',{depth:3,limit:50}));
+    return {target, treeCallId:calls.at(-1).callId};
+  }
+  function readHealthValue(target, reply) {
+    assert.equal(reply.receipt.run.runId,target.runId);
+    assert.equal(reply.receipt.expectedInstanceId,target.expectedInstanceId);
+    const [property] = consoleResult(reply).properties;
+    assert.equal(property.name,'health');
+    assert.equal(property.status,'value');
+    assert.equal(property.value.type,'int');
+    return property.value.value;
   }
   async function health(target) {
     const reply = await api('read_runtime_properties',{...target,properties:[{name:'health',expectedType:'int'}]});
-    assert.equal(reply.receipt.run.runId,target.runId);
-    const value = consoleResult(reply).properties[0];
-    assert.equal(value.status,'value');
-    return value.value.value;
+    return readHealthValue(target, reply);
   }
-  async function screenshot(target, name, shortened) {
-    const frame = summerResult(await call('engine.screenshot',{target:'game'}));
+  async function saveScreenshot(target, name, shortened, reply) {
+    const frame = summerResult(reply);
     assert.equal(frame.run.runId, target.runId);
     assert.equal(frame.releaseId, release.id);
     const png = await readConsolePng(page);
@@ -105,22 +119,29 @@ await runReportedBrowserTest({scope: title, reportFile, run: async test => {
     images.push({name,filename,sha256:createHash('sha256').update(bytes).digest('hex'),frame,pixels:png.pixels});
     return frame;
   }
-  async function stop(run) {
-    const reply = summerResult(await call('engine.stop',{}));
-    assert(reply.runs.some(item=>item.runId===run.runId));
-    const observed = consoleResult(await call('wait_for_event',{runId:run.runId,until:'exited', timeoutMs:10000}));
+  function recordExit(run, reply) {
+    const observed = consoleResult(reply);
     assert.equal(observed.outcome,'reached');
+    assert.equal(observed.run.runId,run.runId);
     const exit = observed.run.exit;
     assert.equal(exit.evidence,'host-report');
     assert.equal(exit.report.sessionFacts.nativeExit.code,0);
     assert.equal(exit.report.sessionFacts.hostCleanup,'complete');
     runs.find(item=>item.run.runId===run.runId).exit=exit;
   }
-  async function fill(callId, op, picker, selection) {
+  async function stop(run) {
+    const reply = summerResult(await call('engine.stop',{}));
+    assert(reply.runs.some(item=>item.runId===run.runId));
+    recordExit(run, await call('wait_for_event',{runId:run.runId,until:'exited',timeoutMs:10000}));
+  }
+  async function fill(callId, op, picker, selection, {expectUnselected = false} = {}) {
     await openConsoleOperation(page,op);
     await viewConsoleCall(page,callId);
-    assert(await element(page,'use-result').isDisabled());
-    await element(page,picker).selectOption(selection);
+    if (expectUnselected) {
+      assert.equal(await element(page,picker).inputValue(),'','A fresh source must start without a selection');
+      assert.equal(await element(page,'use-result').isDisabled(),true,'Filling requires an explicit selection');
+    }
+    if (picker) await element(page,picker).selectOption(selection);
     await element(page,'use-result').click();
     assert.equal(await element(page,'client-error').textContent(),'');
   }
@@ -154,56 +175,92 @@ await runReportedBrowserTest({scope: title, reportFile, run: async test => {
   } else {
     await test.step('method-demo-fill-return-read-png-restart', async () => {
       await openExample('engine.runtime_call');
-      const run = await play(), {target,treeCallId} = await findPlayer(run);
+      const historyIds = () => element(page,'history').locator('[data-call-id]').evaluateAll(rows => rows.map(row => row.dataset.callId));
+      const draftInput = async () => JSON.parse(await element(page,'input').inputValue());
+      const methodPackets = () => page.evaluate(() => window.runtimeMethodDispatches.length);
+      async function lesson(step, op, preset, source) {
+        const historyBefore = await historyIds();
+        const packetsBefore = op === 'engine.runtime_call' ? await methodPackets() : undefined;
+        const lessons = element(page,'lessons');
+        if (!await lessons.evaluate(node=>node.open)) await lessons.locator('summary').click();
+        await lessons.locator(`[data-lesson-id="runtime-method"][data-step-id="${step}"]`).click();
+        assert.deepEqual(await draftInput(),preset);
+        if (source) await fill(source.callId,op,source.picker,source.selection,{expectUnselected:source.expectUnselected});
+        const input = await draftInput();
+        assert.deepEqual(input,{...preset,...source?.fields});
+        assert.deepEqual(await historyIds(),historyBefore,'Loading and filling the lesson must not submit');
+        if (packetsBefore !== undefined) {
+          assert.equal(await methodPackets(),packetsBefore,'Loading and filling the method draft must not dispatch');
+        }
+        const result = await submitConsole(page,op,{timeout});
+        if (packetsBefore !== undefined) assert.equal(await methodPackets(),packetsBefore+1);
+        calls.push({step,op,input,...result});
+        return result;
+      }
+      async function startLesson(startStep, waitStep) {
+        const launched = await lesson(startStep,'engine.play',{});
+        const {attemptId} = summerResult(launched.reply);
+        const waited = await lesson(waitStep,'wait_for_event',{until:'running',timeoutMs:60000},
+          {callId:launched.callId,fields:{attemptId}});
+        return recordRunning(attemptId, waited.reply);
+      }
+      async function discoverHealth(run, treeStep, describeStep) {
+        const tree = await lesson(treeStep,'engine.get_runtime_tree',{depth:3,limit:50});
+        const target = playerFromTree(run, tree.reply);
+        const properties = await lesson(describeStep,'describe_runtime_properties',{names:['health']},
+          {callId:tree.callId,picker:'source-node',selection:target.path,fields:target});
+        return {target,treeCallId:tree.callId,properties};
+      }
+      async function readHealthLesson(step, target, description, expected) {
+        const read = await lesson(step,'read_runtime_properties',{},
+          {callId:description.callId,picker:'source-properties',selection:'health',fields:{...target,properties:[{name:'health',expectedType:'int'}]}});
+        assert.equal(readHealthValue(target, read.reply),expected);
+      }
+      async function stopLesson(run, stopStep, waitStep) {
+        const stopped = await lesson(stopStep,'engine.stop',{});
+        assert(summerResult(stopped.reply).runs.some(item=>item.runId===run.runId));
+        const waited = await lesson(waitStep,'wait_for_event',{until:'exited',timeoutMs:10000},
+          {callId:stopped.callId,picker:'source-run',selection:run.runId,fields:{runId:run.runId}});
+        recordExit(run, waited.reply);
+      }
+
+      const run = await startLesson('play','wait-running');
       assert.equal(consoleResult(await api('get_run',{runId:run.runId})).runtimeCall.ready,true);
-      assert.equal(await health(target),100);
-      const before = await screenshot(target,'method-before',false);
-      await fill(treeCallId,'describe_runtime_methods','source-node',target.path);
-      const describeDraft = JSON.parse(await element(page,'input').inputValue());
-      assert.deepEqual(describeDraft,target);
-      const description = await submitConsole(page,'describe_runtime_methods',{timeout});
+      const {target,treeCallId,properties} = await discoverHealth(run,'tree','describe-health');
+      await readHealthLesson('read-before',target,properties,100);
+      const before = await saveScreenshot(target,'method-before',false,
+        (await lesson('screenshot-before','engine.screenshot',{target:'game'})).reply);
+      const description = await lesson('describe','describe_runtime_methods',{},
+        {callId:treeCallId,picker:'source-node',selection:target.path,fields:target});
       const method = consoleResult(description.reply).methods.find(item=>item.method==='take_damage');
       assert.deepEqual(method.parameterTypes,['int']);
-      await openConsoleOperation(page,'engine.runtime_call');
-      await element(page,'input').fill(JSON.stringify({args:[25]}));
-      await fill(description.callId,'engine.runtime_call','source-method','take_damage');
-      assert.deepEqual(JSON.parse(await element(page,'input').inputValue()),{path:target.path,method:'take_damage',args:[25]});
-      assert.equal(await health(target),100,'Filling the draft must not execute');
-      const receipt = summerResult((await submitConsole(page,'engine.runtime_call',{timeout})).reply).payload;
+      const invoked = await lesson('invoke','engine.runtime_call',{args:[25]},
+        {callId:description.callId,picker:'source-method',selection:'take_damage',expectUnselected:true,
+          fields:{path:target.path,method:'take_damage'}});
+      assert.equal(invoked.reply.result.godotai.compatibility.payload,'godotai-typed-v1');
+      const receipt = summerResult(invoked.reply).payload;
       assert.equal(receipt.receipt.run.runId,run.runId);
       assert.equal(receipt.receipt.expectedInstanceId,target.expectedInstanceId);
       assert.equal(receipt.result.outcome,'returned');
       assert.deepEqual(receipt.result.value,{type:'int',value:75});
-
-      async function loadMethodLesson(step) {
-        const lessons = element(page,'lessons');
-        if (!await lessons.evaluate(node=>node.open)) await lessons.locator('summary').click();
-        await lessons.locator(`[data-lesson-id="runtime-method"][data-step-id="${step}"]`).click();
-      }
-      await loadMethodLesson('describe-health');
-      await fill(treeCallId,'describe_runtime_properties','source-node',target.path);
-      assert.deepEqual(JSON.parse(await element(page,'input').inputValue()),{...target,names:['health']});
-      const properties = await submitConsole(page,'describe_runtime_properties',{timeout});
-      await loadMethodLesson('read');
-      await fill(properties.callId,'read_runtime_properties','source-properties','health');
-      const readback = (await submitConsole(page,'read_runtime_properties',{timeout})).reply;
-      assert.equal(readback.receipt.run.runId,run.runId);
-      assert.equal(readback.receipt.expectedInstanceId,target.expectedInstanceId);
-      assert.deepEqual(consoleResult(readback).properties[0].value,{type:'int',value:75});
-      const after = await screenshot(target,'method-after',true);
+      await readHealthLesson('read',target,properties,75);
+      const after = await saveScreenshot(target,'method-after',true,
+        (await lesson('screenshot','engine.screenshot',{target:'game'})).reply);
       assert(after.renderSerial > before.renderSerial);
-      calls.push({op:'method-demo-validated',receipt,readback,health:75});
-      await stop(run);
-      const restarted = await play(), fresh = (await findPlayer(restarted)).target;
+      await stopLesson(run,'stop','wait-exited');
+
+      const restarted = await startLesson('restart','wait-restarted');
       assert.notEqual(restarted.runId,run.runId);
       assert.equal(runs[0].sourceHash,runs[1].sourceHash);
-      assert.equal(await health(fresh),100);
-      await screenshot(fresh,'method-restarted',false);
+      const {target:fresh,properties:freshProperties} = await discoverHealth(restarted,'tree-restarted','describe-restarted');
+      await readHealthLesson('read-restarted',fresh,freshProperties,100);
+      await saveScreenshot(fresh,'method-restarted',false,
+        (await lesson('screenshot-restarted','engine.screenshot',{target:'game'})).reply);
       const stale = {method:'take_damage',args:[{type:'int',value:25}],methodToken:method.methodToken};
       assert.equal((await api('call_runtime_method',{...target,...stale})).error.code,'run_ended');
       assert.equal((await api('call_runtime_method',{...fresh,...stale})).error.code,'binding_changed');
       assert.equal(await health(fresh),100);
-      await stop(restarted);
+      await stopLesson(restarted,'stop-restarted','wait-restarted-exited');
     });
 
     await test.step('selected-method-draft-rejects-same-path-replacement', async () => {
