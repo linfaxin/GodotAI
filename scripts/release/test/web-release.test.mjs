@@ -13,7 +13,7 @@ import { collectBrowserEvidence } from '../collect-browser-evidence.mjs';
 import { buildBrowserEngine, snapshotBrowserSources } from '../../test/build-browser-engine.mjs';
 import { inspectBrowserEngineArtifact, packageBrowserEngineArtifact, publishBrowserEngineArtifact } from '../../test/package-browser-engine-artifact.mjs';
 import { resolvePlaygroundEngine } from '../browser-engine-artifacts.mjs';
-import { canonical, digest, inspectRelease, json, writeJson, identity, hashSiteRuntimeFiles, assertSourcePatchChains, assertInputScriptBuildProof,
+import { canonical, digest, inspectRelease, json, writeJson, identity, hashSiteRuntimeFiles, assertSourcePatchChains, assertInputScriptBuildProof, assertInputScriptRuntimeExports,
   GAME_PROBE_EXPORTS, OBSERVATION_EXPORTS, OBSERVATION_SOURCE_PATHS, RUNTIME_WRITE_EXPORTS } from '../web-release-utils.mjs';
 import { patchAudioLifecycle } from '../patch-web-audio-lifecycle.mjs';
 import { webLifecycleBuildProof } from '../patch-web-lifecycle.mjs';
@@ -234,17 +234,53 @@ test('portable Game Probe and Input Script require source proof and Input Script
   const wasmHeader = await readFile(wasmPath);
   const originalGlue = await readFile(javascriptPath, 'utf8');
   const names = [...'abcde'];
-  const functions = names.flatMap((name, index) => [1, name.charCodeAt(0), 0, index]);
-  const body = [4, 0, 0x41, 0, 0x0b]; // No locals, i32.const 0, end.
-  const wasm = Buffer.concat([wasmHeader, Buffer.from([
-    1, 5, 1, 0x60, 0, 1, 0x7f, // One () -> i32 type.
-    3, 1 + names.length, names.length, ...names.map(() => 0),
-    7, 1 + functions.length, names.length, ...functions,
-    10, 1 + names.length * body.length, names.length, ...names.flatMap(() => body),
-  ])]);
+  function inputModule({indices = [0, 1, 2, 3, 4], stageType = 1} = {}) {
+    const i32 = 0x7f, i64 = 0x7e;
+    const types = [5,
+      0x60, 0, 1, i32,
+      0x60, 3, i32, i32, i32, 1, i32,
+      0x60, 2, i32, i32, 0,
+      0x60, 1, i32, 1, i32,
+      0x60, 3, i64, i32, i32, 1, i32,
+    ];
+    const functions = [5, 0, 0, stageType, 2, 3];
+    const exports = [5, ...names.flatMap((name, index) => [1, name.charCodeAt(0), 0, indices[index]])];
+    const returnZero = [4, 0, 0x41, 0, 0x0b];
+    const bodies = [5, ...returnZero, ...returnZero, ...returnZero, 2, 0, 0x0b, ...returnZero];
+    return Buffer.concat([wasmHeader, Buffer.from([
+      1, types.length, ...types, 3, functions.length, ...functions,
+      7, exports.length, ...exports, 10, bodies.length, ...bodies,
+    ])]);
+  }
+  const wasm = inputModule();
   const bindings = INPUT_SCRIPT_EXPORTS.map((symbol, index) =>
     `Module["${symbol}"] = ${symbol} = wasmExports["${names[index]}"];`).join('\n');
-  const linkedGlue = (exports, linkedWasm) => `${originalGlue}\n${exports}\n${INPUT_SCRIPT_WASM_MARKER}${digest(linkedWasm)}\n`;
+  const linkedGlue = (exports, linkedWasm, placeholders = '') => `${originalGlue}
+var Godot = (() => {
+  return async function(moduleArg = {}) {
+    var Module = moduleArg;
+    function makeInvalidEarlyAccess(name) { return () => { throw Error(name); }; }
+    function createExportWrapper(name, nargs) { return (...args) => wasmExports[name](...args.slice(0, nargs)); }
+    async function createWasm() {
+      function receiveInstance(instance, module) {
+        wasmExports = instance.exports;
+        assignWasmExports(wasmExports);
+        return wasmExports;
+      }
+      function receiveInstantiationResult(result) { return receiveInstance(result.instance); }
+      var result = await instantiateAsync();
+      var exports = receiveInstantiationResult(result);
+      return exports;
+    }
+    ${placeholders}
+    function assignWasmExports(wasmExports) {
+      ${exports}
+    }
+    var wasmExports = await createWasm();
+    return Module;
+  };
+})();
+${INPUT_SCRIPT_WASM_MARKER}${digest(linkedWasm)}\n`;
   async function writeInputTemplate(name, wasm, glue) {
     await writeFile(wasmPath, wasm);
     await writeFile(javascriptPath, glue);
@@ -263,10 +299,56 @@ test('portable Game Probe and Input Script require source proof and Input Script
   await assert.rejects(packageBrowserEngineArtifact({report: reportPath, out: resolve(f.root, 'missing-bindings')}),
     /E_INPUT_SCRIPT_EXPORT: Missing JavaScript binding/);
   await assert.rejects(resolvePlaygroundEngine({repository: f.root, reportPath}), /E_INPUT_SCRIPT_EXPORT: Missing JavaScript binding/);
+  const stage = bindings.split('\n').find(line => line.startsWith('Module["_godotjs_input_script_stage"]'));
+  assert(stage);
+  for (const [name, replacement] of [
+    ['commented-input-binding', `/*${stage}*/`],
+    ['line-comment-input-binding', `//${stage}`],
+    ['quoted-input-binding', `const example = \`${stage}\`;`],
+    ['conditional-input-binding', `if (false) { ${stage} }`],
+    ['foreign-module-input-binding', `other.${stage}`],
+    ['unused-function-input-binding', `function unusedBinding() { ${stage} }`],
+    ['unreachable-input-binding', `return;\n${stage}`],
+  ]) {
+    await writeInputTemplate(name, wasm, linkedGlue(bindings.replace(stage, replacement), wasm));
+    await assert.rejects(packageBrowserEngineArtifact({report: reportPath, out: resolve(f.root, name)}),
+      /E_INPUT_SCRIPT_EXPORT: Missing JavaScript binding for .*_stage/);
+    if (name === 'commented-input-binding') {
+      await assert.rejects(buildRelease(f.configuration), /E_INPUT_SCRIPT_EXPORT: Missing JavaScript binding for .*_stage/);
+    }
+  }
+  const overwritten = linkedGlue(bindings + '\nModule._godotjs_input_script_stage = undefined;', wasm);
+  assert.throws(() => assertInputScriptRuntimeExports(Buffer.from(overwritten), wasm),
+    /E_INPUT_SCRIPT_EXPORT: Multiple JavaScript assignments for .*_stage/);
+  const disconnected = linkedGlue(bindings, wasm).replace('assignWasmExports(wasmExports);', 'return wasmExports;');
+  assert.throws(() => assertInputScriptRuntimeExports(Buffer.from(disconnected), wasm), /Missing Emscripten input script initialization path/);
+  const placeholders = INPUT_SCRIPT_EXPORTS.map(symbol =>
+    `var ${symbol} = Module['${symbol}'] = makeInvalidEarlyAccess('${symbol}');`).join('\n');
+  const wrapped = INPUT_SCRIPT_EXPORTS.map((symbol, index) =>
+    `Module.${symbol} = ${symbol} = createExportWrapper('${names[index]}', ${[0, 0, 3, 2, 1][index]});`).join('\n');
+  const debugGlue = linkedGlue(wrapped, wasm, placeholders);
+  assert.doesNotThrow(() => assertInputScriptRuntimeExports(Buffer.from(debugGlue), wasm));
+  assert.throws(() => assertInputScriptRuntimeExports(Buffer.from(debugGlue.replace("createExportWrapper('c', 3)", "createExportWrapper('c', 0)")), wasm),
+    /E_INPUT_SCRIPT_EXPORT: Incorrect JavaScript wrapper arity for .*_stage/);
+  const stubOnly = linkedGlue(bindings.replace(stage, ''), wasm, placeholders);
+  assert.throws(() => assertInputScriptRuntimeExports(Buffer.from(stubOnly), wasm), /Missing JavaScript binding for .*_stage/);
+  const stagePlaceholder = placeholders.split('\n').find(line => line.startsWith('var _godotjs_input_script_stage = '));
+  assert(stagePlaceholder);
+  const latePlaceholder = linkedGlue(bindings, wasm).replace('var wasmExports = await createWasm();',
+    'var wasmExports = await createWasm(), ' + stagePlaceholder.slice(4));
+  assert.throws(() => assertInputScriptRuntimeExports(Buffer.from(latePlaceholder), wasm), /Multiple JavaScript assignments for .*_stage/);
   await writeInputTemplate('missing-wasm-functions', wasmHeader, linkedGlue(bindings, wasmHeader));
   await assert.rejects(packageBrowserEngineArtifact({report: reportPath, out: resolve(f.root, 'missing-wasm-functions')}),
     /E_INPUT_SCRIPT_EXPORT: Missing WebAssembly function/);
   await assert.rejects(buildRelease(f.configuration), /E_INPUT_SCRIPT_EXPORT: Missing WebAssembly function/);
+  const aliased = inputModule({indices: [0, 0, 2, 3, 4]});
+  await writeInputTemplate('aliased-input-functions', aliased, linkedGlue(bindings, aliased));
+  await assert.rejects(packageBrowserEngineArtifact({report: reportPath, out: resolve(f.root, 'aliased-input-functions')}),
+    /E_INPUT_SCRIPT_EXPORT: Duplicate WebAssembly function for .*_buffer/);
+  const wrongType = inputModule({stageType: 4});
+  await writeInputTemplate('wrong-input-signature', wrongType, linkedGlue(bindings, wrongType));
+  await assert.rejects(resolvePlaygroundEngine({repository: f.root, reportPath}),
+    /E_INPUT_SCRIPT_EXPORT: Incorrect WebAssembly function signature for .*_stage/);
   const otherWasm = Buffer.from(wasm);
   otherWasm[otherWasm.length - 2] = 1; // Change the last function's return value without changing exports or types.
   const validGlue = linkedGlue(bindings, wasm);

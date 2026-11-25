@@ -4,6 +4,7 @@ import {fileURLToPath} from 'node:url';
 import {randomUUID} from 'node:crypto';
 import {canonical,digest,sitePayloads,siteCandidateId} from './site-evidence.mjs';
 import {isEngineProfile} from '../../../scripts/release/engine-profiles.mjs';
+import {assertInputScriptReleaseCaptures} from '../../../scripts/release/web-release-utils.mjs';
 import {assessStoppedAudio} from './feature-audio-evidence.mjs';
 import {assertRuntimeEvidence,assertWorkerSessionEvidence} from './runtime-evidence.mjs';
 import {assertWorkerBuildProof,assertWorkerCandidate,workerAcceptancePlan,runConfigurationHash} from './worker-candidate.mjs';
@@ -42,6 +43,7 @@ export async function sealSiteAcceptance(directory,reports,{verify=false,begin=f
  if(worker){
   const engine={wasm:release.engine.wasm,javascript:payloads[release.engine.javascript?.path]};
   assertWorkerBuildProof({...release.build,kind:'godot-js-browser-engine-build',status:'built',runtimeProfile:release.runtimeProfile,engineTarget:manifest.engineTarget,runtimeAbi:release.runtimeAbi,execution:release.execution,source:release.build.engineSource,recipe:release.build.engineRecipe},engine);
+  if(release.runtimeAbi.inputScript===1)await assertInputScriptReleaseCaptures(directory,release,engine);
   await assertWorkerSdkSources(repo,release.build.sdkBuild);
  }
  const resources=await json(path.join(directory,'resource-build.json'));

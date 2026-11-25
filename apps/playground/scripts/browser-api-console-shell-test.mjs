@@ -10,15 +10,16 @@ import {consoleElement as element, openConsoleOperation} from './api-console-bro
 const directory = defaultTestDirectory({shellOnly: true});
 const output = path.resolve(process.env.PLAYGROUND_API_CONSOLE_SHELL_OUT ??
   fileURLToPath(new URL('../../../../.godotai-logs/api-console-shell/', import.meta.url)));
+const reportFile = path.resolve(process.env.PLAYGROUND_API_CONSOLE_SHELL_REPORT ?? path.join(output, 'report.json'));
 
 await runReportedBrowserTest({scope: 'real-main-api-console-shell',
-  reportFile: process.env.PLAYGROUND_API_CONSOLE_SHELL_REPORT ?? path.join(output, 'report.json'),
+  reportFile,
   run: async test => {
     const profile = JSON.parse(await readFile(path.join(directory, 'shell-profile.json'), 'utf8'));
     assert.equal(profile.shellOnly, true, 'This smoke test requires an explicit shell-only build.');
     await mkdir(output, {recursive: true});
     test.checkpoint({engineExecuted: false, mainReplaced: false, compilerReplaced: false,
-      nodeVersion: process.version, directory, profile});
+      nodeVersion: process.version, profile});
     const server = createStaticServer(directory);
     await listen(server); test.defer(() => close(server));
     const browser = await launchBrowser({browser: 'chromium', headless: true,
@@ -35,9 +36,10 @@ await runReportedBrowserTest({scope: 'real-main-api-console-shell',
     page.on('console', entry => {if (entry.type() === 'error') consoleErrors.push(entry.text());});
     page.on('requestfailed', request => failedRequests.push({url: request.url(), error: request.failure()?.errorText}));
     const screenshots = [];
-    async function capture(name) {
+    async function capture(name, target = page) {
       const filename = path.join(output, name + '.png');
-      await page.screenshot({path: filename}); screenshots.push(filename);
+      await target.screenshot({path: filename});
+      screenshots.push(path.relative(path.dirname(reportFile), filename).split(path.sep).join('/'));
     }
     test.defer(async () => {
       if (!page.isClosed()) await capture('final-state');
@@ -179,8 +181,7 @@ await runReportedBrowserTest({scope: 'real-main-api-console-shell',
         assert.equal(state.context.projectId, null);
         assert.equal(state.context.latestBuildAttemptId, null);
         assert.equal(await element(loading, 'history').locator('[data-call-id]').count(), 0);
-        const filename = path.join(output, 'initializing-example-client-error.png');
-        await loading.screenshot({path: filename}); screenshots.push(filename);
+        await capture('initializing-example-client-error', loading);
         await openConsoleOperation(loading, 'engine.is_running');
         await openConsoleOperation(loading, 'engine.get_project_context');
         const focusedApi = () => loading.evaluate(() => document.activeElement?.dataset.apiTab);
@@ -225,6 +226,6 @@ await runReportedBrowserTest({scope: 'real-main-api-console-shell',
     }, {after: ['browser-back-keeps-the-api-console-and-its-session']});
     return {status: 'passed', browser: {name: browser.browserType().name(), version: browser.version()},
       engineExecuted: false, mainReplaced: false, compilerReplaced: false, nodeVersion: process.version,
-      directory, profile, pageErrors, consoleErrors, failedRequests, screenshots};
+      profile, pageErrors, consoleErrors, failedRequests, screenshots};
   },
 });

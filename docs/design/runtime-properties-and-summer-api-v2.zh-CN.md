@@ -399,7 +399,7 @@ not_written/not_applied 是已知结算业务结果，保留成功信封；uncon
 
 已核验固定 Summer 客户端参数、请求构造与工具声明的预期字段；客户端只发一次 SetRuntimeProp，不代表已验证其原生绑定检查、实际值编码、transport 枚举或帧关系。本期的 native before/set/readback 由本地新 ABI 自己保证。严格 wire 兼容需要固定版本原生黄金样例和逐字段契约测试，列为后续兼容级别，不阻塞本期输入子集/本地语义演示。
 
-属性发现/批读、check、wait、输入与旧运行负测使用明确的 GodotAI 本地原语，不伪装成 engine.runtime_get。engine.inspect 不自动执行 script getter。最初的 V2 运行时属性阶段将 `game_input` 和 `wait_for_event` 的 Summer 脚本输入与事件游标，以及 `runtime_call`、`game_probe` 和 `game_control` 列在交付范围之外。后续 `game_probe` 的支持条件见[第十六节](#十六-enginegame_probe-同帧采样)。MCP content 是未来对 dispatcher 的外壳；本期不要求安装 MCP server 或连接 Summer 应用。
+属性发现/批读、check、wait、输入与旧运行负测使用明确的 GodotAI 本地原语，不伪装成 engine.runtime_get。engine.inspect 不自动执行 script getter。最初的 V2 运行时属性阶段将 `game_input` 和 `wait_for_event` 的 Summer 脚本输入与事件游标，以及 `runtime_call`、`game_probe` 和 `game_control` 列在交付范围之外。后续 `game_probe` 的支持条件见[第十六节](#十六-enginegame_probe-同帧采样)。现行 `engine.game_input` 的参数、回执和限制见 [Playground 输入脚本契约](../../apps/playground/README.md#input-script)。MCP content 是未来对 dispatcher 的外壳；本期不要求安装 MCP server 或连接 Summer 应用。
 
 ## 九 Playground 与证据
 

@@ -21,6 +21,8 @@ export interface ConsoleLesson {
   steps: readonly ConsoleLessonStep[];
 }
 
+const inputScriptReady = '收到 running 回执后，确认主运行是回执中的 runId、待启动 attempt 为「无」，且「物理帧输入」和「游戏帧探测」均为「可用」。';
+
 export const CONSOLE_LESSONS: readonly ConsoleLesson[] = [
   {
     id: 'input-script',
@@ -28,7 +30,7 @@ export const CONSOLE_LESSONS: readonly ConsoleLesson[] = [
     description: '从输入标签打开独立示例。先探测起点，再执行四个物理步的移动输入并用画面验证。',
     steps: [
       {id: 'input-play', label: '启动示例', operationId: 'engine.play', input: {}},
-      {id: 'input-ready', label: '等待本次启动', operationId: 'wait_for_event', input: {until: 'running', timeoutMs: 60000}, notes: '从本次启动回执填入 attemptId，等到运行就绪。'},
+      {id: 'input-ready', label: '等待本次启动', operationId: 'wait_for_event', input: {until: 'running', timeoutMs: 60000}, notes: '从本次启动回执填入 attemptId。' + inputScriptReady},
       {id: 'input-before', label: '探测起点 x=64', operationId: 'engine.game_probe', input: {tree: {path: '/root/Main'}, props: [INPUT_SCRIPT_PLAYER_PATH + ':position']}},
       {id: 'input-execute', label: '按住向右动作四步', operationId: 'engine.game_input', input: {...SUMMER_OPERATION_SPECS['engine.game_input'].defaultInput},
         needsRunSource: true, notes: '从起点探测回执选择本次运行，再执行并核对两个边沿。'},
@@ -36,7 +38,7 @@ export const CONSOLE_LESSONS: readonly ConsoleLesson[] = [
       {id: 'input-stop', label: '停止已验证的运行', operationId: 'engine.stop', input: {}, needsRunSource: true, notes: '从移动后探测回执选择目标。'},
       {id: 'input-exit', label: '确认原运行退出', operationId: 'wait_for_event', input: {until: 'exited'}, notes: '从停止回执填入 runId。'},
       {id: 'input-restart', label: '以同一源码重启', operationId: 'engine.play', input: {}},
-      {id: 'input-ready-new', label: '等待新的运行', operationId: 'wait_for_event', input: {until: 'running', timeoutMs: 60000}, notes: '使用第二次启动回执。'},
+      {id: 'input-ready-new', label: '等待新的运行', operationId: 'wait_for_event', input: {until: 'running', timeoutMs: 60000}, notes: '使用第二次启动回执。' + inputScriptReady},
       {id: 'input-reset', label: '确认恢复起点 x=64', operationId: 'engine.game_probe', input: {tree: {path: '/root/Main'}, props: [INPUT_SCRIPT_PLAYER_PATH + ':position']}},
       {id: 'input-stop-new', label: '停止新运行', operationId: 'engine.stop', input: {}, needsRunSource: true, notes: '从恢复起点的探测回执选择新运行。'},
       {id: 'input-exit-new', label: '确认新运行退出', operationId: 'wait_for_event', input: {until: 'exited'}, notes: '从第二次停止回执填入 runId。'},

@@ -1,7 +1,10 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
+import {mkdtemp,rm,writeFile} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
 import {gzipSync,gunzipSync} from 'node:zlib';
-import {assembleFullEngineRelease,validateProductionApiCapture,describeAsset,sha256,canonical,FULL_ENGINE_MODULE_EXPORTS,REQUIRED_BINDING_AUDIT_CHECKS} from './full-engine-release.mjs';
+import {assembleFullEngineRelease,validateProductionApiCapture,describeAsset,sha256,canonical,FULL_ENGINE_MODULE_EXPORTS,REQUIRED_BINDING_AUDIT_CHECKS,writeFullEngineOutputs} from './full-engine-release.mjs';
 import {resolvedBrowserModules} from '../../../scripts/test/build-browser-engine.mjs';
 import {engineApiCaptureFiles} from './capture-engine-api.mjs';
 import {auditEngineBinding} from './engine-api-binding-audit.mjs';
@@ -12,7 +15,7 @@ import {assertWorkerBuildProof} from './worker-candidate.mjs';
 import {WORKER_SDK_PACKAGES} from './worker-sdk-proof.mjs';
 import {workerBuildReportFixture} from './fixtures/worker-build-report.mjs';
 import {propertiesProofFixture} from './fixtures/runtime-properties-build-report.mjs';
-import {OBSERVATION_EXPORTS,OBSERVATION_SOURCE_PATHS,RUNTIME_WRITE_EXPORTS} from '../../../scripts/release/web-release-utils.mjs';
+import {assertInputScriptReleaseCaptures,OBSERVATION_EXPORTS,OBSERVATION_SOURCE_PATHS,RUNTIME_WRITE_EXPORTS} from '../../../scripts/release/web-release-utils.mjs';
 import {createRequire} from 'node:module';
 const {ENGINE_SDK_MODULES}=createRequire(new URL('../../../scripts/jsb.react/package.json',import.meta.url))('@godot-js/react/engine-modules');
 const sdkDeclarations=()=>Object.fromEntries(Object.values(ENGINE_SDK_MODULES).map(entry=>[entry.declaration,'export {};\n']));
@@ -72,6 +75,27 @@ test('SDK type-only changes update extension identity while preserving engine-on
  const after=assembleFullEngineRelease(changed).manifest;
  assert.equal(after.engineId,before.engineId);assert.notEqual(after.extensionId,before.extensionId);assert.notEqual(after.sdk.typesHash,before.sdk.typesHash);
  assert.doesNotThrow(()=>assertFullEngineIdentities(after));
+});
+
+test('Input Script production release requires both browser captures for the exact engine bytes',async t=>{
+ const input={...fixture({compressed:true}),inputScript:true};
+ assert.throws(()=>assembleFullEngineRelease(input),/E_INPUT_SCRIPT_RUNTIME_CAPTURE.*snake/);
+ Object.assign(input.capture,{browser:'Chromium fixture',inputScript:{abi:1}});
+ assert.throws(()=>assembleFullEngineRelease(input),/E_INPUT_SCRIPT_RUNTIME_CAPTURE.*camel/);
+ const camel=input.namingProfiles.camel.capture;
+ Object.assign(camel,{browser:'Chromium fixture',inputScript:{abi:1},engineWasmSha256:input.engine.wasm.sha256});
+ assert.throws(()=>assembleFullEngineRelease(input),/E_FULL_ENGINE_IDENTITY/);
+ camel.engineWasmSha256=input.engine.wasm.decodedSha256;
+ const {manifest,outputs}=assembleFullEngineRelease(input);
+ const root=await mkdtemp(join(tmpdir(),'input-script-capture-'));
+ t.after(()=>rm(root,{recursive:true,force:true}));
+ await writeFullEngineOutputs(root,outputs);
+ await assertInputScriptReleaseCaptures(root,manifest);
+ await assert.rejects(assertInputScriptReleaseCaptures(root,manifest,{...manifest.engine,javascript:{sha256:sha256('stale bytes')}}),
+  /E_INPUT_SCRIPT_RUNTIME_CAPTURE.*exact snake/);
+ const capturePath=manifest.api.namingProfiles.camel.capture.path;
+ await writeFile(join(root,capturePath),outputs.get(capturePath).toString().replace('Chromium fixture','Chromium changed'));
+ await assert.rejects(assertInputScriptReleaseCaptures(root,manifest),/E_INPUT_SCRIPT_RUNTIME_CAPTURE.*capture bytes/);
 });
 
 test('Worker release retains composed native ABI receipts for later verification',()=>{
