@@ -95,17 +95,20 @@ await runReportedBrowserTest({scope, reportFile, run: async test => {
     assert.equal(run.attemptId, attemptId);
     assert.equal(run.release.releaseId, release.id);
     assert.equal(run.configuration.presentationBackend, 'direct');
-    assert.deepEqual(consoleResult(await api('get_run', {runId: run.runId})).inputScript, {supported, ready: supported});
+    await page.waitForFunction(async ({runId, supported}) => {
+      const api = window.godotPlayground;
+      const main = (await api.summer_call({op: 'engine.is_running'})).result?.data;
+      if (!main?.playing || main.capturedRunId !== runId || main.pendingAttemptId !== null) return false;
+      const current = api.get_run({runId}).result;
+      return current?.state === 'running' && current.gameProbe?.ready === true &&
+        current.inputScript?.supported === supported && current.inputScript.ready === supported;
+    }, {runId: run.runId, supported}, {timeout: 30000});
     const build = consoleResult(await api('get_build', {attemptId}));
     assert.equal(build.status, 'succeeded');
     assert.equal(build.diagnostics.counts.error, 0);
     assert.equal(build.artifact.artifactId, run.artifact.artifactId);
     if (supported) assert.equal(build.compilerIdentity.target.naming, 'snake');
     assert.match(build.sourceHash, /^[a-f0-9]{64}$/);
-    await page.waitForFunction(async () => {
-      const reply = await window.godotPlayground.summer_call({op: 'engine.is_running'});
-      return reply.result?.data.pendingAttemptId === null;
-    });
     const record = {run, sourceHash: build.sourceHash, build};
     runs.push(record);
     engineExecuted = true;
@@ -138,7 +141,7 @@ await runReportedBrowserTest({scope, reportFile, run: async test => {
     const file = path.join(path.dirname(reportFile), fileName + '.png'), bytes = Buffer.from(png.bytes);
     await mkdir(path.dirname(file), {recursive: true});
     await writeFile(file, bytes);
-    pngs.push({file, callId: captured.callId, sha256: createHash('sha256').update(bytes).digest('hex'),
+    pngs.push({file: path.basename(file), callId: captured.callId, sha256: createHash('sha256').update(bytes).digest('hex'),
       run: result.run, frame: result.frame, position: result.properties[0].value,
       playerInstanceId: result.properties[0].instanceId, pixels: png.pixels});
     checkpoint();

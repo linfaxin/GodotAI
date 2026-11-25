@@ -7,6 +7,7 @@ import {captureEngineApi,engineApiCapturePack} from './capture-engine-api.mjs';
 import {getEngineProfile,validateEngineProfile,assertWorkerRuntimeAbi} from '../../../scripts/release/engine-profiles.mjs';
 import {legacyExecution,validateExecutionContract} from '../../../scripts/release/execution-contract.mjs';
 import {createEngineIdentity,createExtensionIdentity,nativeEngineIdentityInputs} from '../../../scripts/release/release-identities.mjs';
+import {assertInputScriptRuntimeCapture} from '../../../scripts/release/web-release-utils.mjs';
 import {nativeExtensionIdentityInputs} from '../../../packages/engine/src/identities.ts';
 
 import {assertWorkerBuildProof} from './worker-candidate.mjs';
@@ -100,7 +101,7 @@ function validateGeneratedProfile({ir,capture,irBytes,declarations,namingVersion
 }
 
 /** Both naming snapshots are captured from the same production engine bytes. */
-export function assembleFullEngineRelease({engine,ir,capture,irBytes,declarations,namingVersion,codegenVersion,sdkVersion,vendor,developmentVendor,typeSnapshot,namingProfiles,strictTypechecks,build={},runtimeProfile=FULL_ENGINE_PROFILE,runtimeAbi,engineBuildReport}){
+export function assembleFullEngineRelease({engine,ir,capture,irBytes,declarations,namingVersion,codegenVersion,sdkVersion,vendor,developmentVendor,typeSnapshot,namingProfiles,strictTypechecks,build={},runtimeProfile=FULL_ENGINE_PROFILE,runtimeAbi,engineBuildReport,inputScript=false}){
  const execution=engine.execution??legacyExecution();validateExecutionContract(execution,{requireWorkerAssets:execution.executionModel!=='window'});
  if(execution.executionModel!=='window'&&!engine.host)throw Error('E_FULL_ENGINE_HOST: Worker release requires the actual browser host bundle');
  if(engine.host&&(!/^[a-f0-9]{64}$/.test(engine.host.sha256??'')||!Number.isSafeInteger(engine.host.bytes)||engine.host.bytes<=0||!engine.host.path||engine.host.path.startsWith('/')||engine.host.path.split('/').some(part=>!part||part==='.'||part==='..')))throw Error('E_FULL_ENGINE_HOST: Invalid browser host asset');
@@ -144,7 +145,10 @@ export function assembleFullEngineRelease({engine,ir,capture,irBytes,declaration
  const definition=getEngineProfile(runtimeProfile);
  const profiles={snake:{ir,capture,irBytes,declarations,namingVersion,codegenVersion,typeSnapshot,strictTypechecks,actualAPIHash:build.actualAPIHash},camel:namingProfiles?.camel};
  if(!profiles.camel)throw Error('E_FULL_ENGINE_NAMING: Both snake and camel captures are required');
- for(const [naming,profile]of Object.entries(profiles))validateGeneratedProfile(profile,engine,naming,runtimeProfile);
+ for(const [naming,profile]of Object.entries(profiles)){
+  validateGeneratedProfile(profile,engine,naming,runtimeProfile);
+  if(inputScript||runtimeAbi?.inputScript===1)assertInputScriptRuntimeCapture(profile.capture,engine,naming);
+ }
  if(canonical(capture.authoring??null)!==canonical(profiles.camel.capture.authoring??null)||
     runtimeAbi?.runtimeCall===1&&capture.authoring?.runtimeMethod!==true)throw Error('E_FULL_ENGINE_AUTHORING: Capture profiles disagree about runtime method authoring');
  for(const field of ['engineVersion','bindingVersion','namingVersion','platform'])if(ir[field]!==profiles.camel.ir[field])throw Error('E_FULL_ENGINE_IDENTITY: Naming profiles target different '+field);
@@ -195,12 +199,13 @@ export function assembleFullEngineRelease({engine,ir,capture,irBytes,declaration
  return {manifest,outputs};
 }
 
-export async function loadProductionApi({engineJs,engineWasm,irPath,reportPath,captureDirectory,naming='snake',execution}){
+export async function loadProductionApi({engineJs,engineWasm,irPath,reportPath,captureDirectory,naming='snake',execution,inputScript=false}){
  if(irPath&&!reportPath)throw Error('E_FULL_ENGINE_CAPTURE: An existing IR requires its exact production capture report');
  const expectedPack = sha256(await engineApiCapturePack(naming));
- if(!irPath || JSON.parse(await readFile(reportPath,'utf8')).authoring===undefined){
+ const existing=irPath?JSON.parse(await readFile(reportPath,'utf8')):undefined;
+ if(existing?.authoring===undefined||(inputScript&&existing.inputScript===undefined)){
   irPath=path.join(captureDirectory,'engine-ir.json');reportPath=irPath+'.capture.json';
-  await captureEngineApi({engineJs,engineWasm,output:irPath,reportPath,naming,execution});
+  await captureEngineApi({engineJs,engineWasm,output:irPath,reportPath,naming,execution,inputScript});
  }
  const [irBytes,captureBytes,api]=await Promise.all([readFile(irPath),readFile(reportPath),import(path.join(repo,'scripts/jsb.react-browser/dist/engine-api.js'))]);
  const ir=api.parseEngineApi(JSON.parse(irBytes.toString('utf8'))),capture=JSON.parse(captureBytes.toString('utf8'));
@@ -214,10 +219,10 @@ export async function loadProductionApi({engineJs,engineWasm,irPath,reportPath,c
  return {ir,capture,irBytes,declarations,strictTypechecks,namingVersion:api.ENGINE_NAMING_VERSION,codegenVersion:api.ENGINE_DECLARATIONS_VERSION,actualAPIHash:sha256(api.canonicalEngineApi(ir))};
 }
 
-export async function loadProductionApiProfiles({engineJs,engineWasm,captureDirectory,namingProfiles={},execution}){
+export async function loadProductionApiProfiles({engineJs,engineWasm,captureDirectory,namingProfiles={},execution,inputScript=false}){
  const result={};
  // Each browser is fully retired before loading the same large WASM again.
- for(const naming of ['snake','camel'])result[naming]=await loadProductionApi({engineJs,engineWasm,captureDirectory:path.join(captureDirectory,naming),...namingProfiles[naming],naming,execution});
+ for(const naming of ['snake','camel'])result[naming]=await loadProductionApi({engineJs,engineWasm,captureDirectory:path.join(captureDirectory,naming),...namingProfiles[naming],naming,execution,inputScript});
  return result;
 }
 

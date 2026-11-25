@@ -166,13 +166,14 @@ export async function buildRelease(configuration) {
         const source = config.engineApi?.namingProfiles?.[naming] ?? (naming === 'snake' ? config.engineApi : undefined);
         return [naming, source?.ir ? { irPath: resolve(root, source.ir), reportPath: source.captureReport && resolve(root, source.captureReport) } : {}];
       }));
-      const namingProfiles = await loadProductionApiProfiles({ engineJs: resolve(staging, 'assets/godot.js'), engineWasm: resolve(captureDirectory, 'godot.wasm'), captureDirectory, namingProfiles: captureInputs,execution });
+      const inputScript = sourceCertified && report.runtimeAbi?.inputScript === 1;
+      const namingProfiles = await loadProductionApiProfiles({ engineJs: resolve(staging, 'assets/godot.js'), engineWasm: resolve(captureDirectory, 'godot.wasm'), captureDirectory, namingProfiles: captureInputs,execution,inputScript });
       await Promise.all(Object.values(namingProfiles).map(async profile => { profile.typeSnapshot = await createTypeSnapshot({ engineFiles: profile.declarations.files }); }));
       const api = namingProfiles.snake;
       const engine = { javascript: files.find(file => file.kind === 'engine-js'), wasm: files.find(file => file.kind === 'engine-wasm'), worklets: files.filter(file => file.kind === 'engine-worklet'),...(config.engineHost?{host:files.find(file=>file.kind==='engine-host')}:{}),execution,workerAssets:execution.workerAssets.map(worker=>files.find(file=>file.path===worker.path)) };
       if (report.modules && canonical([...report.modules].sort()) !== canonical([...api.ir.modules].sort())) fail('E_RELEASE_MODULES', 'Built module header and production native API disagree');
       const [vendor, developmentVendor] = await Promise.all([buildEngineVendor(), buildEngineVendor({ mode: 'development' })]);
-      const prepared = assembleFullEngineRelease({ ...api, namingProfiles, engine, execution, sdkVersion: metadata.sdkVersion ?? createRequire(resolve(repository, 'scripts/jsb.react/package.json'))('./package.json').version,
+      const prepared = assembleFullEngineRelease({ ...api, namingProfiles, engine, execution, inputScript, sdkVersion: metadata.sdkVersion ?? createRequire(resolve(repository, 'scripts/jsb.react/package.json'))('./package.json').version,
         vendor, developmentVendor, runtimeProfile, build: { actualAPIHash: api.actualAPIHash, sourceCertified, engineReportSha256: digest(await readFile(reportPath)), engineTemplateSha256: report.template.sha256, recipeSha256: report.recipeSha256 } });
       fullRelease = prepared.manifest;
       for (const [path, bytes] of prepared.outputs) {

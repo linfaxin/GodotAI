@@ -2,6 +2,7 @@ import {GAME_PROBE_PATCH,GAME_PROBE_PATHS} from './patch-web-game-probe.mjs';
 import {INPUT_SCRIPT_PATCH,INPUT_SCRIPT_PATHS,INPUT_SCRIPT_EXPORTS,INPUT_SCRIPT_WASM_MARKER} from './patch-web-input-script.mjs';
 import { createHash } from 'node:crypto';
 import { readFile, readdir, lstat, mkdir, writeFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { resolve, relative, dirname, sep } from 'node:path';
 import { gunzipSync } from 'node:zlib';
 import { assertGame2dCertification } from './game-2d-evidence.mjs';
@@ -149,26 +150,216 @@ export function assertInputScriptAssets(runtimeAbi, proof, {wasmSha256, javascri
     throw Error('E_INPUT_SCRIPT_BUILD_PROOF');
 }
 
+export function assertInputScriptRuntimeCapture(capture, engine, naming) {
+  if (capture?.kind !== 'godotjs-production-engine-api-capture' || capture.status !== 'captured' ||
+      capture.naming !== naming || typeof capture.browser !== 'string' || !capture.browser || capture.inputScript?.abi !== 1 ||
+      capture.engineJsSha256 !== engine.javascript.sha256 ||
+      capture.engineWasmSha256 !== (engine.wasm.decodedSha256 ?? engine.wasm.sha256))
+    fail('E_INPUT_SCRIPT_RUNTIME_CAPTURE', `Missing browser ABI capture for the exact ${naming} engine JS/WASM`);
+}
+
+export async function assertInputScriptReleaseCaptures(root, release, engine = release.engine) {
+  for (const naming of ['snake', 'camel']) {
+    const asset = release.api?.namingProfiles?.[naming]?.capture;
+    const sealed = asset && release.payloads?.[asset.path];
+    if (!sealed || sealed.sha256 !== asset.sha256 || sealed.bytes !== asset.bytes)
+      fail('E_INPUT_SCRIPT_RUNTIME_CAPTURE', `Missing sealed ${naming} capture`);
+    const bytes = await readFile(within(root, asset.path));
+    if (bytes.length !== asset.bytes || digest(bytes) !== asset.sha256)
+      fail('E_INPUT_SCRIPT_RUNTIME_CAPTURE', `${naming} capture bytes differ from the release`);
+    assertInputScriptRuntimeCapture(JSON.parse(bytes.toString('utf8')), engine, naming);
+  }
+}
+
+// The engine targets core Wasm function types. Read the type, function and export
+// sections of the already validated module without instantiating the engine.
+function readWasmFunctionExports(wasm, module) {
+  const types = [], definitions = [], exports = new Map();
+  const importedFunctions = WebAssembly.Module.imports(module).filter(entry => entry.kind === 'function').length;
+  let offset = 8;
+  function readU32() {
+    let value = 0, shift = 0, byte;
+    do {
+      byte = wasm[offset++];
+      value |= (byte & 0x7f) << shift;
+      shift += 7;
+    } while (byte & 0x80);
+    return value >>> 0;
+  }
+  function readValueTypes() {
+    return Array.from({length: readU32()}, () => {
+      const type = wasm[offset++];
+      // A typed reference also encodes a heap type as a LEB128 immediate.
+      if (type === 0x63 || type === 0x64) readU32();
+      return type;
+    });
+  }
+  while (offset < wasm.length) {
+    const section = wasm[offset++], size = readU32(), end = offset + size;
+    if (section === 1) {
+      const count = readU32();
+      for (let i = 0; i < count; i++) {
+        if (wasm[offset++] !== 0x60) fail('E_INPUT_SCRIPT_EXPORT', 'Unsupported WebAssembly type declaration');
+        types.push({parameters: readValueTypes(), results: readValueTypes()});
+      }
+    } else if (section === 3) {
+      const count = readU32();
+      for (let i = 0; i < count; i++) definitions.push(readU32());
+    } else if (section === 7) {
+      const count = readU32();
+      for (let i = 0; i < count; i++) {
+        const length = readU32();
+        const name = Buffer.from(wasm.subarray(offset, offset + length)).toString('utf8');
+        offset += length;
+        const kind = wasm[offset++], index = readU32();
+        if (kind === 0 && index >= importedFunctions)
+          exports.set(name, {index, type: types[definitions[index - importedFunctions]]});
+      }
+      break;
+    }
+    offset = end;
+  }
+  return exports;
+}
+
+const INPUT_SCRIPT_SIGNATURES = new Map([
+  ['_godotjs_input_script_abi', [0, 1]], ['_godotjs_input_script_buffer', [0, 1]],
+  ['_godotjs_input_script_stage', [3, 1]], ['_godotjs_input_script_cancel', [2, 0]],
+  ['_godotjs_input_script_take', [1, 1]],
+]);
+
+function readInputScriptBindings(glue) {
+  const ts = createRequire(new URL('../../apps/playground/package.json', import.meta.url))('typescript');
+  const source = ts.createSourceFile('godot.js', glue, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  if (source.parseDiagnostics.length)
+    fail('E_INPUT_SCRIPT_EXPORT', 'Invalid JavaScript glue: ' + ts.flattenDiagnosticMessageText(source.parseDiagnostics[0].messageText, ' '));
+
+  const identifier = (node, name) => node && ts.isIdentifier(node) && node.text === name;
+  const assignment = node => ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken;
+  function property(node, object) {
+    if (ts.isPropertyAccessExpression(node) && identifier(node.expression, object)) return node.name.text;
+    if (ts.isElementAccessExpression(node) && identifier(node.expression, object) && ts.isStringLiteral(node.argumentExpression))
+      return node.argumentExpression.text;
+  }
+  const call = (node, name, count) => node && ts.isCallExpression(node) &&
+    identifier(node.expression, name) && node.arguments.length === count;
+  function beforeExit(block) {
+    const statements = block?.statements ?? [];
+    const exit = statements.findIndex(statement => ts.isReturnStatement(statement) || ts.isThrowStatement(statement));
+    return exit === -1 ? statements : statements.slice(0, exit);
+  }
+  function functionBody(block, name) {
+    const declarations = (block?.statements ?? []).filter(statement =>
+      ts.isFunctionDeclaration(statement) && identifier(statement.name, name));
+    if (declarations.length > 1) fail('E_INPUT_SCRIPT_EXPORT', 'Multiple Emscripten functions named ' + name);
+    return declarations[0]?.body;
+  }
+  function initializer(statements, name) {
+    return statements.filter(ts.isVariableStatement).flatMap(statement => [...statement.declarationList.declarations])
+      .find(declaration => identifier(declaration.name, name))?.initializer;
+  }
+  function returnedValue(block) {
+    const statements = beforeExit(block);
+    const exit = block?.statements?.[statements.length];
+    if (!exit || !ts.isReturnStatement(exit)) return;
+    const value = exit.expression;
+    return value && ts.isIdentifier(value) ? initializer(statements, value.text) : value;
+  }
+
+  // Follow the emitted Godot factory's synchronous binding path after Wasm
+  // instantiation. Keep verification offline and never evaluate the glue.
+  const godot = initializer(source.statements, 'Godot');
+  const factory = godot && ts.isCallExpression(godot)
+    ? returnedValue(ts.skipParentheses(godot.expression).body) : godot;
+  const factoryStatements = beforeExit(factory?.body);
+  const argument = factory?.parameters?.[0]?.name;
+  const start = initializer(factoryStatements, 'wasmExports');
+  const createWasm = functionBody(factory?.body, 'createWasm');
+  const instantiateResult = returnedValue(createWasm);
+  const receiveResult = returnedValue(functionBody(createWasm, 'receiveInstantiationResult'));
+  const receiveInstance = beforeExit(functionBody(createWasm, 'receiveInstance'));
+  const bindingScope = functionBody(factory?.body, 'assignWasmExports');
+  const bindsExports = receiveInstance.findIndex(statement => ts.isExpressionStatement(statement) &&
+    call(statement.expression, 'assignWasmExports', 1) && identifier(statement.expression.arguments[0], 'wasmExports'));
+  if (!argument || !ts.isIdentifier(argument) || !identifier(initializer(factoryStatements, 'Module'), argument.text) ||
+      !start || !ts.isAwaitExpression(start) || !call(start.expression, 'createWasm', 0) ||
+      !call(instantiateResult, 'receiveInstantiationResult', 1) || !call(receiveResult, 'receiveInstance', 1) ||
+      property(receiveResult.arguments[0], 'result') !== 'instance' ||
+      !bindingScope || bindsExports < 0 || !receiveInstance.slice(0, bindsExports).some(statement =>
+        ts.isExpressionStatement(statement) && assignment(statement.expression) && identifier(statement.expression.left, 'wasmExports') &&
+        property(statement.expression.right, 'instance') === 'exports'))
+    fail('E_INPUT_SCRIPT_EXPORT', 'Missing Emscripten input script initialization path');
+
+  const directBindings = new Set();
+  for (const statement of bindingScope.statements) {
+    if (ts.isEmptyStatement(statement)) continue;
+    if (!ts.isExpressionStatement(statement) || !assignment(statement.expression)) break;
+    directBindings.add(statement);
+  }
+  const initializationStatements = new Set(factoryStatements);
+  const hasEarlyAccessHelper = Boolean(functionBody(factory?.body, 'makeInvalidEarlyAccess'));
+  const hasExportWrapper = Boolean(functionBody(factory?.body, 'createExportWrapper'));
+  const bindings = new Map();
+  const writes = new Set();
+  const placeholders = new Set();
+  function visit(node) {
+    const symbol = assignment(node) && property(node.left, 'Module');
+    if (INPUT_SCRIPT_SIGNATURES.has(symbol)) {
+      const parent = node.parent, value = node.right;
+      // Assertion builds expose a trapping placeholder before startup, then
+      // replace it through the same native binding path as ordinary builds.
+      if (hasEarlyAccessHelper && ts.isVariableDeclaration(parent) && parent.initializer === node &&
+          identifier(parent.name, symbol) && node.pos < start.pos && initializationStatements.has(parent.parent.parent) &&
+          call(value, 'makeInvalidEarlyAccess', 1) && ts.isStringLiteral(value.arguments[0]) && value.arguments[0].text === symbol) {
+        if (placeholders.has(symbol)) fail('E_INPUT_SCRIPT_EXPORT', 'Multiple JavaScript placeholders for ' + symbol);
+        placeholders.add(symbol);
+      } else {
+        if (writes.has(symbol)) fail('E_INPUT_SCRIPT_EXPORT', 'Multiple JavaScript assignments for ' + symbol);
+        writes.add(symbol);
+        if (directBindings.has(parent) && ts.isExpressionStatement(parent) && parent.expression === node &&
+            assignment(value) && identifier(value.left, symbol)) {
+          const target = value.right;
+          let name = property(target, 'wasmExports');
+          if (hasExportWrapper && call(target, 'createExportWrapper', 2) && ts.isStringLiteral(target.arguments[0])) {
+            const count = target.arguments[1];
+            if (!ts.isNumericLiteral(count) || Number(count.text) !== INPUT_SCRIPT_SIGNATURES.get(symbol)[0])
+              fail('E_INPUT_SCRIPT_EXPORT', 'Incorrect JavaScript wrapper arity for ' + symbol);
+            name = target.arguments[0].text;
+          }
+          if (name !== undefined) bindings.set(symbol, name);
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(source);
+  return bindings;
+}
+
 export function assertInputScriptRuntimeExports(javascript, wasm) {
   const glue = javascript.toString('utf8');
   const marks = glue.split('\n').filter(line => line.startsWith(INPUT_SCRIPT_WASM_MARKER));
   if (marks.length !== 1 || marks[0].trimEnd() !== INPUT_SCRIPT_WASM_MARKER + digest(wasm))
     fail('E_INPUT_SCRIPT_WASM_PAIR', 'JavaScript must record the digest of its linked WebAssembly');
   // Emscripten maps the public Module properties to possibly minified Wasm names.
-  const source = /(?:wasmExports\[['"]([^'"]+)['"]\]|wasmExports\.([\w$]+)|createExportWrapper\(\s*['"]([^'"]+)['"]\s*,)/.source;
-  const bindings = INPUT_SCRIPT_EXPORTS.map(symbol => {
-    const property = String.raw`(?:\[['"]${symbol}['"]\]|\.${symbol})`;
-    const binding = new RegExp(String.raw`\bModule${property}\s*=\s*${symbol}\s*=\s*${source}`);
-    const match = binding.exec(glue);
-    if (!match) fail('E_INPUT_SCRIPT_EXPORT', 'Missing JavaScript binding for ' + symbol);
-    return [symbol, match[1] ?? match[2] ?? match[3]];
-  });
+  const bindings = readInputScriptBindings(glue);
+  for (const symbol of INPUT_SCRIPT_EXPORTS)
+    if (!bindings.has(symbol)) fail('E_INPUT_SCRIPT_EXPORT', 'Missing JavaScript binding for ' + symbol);
   let module;
   try { module = new WebAssembly.Module(wasm); }
   catch (error) { fail('E_INPUT_SCRIPT_EXPORT', 'Invalid WebAssembly module: ' + error.message); }
-  const functions = new Set(WebAssembly.Module.exports(module).filter(item => item.kind === 'function').map(item => item.name));
+  const functions = readWasmFunctionExports(wasm, module);
+  const bound = new Set();
   for (const [symbol, name] of bindings) {
-    if (!functions.has(name)) fail('E_INPUT_SCRIPT_EXPORT', 'Missing WebAssembly function for ' + symbol);
+    const fn = functions.get(name);
+    if (!fn) fail('E_INPUT_SCRIPT_EXPORT', 'Missing WebAssembly function for ' + symbol);
+    if (bound.has(fn.index)) fail('E_INPUT_SCRIPT_EXPORT', 'Duplicate WebAssembly function for ' + symbol);
+    bound.add(fn.index);
+    const [inputs, outputs] = INPUT_SCRIPT_SIGNATURES.get(symbol);
+    const {parameters, results} = fn.type;
+    if (parameters.length !== inputs || results.length !== outputs ||
+        parameters.some(type => type !== 0x7f) || results.some(type => type !== 0x7f))
+      fail('E_INPUT_SCRIPT_EXPORT', 'Incorrect WebAssembly function signature for ' + symbol);
   }
 }
 
@@ -401,6 +592,7 @@ export async function inspectRelease(directory, { requireCertified = false } = {
   if(isEngineProfile(descriptor.runtimeProfile)){
     if(descriptor.legacy!==false||!descriptor.engineRelease)fail('E_RELEASE_PROFILE','Native release cannot enter the legacy path');
     const native=await json(within(root,descriptor.engineRelease));
+    if(attestation.runtimeAbi?.inputScript===1)await assertInputScriptReleaseCaptures(root,native,{javascript,wasm});
     if(releaseExecution.executionModel!=='window'&&!native.engine?.host)fail('E_RELEASE_HOST','Worker native descriptor has no bound host bundle');
     if(native.engine?.host){
       const host=native.engine.host,file=descriptor.files.find(item=>item.path===host.path),sealed=native.payloads?.[host.path];
