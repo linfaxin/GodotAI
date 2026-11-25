@@ -32,6 +32,50 @@ test('Summer request stays bound to its draft until an explicit target update',a
   assert.equal(last(f).draft.anchor.activeRunId,'run-2');f.session.dispose();
 });
 
+test('input lesson requires a history receipt for the current stable run and fills without execution', async () => {
+  const f = createConsoleFixture();
+  f.session.selectOperation('engine.get_runtime_tree');
+  await f.session.submit();
+  const first = last(f);
+  f.session.loadPreset('engine.game_input', '{"action":"script"}', true);
+  await f.session.submit();
+  assert.equal(f.session.snapshot().clientError.kind, 'missing_source');
+  f.setContext(changeRun());
+  f.session.updateTarget({sourceCallId: first.callId});
+  assert.equal(f.session.snapshot().clientError.kind, 'missing_source');
+  await f.session.submit();
+  assert.equal(f.calls.length, 1);
+  f.setContext(consoleEnvironment);
+  f.session.updateTarget({sourceCallId: first.callId});
+  assert.equal(f.session.snapshot().clientError, undefined);
+  assert.equal(f.calls.length, 1);
+  await f.session.submit();
+  assert.equal(f.calls.length, 2);
+  const bound = last(f);
+  assert.equal(bound.draft.anchor.activeRunId, first.resultFacts.run.identity.runId);
+  assert.equal(bound.draft.runSourceCallId, first.callId);
+  f.setContext(changeRun());
+  f.session.loadHistory(bound.callId);
+  f.session.updateTarget();
+  assert.equal(f.session.snapshot().clientError.kind, 'missing_source');
+  await f.session.submit();
+  assert.equal(f.session.snapshot().clientError.kind, 'stale_target');
+  assert.equal(f.calls.length, 2);
+  const nextRun = {...consoleIdentity,runId:'run-2'};
+  f.setReply('summer_call', {ok:true,result:{data:{run:nextRun,nodes:[consoleNode]}}});
+  f.session.loadPreset('engine.get_runtime_tree', '{}');
+  await f.session.submit();
+  const second = last(f);
+  f.session.loadHistory(bound.callId);
+  f.session.updateTarget({sourceCallId:second.callId});
+  assert.equal(f.session.snapshot().draft.runSourceCallId, second.callId);
+  assert.equal(f.calls.length, 3);
+  await f.session.submit();
+  assert.equal(f.calls.length, 4);
+  assert.equal(last(f).draft.anchor.activeRunId, nextRun.runId);
+  f.session.dispose();
+});
+
 test('runtime draft detects editor edits and pending replacement while an older source run may be explicitly rebound',async()=>{
   const f=createConsoleFixture();f.session.selectOperation('engine.screenshot');
   f.setContext({...copy(consoleEnvironment),anchor:{...consoleEnvironment.anchor,editorRevision:8,pendingAttemptId:'build-next'}});

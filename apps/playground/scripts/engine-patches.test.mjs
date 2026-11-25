@@ -9,6 +9,7 @@ import {buildBrowserEngine} from '../../../scripts/test/build-browser-engine.mjs
 import {applyWebEnginePatches} from '../../../scripts/release/patch-web-engine.mjs';
 import {digest,canonical,assertSourcePatchChains} from '../../../scripts/release/web-release-utils.mjs';
 import {GAME_PROBE_PATCH,GAME_PROBE_PATHS,GAME_PROBE_REMOVAL_PATCH} from '../../../scripts/release/patch-web-game-probe.mjs';
+import {INPUT_SCRIPT_PATCH,INPUT_SCRIPT_PATHS,INPUT_SCRIPT_REMOVAL_PATCH,unpatchInputScript} from '../../../scripts/release/patch-web-input-script.mjs';
 import {THREADLESS_GROUP_WAIT_ORIGINAL} from '../../../scripts/release/patch-web-threadless-groups.mjs';
 import {PROXY_ENTRY_ORIGINAL,patchProxyEntry} from '../../../scripts/release/patch-web-proxy-entry.mjs';
 import {patchShaderUtf8} from '../../../scripts/release/patch-web-shader-utf8.mjs';
@@ -23,7 +24,16 @@ async function fixture(root){
   'scene/main/node.h':await readFile(new URL('../../../scripts/jsb.react-browser/test/fixtures/godot-4.6.1-node.h',import.meta.url),'utf8'),
   'scene/main/node.cpp':await readFile(new URL('../../../scripts/jsb.react-browser/test/fixtures/godot-4.6.1-node.cpp',import.meta.url),'utf8'),
   'core/object/object.cpp':await readFile(new URL('../../../scripts/jsb.react-browser/test/fixtures/godot-4.6.1-object.cpp',import.meta.url),'utf8'),
+  'core/input/input.h':'class Input : public Object {\n\tvoid release_pressed_events();\n};\n',
+  'core/input/input.cpp':[
+   'void Input::release_pressed_events() {', '}', 'void Input::_bind_methods() {',
+   '\tClassDB::bind_method(D_METHOD("is_action_pressed", "action", "exact_match"), &Input::is_action_pressed, DEFVAL(false));',
+   '\tClassDB::bind_method(D_METHOD("get_action_strength", "action", "exact_match"), &Input::get_action_strength, DEFVAL(false));',
+   '\tClassDB::bind_method(D_METHOD("get_axis", "negative_action", "positive_action"), &Input::get_axis);',
+   '\tClassDB::bind_method(D_METHOD("action_release", "action"), &Input::action_release);', '}', '',
+  ].join('\n'),
   'platform/web/detect.py':await readFile(new URL('./fixtures/godot-4.6.1-web-detect.py',import.meta.url),'utf8'),
+  'platform/web/SCsub':'sys_env.Depends(build[0], sys_env["JS_LIBS"])\n',
   'platform/web/js/patches/patch_em_gl.js':await readFile(new URL('./fixtures/godot-4.6.1-patch-em-gl.js',import.meta.url),'utf8'),
   'core/object/worker_thread_pool.cpp':THREADLESS_GROUP_WAIT_ORIGINAL,
   'platform/web/js/engine/config.js':await readFile(new URL('../../../scripts/jsb.react-browser/test/fixtures/godot-4.6.1-config.js',import.meta.url),'utf8'),
@@ -56,6 +66,9 @@ test('local patch CLI and the actual CI snapshot builder produce identical engin
  const root=await mkdtemp(join(tmpdir(),'engine-patch-contract-'));t.after(()=>rm(root,{recursive:true,force:true}));
  const source=join(root,'upstream'),local=join(root,'local'),built=join(root,'ci');
  await fixture(source);await cp(source,local,{recursive:true});
+ assert.equal(spawnSync('git',['init','--quiet',source]).status,0);
+ assert.equal(spawnSync('git',['-C',source,'-c','user.name=Fixture','-c','user.email=fixture@example.test',
+  '-c','commit.gpgsign=false','commit','--allow-empty','--quiet','-m','Fixture']).status,0);
  const run=spawnSync(process.execPath,[new URL('../../../scripts/release/patch-web-engine.mjs',import.meta.url).pathname,local],{encoding:'utf8'});
  assert.equal(run.status,0,run.stderr);const localPatches=JSON.parse(run.stdout);
  // Snapshot mode executes real source copying and patching; no fake SCons
@@ -63,9 +76,15 @@ test('local patch CLI and the actual CI snapshot builder produce identical engin
  const out=join(root,'report.json');
  await buildBrowserEngine({'godot-source':source,'build-dir':built,out,'snapshot-only':true,scons:process.execPath,emcc:process.execPath});
  const report=JSON.parse(await readFile(out,'utf8'));
- assert.equal(report.status,'snapshotted');assert.equal(report.recipe.patches.length,42);
+ assert.equal(report.status,'snapshotted');assert.equal(report.recipe.patches.length,48);
  assert.equal(report.recipe.patches.filter(record=>record.patchId==='godotjs-web-game-probe-v1').length,6);
+ assert.deepEqual(report.recipe.patches.filter(record=>record.patchId===INPUT_SCRIPT_PATCH).map(patch=>patch.path),INPUT_SCRIPT_PATHS);
+ assertSourcePatchChains(report);
+ assert.match(await readFile(join(built,'platform/web/SCsub'),'utf8'),/AddPostAction\(build\[0\], sys_env\.Action\(bind_input_script_wasm,/);
  assert.match(await readFile(join(built,'platform/web/web_main.cpp'),'utf8'),/EMSCRIPTEN_KEEPALIVE uint32_t godotjs_game_probe_abi\(\)/);
+ const sceneTree=await readFile(join(built,'scene/main/scene_tree.cpp'),'utf8');
+ for(const member of ['paused','suspended'])assert.match(sceneTree,new RegExp(member+' = p_enabled;\\n#ifdef GODOTJS_INPUT_SCRIPT_ABI\\n\\tif \\(p_enabled\\) jsb::input_script::pause\\(\\);'));
+ assert.match(sceneTree,/jsb::input_script::scene_will_change\(current_scene, p_scene\);\n#endif\n\tcurrent_scene = p_scene;/);
  for(const id of ['godotjs-artifact-set-early-mount-v1','godotjs-host-resource-owner-v1','godotjs-native-observer-v1'])assert(report.recipe.patches.some(record=>record.patchId===id));
  assert.equal(report.execution.artifactSetAbi,1);assert.equal(report.execution.hostResourceAbi,1);assert.equal(report.nativeObserverPatch.abi,1);assert.equal(report.execution.shutdownQueueAbi,1);
  assert.deepEqual(report.runtimeAbi,{protocolVersion:2,host:1,audio:1,presentation:1,lifecycle:1});
@@ -97,7 +116,27 @@ test('local patch CLI and the actual CI snapshot builder produce identical engin
  assert.match(await readFile(join(built,'drivers/gles3/shaders/scene.glsl'),'utf8'),/alpha < alpha_hash_threshold/);
  assert.match(await readFile(join(built,'drivers/gles3/storage/texture_storage.cpp'),'utf8'),/rt->size.x > 0 && rt->size.y > 0/);
  assert.match(await readFile(join(built,'scene/main/viewport.cpp'),'utf8'),/Node::INTERNAL_MODE_BACK/);
- const again=await applyWebEnginePatches(local);assert.ok(again.every(p=>!p.changed&&p.beforeSha256===p.afterSha256));
+ const again=await applyWebEnginePatches(local);
+ for(const path of new Set(again.map(patch=>patch.path))){
+  assert.equal(again.find(patch=>patch.path===path).beforeSha256,again.findLast(patch=>patch.path===path).afterSha256,path);
+  assert.deepEqual(await readFile(join(local,path)),await readFile(join(built,path)),path);
+ }
+});
+
+test('Full debug omits Input Script for a source archive inside an unrelated Git worktree',{timeout:60000},async t=>{
+ const root=await mkdtemp(join(tmpdir(),'engine-archive-source-'));t.after(()=>rm(root,{recursive:true,force:true}));
+ assert.equal(spawnSync('git',['init','--quiet',root]).status,0);
+ assert.equal(spawnSync('git',['-C',root,'-c','user.name=Fixture','-c','user.email=fixture@example.test',
+  '-c','commit.gpgsign=false','commit','--allow-empty','--quiet','-m','Fixture']).status,0);
+ const source=join(root,'archive'),built=join(root,'build'),out=join(root,'report.json');
+ await fixture(source);
+ await buildBrowserEngine({'godot-source':source,'build-dir':built,out,profile:'full-engine-v1',target:'template_debug',
+  development:true,'snapshot-only':true,scons:process.execPath,emcc:process.execPath});
+ const report=JSON.parse(await readFile(out,'utf8'));
+ assert.equal(report.godotSource.commit,'unknown');
+ assert(report.recipe.patches.some(patch=>patch.patchId===GAME_PROBE_PATCH));
+ assert(!report.recipe.patches.some(patch=>patch.patchId===INPUT_SCRIPT_PATCH));
+ assert.doesNotMatch(await readFile(join(built,'platform/web/web_main.cpp'),'utf8'),/godotjs_input_script_abi/);
 });
 test('a rejected late patch leaves all upstream files unchanged',async t=>{
  const root=await mkdtemp(join(tmpdir(),'engine-patch-atomic-'));t.after(()=>rm(root,{recursive:true,force:true}));
@@ -171,7 +210,7 @@ test('ThinLTO worker cap and compiler environment are part of the attested recip
  assert.match(await readFile(join(built,'SConstruct'),'utf8'),/resolvedLinkFlags/);assert(report.godotSource.inputs.SConstruct);
 });
 
-test('2D release strips all Game Probe changes from a previously patched source',async t=>{
+test('2D release strips the Game Probe and Input Script patches from a previously patched source',async t=>{
  const root=await mkdtemp(join(tmpdir(),'engine-game-probe-profile-'));t.after(()=>rm(root,{recursive:true,force:true}));
  const clean=join(root,'clean'),source=join(root,'patched'),built=join(root,'build'),out=join(root,'report.json');
  await fixture(clean);await cp(clean,source,{recursive:true});
@@ -184,8 +223,10 @@ test('2D release strips all Game Probe changes from a previously patched source'
  assert(!report.recipe.patches.some(patch=>patch.patchId===GAME_PROBE_PATCH));
  const removed=report.recipe.patches.filter(patch=>patch.patchId===GAME_PROBE_REMOVAL_PATCH);
  assert.deepEqual(removed.map(patch=>patch.path),GAME_PROBE_PATHS);
+ assert(!report.recipe.patches.some(patch=>patch.patchId===INPUT_SCRIPT_PATCH));
+ assert.deepEqual(report.recipe.patches.filter(patch=>patch.patchId===INPUT_SCRIPT_REMOVAL_PATCH).map(patch=>patch.path),INPUT_SCRIPT_PATHS);
  assertSourcePatchChains(report);
- for(const path of GAME_PROBE_PATHS){
+ for(const path of new Set([...GAME_PROBE_PATHS,...INPUT_SCRIPT_PATHS])){
   const original=await readFile(join(source,path));
   const expected=await readFile(join(clean,path));
   assert.notDeepEqual(original,expected,path);
@@ -194,6 +235,28 @@ test('2D release strips all Game Probe changes from a previously patched source'
  }
 });
 
+test('the previous Input Script SceneTree patch can be upgraded or disabled', async t => {
+ const root=await mkdtemp(join(tmpdir(),'engine-input-script-upgrade-'));t.after(()=>rm(root,{recursive:true,force:true}));
+ const current=join(root,'current'), outdated=join(root,'outdated'), disabled=join(root,'disabled');
+ await fixture(current);await cp(current,disabled,{recursive:true});
+ await applyWebEnginePatches(current);
+ await applyWebEnginePatches(disabled,{gameProbe:false});
+ await cp(current,outdated,{recursive:true});
+ const path='scene/main/scene_tree.cpp';
+ const expected=await readFile(join(current,path),'utf8');
+ const previous=unpatchInputScript(path,expected).replace('void SceneTree::set_pause(bool p_enabled) {',
+  '#if defined(WEB_ENABLED) && !defined(THREADS_ENABLED)\n#include "modules/GodotJS/bridge/jsb_runtime_input_script.h"\n#endif\n' +
+  '#ifdef GODOTJS_INPUT_SCRIPT_ABI\nnamespace jsb::input_script { void pause(); }\n#endif\n\n' +
+  'void SceneTree::set_pause(bool p_enabled) {').replace(/\t(paused|suspended) = p_enabled;/g,
+  '$&\n#ifdef GODOTJS_INPUT_SCRIPT_ABI\n\tif (p_enabled) jsb::input_script::pause();\n#endif');
+ await writeFile(join(outdated,path),previous);
+ await applyWebEnginePatches(outdated);
+ assert.equal(await readFile(join(outdated,path),'utf8'),expected);
+ await writeFile(join(outdated,path),previous);
+ const removed=await applyWebEnginePatches(outdated,{gameProbe:false});
+ assert(removed.some(patch=>patch.path===path&&patch.patchId===INPUT_SCRIPT_REMOVAL_PATCH&&patch.beforeSha256===digest(previous)));
+ assert.deepEqual(await readFile(join(outdated,path)),await readFile(join(disabled,path)));
+});
 
 test('proxy-pthread snapshots retain the native pthread patch set without the Dedicated Worker ABI',async t=>{
  const root=await mkdtemp(join(tmpdir(),'engine-pthread-patch-contract-'));t.after(()=>rm(root,{recursive:true,force:true}));

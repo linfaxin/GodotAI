@@ -1,4 +1,5 @@
 import {GAME_PROBE_PATCH,GAME_PROBE_PATHS} from './patch-web-game-probe.mjs';
+import {INPUT_SCRIPT_PATCH,INPUT_SCRIPT_PATHS,INPUT_SCRIPT_EXPORTS,INPUT_SCRIPT_WASM_MARKER} from './patch-web-input-script.mjs';
 import { createHash } from 'node:crypto';
 import { readFile, readdir, lstat, mkdir, writeFile } from 'node:fs/promises';
 import { resolve, relative, dirname, sep } from 'node:path';
@@ -139,6 +140,70 @@ export function assertGameProbeBuildProof(report, assets = {
   assertRuntimeObservationBuildProof(report, assets.wasmSha256);
 }
 
+export function assertInputScriptAssets(runtimeAbi, proof, {wasmSha256, javascriptSha256}) {
+  if (runtimeAbi?.inputScript === undefined && proof === undefined) return;
+  const hash = /^[a-f0-9]{64}$/;
+  if (runtimeAbi?.inputScript !== 1 || proof?.abi !== 1 || canonical(proof.exports) !== canonical(INPUT_SCRIPT_EXPORTS) ||
+      !hash.test(proof.wasmSha256) || proof.wasmSha256 !== wasmSha256 ||
+      !hash.test(proof.javascriptSha256) || proof.javascriptSha256 !== javascriptSha256)
+    throw Error('E_INPUT_SCRIPT_BUILD_PROOF');
+}
+
+export function assertInputScriptRuntimeExports(javascript, wasm) {
+  const glue = javascript.toString('utf8');
+  const marks = glue.split('\n').filter(line => line.startsWith(INPUT_SCRIPT_WASM_MARKER));
+  if (marks.length !== 1 || marks[0].trimEnd() !== INPUT_SCRIPT_WASM_MARKER + digest(wasm))
+    fail('E_INPUT_SCRIPT_WASM_PAIR', 'JavaScript must record the digest of its linked WebAssembly');
+  // Emscripten maps the public Module properties to possibly minified Wasm names.
+  const source = /(?:wasmExports\[['"]([^'"]+)['"]\]|wasmExports\.([\w$]+)|createExportWrapper\(\s*['"]([^'"]+)['"]\s*,)/.source;
+  const bindings = INPUT_SCRIPT_EXPORTS.map(symbol => {
+    const property = String.raw`(?:\[['"]${symbol}['"]\]|\.${symbol})`;
+    const binding = new RegExp(String.raw`\bModule${property}\s*=\s*${symbol}\s*=\s*${source}`);
+    const match = binding.exec(glue);
+    if (!match) fail('E_INPUT_SCRIPT_EXPORT', 'Missing JavaScript binding for ' + symbol);
+    return [symbol, match[1] ?? match[2] ?? match[3]];
+  });
+  let module;
+  try { module = new WebAssembly.Module(wasm); }
+  catch (error) { fail('E_INPUT_SCRIPT_EXPORT', 'Invalid WebAssembly module: ' + error.message); }
+  const functions = new Set(WebAssembly.Module.exports(module).filter(item => item.kind === 'function').map(item => item.name));
+  for (const [symbol, name] of bindings) {
+    if (!functions.has(name)) fail('E_INPUT_SCRIPT_EXPORT', 'Missing WebAssembly function for ' + symbol);
+  }
+}
+
+export function assertInputScriptBuildProof(report, assets = {
+  wasmSha256: report.template?.assets?.find(asset => asset.path === 'godot.wasm')?.sha256,
+  javascriptSha256: report.template?.assets?.find(asset => asset.path === 'godot.js')?.sha256,
+}, {developmentRelease = false} = {}) {
+  assertInputScriptAssets(report.runtimeAbi, report.inputScript, assets);
+  // A development package can retain the compiled patch history with the optional ABI disabled.
+  if (developmentRelease && report.runtimeAbi?.inputScript !== undefined) throw Error('E_INPUT_SCRIPT_BUILD_PROOF');
+  const patches = report.recipe?.patches ?? [];
+  const edges = patches.filter(patch => patch.patchId === INPUT_SCRIPT_PATCH);
+  if (report.runtimeAbi?.inputScript === undefined && !edges.length) return;
+  assertSourcePatchChains(report);
+  if (developmentRelease && report.sourceCertified === false) return;
+  const implementation = 'scripts/release/patch-web-input-script.mjs';
+  const inputs = report.source?.inputs ?? {};
+  const hash = /^[a-f0-9]{64}$/;
+  if (report.runtimeAbi?.inputScript !== 1 || report.runtimeAbi.gameProbe !== 1 || report.status !== 'built' ||
+      !report.sourceCertified || !runtimeWriteBuildTarget(report) || report.resolvedBuildOptions?.threads !== false ||
+      report.resolvedBuildOptions?.dlink_enabled !== false || digest(canonical(report.recipe)) !== report.recipeSha256 ||
+      digest(canonical(report.godotSource?.inputs)) !== report.godotSource?.snapshotHash ||
+      !hash.test(inputs['bridge/jsb_runtime_input_script.h']) || !hash.test(inputs['bridge/jsb_runtime_input_script.cpp']) ||
+      !hash.test(inputs[implementation]) || edges.length !== INPUT_SCRIPT_PATHS.length ||
+      !INPUT_SCRIPT_PATHS.every(path => {
+        const index = patches.findIndex(edge => edge.patchId === INPUT_SCRIPT_PATCH && edge.path === path &&
+          edge.implementation?.path === implementation && edge.implementation.sha256 === inputs[implementation]);
+        if (index < 0) return false;
+        const successors = patches.slice(index + 1).filter(edge => edge.path === path);
+        return GAME_PROBE_PATHS.includes(path) ? successors.length === 1 && successors[0].patchId === GAME_PROBE_PATCH :
+          successors.length === 0;
+      })) throw Error('E_INPUT_SCRIPT_BUILD_PROOF');
+  assertGameProbeBuildProof(report, assets);
+}
+
 export function assertRuntimeObservationBuildProof(report, wasmSha256 = report.template?.assets?.find(asset => asset.path === 'godot.wasm')?.sha256) {
   const proof = report.runtimeObservation;
   if (report.runtimeAbi?.observation === undefined && proof === undefined) return;
@@ -269,12 +334,16 @@ export async function inspectRelease(directory, { requireCertified = false } = {
   if (descriptor.id !== identity(descriptor) || descriptor.runtimeRelease !== descriptor.id) fail('E_RELEASE_IDENTITY', 'runtimeRelease does not match immutable descriptor content');
   if (requireCertified && descriptor.certified !== true) fail('E_RELEASE_UNCERTIFIED', 'Official publication requires source and browser validation certification');
   const paths = new Set();
+  const wasm = descriptor.files.find(file => file.kind === 'engine-wasm');
+  const javascript = descriptor.files.find(file => file.kind === 'engine-js');
+  let wasmBytes, javascriptBytes;
   for (const file of descriptor.files) {
     safePath(file.path);
     if (paths.has(file.path)) fail('E_RELEASE_DUPLICATE', `Duplicate ${file.path}`);
     paths.add(file.path); assertHash(file.sha256, file.path);
     const bytes = await readFile(within(root, file.path));
     if (bytes.length !== file.bytes || digest(bytes) !== file.sha256) fail('E_RELEASE_INTEGRITY', `Bytes changed: ${file.path}`);
+    if (file === javascript) javascriptBytes = bytes;
     if (file.kind === 'engine-wasm') {
       let decoded = bytes;
       if (file.encoding) {
@@ -285,6 +354,7 @@ export async function inspectRelease(directory, { requireCertified = false } = {
         if (decoded.length !== file.decodedBytes || digest(decoded) !== file.decodedSha256) fail('E_RELEASE_INTEGRITY', 'Decoded WASM bytes differ');
       }
       if (!decoded.subarray(0, 8).equals(Buffer.from([0, 97, 115, 109, 1, 0, 0, 0]))) fail('E_RELEASE_ENGINE', 'Invalid decoded WebAssembly module');
+      if (file === wasm) wasmBytes = decoded;
     }
   }
   for (const path of await filesIn(root)) {
@@ -296,19 +366,23 @@ export async function inspectRelease(directory, { requireCertified = false } = {
   if (attestation.schemaVersion !== 1 || attestation.kind !== 'godot-js-web-release-attestation') fail('E_RELEASE_ATTESTATION', 'Unsupported release attestation');
   if (digest(canonical(attestation.recipe)) !== attestation.recipeSha256) fail('E_RELEASE_RECIPE', 'Attestation recipe was changed');
   assertSourcePatchChains(attestation);
-  const wasm = descriptor.files.find(file => file.kind === 'engine-wasm');
   const wasmSha256 = wasm?.decodedSha256 ?? wasm?.sha256;
   assertRuntimeObservationBuildProof(attestation, wasmSha256);
   assertRuntimeWriteBuildProof(attestation, wasmSha256);
   assertRuntimePropertiesBuildProof(attestation, wasmSha256);
   assertRuntimeCallBuildProof(attestation, {
     wasmSha256,
-    javascriptSha256: descriptor.files.find(file => file.kind === 'engine-js')?.sha256,
+    javascriptSha256: javascript?.sha256,
   });
   assertGameProbeBuildProof(attestation, {
     wasmSha256,
-    javascriptSha256: descriptor.files.find(file => file.kind === 'engine-js')?.sha256,
+    javascriptSha256: javascript?.sha256,
   });
+  assertInputScriptBuildProof(attestation, {
+    wasmSha256,
+    javascriptSha256: javascript?.sha256,
+  }, {developmentRelease: descriptor.sourceCertified === false});
+  if (attestation.runtimeAbi?.inputScript === 1) assertInputScriptRuntimeExports(javascriptBytes, wasmBytes);
   if (descriptor.sourceCertified) {
     if (attestation.status !== 'built') fail('E_RELEASE_SOURCE', 'Source certification requires an actual successful build');
     assertCommit(attestation.source?.commit, 'GodotJS commit'); assertHash(attestation.source?.snapshotHash, 'GodotJS snapshot');

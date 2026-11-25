@@ -30,6 +30,9 @@ import {createNativeRuntimeCall, RUNTIME_CALL_VERSION, supportsWorkerRuntimeCall
 import {createNativeGameProbe, gameProbeError, GAME_PROBE_VERSION, readGameProbeRequest, readGameProbeSequence, supportsGameProbe,
   type GameProbeData, type GameProbeError} from './worker-game-probe.js';
 import {scheduleRuntimeWriteDeadline} from './worker-runtime-write-transport.js';
+import {createNativeInputScript, INPUT_SCRIPT_VERSION, matchesInputScript, noInputScript, readInputScriptKey,
+  readInputScriptRequest, supportsInputScript, type InputScriptKey, type InputScriptRequest,
+  type InputScriptTerminal} from './worker-input-script.js';
 
 interface RuntimeScope {
   __godotjsRuntimeHost?: RuntimeBinding;
@@ -81,6 +84,61 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
   // Leave the native frame or teardown callback before reporting a fatal transport failure.
   const sendInteractionResult = createInteractionResultSender(post, error => queueMicrotask(() => fatal(error)));
   const supportsInteraction = supportsWorkerInteraction(boot.release, boot.configuration.presentationBackend, scope.navigator?.userAgent ?? '');
+  const inputScriptSupported = supportsInputScript(boot.release, boot.configuration.presentationBackend, scope.navigator?.userAgent ?? '');
+  let nativeInputScript: ReturnType<typeof createNativeInputScript> | undefined;
+  let inputScript: InputScriptRequest | undefined;
+  let inputScriptTimer: (() => void) | undefined;
+  let lastInputScriptSequence = 0;
+  function postInputScript(key: InputScriptKey, terminal: InputScriptTerminal) {
+    post({type: 'input-script-terminal', releaseId: key.releaseId, requestId: key.requestId, sequence: key.sequence, terminal});
+  }
+  function drainInputScript() {
+    if (!inputScript || !nativeInputScript || nativeExited || closed) return;
+    try {
+      const terminal = nativeInputScript.take(inputScript);
+      if (!terminal) return;
+      const request = inputScript;
+      inputScript = undefined;
+      inputScriptTimer?.();
+      inputScriptTimer = undefined;
+      postInputScript(request, terminal);
+    } catch (error) { fatal(error); }
+  }
+  function cancelInputScript(request: InputScriptRequest, reason: 'cancelled' | 'timeout' | 'run_ended' | 'hidden') {
+    if (inputScript !== request || nativeExited || closed) return;
+    try {
+      nativeInputScript?.cancel(request.sequence, reason);
+      drainInputScript();
+    } catch (error) { fatal(error); }
+  }
+  function receiveInputScript(message: Record<string, unknown>) {
+    const key = readInputScriptKey(message, identity.runId, boot.release.releaseId);
+    if (!key) return;
+    if (message.type === 'input-script-cancel') {
+      if (inputScript && matchesInputScript(inputScript, key)) cancelInputScript(inputScript,
+        interactionNow() >= inputScript.deadline ? 'timeout' : message.hidden === true ? 'hidden' : 'cancelled');
+      return;
+    }
+    if (key.sequence <= lastInputScriptSequence) return;
+    lastInputScriptSequence = key.sequence;
+    const request = readInputScriptRequest(message, key);
+    const reason = !request ? 'invalid_input' : !lease.active || stopping || nativeExited || closed ? 'run_ended' :
+      !nativeStarted ? 'not_ready' : !inputScriptSupported || !nativeInputScript ? 'unsupported' :
+      request.deadline <= interactionNow() ? 'timeout' : inputScript ? 'busy' : undefined;
+    try {
+      if (reason || !request || !nativeInputScript) {
+        postInputScript(key, noInputScript('worker', reason ?? 'not_ready'));
+        return;
+      }
+      if (!nativeInputScript.stage(request)) {
+        postInputScript(key, noInputScript('worker', 'not_ready'));
+        return;
+      }
+      inputScript = request;
+      inputScriptTimer = scheduleRuntimeWriteDeadline(request.deadline, () => cancelInputScript(request, 'timeout'));
+      drainInputScript();
+    } catch (error) { fatal(error); }
+  }
   const declaresObservation = supportsWorkerObservation(boot.release);
   let sampleNativeObservation: ReturnType<typeof createNativeRuntimeSampler> | undefined;
   let removeObservationHooks: (() => void) | undefined;
@@ -242,6 +300,7 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
   const phase = (value: RunPhase) => {
     assertStarting();
     post({type: 'phase', phase: value, ...(value === 'running' && supportsInteraction ? {interactionVersion: INTERACTION_VERSION} : {}),
+      ...(value === 'running' && inputScriptSupported && nativeInputScript ? {inputScriptVersion: INPUT_SCRIPT_VERSION} : {}),
       ...(value === 'running' && sampleNativeObservation ? {observationVersion: RUNTIME_OBSERVATION_VERSION} : {}),
       ...(value === 'running' && supportsWrite && writeNativeProperty ? {runtimeWriteVersion: RUNTIME_WRITE_VERSION} : {}),
       ...(value === 'running' && supportsProperties && accessNativeProperties ? {runtimePropertiesVersion: RUNTIME_PROPERTIES_VERSION} : {}),
@@ -290,6 +349,7 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
   const release = () => {
     if (closed) return; closed = true; lease.cancel(); lifecycleGate?.dispose();binding?.settle();uninstallHost?.();clearInterval(heartbeat);
     removeObservationHooks?.();
+    inputScriptTimer?.();
     presentation?.dispose(); dom?.dispose(); browser?.dispose(); xr?.dispose(); loaded?.dispose();
     pendingHostCommands.clear();pendingCleanupHostCommands.clear();
     scope.removeEventListener('error', onError); scope.removeEventListener('unhandledrejection', onRejection);
@@ -365,6 +425,8 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
     attempt(()=>capture.stop());
     attempt(()=>observation.stop());
     attempt(()=>runtimeAccess.stop());
+    const activeInputScript = inputScript;
+    if (activeInputScript) queueMicrotask(() => cancelInputScript(activeInputScript, 'run_ended'));
     if(canCooperativelyClose()){
       attempt(()=>binding?.beginClose(reason));attempt(()=>dom?.revokeInput());attempt(()=>audio?.beginDrain());
       attempt(()=>browser?.beginDrain?.());attempt(()=>presentation?.setVisible(false));attempt(()=>lifecycleGate?.beginClose(reason));
@@ -381,6 +443,8 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
     const m: any = event.data;
     if (m.type === 'stop') {
       beginStopping(typeof m.cause==='string'?m.cause:'session-stop');
+    } else if (m.type === 'input-script-request' || m.type === 'input-script-cancel') {
+      receiveInputScript(m);
     } else if (!closed && m.type === 'project-receipt' && Number.isSafeInteger(m.projectSequence)) {
       const bytes = pendingProjects.get(m.projectSequence); if(bytes!==undefined){pendingProjects.delete(m.projectSequence);pendingProjectBytes-=bytes;}
     } else if (!closed && m.type === 'project-command' && isProjectData(m.data)) {
@@ -602,6 +666,9 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
     const original = config.getModuleConfig;
     config.getModuleConfig = function (...args: unknown[]) {
       const value = original.apply(this, args);
+      if (inputScriptSupported) value.godotInputScriptTerminal = () => {
+        if (inputScript) queueMicrotask(drainInputScript);
+      };
       if (probeAvailable && supportsInteraction) {
         value.godotGameProbeMayFreeze = () => {
           const geometry = presentation?.geometry;
@@ -643,6 +710,7 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
       if (boot.release.runtimeAbi?.runtimeCall === RUNTIME_CALL_VERSION) nativeCall = createNativeRuntimeCall(module);
     }
     if (probeAvailable && supportsInteraction) nativeProbe = createNativeGameProbe(module!);
+    if (boot.release.runtimeAbi?.inputScript === INPUT_SCRIPT_VERSION) nativeInputScript = createNativeInputScript(module!);
     phase('starting'); await engine.start({ args: ['--main-pack', '/application.pck', '--rendering-method', 'gl_compatibility'] }); assertStarting();
     nativeStarted=true;
     if(managedClose&&!lifecycleGate)throw Error('E_NATIVE_LIFECYCLE_ABI: matching native hook was not installed');

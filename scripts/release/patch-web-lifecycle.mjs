@@ -1,4 +1,5 @@
 import {patchRuntimePropertiesQuitFile,unpatchRuntimePropertiesQuitFile,RUNTIME_PROPERTIES_QUIT_PATCH} from './patch-runtime-properties-quit.mjs';
+import {INPUT_SCRIPT_PATCH} from './patch-web-input-script.mjs';
 /** Godot 4.6.1 owner-thread exit gate. Cleanup runs before Web atexit closes
  * audio, browser services or the filesystem; it never advances business frames. */
 import {createHash} from 'node:crypto';
@@ -118,12 +119,18 @@ export function patchWebLifecycleFile(path,source){
 
 /** Advertise the ability only from the complete, actually applied source set.
  * Ordinary Worker web_main is owned by its composed checked patch. */
+export function isWebLifecycleSuccessor(path, patchId) {
+ return (path==='platform/web/web_main.cpp'&&patchId==='godotjs-web-game-probe-v1')||
+  (path==='scene/main/scene_tree.cpp'&&['godotjs-managed-shutdown-queue-v1',INPUT_SCRIPT_PATCH].includes(patchId))||
+  (path==='scene/main/scene_tree.h'&&patchId===RUNTIME_PROPERTIES_QUIT_PATCH);
+}
+
 export function webLifecycleBuildProof(patches){
  const files={};
  for(const path of WEB_LIFECYCLE_PATHS){
   const expected=path==='platform/web/web_main.cpp'?new Set([WEB_LIFECYCLE_PATCH,'godotjs-web-worker-runtime-v1']):new Set([WEB_LIFECYCLE_PATCH]);
   const record=patches.findLast(item=>item.path===path&&expected.has(item.patchId)),latest=patches.findLast(item=>item.path===path);
-  if(!record||!latest||(!expected.has(latest.patchId)&&!(path==='platform/web/web_main.cpp'&&latest.patchId==='godotjs-web-game-probe-v1')&&!(path==='scene/main/scene_tree.cpp'&&latest.patchId==='godotjs-managed-shutdown-queue-v1')&&!(path==='scene/main/scene_tree.h'&&latest.patchId===RUNTIME_PROPERTIES_QUIT_PATCH))||!(/^[a-f0-9]{64}$/).test(latest.afterSha256)||!record.implementation?.sha256)throw Error('E_WEB_LIFECYCLE_PROOF: '+path);
+  if(!record||!latest||(!expected.has(latest.patchId)&&!isWebLifecycleSuccessor(path,latest.patchId))||!(/^[a-f0-9]{64}$/).test(latest.afterSha256)||!record.implementation?.sha256)throw Error('E_WEB_LIFECYCLE_PROOF: '+path);
   files[path]={sha256:latest.afterSha256,implementation:record.implementation};
  }
  return {lifecycleAbi:WEB_LIFECYCLE_ABI,lifecyclePatch:{abi:WEB_LIFECYCLE_ABI,patchId:WEB_LIFECYCLE_PATCH,files}};

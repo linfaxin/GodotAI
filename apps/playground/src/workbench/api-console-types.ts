@@ -17,16 +17,24 @@ export interface ConsoleEnvironment {
   anchor: ConsoleAnchor;
   activeRunState: RunnerState | null;
   methodExampleAvailable?: boolean;
+  inputExampleAvailable?: boolean;
   capabilities?: {
     observation?: ConsoleCapability;
     runtimeWrite?: ConsoleCapability;
     runtimeProperties?: ConsoleCapability;
     runtimeCall?: ConsoleCapability;
     gameProbe?: ConsoleCapability;
+    inputScript?: ConsoleCapability;
     interaction?: ConsoleCapability;
   };
 }
-export interface ConsoleDraft {operationId: string; inputText: string; anchor: ConsoleAnchor; selectedMethod?: SelectedRuntimeMethod}
+export interface ConsoleDraft {
+  operationId: string;
+  inputText: string;
+  anchor: ConsoleAnchor;
+  selectedMethod?: SelectedRuntimeMethod;
+  runSourceCallId?: string | null;
+}
 export interface ConsoleResultFacts {
   sourceCallId: string;
   sourceAnchor: ConsoleAnchor;
@@ -91,7 +99,7 @@ export interface ConsoleSession {
   subscribe(listener: () => void): () => void;
   selectOperation(operationId: string): void;
   updateDraft(inputText: string): void;
-  loadPreset(operationId: string, inputText: string): void;
+  loadPreset(operationId: string, inputText: string, needsRunSource?: boolean): void;
   loadHistory(callId: string): void;
   updateTarget(source?: ConsoleFillSelection): void;
   submit(): Promise<void>;

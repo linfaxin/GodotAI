@@ -211,6 +211,7 @@ export const CONSOLE_OPERATIONS: readonly ConsoleOperation[] = Object.freeze([
   summer('engine.runtime_call', 'runtime', true),
   summer('engine.screenshot', 'runtime', true),
   summer('engine.game_probe', 'runtime', true),
+  summer('engine.game_input', 'runtime', true),
   ...localOperations.map(operation => Object.freeze(operation)),
 ]);
 

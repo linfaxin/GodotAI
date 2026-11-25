@@ -10,9 +10,10 @@ import { canonical, digest, fail, options, required, writeJson,
   OBSERVATION_READER_SOURCE, OBSERVATION_SOURCE_PATHS, OBSERVATION_EXPORTS, assertRuntimeObservationBuildProof,
   RUNTIME_WRITE_EXPORTS, assertRuntimeWriteBuildProof, runtimeWriteBuildTarget,
   RUNTIME_PROPERTIES_EXPORTS, RUNTIME_PROPERTIES_SOURCE_PATHS, assertRuntimePropertiesBuildProof,
-  assertRuntimeCallBuildProof, GAME_PROBE_EXPORTS, assertGameProbeBuildProof,
+  assertRuntimeCallBuildProof, GAME_PROBE_EXPORTS, assertGameProbeBuildProof, assertInputScriptBuildProof,
 } from '../release/web-release-utils.mjs';
 import { applyWebEnginePatches } from '../release/patch-web-engine.mjs';
+import { INPUT_SCRIPT_PATCH, INPUT_SCRIPT_EXPORTS } from '../release/patch-web-input-script.mjs';
 import { GAME_PROBE_PATCH } from '../release/patch-web-game-probe.mjs';
 import {getEngineProfile,engineExecution,engineBuildArgs,validateEngineProfile,validateEngineExecution} from '../release/engine-profiles.mjs';
 import {workerRuntimeBuildProof} from '../release/patch-web-worker-runtime.mjs';
@@ -21,6 +22,7 @@ import {artifactSetMountBuildProof} from '../release/patch-artifact-set-mount.mj
 import {nativeObserverBuildProof} from '../release/patch-native-observer.mjs';
 import {hostResourceBuildProof} from '../release/patch-web-resource-owner.mjs';
 import {managedShutdownBuildProof} from '../release/patch-managed-shutdown-queue.mjs';
+import {inspectTemplateRuntimeAssets} from '../release/browser-engine-artifacts.mjs';
 
 const moduleRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const excluded = new Set(['.git', 'node_modules', '.godot', '__pycache__', 'bin', 'obj', 'out', 'dist', 'dist-conformance', 'dist-2d-debug', 'dist-2d-release', 'dist-full-release', 'work', '.browser-engine']);
@@ -94,15 +96,16 @@ export function inspectBrowserTemplate(template, {python='python3'}={}) {
   return assets;
 }
 function bindRuntimeObservation(report, template, assets, python) {
-  if (!report.runtimeAbi || !Object.hasOwn(report.source.inputs, OBSERVATION_READER_SOURCE)) return;
-  const includeWrite = report.sourceCertified && runtimeWriteBuildTarget(report);
+  const observation = report.runtimeAbi && Object.hasOwn(report.source.inputs, OBSERVATION_READER_SOURCE);
+  const includeWrite = observation && report.sourceCertified && runtimeWriteBuildTarget(report);
   const includeProperties = includeWrite && Object.hasOwn(report.source.inputs, 'bridge/jsb_runtime_properties.cpp');
   if (includeProperties && !RUNTIME_PROPERTIES_SOURCE_PATHS.every(path => Object.hasOwn(report.source.inputs, path)))
     fail('E_RUNTIME_PROPERTIES_SOURCE', 'Runtime property source closure is incomplete');
   const includeCall = includeWrite && Object.hasOwn(report.source.inputs, 'bridge/jsb_runtime_call.cpp');
   const probePatched = report.recipe.patches.some(patch => patch.patchId === GAME_PROBE_PATCH);
 
-  const requiredSymbols = [...OBSERVATION_EXPORTS, ...(includeWrite ? RUNTIME_WRITE_EXPORTS : []),
+  const inputPatched = report.recipe.patches.some(patch => patch.patchId === INPUT_SCRIPT_PATCH);
+  const requiredSymbols = [...(observation ? OBSERVATION_EXPORTS : []), ...(inputPatched ? INPUT_SCRIPT_EXPORTS : []), ...(includeWrite ? RUNTIME_WRITE_EXPORTS : []),
     ...(includeProperties ? RUNTIME_PROPERTIES_EXPORTS : []),
     ...(includeCall ? ['_godotjs_runtime_call_abi', '_godotjs_runtime_call_execute', 'IsRuntimeCallValue'] : []), ...(probePatched ? GAME_PROBE_EXPORTS : [])];
   const inspect = spawnSync(python, ['-c', [
@@ -114,9 +117,10 @@ function bindRuntimeObservation(report, template, assets, python) {
     '  for name in names:',
     '   if bool(re.search(rb"\\b" + name.encode() + rb"\\b", data)) != expected:',
     '    sys.exit(("Missing" if expected else "Unexpected") + " runtime bridge symbol: " + name)',
-  ].join('\n'), template, requiredSymbols.join(' '), probePatched ? '' : GAME_PROBE_EXPORTS.join(' ')], {encoding: 'utf8'});
+  ].join('\n'), template, requiredSymbols.join(' '), [...(probePatched ? [] : GAME_PROBE_EXPORTS), ...(inputPatched ? [] : INPUT_SCRIPT_EXPORTS)].join(' ')], {encoding: 'utf8'});
   if (inspect.error || inspect.status !== 0)
-    fail('E_RUNTIME_OBSERVATION_EXPORT', inspect.error?.message ?? inspect.stderr.trim());
+    fail('E_RUNTIME_OBSERVATION_EXPORT', inspect.error?.message ?? (inspect.stderr || inspect.stdout).trim());
+  if (!observation) return;
   report.runtimeAbi = {...report.runtimeAbi, observation: 1};
   report.runtimeObservation = {
     abi: 1,
@@ -146,6 +150,12 @@ function bindRuntimeObservation(report, template, assets, python) {
     report.gameProbe = {abi: 1, exports: [...GAME_PROBE_EXPORTS], wasmSha256: report.runtimeObservation.wasmSha256,
       javascriptSha256: assets.find(asset => asset.path === 'godot.js').sha256};
     assertGameProbeBuildProof(report);
+  }
+  if (inputPatched) {
+    report.runtimeAbi.inputScript = 1;
+    report.inputScript = {abi: 1, exports: [...INPUT_SCRIPT_EXPORTS], wasmSha256: report.runtimeObservation.wasmSha256,
+      javascriptSha256: assets.find(asset => asset.path === 'godot.js').sha256};
+    assertInputScriptBuildProof(report);
   }
 
 }
@@ -222,8 +232,13 @@ export async function buildBrowserEngine(configuration) {
     !excluded.has(basename(path)) && !generated.test(basename(path)) &&
     relative(moduleRoot, path).split(sep).join('/') !== webBridgeBundle });
   await generateEngineJavaScript(destinationModule, reportFile);
+  const moduleCommit = git(moduleRoot, ['rev-parse', 'HEAD'])?.trim() ?? 'unknown';
+  const godotCommit = git(sourceRoot, ['rev-parse', '--show-prefix'])?.trim() === ''
+    ? git(sourceRoot, ['rev-parse', 'HEAD'])?.trim() ?? 'unknown' : 'unknown';
+  const sourceCertified = [moduleCommit, godotCommit].every(commit => /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(commit));
   const patches = await applyWebEnginePatches(destination, { python: configuration.python ?? 'python3', executionModel: execution.executionModel,
-    gameProbe: runtimeProfile === 'full-engine-v1' && target === 'template_debug' });
+    gameProbe: runtimeProfile === 'full-engine-v1' && target === 'template_debug',
+    inputScript: sourceCertified && runtimeProfile === 'full-engine-v1' && target === 'template_debug' });
   const lifecycleProof=webLifecycleBuildProof(patches);
   const artifactSetProof={...artifactSetMountBuildProof(patches),...nativeObserverBuildProof(patches),...hostResourceBuildProof(patches),...managedShutdownBuildProof(patches)};
   execution={...execution,lifecycleAbi:lifecycleProof.lifecycleAbi,artifactSetAbi:artifactSetProof.artifactSetAbi,hostResourceAbi:artifactSetProof.hostResourceAbi,shutdownQueueAbi:artifactSetProof.shutdownQueueAbi};
@@ -236,9 +251,9 @@ export async function buildBrowserEngine(configuration) {
   const sconstruct=await readFile(sconstructPath,'utf8');
   await writeFile(sconstructPath,sconstruct+hook);
   const source = await snapshotBrowserSources(destinationModule, { module: true });
-  source.commit = git(moduleRoot, ['rev-parse', 'HEAD'])?.trim() ?? 'unknown'; source.dirty = git(moduleRoot, ['status', '--porcelain'])?.trim() ?? 'unknown';
+  source.commit = moduleCommit; source.dirty = git(moduleRoot, ['status', '--porcelain'])?.trim() ?? 'unknown';
   const godotSource = await snapshotBrowserSources(destination);
-  godotSource.commit = git(sourceRoot, ['rev-parse', 'HEAD'])?.trim() ?? 'unknown'; godotSource.dirty = git(sourceRoot, ['status', '--porcelain'])?.trim() ?? 'unknown';
+  godotSource.commit = godotCommit; godotSource.dirty = godotCommit === 'unknown' ? 'unknown' : git(sourceRoot, ['status', '--porcelain'])?.trim() ?? 'unknown';
   const scons = configuration.scons ?? 'scons';
   const args=engineBuildArgs({profile:runtimeProfile,target,jobs:configuration.jobs??4,lto:configuration.lto??'none',moduleMode:configuration['module-mode']??'baseline',executionModel:execution.executionModel});
   const environment=Object.fromEntries(['EMCC_CORES','BINARYEN_CORES'].filter(name=>process.env[name]!==undefined).map(name=>[name,process.env[name]]));
@@ -264,13 +279,15 @@ export async function buildBrowserEngine(configuration) {
     validateEngineProfile(runtimeProfile,{modules,features:resolvedFeatures,forBuild:true});
     const assets=inspectBrowserTemplate(template,{python:configuration.python??'python3'});
     // Unknown source archives remain usable locally, never certified by a flag.
-    report.sourceCertified = [source.commit, godotSource.commit].every(commit => /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(commit));
+    report.sourceCertified = sourceCertified;
     // Modern Emscripten embeds pthread bootstrap code and uses the engine JS
     // URL for workers. Bind that actual file, plus separate workers if emitted.
     const workerAssets=execution.wasmThreads?assets.filter(asset=>asset.path==='godot.js'||(/worker.*\.js$/.test(asset.path)&&!asset.path.includes('service.worker'))).map(asset=>({...asset,role:'pthread-runtime',...(asset.path==='godot.js'?{embedded:true}:{})})):[];
     const workerBootstrap=execution.wasmThreads?(workerAssets.some(asset=>!asset.embedded)?'separate':'embedded'):undefined;
     Object.assign(report, await version(destination), { status: 'built', execution:{...execution,workerAssets,...(workerBootstrap?{workerBootstrap}:{})}, modules, resolvedFeatures, resolvedBuildOptions, featuresEvidence:{path:featureEvidencePath,sha256:digest(resolvedOptionsBytes)}, modulesEvidence: { path: 'modules/modules_enabled.gen.h', sha256: digest(modulesHeader) }, template: { path: template, sha256: digest(bytes), bytes: bytes.length,assets }, logSha256: digest(await readFile(`${reportFile}.log`)) });
     bindRuntimeObservation(report, template, assets, configuration.python ?? 'python3');
+    if (report.runtimeAbi?.inputScript === 1)
+      assertInputScriptBuildProof(report, inspectTemplateRuntimeAssets(bytes, report.runtimeAbi, configuration.python ?? 'python3'));
     await writeJson(reportFile, report); return { status: 'built', sourceCertified: report.sourceCertified, template, report: reportFile };
   } catch (error) { report.status = 'failed'; report.error = error.message; await writeJson(reportFile, report); throw error; }
 }

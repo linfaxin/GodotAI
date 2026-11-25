@@ -5,9 +5,9 @@ import {SUMMER_OPERATION_SPECS, SUMMER_TREE_LIMITS, SUMMER_COMPATIBILITY, SUMMER
 import {createSummerDispatcher} from '../src/summer-adapter.ts';
 
 const summerIds = ['engine.get_project_context', 'engine.play', 'engine.stop', 'engine.is_running',
-  'engine.get_runtime_tree', 'engine.inspect_runtime_node', 'engine.runtime_set', 'engine.runtime_call', 'engine.screenshot', 'engine.game_probe'];
+  'engine.get_runtime_tree', 'engine.inspect_runtime_node', 'engine.runtime_set', 'engine.runtime_call', 'engine.screenshot', 'engine.game_probe', 'engine.game_input'];
 const localIds = ['describe_runtime_methods', 'check', 'wait_for_event', 'describe_runtime_properties', 'read_runtime_properties', 'game_input', 'wait_for_input'];
-const cancellable = new Set(['engine.get_runtime_tree', 'engine.inspect_runtime_node', 'engine.runtime_set', 'engine.runtime_call', 'engine.screenshot', 'engine.game_probe',
+const cancellable = new Set(['engine.get_runtime_tree', 'engine.inspect_runtime_node', 'engine.runtime_set', 'engine.runtime_call', 'engine.screenshot', 'engine.game_probe', 'engine.game_input',
   'wait_for_event', 'describe_runtime_methods', 'describe_runtime_properties', 'read_runtime_properties', 'wait_for_input']);
 const operation = id => {
   const item = getConsoleOperation(id);
@@ -15,11 +15,11 @@ const operation = id => {
   return item;
 };
 
-test('the console exposes precisely ten Summer operations and seven local helpers', () => {
+test('the console exposes eleven Summer operations and seven local helpers', () => {
   assert.deepEqual(CONSOLE_OPERATIONS.map(item => item.id), [...summerIds, ...localIds]);
   assert.deepEqual(CONSOLE_OPERATIONS.filter(item => item.family === 'summer').map(item => item.id), summerIds);
   assert.deepEqual(CONSOLE_OPERATIONS.filter(item => item.family === 'local').map(item => item.id), localIds);
-  assert.equal(new Set(CONSOLE_OPERATIONS.map(item => item.id)).size, 17);
+  assert.equal(new Set(CONSOLE_OPERATIONS.map(item => item.id)).size, 18);
   for (const item of CONSOLE_OPERATIONS) {
     assert.equal(item.acceptsSignal, cancellable.has(item.id), item.id);
     assert.equal(item.resultKind, item.id === 'engine.screenshot' ? 'game-screenshot' : item.id === 'engine.game_probe' ? 'game-probe' : 'json');

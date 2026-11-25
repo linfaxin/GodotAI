@@ -140,7 +140,8 @@ function createApiConsoleCard(container: HTMLElement, session: ConsoleSession, o
   const contextRows = ['编辑项目 / 版本', '主运行 / 源码版本', '运行归属 / 阶段', '待启动 attempt'].map(contextRow);
   const capabilityRows = ([
     ['observation', '运行时观察'], ['runtimeWrite', '原生属性写入'],
-    ['runtimeProperties', '公开属性访问'], ['runtimeCall', '公开方法调用'], ['gameProbe', '游戏帧探测'], ['interaction', '截图与输入'],
+    ['runtimeProperties', '公开属性访问'], ['runtimeCall', '公开方法调用'], ['gameProbe', '游戏帧探测'],
+    ['inputScript', '物理帧输入'], ['interaction', '截图与输入'],
   ] as const).map(([key, label]) => ({key, value: contextRow(label)}));
   const compatibility = element('p', 'api-console-note', operation.family === 'summer'
     ? 'Summer 风格输入子集 · 部分语义 · GodotAI typed-v1 结果' : 'GodotAI 本地辅助');
@@ -380,10 +381,15 @@ function createApiConsoleCard(container: HTMLElement, session: ConsoleSession, o
     for (const {key, value} of capabilityRows) setText(value, capabilityText(state.environment.capabilities?.[key]));
     execute.disabled = state.owner !== null || !!state.pendingCallId;
     const methodExample = operation.id === 'engine.runtime_call' || operation.id === 'describe_runtime_methods';
-    open.disabled = state.owner !== null || methodExample && state.environment.methodExampleAvailable !== true;
+    const inputExample = operation.id === 'engine.game_input';
+    open.disabled = state.owner !== null || methodExample && state.environment.methodExampleAvailable !== true ||
+      inputExample && state.environment.inputExampleAvailable !== true;
     if (methodExample) setText(exampleNote, state.environment.methodExampleAvailable === true
       ? '打开玩法方法示例。选择方法和填参后，由你执行调用。'
       : '当前引擎发布或呈现模式不支持玩法方法示例。');
+    if (inputExample) setText(exampleNote, state.environment.inputExampleAvailable === true
+      ? '打开物理帧输入示例，按教程从调用历史选择运行。'
+      : '物理帧输入示例需要支持输入脚本和帧探测的 Chromium Direct 预览。');
     const pendingHere = state.history.some(call => call.callId === state.pendingCallId && call.draft.operationId === operation.id);
     cancel.hidden = !pendingHere || !state.cancellable;
     status.textContent = state.owner === 'replay' ? '自动验证正在运行；结束后可手工调用。'
@@ -420,7 +426,7 @@ function createApiConsoleCard(container: HTMLElement, session: ConsoleSession, o
     },
     loadLesson(step: ConsoleLessonStep) {
       act(() => {
-        if (step.input !== undefined) session.loadPreset(operation.id, stringifyConsoleJson(step.input));
+        if (step.input !== undefined) session.loadPreset(operation.id, stringifyConsoleJson(step.input), step.needsRunSource);
         if (step.inputOverrides !== undefined) {
           const current: unknown = JSON.parse(session.snapshot().draft.inputText);
           if (!current || typeof current !== 'object' || Array.isArray(current)) throw new Error('请先准备有效的 input 对象。');

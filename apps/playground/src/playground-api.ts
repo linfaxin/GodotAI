@@ -5,7 +5,8 @@ import type {
 import {snapshotRuntimePropertyData, prepareRuntimeProperties, runtimePropertiesError, type DescribeInput, type ReadInput, type WriteInput, type PropertyKind, type PropertyResult, prepareRuntimeObservation, prepareRuntimeSet, runtimeWriteError, type GameInput, type GameScreenshot, type InteractionResult,
   type ObservationResult, type PreparedRuntimeObservation, type RuntimeNodeInput, type RuntimeTreeInput, type ScreenshotInput,
   type RuntimeSetInput, type RuntimeSetResult, type WaitForInput, type WorkerPreviewRunner,
-  gameProbeError, prepareGameProbe, type GameProbeInput, type GameProbeResult, runtimeMethodError, type DescribeMethodsInput, type CallMethodInput} from '@godot-js/engine/browser/dedicated/worker-runner';
+  gameProbeError, prepareGameProbe, type GameProbeInput, type GameProbeResult, runtimeMethodError, type DescribeMethodsInput, type CallMethodInput,
+  inputScriptFailure, type InputScriptInput} from '@godot-js/engine/browser/dedicated/worker-runner';
 
 type Recorder = ReturnType<typeof createDebugRecorder>;
 type ErrorCode = 'invalid_input' | 'not_found' | 'invalid_cursor' | 'revision_conflict' |
@@ -43,6 +44,7 @@ interface Actions {
   runtimeWrite?(): Pick<WorkerPreviewRunner, 'runtimeWriteState' | 'setRuntimeProperty'> | undefined;
   runtimeProperties?(): Pick<WorkerPreviewRunner, 'runtimePropertiesState' | 'describeRuntimeProperties' | 'readRuntimeProperties' | 'writeRuntimeProperty'> | undefined;
   gameProbe?(): Pick<WorkerPreviewRunner, 'gameProbe' | 'gameProbeState'> | undefined;
+  inputScript?(): Pick<WorkerPreviewRunner, 'runGameInputScript' | 'inputScriptState'> | undefined;
   runtimeCall?(): Pick<WorkerPreviewRunner, 'runtimeCallState' | 'describeRuntimeMethods' | 'callRuntimeMethod' | 'getRuntimeTree'> | undefined;
   summerCall?(input: unknown, signal?: AbortSignal, selected?: SelectedRuntimeMethod): Promise<FacadeReply>;
 }
@@ -300,6 +302,8 @@ export function createPlaygroundApi(recorder: Recorder, actions: Actions) {
       return ok({...result.result, image: {...metadata, byteLength: bytes.byteLength}});
     }),
     summer_call: (input: unknown, signal?: AbortSignal) => summerCall(input, signal),
+    run_game_input_script: tool('run_game_input_script', (input: InputScriptInput, signal?: AbortSignal) =>
+      actions.inputScript?.()?.runGameInputScript(input, signal) ?? Promise.resolve(inputScriptFailure('unsupported'))),
     get_project_context: tool('get_project_context', getProjectContext),
     check: tool('check', async (input: ProjectInput) => {
       const rejected = admit(input, 'check');
@@ -336,6 +340,7 @@ export function createPlaygroundApi(recorder: Recorder, actions: Actions) {
         runtimeProperties: actions.runtimeProperties?.()?.runtimePropertiesState(runId) ?? {supported: false, ready: false},
         runtimeCall: actions.runtimeCall?.()?.runtimeCallState(runId) ?? {supported: false, ready: false},
         gameProbe: actions.gameProbe?.()?.gameProbeState(runId) ?? {supported: false, ready: false},
+        inputScript: actions.inputScript?.()?.inputScriptState(runId) ?? {supported: false, ready: false},
       });
     }),
     read_run_events: tool('read_run_events', (input: {runId: string} & ReadRunEventsOptions) => {

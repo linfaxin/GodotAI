@@ -13,7 +13,7 @@ export interface VerifiedAsset {
   maxDecodedBytes?: number;
 }
 export interface VerifiedRelease {
-  runtimeAbi?: { protocolVersion: 2; host: 1; audio: 1; presentation: 1; lifecycle?: 1; observation?: 1; runtimeWrite?: 1; runtimeProperties?: 1; runtimeCall?: 1; gameProbe?: 1 };
+  runtimeAbi?: { protocolVersion: 2; host: 1; audio: 1; presentation: 1; lifecycle?: 1; observation?: 1; runtimeWrite?: 1; runtimeProperties?: 1; runtimeCall?: 1; gameProbe?: 1; inputScript?: 1 };
   runtimeWorker?: VerifiedAsset;
   runtimeAudioWorklet?: VerifiedAsset;
   artifactReceiptVersion?:2;
@@ -158,6 +158,9 @@ export function validateRelease(release: VerifiedRelease, base = globalThis.loca
   if (release.runtimeAbi?.runtimeProperties !== undefined && (release.runtimeAbi.runtimeProperties !== 1 ||
       release.runtimeAbi.observation !== 1 || release.runtimeAbi.lifecycle !== 1 || execution.wasmThreads ||
       release.profile !== 'full-engine-v1' || release.engineTarget !== 'template_debug')) throw Error('E_RELEASE_RUNTIME_PROPERTIES_ABI');
+  if (release.runtimeAbi?.inputScript !== undefined && (release.runtimeAbi.inputScript !== 1 ||
+      release.runtimeAbi.lifecycle !== 1 || execution.wasmThreads || execution.executionModel !== 'window' ||
+      release.profile !== 'full-engine-v1' || release.engineTarget !== 'template_debug')) throw new Error('E_INPUT_SCRIPT_ABI');
   if (release.runtimeAbi?.gameProbe !== undefined && (release.runtimeAbi.gameProbe !== 1 ||
       release.runtimeAbi.lifecycle !== 1 || release.runtimeAbi.observation !== 1 ||
       execution.executionModel !== 'window' || execution.wasmThreads ||

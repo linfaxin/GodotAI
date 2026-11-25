@@ -35,6 +35,12 @@ import {attachGameProbeReceipt, gameProbeError, GAME_PROBE_VERSION, prepareGameP
   type GameProbeInput, type GameProbeQuery, type GameProbeReceipt, type GameProbeResult, type GameProbeState} from './worker-game-probe.js';
 export {gameProbeError, prepareGameProbe, readGameProbeQuery} from './worker-game-probe.js';
 export type {GameProbeInput, GameProbeResult, GameProbeState} from './worker-game-probe.js';
+import {INPUT_SCRIPT_DRAIN_MS, INPUT_SCRIPT_VERSION, inputScriptFailure, inputScriptRequestId, matchesInputScript,
+  prepareInputScript, readInputScriptKey, readInputScriptTerminal, supportsInputScript,
+  type InputScriptCommand, type InputScriptInput, type InputScriptReceipt, type InputScriptResult, type InputScriptState}
+  from './worker-input-script.js';
+export {inputScriptFailure, readInputScriptCommand, supportsInputScript} from './worker-input-script.js';
+export type {InputScriptCommand, InputScriptInput, InputScriptResult, InputScriptState} from './worker-input-script.js';
 
 export * from './worker-runtime-properties.js';
 export * from './worker-runtime-call.js';
@@ -131,6 +137,8 @@ interface Session {
   runtimeMethod?: PendingRuntimeMethod;
   input?: InputRecord;
   inputSequence: number;
+  inputScriptSequence: number;
+  inputScript?: {receipt: InputScriptReceipt; command: InputScriptCommand; deadline: number; retire(result: InputScriptResult): void};
   failure?: ReturnType<typeof previewDiagnostic>;
   timer?: ReturnType<typeof setTimeout>; watchdog?: ReturnType<typeof setInterval>;
   onVisibility?: () => void;
@@ -151,6 +159,7 @@ export class WorkerPreviewRunner {
   private readonly runtimeWriteVersions = new Map<string, boolean | null>();
   private readonly runtimePropertiesVersions = new Map<string, boolean | null>();
   private readonly gameProbeVersions = new Map<string, boolean | null>();
+  private readonly inputScriptVersions = new Map<string, boolean | null>();
   private readonly runtimeCallVersions = new Map<string, boolean | null>();
   private inputWaiters = 0;
   private active?: Session;
@@ -200,6 +209,9 @@ export class WorkerPreviewRunner {
     s.report = report; s.settled = true; ++s.epoch;
     s.capture?.finish(interactionError('run_ended'));
     if (s.probe) s.probe.finish(gameProbeError('run_ended', undefined, s.probe.receipt));
+    if (s.inputScript) s.inputScript.retire(inputScriptFailure(
+      report.reason === 'forced-frame-disposal' || report.reason === 'crashed' ? 'transport_lost' : 'run_ended',
+      s.inputScript.receipt, 'outcome_unknown'));
     s.observation?.finish(observationError('run_ended'));
     s.runtimeWrite?.retire(report.reason === 'forced-frame-disposal' || report.reason === 'crashed' ? 'transport_lost' : 'run_ended');
     s.runtimeProperties?.retire(report.reason === 'forced-frame-disposal' || report.reason === 'crashed' ? 'transport_lost' : 'run_ended');
@@ -256,7 +268,7 @@ export class WorkerPreviewRunner {
     const s: Session = { identity, frame, port: channel.port1, peer: channel.port2, state: 'loading-frame', epoch: 0, settled: false,
       lastWorkerBeat: now(), beatSequence: -1, resumeEpoch: 0, logs: new WorkerLogBudget(frozen.configuration.budgets), projectQueue: [], projectBytes: 0,
       commands:new WorkerProjectCommandCredits(frozen.configuration.budgets.maxProjectEvents!,frozen.configuration.budgets.maxProjectBytes!),commandSequence:0,
-      inputSequence: 0, observationSampleSeq: 0, accessSequence: 0, probeSequence: 0, resolveRun, rejectRun, exit, resolveExit };
+      inputSequence: 0, inputScriptSequence: 0, observationSampleSeq: 0, accessSequence: 0, probeSequence: 0, resolveRun, rejectRun, exit, resolveExit };
     this.active = s;
     this.interactionVersions.set(identity.runId, null);
     if (this.interactionVersions.size > MAX_RECEIPTS) this.interactionVersions.delete(this.interactionVersions.keys().next().value!);
@@ -267,6 +279,8 @@ export class WorkerPreviewRunner {
     this.runtimePropertiesVersions.set(identity.runId, null);
     this.runtimeCallVersions.set(identity.runId, null);
     this.gameProbeVersions.set(identity.runId, null);
+    this.inputScriptVersions.set(identity.runId, null);
+    if (this.inputScriptVersions.size > MAX_RECEIPTS) this.inputScriptVersions.delete(this.inputScriptVersions.keys().next().value!);
     if (this.gameProbeVersions.size > MAX_RECEIPTS) this.gameProbeVersions.delete(this.gameProbeVersions.keys().next().value!);
     if (this.runtimeCallVersions.size > MAX_RECEIPTS) this.runtimeCallVersions.delete(this.runtimeCallVersions.keys().next().value!);
     if (this.runtimePropertiesVersions.size > MAX_RECEIPTS) this.runtimePropertiesVersions.delete(this.runtimePropertiesVersions.keys().next().value!);
@@ -275,6 +289,16 @@ export class WorkerPreviewRunner {
     s.port.onmessage = event => {
       if (!this.live(s) || !isWorkerEnvelope(event.data) || !sameWorkerRun(event.data, identity)) return;
       const m: any = event.data;
+      if (m.type === 'input-script-terminal') {
+        const current = s.inputScript;
+        if (!current || !matchesInputScript(current.receipt, readInputScriptKey(m, identity.runId, this.release.releaseId))) return;
+        const terminal = readInputScriptTerminal(m.terminal, current.command);
+        if (!terminal) return;
+        current.retire(interactionNow() >= current.deadline ? inputScriptFailure('timeout', current.receipt, 'outcome_unknown') :
+          terminal.kind === 'completed' ? {ok: true, receipt: current.receipt, result: terminal} :
+            inputScriptFailure(terminal.reason, current.receipt, terminal.kind, terminal));
+        return;
+      }
       if (m.type === 'runtime-write-result') {
         const id = readRuntimeWriteId(m, identity.runId);
         if (id && sameRuntimeWrite(s.runtimeWrite, id)) s.runtimeWrite?.reply(m.result);
@@ -395,6 +419,13 @@ export class WorkerPreviewRunner {
             return;
           }
           this.gameProbeVersions.set(identity.runId, probeVersion !== undefined);
+          const inputVersion = supportsInputScript(this.release, frozen.configuration.presentationBackend,
+            this.options.container.ownerDocument.defaultView?.navigator.userAgent ?? '') ? INPUT_SCRIPT_VERSION : undefined;
+          if (m.inputScriptVersion !== inputVersion) {
+            this.beginStop(s, 'runtime-failed', 'Input script ABI does not match the release');
+            return;
+          }
+          this.inputScriptVersions.set(identity.runId, inputVersion !== undefined);
         }
         if (!this.transition(s, m.phase)) return;
         if (m.phase === 'running') {
@@ -835,6 +866,67 @@ export class WorkerPreviewRunner {
       catch { s.capture = undefined; finish(interactionError('capture_failed')); }
     });
   }
+  inputScriptState(runId: string): InputScriptState {
+    const supported = this.inputScriptVersions.get(runId) ?? null;
+    return {supported, ready: supported === true && this.active?.identity.runId === runId && this.active.state === 'running'};
+  }
+
+  runGameInputScript(input: InputScriptInput, signal?: AbortSignal): Promise<InputScriptResult> {
+    const prepared = prepareInputScript(input, signal);
+    if (!prepared.ok) return Promise.resolve(prepared);
+    const {runId, command, deadline} = prepared;
+    const session = this.active;
+    if (!session || session.identity.runId !== runId)
+      return Promise.resolve(inputScriptFailure(this.inputScriptVersions.has(runId) ? 'run_ended' : 'not_found'));
+    if (session.state === 'stopping' || session.settled) return Promise.resolve(inputScriptFailure('run_ended'));
+    if (session.state !== 'running') return Promise.resolve(inputScriptFailure('not_ready'));
+    if (!this.inputScriptState(runId).ready) return Promise.resolve(inputScriptFailure('unsupported'));
+    if (this.options.container.ownerDocument.visibilityState === 'hidden') return Promise.resolve(inputScriptFailure('hidden'));
+    if (session.inputScript || session.inputScriptSequence === 0xffffffff) return Promise.resolve(inputScriptFailure('busy'));
+    const sequence = ++session.inputScriptSequence;
+    const receipt: InputScriptReceipt = {run: {...session.identity}, releaseId: this.release.releaseId,
+      requestId: inputScriptRequestId(runId, sequence), sequence};
+    const envelope = {...session.identity, protocolVersion: WORKER_PROTOCOL,
+      releaseId: receipt.releaseId, sequence, requestId: receipt.requestId};
+    return new Promise(resolve => {
+      let settled = false;
+      let stopTimer: (() => void) | undefined;
+      let drain: ReturnType<typeof setTimeout> | undefined;
+      const finish = (result: InputScriptResult) => {
+        if (settled) return;
+        settled = true;
+        stopTimer?.();
+        if (signal) EventTarget.prototype.removeEventListener.call(signal, 'abort', abort);
+        resolve(result);
+      };
+      const pending: NonNullable<Session['inputScript']> = {receipt, command, deadline, retire: result => {
+        if (session.inputScript !== pending) return;
+        session.inputScript = undefined;
+        clearTimeout(drain);
+        finish(result);
+      }};
+      const cancel = (reason: 'timeout' | 'cancelled') => {
+        if (settled || session.inputScript !== pending) return;
+        finish(inputScriptFailure(reason, receipt, 'outcome_unknown'));
+        drain = setTimeout(() => {
+          if (this.live(session) && session.inputScript === pending)
+            this.beginStop(session, 'runtime-failed', 'Input script cleanup was not confirmed');
+        }, Math.max(0, Math.min(deadline, interactionNow()) + INPUT_SCRIPT_DRAIN_MS - interactionNow()));
+        try { session.port.postMessage({...envelope, type: 'input-script-cancel'}); }
+        catch { /* Only the original session can be stopped by the drain timer. */ }
+      };
+      const abort = () => cancel(interactionNow() >= deadline ? 'timeout' : 'cancelled');
+      session.inputScript = pending;
+      if (signal) EventTarget.prototype.addEventListener.call(signal, 'abort', abort, {once: true});
+      if (signal && readAborted.call(signal)) { pending.retire(inputScriptFailure('cancelled')); return; }
+      if (interactionNow() >= deadline) { pending.retire(inputScriptFailure('timeout')); return; }
+      try {
+        session.port.postMessage({...envelope, type: 'input-script-request', command, deadline});
+        stopTimer = scheduleRuntimeWriteDeadline(deadline, () => cancel('timeout'));
+      } catch { pending.retire(inputScriptFailure('dispatch_failed', receipt)); }
+    });
+  }
+
   gameInput(input: GameInput): InteractionResult<{operationId: string}> {
     const gesture = readGesture(input?.gesture);
     if (!gesture || !validInteractionId(input?.runId)) return interactionError('invalid_input');

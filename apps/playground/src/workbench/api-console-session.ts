@@ -73,6 +73,8 @@ function resultSummary(operationId: string, reply: unknown): string {
   if (!object(reply)) return '调用已结算';
   if (reply.ok === false) {
     const code = reply.error?.code;
+    if (operationId === 'engine.game_input' && reply.error?.details?.godotai?.receipt?.outcome === 'interrupted')
+      return '输入脚本中断，已记录执行边沿和清理回执';
     if (code === 'outcome_unknown') return operationId === 'engine.runtime_call' ? '结果未确认；请先独立观察' : '结果未确认；不得自动重试';
     if (code === 'call_error') return '脚本方法已执行并抛出异常';
     if (code === 'result_unavailable') return '脚本方法已返回，返回值无法编码';
@@ -84,6 +86,7 @@ function resultSummary(operationId: string, reply: unknown): string {
   if (operationId === 'engine.play') return '已接纳，待启动';
   if (operationId === 'engine.stop') return data.no_target ? '没有待停止目标' : '停止请求已接纳，退出待确认';
   if (operationId === 'engine.is_running') return data.playing ? '主运行正在运行' : '主运行未处于 running';
+  if (operationId === 'engine.game_input') return '输入脚本已完成，使用帧探测验证玩法';
   if (operationId === 'game_input') return '输入已接纳，分发待确认';
   if (operationId === 'wait_for_input') return `输入等待：${data.outcome}；分发：${data.operation?.status ?? 'unknown'}`;
   if (operationId === 'wait_for_event') return `等待结果：${data.outcome}`;
@@ -99,12 +102,13 @@ function resultFacts(call: ConsoleCall, input: unknown, reply: unknown, submitte
   // Explicit discovery can submit a current run ID from an older draft.
   const anchor = op === 'describe_runtime_methods' ? submittedAnchor : call.draft.anchor;
   const facts: ConsoleResultFacts = {sourceCallId:call.callId,sourceAnchor:copy(anchor)};
-  let run = identity(data.run);
+  const runData = op === 'engine.game_input' ? data.receipt?.run : data.run;
+  let run = identity(runData);
   if (op === 'wait_for_event' && data.outcome !== 'reached') run = undefined;
   if (run) {
-    const projectId = nonempty(data.run.projectId) ? data.run.projectId :
+    const projectId = nonempty(runData.projectId) ? runData.projectId :
       anchor.activeRunId === run.runId ? anchor.activeRunProjectId ?? undefined : undefined;
-    facts.run = {identity:run,...(projectId ? {projectId} : {}),...(nonempty(data.run.attemptId) ? {attemptId:data.run.attemptId} : {})};
+    facts.run = {identity:run,...(projectId ? {projectId} : {}),...(nonempty(runData.attemptId) ? {attemptId:runData.attemptId} : {})};
     facts.sourceAnchor.activeRunId = run.runId;facts.sourceAnchor.activeRunRevision = run.revision;
     facts.sourceAnchor.activeRunProjectId = projectId ?? null;
   }
@@ -183,6 +187,8 @@ export function consoleResultSource(operationId: string, facts: ConsoleResultFac
       if (facts.run) return 'run';
       return facts.attemptId ? 'attempt' : undefined;
     case 'game_input':
+    case 'engine.game_input':
+    case 'engine.stop':
       return facts.run ? 'run' : undefined;
     case 'wait_for_input':
       return facts.input ? 'input' : undefined;
@@ -230,6 +236,11 @@ export function createApiConsoleSession(api: PlaygroundApi, hooks: ConsoleHooks,
   function admissible(input:unknown,current:ConsoleEnvironment):boolean {
     const selected=getConsoleOperation(operationId)!;const original=draft().anchor,now=current.anchor;
     const stale=()=>{error('stale_target','目标已变化，请显式更新目标后提交');return false;};
+    if(draft().runSourceCallId===null){error('missing_source','请从运行历史选择本次操作的目标');return false;}
+    if(draft().runSourceCallId!==undefined&&(!same(original,now,['editorProjectId','activeRunProjectId','activeRunId','activeRunRevision','pendingAttemptId'])||
+      now.pendingAttemptId!==null||current.activeRunState!=='running')){
+      error('stale_target','运行已变化，请从当前运行的历史回执重新选择目标');return false;
+    }
     if(selected.binding==='project'&&!same(original,now,['editorProjectId','editorRevision']))return stale();
     if(selected.binding==='main'&&!same(original,now,['activeRunId','pendingAttemptId']))return stale();
     if(selected.binding==='runtime'){
@@ -253,13 +264,22 @@ export function createApiConsoleSession(api: PlaygroundApi, hooks: ConsoleHooks,
     subscribe(listener){listeners.add(listener);return()=>{listeners.delete(listener);};},
     selectOperation(id){if(disposed||!getConsoleOperation(id))return;operationId=id;draft();emit();},
     updateDraft(inputText){if(disposed)return;draft().inputText=inputText;clearError();emit();},
-    loadPreset(id,inputText){if(disposed||!getConsoleOperation(id))return;operationId=id;drafts.set(id,{operationId:id,inputText,anchor:environment().anchor});clearError();emit();},
+    loadPreset(id,inputText,needsRunSource){
+      if(disposed||!getConsoleOperation(id))return;
+      operationId=id;
+      const anchor=needsRunSource?draft().anchor:environment().anchor;
+      drafts.set(id,{operationId:id,inputText,anchor,...(needsRunSource?{runSourceCallId:null}:{})});
+      clearError();emit();
+    },
     loadHistory(callId){const call=history.find(item=>item.callId===callId);if(disposed||!call)return;operationId=call.draft.operationId;drafts.set(operationId,copy(call.draft));clearError();emit();},
     updateTarget(selection){
       if(disposed)return;
       clearError();
       const input=parsed();if(clientErrors.has(operationId))return;
       const current=environment(),id=operationId;
+      if(draft().runSourceCallId!==undefined&&!selection){
+        error('missing_source','请从运行历史选择本次操作的目标');return;
+      }
       if (id === 'engine.game_probe' && !selection && object(input) && (input.tree?.path !== undefined ||
           Array.isArray(input.props) && input.props.length > 0) &&
           !same(draft().anchor,current.anchor,['editorProjectId','activeRunId'])) {
@@ -279,7 +299,16 @@ export function createApiConsoleSession(api: PlaygroundApi, hooks: ConsoleHooks,
       const missing=(message:string)=>error('missing_source',message+'；原草稿已保留');
       const node=source?.nodes?.find(item=>item.path===selection?.nodePath);
       const target=node&&source?.run?{runId:source.run.identity.runId,path:node.path,expectedInstanceId:node.instanceId}:source?.propertyTarget;
-      if(id==='check'){
+      if((id==='engine.game_input'||id==='engine.stop')&&selection){
+        if(!source?.run||source.run.identity.runId!==current.anchor.activeRunId||
+          source.run.identity.revision!==current.anchor.activeRunRevision||current.activeRunState!=='running'||
+          source.run.projectId!==current.anchor.editorProjectId||current.anchor.pendingAttemptId!==null||
+          source.sourceAnchor.pendingAttemptId!==current.anchor.pendingAttemptId){
+          missing('请从当前项目的稳定运行选择回执');return;
+        }
+        anchor=current.anchor;
+        draft().runSourceCallId=selection.sourceCallId;
+      }else if(id==='check'){
         if(!current.anchor.editorProjectId||current.anchor.editorRevision===null){missing('尚缺当前编辑项目');return;}
         next.projectId=current.anchor.editorProjectId;next.expectedEditorRevision=current.anchor.editorRevision;anchor=current.anchor;
       }else if(id==='wait_for_event'){

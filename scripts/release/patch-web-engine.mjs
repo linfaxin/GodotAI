@@ -22,13 +22,17 @@ import {MANAGED_SHUTDOWN_PATHS,patchManagedShutdownQueue,unpatchManagedShutdownQ
 import {AUDIO_WORKLET_FINISH_PATH,patchAudioWorkletFinish,unpatchAudioWorkletFinish} from './patch-web-audio-worklet-finish.mjs';
 
 import {GAME_PROBE_PATHS,GAME_PROBE_PATCH,GAME_PROBE_REMOVAL_PATCH,patchGameProbe,unpatchGameProbe} from './patch-web-game-probe.mjs';
+import {INPUT_SCRIPT_PATHS,INPUT_SCRIPT_PATCH,INPUT_SCRIPT_REMOVAL_PATCH,patchInputScript,unpatchInputScript} from './patch-web-input-script.mjs';
 
 const repo=fileURLToPath(new URL('../../',import.meta.url));
 const execute=promisify(execFile),hash=value=>createHash('sha256').update(value).digest('hex');
-export async function applyWebEnginePatches(root,{python='python3',executionModel='window',gameProbe=true}={}) {
+export async function applyWebEnginePatches(root,{python='python3',executionModel='window',gameProbe=true,inputScript=gameProbe}={}) {
  const planned=[];
  const enableGameProbe=executionModel==='window'&&gameProbe;
+ const enableInputScript=enableGameProbe&&inputScript;
  const gameProbeImplementation='scripts/release/patch-web-game-probe.mjs';
+ const inputScriptImplementation='scripts/release/patch-web-input-script.mjs';
+ const plannedSource=path=>planned.findLast(item=>item.record.path===path)?.code??readFile(resolve(root,path),'utf8');
  const add=async(path,code,patchId,implementation,baseline)=>{
   const before=baseline??await readFile(resolve(root,path),'utf8');
   planned.push({code,record:{patchId,path,beforeSha256:hash(before),afterSha256:hash(code),changed:before!==code,
@@ -37,9 +41,14 @@ export async function applyWebEnginePatches(root,{python='python3',executionMode
  // Compute every patch before writing: unsupported source layouts leave the
  // input tree intact. Python's JSON mode calls the same checked pure patchers.
  // Disabled profiles may start from a checkout already patched for Full Debug.
- if(!enableGameProbe)for(const path of GAME_PROBE_PATHS){
+ const hadInputScript=(await readFile(resolve(root,'core/input/input.cpp'),'utf8')).includes('Input::godotjs_is_action_pressed');
+ if(!enableGameProbe||enableInputScript||hadInputScript)for(const path of GAME_PROBE_PATHS){
   const before=await readFile(resolve(root,path),'utf8'),code=unpatchGameProbe(path,before);
   if(code!==before)await add(path,code,GAME_PROBE_REMOVAL_PATCH,gameProbeImplementation,before);
+ }
+ if(hadInputScript)for(const path of INPUT_SCRIPT_PATHS){
+  const before=await plannedSource(path),code=unpatchInputScript(path,before);
+  if(code!==before)await add(path,code,INPUT_SCRIPT_REMOVAL_PATCH,inputScriptImplementation,before);
  }
  for(const [script,patchIds] of [
   ['impl/web/patches/patch-web-renderer.py',{'drivers/gles3/shaders/scene.glsl':'godotjs-gles3-alpha-hash-v1','drivers/gles3/storage/texture_storage.cpp':'godotjs-gles3-small-canvas-backbuffer-v1'}],
@@ -114,11 +123,19 @@ export async function applyWebEnginePatches(root,{python='python3',executionMode
   const result=patchRuntimePropertiesQuitFile(path,before);
   await add(path,result.code,result.patchId,'scripts/release/patch-runtime-properties-quit.mjs',before);
  }
+ if(enableInputScript)for(const path of INPUT_SCRIPT_PATHS){
+  const before=await plannedSource(path);
+  await add(path,patchInputScript(path,before),INPUT_SCRIPT_PATCH,inputScriptImplementation,before);
+ }
  if(enableGameProbe)for(const path of GAME_PROBE_PATHS){
   const before=planned.findLast(item=>item.record.path===path)?.code??await readFile(resolve(root,path),'utf8');
   await add(path,patchGameProbe(path,before),GAME_PROBE_PATCH,gameProbeImplementation,before);
  }
- for(const {code,record}of planned)if(record.changed)await writeFile(resolve(root,record.path),code);
+ const final=new Map(planned.map(item=>[item.record.path,item]));
+ for(const [path,{code,record}]of final){
+  const initial=planned.find(item=>item.record.path===path).record;
+  if(initial.beforeSha256!==record.afterSha256)await writeFile(resolve(root,path),code);
+ }
  return planned.map(({record})=>record);
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(resolve(process.argv[1])).href){

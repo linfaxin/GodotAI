@@ -85,6 +85,29 @@ await window.godotPlayground.summer_call({
 
 For a caller with an exact run and node instance, use `describe_runtime_methods` to obtain a method token and pass it to `call_runtime_method` with typed arguments. Tokens are scoped to the registered method, instance, run and release. If a call reports `outcome_unknown`, read the live state before deciding whether to call again. Older templates report `unsupported`. The generated `godot.annotations` declaration follows the annotation observed in the exact engine template.
 
+### Input script
+
+Open the `engine.game_input` example in the API console on a Chromium Full Engine debug Dedicated Worker Direct preview that advertises `inputScript: 1`. Run the lesson in order to capture the player's starting position, move it from `(64, 256)` to `(128, 256)`, and verify the starting position after Stop and Play. Each capture pairs the coordinates with a PNG from the same draw.
+
+When the run changes, bind the lesson draft using a receipt from the new run. Filling the draft never sends input. Pausing or suspending the scene tree ends its input script, even if the project resumes during the same physics step.
+
+```js
+await window.godotPlayground.summer_call({
+  op: 'engine.game_input',
+  input: {
+    action: 'script',
+    events: [
+      {type: 'action', action: 'move_right', pressed: true, at_frame: 0},
+      {type: 'action', action: 'move_right', pressed: false, at_frame: 4},
+    ],
+  },
+});
+```
+
+The subset accepts one press and release for the same registered InputMap action. The defaults are `instance: 'main'`, `clock: 'frame'`, `wait: true`, press offset `0`, and strength `1`. The release offset is greater than the press offset and at most `120`. The action is visible during eligible physics callbacks through `Input.is_action_pressed` and `Input.get_action_strength` with `exact_match: false`, and through `Input.get_axis`. Raw input, recording, replay, event callbacks and just-pressed queries are outside this subset.
+
+Use `get_run({runId})` to read `inputScript.supported` and `inputScript.ready`. For a captured run, use `run_game_input_script({runId, actionName, pressOffset, releaseOffset, timeoutMs?}, signal?)` or `WorkerPreviewRunner.runGameInputScript(input, signal?)`. The timeout defaults to 5,000 ms and accepts integers from 1 to 30,000 ms. A completed receipt includes both native physics frames. Use the resulting `outcome` and `terminal` to distinguish a skipped request from an interruption. If the response is `outcome_unknown`, inspect the original run before deciding whether to issue another command. The existing `game_input` method on the debug API continues to accept physical gestures.
+
 ### Game probe
 
 On a Chromium Full Engine debug Dedicated Worker Direct preview with `gameProbe: 1`, open **打开独立示例** from `engine.game_probe`. The lesson discovers `/root/Main/Player`, captures its local position and PNG together, moves the player, and repeats the capture. After stopping and restarting the same source, it captures the starting position again. Filling a draft from run history requires a separate execution action.
@@ -165,6 +188,8 @@ Explicit and adjacent reports both supply unspecified profile, target, LTO and m
 
 Package a local build report with `node scripts/test/package-browser-engine-artifact.mjs --report /path/to/engine-report.json --out /path/to/browser-engine-artifact`. The portable directory contains the exact ZIP, reports, compiler log and integrity manifest. Recheck an existing portable directory with `--out /path/to/browser-engine-artifact --verify`. Run `node scripts/test/measure-browser-engine.mjs --report /path/to/browser-engine-artifact/engine-report.json --out /path/to/measurement.json` to measure it.
 
+For Input Script builds, the linker records the exact WASM digest in the generated JavaScript. Packaging and Playground builds verify the pair. Rebuild any local Input Script template produced before this check to generate a matching pair and report.
+
 Run browser verification locally against the exact candidate and select the relevant profile, target and presentation backend. For complete release evidence, prepare both profiles with both debug and release templates, then run both Worker presenters with default browser settings. Optional performance verification uses a separately frozen historical site as the legacy baseline for the matching profile and target. The local rollout verifier rechecks the four candidates and their capability, browser and performance evidence. [Worker verification commands](../../docs/browser-worker-runtime.zh-CN.md) · [Local verification policy](../../CONTRIBUTING.md#local-verification)
 
 The release captures snake and camel declarations from the actual exported Web engine. Types, SDK modules, engine JavaScript/WASM and audio worklets are bound to that release. Local engine builds use the checked native patch pipeline, including the established renderer/audio/presentation fixes and the versioned Worker startup, host, audio and browser bridges. Build and acceptance consume the same native patch-file registry. Worker releases require its complete built-source proof and a fresh frozen SDK; old templates cannot acquire the ABI by adding metadata.
@@ -196,6 +221,8 @@ Run `test:browser:debug-api` against a matching Full Engine debug Worker site to
 `test:browser:api-console` validates the console against controlled APIs (`engineExecuted=false`). `test:browser:api-console:shell` exercises the actual main/editor integration on a separately built shell-only site. Run `test:browser:api-console:real` with `PLAYGROUND_TEST_DIRECTORY` set to a matching Full/debug Worker Direct site and `PLAYGROUND_API_CONSOLE_REAL_REPORT` set to the output JSON path for real gameplay, PNG and restart verification. The real suite requires runtimeProperties ABI 1 and records `engineExecuted=true`; the two UI suites cannot replace that evidence.
 
 Run `test:browser:runtime-call` once per Full/debug Worker Direct candidate. Set `PLAYGROUND_TEST_DIRECTORY` and `PLAYGROUND_RUNTIME_CALL_REPORT` for each site, and set `PLAYGROUND_RUNTIME_CALL_CASE` to `supported` for ABI 1 or `unsupported` for the previous template. The new template run records the method receipt, typed property readback, before/after/restart PNGs and native exit receipts. The previous template run checks the unavailable response and confirms that no method request was sent to the Worker.
+
+Run `pnpm --filter @godot-js/playground test:browser:input-script:g0 /path/to/engine-report.json /path/to/report-directory` for the minimal PCK suite on the new Full/debug template. Build both the new and previous Game Probe templates with the same current SDK. Run `test:browser:input-script` on each site with `PLAYGROUND_TEST_DIRECTORY` and `PLAYGROUND_INPUT_SCRIPT_REPORT` set, and use `PLAYGROUND_INPUT_SCRIPT_CASE=supported` or `unsupported` to select the expected capability. The reports cover movement, restart, stale run receipts and legacy physical gestures.
 
 Run `PLAYGROUND_DEBUG_API_CASE=runtime-set-position` on a site with write ABI 1 and `runtime-set-unsupported` on an observation ABI 1 site with a read-only template. Set `PLAYGROUND_TEST_DIRECTORY` to the matching site for each run. The write case records the write receipt, PNGs and both exits.
 `PLAYGROUND_DEBUG_API_CASE=runtime-set-boundaries` checks coordinate precision, same-origin iframe inputs and synthetic abort events on the write-capable site.

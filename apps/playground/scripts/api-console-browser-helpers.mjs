@@ -54,8 +54,9 @@ export function consoleResult(reply) {
 }
 export function summerResult(reply) { return consoleResult(reply).data; }
 
-export async function readConsolePng(page) {
-  const image = consoleElement(page, 'attachments').locator('img').last();
+export async function readConsolePng(page, callId) {
+  const attachments = consoleElement(page, 'attachments');
+  const image = callId ? attachments.getByAltText('实际游戏截图 ' + callId, {exact: true}) : attachments.locator('img').last();
   await image.waitFor();
   const result = await image.evaluate(async element => {
     await element.decode();
@@ -67,7 +68,7 @@ export async function readConsolePng(page) {
       const rgba = (x, y) => Array.from(context.getImageData(Math.floor(x * bitmap.width / 960), Math.floor(y * bitmap.height / 640), 1, 1).data);
       return {bytes: Array.from(new Uint8Array(await blob.arrayBuffer())), mimeType: blob.type,
         width: bitmap.width, height: bitmap.height,
-        pixels: {initialMarker: rgba(64, 256), movedMarker: rgba(192, 256), health40: rgba(80, 32), health100: rgba(160, 32), damageInner: rgba(170, 32), damageOuter: rgba(180, 32)}};
+        pixels: {initialMarker: rgba(64, 256), movedMarker: rgba(192, 256), inputMarker: rgba(128, 256), health40: rgba(80, 32), health100: rgba(160, 32), damageInner: rgba(170, 32), damageOuter: rgba(180, 32)}};
     } finally { bitmap.close(); }
   });
   assert.equal(result.mimeType, 'image/png');

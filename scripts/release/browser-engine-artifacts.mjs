@@ -1,6 +1,7 @@
 import {readFile,access} from 'node:fs/promises';
+import {spawnSync} from 'node:child_process';
 import path from 'node:path';
-import {canonical,digest} from './web-release-utils.mjs';
+import {assertInputScriptBuildProof,assertInputScriptRuntimeExports,canonical,digest} from './web-release-utils.mjs';
 import {engineBuildArgs,getEngineProfile,validateEngineProfile} from './engine-profiles.mjs';
 import {isSourceCertified} from './engine-build-proof.mjs';
 
@@ -22,6 +23,42 @@ export function browserEngineVariant(report){
  const jobs=args.find(value=>/^-j\d+$/.test(value));
  const executionModel=report?.execution?.executionModel??(args.includes('proxy_to_pthread=yes')?'proxy-pthread':undefined);
  return {lto,moduleMode:modules===undefined?undefined:modules?'baseline':'explicit',jobs:jobs?Number(jobs.slice(2)):undefined,...(executionModel?{executionModel}:{})};
+}
+
+function templateRuntimeAsset(templateBytes, name, readContent, python) {
+ const result = spawnSync(python, ['-c', `
+import hashlib, io, shutil, sys, zipfile
+name, mode = sys.argv[1:]
+with zipfile.ZipFile(io.BytesIO(sys.stdin.buffer.read())) as archive:
+    entries = [entry for entry in archive.infolist() if entry.filename == name]
+    if len(entries) != 1:
+        sys.exit(f"Expected exactly one {name} in the template")
+    with archive.open(entries[0]) as asset:
+        if mode == 'content':
+            shutil.copyfileobj(asset, sys.stdout.buffer)
+        else:
+            digest = hashlib.sha256()
+            for chunk in iter(lambda: asset.read(1024 * 1024), b""):
+                digest.update(chunk)
+            print(digest.hexdigest())
+`, name, readContent ? 'content' : 'hash'], {input: templateBytes, maxBuffer: 192 * 1024 * 1024});
+ if (result.error || result.status !== 0) {
+  const code = name === 'godot.wasm' ? 'E_ENGINE_ARTIFACT_WASM' : 'E_ENGINE_ARTIFACT_RUNTIME_ASSET';
+  throw Error(code + ': ' + (result.error?.message ?? result.stderr.toString('utf8').trim()));
+ }
+ return readContent ? result.stdout : result.stdout.toString('utf8').trim();
+}
+
+export function inspectTemplateRuntimeAssets(templateBytes, {runtimeCall, gameProbe, inputScript}, python = process.env.PYTHON ?? 'python3') {
+ if (inputScript === 1) {
+  const javascript = templateRuntimeAsset(templateBytes, 'godot.js', true, python);
+  const wasm = templateRuntimeAsset(templateBytes, 'godot.wasm', true, python);
+  assertInputScriptRuntimeExports(javascript, wasm);
+  return {wasmSha256: digest(wasm), javascriptSha256: digest(javascript)};
+ }
+ const wasmSha256 = templateRuntimeAsset(templateBytes, 'godot.wasm', false, python);
+ const javascriptSha256 = runtimeCall === 1 || gameProbe === 1 ? templateRuntimeAsset(templateBytes, 'godot.js', false, python) : undefined;
+ return {wasmSha256, javascriptSha256};
 }
 
 /** Ordinary builds require a matching certified report. Local unproven input
@@ -54,5 +91,6 @@ export async function resolvePlaygroundEngine(configuration){
  const template=configuration.templatePath?path.resolve(configuration.templatePath):report?.template?.path?path.resolve(path.dirname(reportPath),report.template.path):defaults.templatePath;
  const templateBytes=await readFile(template),templateHash=digest(templateBytes);
  if(report&&(!report.template||report.template.sha256!==templateHash||(report.template.bytes!==undefined&&report.template.bytes!==templateBytes.length)))throw Error('E_PLAYGROUND_ENGINE_REPORT: template bytes differ from the report');
+ if(report?.runtimeAbi?.inputScript===1)assertInputScriptBuildProof(report,inspectTemplateRuntimeAssets(templateBytes,report.runtimeAbi));
  return {configuration:selected,defaults,reportPath,report,reportSha256:reportBytes?digest(reportBytes):undefined,template,templateHash,sourceCertified:Boolean(!development&&report?.sourceCertified&&isSourceCertified(report))};
 }

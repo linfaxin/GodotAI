@@ -13,7 +13,7 @@ import {invalidateSiteDelivery} from './site-delivery-state.mjs';
 import {describeWorkerCandidate} from './worker-candidate.mjs';
 import {assertWorkerRuntimeAbi} from '../../../scripts/release/engine-profiles.mjs';
 import {assertWorkerSdkBuildFrozen} from './worker-sdk-proof.mjs';
-import {assertGameProbeAssets,assertRuntimeCallAssets,digest,within} from '../../../scripts/release/web-release-utils.mjs';
+import {assertGameProbeAssets,assertInputScriptBuildProof,assertInputScriptRuntimeExports,assertRuntimeCallAssets,digest,within} from '../../../scripts/release/web-release-utils.mjs';
 const app=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const repository=path.resolve(app,'../..');
 /** Engine/SDK types are release inputs; demo helper types have their own descriptor. */
@@ -100,11 +100,18 @@ export async function buildShell(dist,options={}){
   if((existing.execution??existing.engine?.execution)?.executionModel!=='proxy-pthread'){
    try{assertWorkerRuntimeAbi(existing.runtimeAbi);}catch{throw Error('E_EXECUTION_BACKEND_RETIRED: rebuild the complete playground as a Worker release before refreshing');}
   }
-  if(existing.runtimeAbi?.runtimeCall!==undefined||existing.build?.runtimeCall!==undefined||existing.runtimeAbi?.gameProbe!==undefined||existing.build?.gameProbe!==undefined){
+  if(existing.runtimeAbi?.runtimeCall!==undefined||existing.build?.runtimeCall!==undefined||existing.runtimeAbi?.gameProbe!==undefined||existing.build?.gameProbe!==undefined||existing.runtimeAbi?.inputScript!==undefined||existing.build?.inputScript!==undefined){
    const {javascript,wasm}=existing.engine;
-   const [javascriptSha256,wasmSha256]=await Promise.all([javascript,wasm].map(async asset=>digest(await fs.readFile(within(dist,asset.path)))));
-   assertRuntimeCallAssets(existing.runtimeAbi,existing.build?.runtimeCall,{javascriptSha256,wasmSha256});
-   assertGameProbeAssets(existing.runtimeAbi,existing.build?.gameProbe,{javascriptSha256,wasmSha256});
+   const [javascriptBytes,wasmBytes]=await Promise.all([javascript,wasm].map(asset=>fs.readFile(within(dist,asset.path))));
+   const assets={javascriptSha256:digest(javascriptBytes),wasmSha256:digest(wasmBytes)};
+   assertRuntimeCallAssets(existing.runtimeAbi,existing.build?.runtimeCall,assets);
+   assertGameProbeAssets(existing.runtimeAbi,existing.build?.gameProbe,assets);
+   if(existing.runtimeAbi?.inputScript!==undefined||existing.build?.inputScript!==undefined){
+    const build=existing.build;
+    assertInputScriptBuildProof({...build,status:'built',runtimeProfile,engineTarget:build?.resolvedBuildOptions?.target,
+     runtimeAbi:existing.runtimeAbi,execution:existing.execution,source:build?.engineSource,recipe:build?.engineRecipe},assets);
+    assertInputScriptRuntimeExports(javascriptBytes,wasmBytes);
+   }
   }
   await assertWorkerSdkBuildFrozen(repository,existing.build?.sdkBuild);
   const resourceBuild=JSON.parse(await fs.readFile(path.join(dist,'resource-build.json'),'utf8'));

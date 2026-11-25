@@ -10,12 +10,14 @@ import type {
 import type {CallMethodInput, DescribeMethodsInput, MethodCallResult, MethodDescriptionResult, MethodFailure,
   RuntimeCallState, RuntimeMethodScalar, MethodOutcome} from '@godot-js/engine/browser/dedicated/worker-runner';
 import {readGameProbeQuery, type GameProbeInput, type GameProbeResult} from '@godot-js/engine/browser/dedicated/worker-runner';
+import {readInputScriptCommand, type InputScriptCommand, type InputScriptInput,
+  type InputScriptResult} from '@godot-js/engine/browser/dedicated/worker-runner';
 import {sameWorkerRun, type WorkerRunIdentity} from '@godot-js/engine/browser/dedicated/worker-protocol';
 import type {ProjectContextData, StopResult} from './playground-api';
 import {SUMMER_OPERATION_SPECS as rules, SUMMER_TREE_LIMITS, SUMMER_COMPATIBILITY, type SummerOperation} from './summer-operation-spec.ts';
 export {SUMMER_COMPATIBILITY} from './summer-operation-spec.ts';
 
-type BackendFailure = Extract<RuntimeSetResult | ObservationResult<unknown> | InteractionResult<unknown> | StopResult | PublicResult<unknown> | MethodFailure | GameProbeResult, {ok: false}>;
+type BackendFailure = Extract<RuntimeSetResult | ObservationResult<unknown> | InteractionResult<unknown> | StopResult | PublicResult<unknown> | MethodFailure | GameProbeResult | InputScriptResult, {ok: false}>;
 export type BackendError = {code: BackendFailure['error']['code']; message: string; source?: AccessError['source']; [key: string]: unknown};
 export type FacadeErrorCode = BackendError['code'] | 'outcome_unknown' | 'call_error' | 'result_unavailable';
 export type BackendReply<T> = {ok: true; result: T} | {ok: false; error: BackendError};
@@ -43,6 +45,7 @@ export interface SummerMethodBackend {
 }
 export interface SummerBackend {
   gameProbe?(input: GameProbeInput, signal?: AbortSignal): Promise<GameProbeResult>;
+  inputScript?(input: InputScriptInput, signal?: AbortSignal): Promise<InputScriptResult>;
   runtimeMethods?: SummerMethodBackend;
   captureContext(): SummerContext;
   getProjectContext(): BackendReply<ProjectContextData>;
@@ -68,12 +71,13 @@ export type RunningData = {playing: boolean; capturedRunId: string | null; pendi
 export type StopData = {accepted: true; cancelledAttemptId: string | null; capturedRunId: string | null; pendingAttemptId: string | null;
   runs: {runId: string; receipt: StopResult}[]; no_target: boolean};
 export type CallData = {route: 'runtime_call'; payload: {ok: true; receipt: Extract<MethodCallResult, {ok: true}>['receipt']; result: Extract<MethodOutcome, {outcome: 'returned'}>}};
-export type SummerData = Extract<GameProbeResult, {ok: true}>['result'] | CallData | ProjectContextData | RuntimeTreeSnapshot | RuntimeNodeSnapshot | GameScreenshot | WriteData | PlayData | RunningData | StopData;
+export type SummerData = Extract<GameProbeResult, {ok: true}>['result'] | Extract<InputScriptResult, {ok: true}> |
+  CallData | ProjectContextData | RuntimeTreeSnapshot | RuntimeNodeSnapshot | GameScreenshot | WriteData | PlayData | RunningData | StopData;
 export type FacadeSuccess<T = SummerData> = {ok: true; status: 'done'; result: {data: T; godotai: {compatibility: typeof SUMMER_COMPATIBILITY}}};
 export type FacadeFailure = {ok: false; error: {code: FacadeErrorCode; message: string; source?: AccessError['source']; retry: 'no';
   details: {godotai: {compatibility: typeof SUMMER_COMPATIBILITY; route?: 'runtime_properties' | 'legacy_write' | 'runtime_call';
     stage?: 'resolve' | 'describe' | 'invoke';
-    receipt?: NonNullable<Extract<GameProbeResult, {ok: false}>['receipt']> | PublicResult<WriteResult> | RuntimeSetResult | MethodCallResult | MethodDescriptionResult; backendError?: BackendError;
+    receipt?: NonNullable<Extract<GameProbeResult, {ok: false}>['receipt']> | PublicResult<WriteResult> | RuntimeSetResult | MethodCallResult | MethodDescriptionResult | InputScriptResult; backendError?: BackendError;
     parameter?: string; unknownKeys?: string[]}}}};
 export type FacadeReply<T = SummerData> = FacadeSuccess<T> | FacadeFailure;
 export type SummerCallInput = {op: string; input?: Record<string, unknown>};
@@ -83,6 +87,32 @@ const vectorNumber = '[+-]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)
 const vectorLiteral = new RegExp('^Vector2[\\t\\n\\r ]*\\([\\t\\n\\r ]*(' + vectorNumber + ')[\\t\\n\\r ]*,[\\t\\n\\r ]*(' + vectorNumber + ')[\\t\\n\\r ]*\\)$');
 type Operation = SummerOperation;
 type Validated = {op: Operation; input: Record<string, unknown>};
+
+function validateInputScript(input: Record<string, unknown>): Validated | FacadeFailure {
+  const data = snapshotRuntimePropertyData(input);
+  if (!propertyRecord(data)) return localError('invalid_input', 'input');
+  if (data.action !== 'script') return localError(
+    typeof data.action === 'string' && ['record_start', 'record_stop', 'replay'].includes(data.action) ? 'unsupported' : 'invalid_input', 'action');
+  if (data.clock !== undefined && data.clock !== 'frame') return localError(data.clock === 'ms' ? 'unsupported' : 'invalid_input', 'clock');
+  if (data.wait !== undefined && data.wait !== true) return localError(data.wait === false ? 'unsupported' : 'invalid_input', 'wait');
+  if (!Array.isArray(data.events) || !data.events.every(propertyRecord)) return localError('invalid_input', 'events');
+  for (const [index, edge] of data.events.entries()) {
+    const name = 'events[' + index + ']';
+    if (edge.type !== 'action') return localError(
+      typeof edge.type === 'string' && ['key', 'mouse_click', 'axis', 'raw'].includes(edge.type) ? 'unsupported' : 'invalid_input', name + '.type');
+    for (const field of ['hold_ms', 'at_ms']) if (Object.hasOwn(edge, field)) return localError('unsupported', name + '.' + field);
+    if (Object.keys(edge).some(key => !['type', 'action', 'pressed', 'at_frame', 'strength'].includes(key)))
+      return localError('invalid_input', name);
+    if (Object.hasOwn(edge, 'strength') && (index !== 0 || edge.strength !== 1))
+      return localError(typeof edge.strength === 'number' && edge.strength >= 0 && edge.strength <= 1 ? 'unsupported' : 'invalid_input', name + '.strength');
+  }
+  if (data.events.length !== 2) return localError('invalid_input', 'events');
+  const [press, release] = data.events;
+  const command = readInputScriptCommand({actionName: press.action, pressOffset: Object.hasOwn(press, 'at_frame') ? press.at_frame : 0, releaseOffset: release.at_frame});
+  if (!command || press.pressed !== true || release.pressed !== false || press.action !== release.action)
+    return localError('invalid_input', 'events');
+  return {op: 'engine.game_input', input: command};
+}
 
 const done = <T>(data: T): FacadeSuccess<T> => ({ok: true, status: 'done', result: {data, godotai: {compatibility: SUMMER_COMPATIBILITY}}});
 function fail(code: FacadeErrorCode, message: string, detail: Omit<FacadeFailure['error']['details']['godotai'], 'compatibility'> = {},
@@ -108,6 +138,7 @@ function validate(raw: unknown): Validated | FacadeFailure {
     if (unknownKeys.length) return fail('invalid_input', '未知操作参数', {unknownKeys}, 'sdk');
     for (const key of unsupported) if (Object.hasOwn(input, key)) return localError('unsupported', key, '当前不支持该参数');
     if (Object.hasOwn(input, 'instance') && input.instance !== 'main') return localError(typeof input.instance === 'string' ? 'unsupported' : 'invalid_input', 'instance');
+    if (op === 'engine.game_input') return validateInputScript(input);
     if (op === 'engine.inspect_runtime_node' || op === 'engine.runtime_set' || op === 'engine.runtime_call' || Object.hasOwn(input, 'path')) {
       if (!pathIsCanonical(input.path)) return localError('invalid_input', 'path');
     }
@@ -299,6 +330,13 @@ export function createSummerDispatcher(backend: SummerBackend) {
     const run = backend.getRun({runId});
     if (!run.ok) return backendFailure(run);
     if (run.result.state === 'stopping' || run.result.state === 'exited') return localError('run_ended', 'run');
+    if (op === 'engine.game_input') {
+      if (!context.projectId || run.result.projectId !== context.projectId) return localError('revision_conflict', 'run');
+      if (context.pendingAttemptId || run.result.state !== 'running') return localError('not_ready', 'run');
+      if (!backend.inputScript) return localError('unsupported', 'inputScript');
+      const response = await backend.inputScript({runId, ...(input as InputScriptCommand)}, signal);
+      return response.ok ? done(response) : backendFailure(response, {receipt: response});
+    }
     if (op === 'engine.game_probe') {
       if (!context.projectId || run.result.projectId !== context.projectId) return localError('revision_conflict', 'run');
       if (!backend.gameProbe) return localError('unsupported', 'gameProbe');

@@ -12,8 +12,9 @@ import {createArtifactIdentity} from '@godot-js/engine/identities';
 import {assertWorkerBuildProof} from './worker-candidate.mjs';
 import {launchBrowser} from './browser-harness.mjs';
 
-const [reportFile, out] = process.argv.slice(2);
-if (!reportFile || !out) throw Error('Usage: browser-game-probe-g0.mjs <engine-report.json> <report-directory>');
+const inputOnly = process.argv[2] === '--input-script';
+const [reportFile, out] = process.argv.slice(inputOnly ? 3 : 2);
+if (!reportFile || !out) throw Error('Usage: browser-game-probe-g0.mjs [--input-script] <engine-report.json> <report-directory>');
 const root = fileURLToPath(new URL('../', import.meta.url));
 const encoder = new TextEncoder();
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -21,6 +22,7 @@ const reportBytes = await readFile(reportFile);
 const report = JSON.parse(reportBytes);
 assertWorkerBuildProof(report);
 assert.equal(report.runtimeAbi.gameProbe, 1);
+if (inputOnly) assert.equal(report.runtimeAbi.inputScript, 1);
 await mkdir(out, {recursive: true});
 
 const previewRoutes = new Map(), editorRoutes = new Map();
@@ -40,7 +42,7 @@ const asset = (name, bytes, type = 'text/javascript') => {
   return {url: preview.origin + '/' + name, bytes: bytes.byteLength, sha256: hash(bytes)};
 };
 function fromTemplate(name, type) {
-  const result = spawnSync('unzip', ['-p', report.template.path, name], {maxBuffer: 256 * 1024 * 1024});
+  const result = spawnSync('unzip', ['-p', path.resolve(path.dirname(reportFile), report.template.path), name], {maxBuffer: 256 * 1024 * 1024});
   if (result.status !== 0) throw Error('Template asset missing: ' + name);
   const descriptor = asset(name, result.stdout, type);
   const expected = report.template.assets.find(item => item.path === name);
@@ -55,6 +57,7 @@ async function bundle(contents) {
 }
 
 const fixture = (mode) => {
+  if (mode.startsWith('input-')) return inputScriptFixture(mode);
   const script = `
 extends Node2D
 var frames := 0
@@ -113,6 +116,189 @@ func _input(event):
   }).map(([name, text]) => [name, encoder.encode(text)]));
 };
 
+const inputModes = ['input-snake', 'input-camel', 'input-zero', 'input-multi', 'input-cancel', 'input-cancel-no-raf',
+  'input-replace-action', 'input-change-scene', 'input-restore-scene', 'input-same-scene', 'input-pause', 'input-release', 'input-physical',
+  'input-pause-resume', 'input-expiry', 'input-early-cancel', 'input-stop',
+  'input-quit', 'input-quit-at-release'];
+const interruptedInputReasons = {'input-quit': 'run_ended', 'input-stop': 'run_ended', 'input-replace-action': 'action_changed',
+  'input-change-scene': 'scene_changed', 'input-restore-scene': 'scene_changed', 'input-pause': 'paused', 'input-pause-resume': 'paused',
+  'input-release': 'action_released'};
+
+function inputScriptFixture(mode) {
+  const camel = mode === 'input-camel';
+  const ticks = mode === 'input-zero' ? 15 : mode === 'input-multi' ? 240 : 60;
+  const player = [
+    'const {Input, Node2D, Vector2} = require("godot");',
+    'exports.default = class Player extends Node2D {',
+    '  ' + (camel ? '_physicsProcess' : '_physics_process') + '() {',
+    '    if (Input.' + (camel ? 'isActionPressed' : 'is_action_pressed') + '("move_right") &&',
+    '        Input.' + (camel ? 'getActionStrength' : 'get_action_strength') + '("move_right") === 1 &&',
+    '        Input.' + (camel ? 'getAxis' : 'get_axis') + '("move_left", "move_right") === 1) {',
+    '      this.position = new Vector2(this.position.x + 16, this.position.y);',
+    '    }',
+    '  }',
+    '};',
+  ].join('\n');
+  const project = [
+    'config_version=5', '[application]', 'run/main_scene="res://main.tscn"', '[display]',
+    'window/size/viewport_width=320', 'window/size/viewport_height=240', '[audio]', 'driver/driver="Dummy"',
+    '[rendering]', 'renderer/rendering_method="gl_compatibility"', '[input]',
+    'move_left={"deadzone":0.5,"events":[]}', 'move_right={"deadzone":0.5,"events":[Object(InputEventKey,"physical_keycode":4194321)]}',
+    '[physics]', 'common/physics_ticks_per_second=' + ticks,
+    '[GodotJS]', 'runtime/debugger/debugger_port=0', 'runtime/core/camel_case_bindings_enabled=' + camel,
+  ].join('\n') + '\n';
+  const onPress = {
+    'input-snake': ['if not Input.is_action_pressed("move_right", true) and Input.get_action_strength("move_right", true) == 0 and Input.get_action_raw_strength("move_right") == 0 and not Input.is_action_just_pressed("move_right"):',
+      '    print("G0_NATIVE_INPUT_UNCHANGED")'],
+    'input-quit': ['get_tree().quit()'],
+    'input-replace-action': ['InputMap.erase_action("move_right")', 'InputMap.add_action("move_right")'],
+    'input-change-scene': ['get_tree().change_scene_to_file("res://replacement.tscn")'],
+    'input-restore-scene': ['var tree = get_tree()', 'var original = tree.current_scene', 'var other = Node.new()',
+      'tree.root.add_child(other)', 'tree.current_scene = other', 'var changed = tree.current_scene == other',
+      'tree.current_scene = original', 'print("G0_SCENE_RESTORED=", changed and tree.current_scene == original)',
+      'print("G0_AFTER_RESTORE=", Input.is_action_pressed("move_right"))', 'other.queue_free()'],
+    'input-same-scene': ['get_tree().current_scene = get_tree().current_scene',
+      'print("G0_SAME_SCENE_HELD=", Input.is_action_pressed("move_right"))'],
+    'input-pause': ['get_tree().paused = true'],
+    'input-pause-resume': ['get_tree().paused = true', 'get_tree().paused = false',
+      'print("G0_AFTER_RESUME=", Input.is_action_pressed("move_right"))'],
+    'input-expiry': ['JavaScriptBridge.eval("{ const stop = performance.now() + 500; while (performance.now() < stop) {} }")',
+      'print("G0_AFTER_DEADLINE=", Input.is_action_pressed("move_right"))'],
+    'input-release': ['Input.action_release("move_right")'],
+    'input-physical': ['var key = InputEventKey.new()', 'key.physical_keycode = KEY_RIGHT', 'key.pressed = true', 'Input.parse_input_event(key)'],
+    'input-cancel-no-raf': ['JavaScriptBridge.eval("globalThis.g0PauseAnimation()")', 'print("G0_PAUSED_RAF")'],
+  }[mode];
+  const main = ['extends Node2D', 'var edge_seen = false', 'var last_step := 0', 'var cadence_seen = false',
+    'func _ready():', '    RenderingServer.render_loop_enabled = false', '    last_step = Engine.get_physics_frames()'];
+  if (onPress) main.push('func _physics_process(_delta):', '    if not edge_seen and Input.is_action_pressed("move_right"):',
+    '        edge_seen = true', ...onPress.map(line => '        ' + line));
+  if (mode === 'input-quit-at-release') main.push('func _physics_process(_delta):',
+    '    if Input.is_action_pressed("move_right"):', '        edge_seen = true',
+    '    elif edge_seen:', '        get_tree().quit()');
+  if (ticks !== 60) main.push('func _process(_delta):', '    var count = Engine.get_physics_frames() - last_step',
+    '    last_step = Engine.get_physics_frames()', `    if not cadence_seen and count ${ticks < 60 ? '== 0' : '> 1'}:`,
+    '        cadence_seen = true', '        print("G0_PHYSICS_CADENCE=", count)');
+  return new Map(Object.entries({
+    'res://project.godot': project,
+    'res://main.tscn': '[gd_scene load_steps=3 format=3]\n[ext_resource type="Script" path="res://main.gd" id="1"]\n[ext_resource type="Script" path="res://Player.ts" id="2"]\n[node name="Main" type="Node2D"]\nscript = ExtResource("1")\n[node name="Player" type="Node2D" parent="."]\nposition = Vector2(64, 120)\nscript = ExtResource("2")\n',
+    'res://main.gd': main.join('\n') + '\n',
+    'res://replacement.tscn': '[gd_scene format=3]\n[node name="Replacement" type="Node2D"]\n',
+    'res://Player.ts': 'export default class Player {}',
+    'res://.godot/GodotJS/Player.js': player,
+    'res://.godot/global_script_class_cache.cfg': 'list=Array[Dictionary]([])\n',
+  }).map(([name, text]) => [name, encoder.encode(text)]));
+}
+
+async function verifyInputScripts(page, evidence) {
+  for (const mode of inputModes) {
+    const sample = await page.evaluate(async mode => {
+      const runner = window.probeRunner;
+      const run = await window.startProbeFixture(mode), {runId} = run;
+      const query = {runId, props: [{path: '/root/Main/Player', property: 'position'}], screenshot: false};
+      const read = () => runner.gameProbe(query);
+      const before = await read();
+      const cancels = mode.startsWith('input-cancel') || mode === 'input-early-cancel';
+      const stops = mode === 'input-stop';
+      const expires = mode === 'input-expiry';
+      const pressOffset = mode === 'input-early-cancel' ? 119 : mode === 'input-zero' ? 2 : 0;
+      const request = {runId, actionName: 'move_right', pressOffset, releaseOffset: cancels || stops || expires ? 120 : pressOffset + 4};
+      const controller = new AbortController();
+      const wait = () => new Promise(resolve => setTimeout(resolve, 10));
+      const onExit = mode.startsWith('input-quit') ? new Promise((resolve, reject) => {
+        const timer = setTimeout(() => { unsubscribe(); reject(Error('No native quit receipt')); }, 6000);
+        const unsubscribe = runner.subscribe(event => {
+          if (event.type === 'exit' && event.report.runId === runId) {
+            unsubscribe(); clearTimeout(timer); resolve(event.report);
+          }
+        });
+      }) : null;
+      const pending = runner.runGameInputScript(expires ? {...request, timeoutMs: 350} : request, controller.signal);
+      let stopping;
+      if (mode === 'input-cancel-no-raf') {
+        for (let index = 0; index < 80 && !window.probeLogs.some(log => log.runId === runId && log.text === 'G0_PAUSED_RAF'); index++) await wait();
+        if (!window.probeLogs.some(log => log.runId === runId && log.text === 'G0_PAUSED_RAF')) throw Error('No RAF pause evidence');
+        controller.abort();
+      } else if (mode === 'input-early-cancel') {
+        controller.abort();
+      } else if (cancels || stops) {
+        for (let index = 0; index < 20; index++) {
+          const state = await read();
+          if (state.ok && state.result.properties[0]?.value.x > 64) break;
+        }
+        if (stops) stopping = runner.stopRun(runId);
+        else controller.abort();
+      }
+      const input = await pending;
+      let retired;
+      if (cancels || expires) {
+        for (let index = 0; index < 60; index++) {
+          retired = await runner.runGameInputScript({...request, actionName: 'missing'});
+          if (retired.error?.code !== 'busy') break;
+          await wait();
+        }
+      }
+      const after = onExit || stopping ? null : await read();
+      const settled = after ? await read() : null;
+      const exit = await (onExit ?? stopping ?? runner.stopRun(runId));
+      const markers = window.probeLogs.filter(log => log.runId === runId && log.text?.startsWith('G0_')).map(log => log.text);
+      return {run, before, input, retired, after, settled, exit, markers};
+    }, mode);
+    evidence.engineExecuted = true;
+    evidence.cases.push({name: mode, ...sample});
+    assert.equal(sample.before.result?.properties[0]?.value.x, 64, JSON.stringify(sample.before));
+    if (mode.startsWith('input-cancel') || mode === 'input-early-cancel') {
+      assert.equal(sample.input.outcome, 'outcome_unknown');
+      assert.equal(sample.retired.error?.code, 'unknown_action', JSON.stringify(sample.retired));
+      if (mode === 'input-early-cancel') assert.equal(sample.after.result?.properties[0]?.value.x, 64);
+      else assert(sample.after.result?.properties[0]?.value.x > 64);
+      assert.equal(sample.settled.result?.properties[0]?.value.x, sample.after.result?.properties[0]?.value.x);
+    } else if (interruptedInputReasons[mode]) {
+      assert.equal(sample.input.outcome, 'interrupted', JSON.stringify(sample.input));
+      assert.equal(sample.input.terminal.owner, 'cleared');
+      assert.equal(sample.input.terminal.reason, interruptedInputReasons[mode]);
+      if (mode.endsWith('-resume')) {
+        assert(sample.markers.includes('G0_AFTER_RESUME=false'), JSON.stringify(sample.markers));
+        assert.equal(sample.after.result?.properties[0]?.value.x, 64);
+      }
+      if (mode === 'input-restore-scene') {
+        assert.deepEqual(sample.markers, ['G0_SCENE_RESTORED=true', 'G0_AFTER_RESTORE=false']);
+        assert.equal(sample.after.result?.properties[0]?.value.x, 64);
+        assert.equal(sample.settled.result?.properties[0]?.value.x, 64);
+      }
+    } else if (mode === 'input-expiry') {
+      assert.equal(sample.input.outcome, 'outcome_unknown', JSON.stringify(sample.input));
+      assert.equal(sample.input.error.message, 'timeout');
+      assert(sample.markers.includes('G0_AFTER_DEADLINE=false'), JSON.stringify(sample.markers));
+      assert.equal(sample.retired.error?.code, 'unknown_action', JSON.stringify(sample.retired));
+      assert.equal(sample.after.result?.properties[0]?.value.x, 64);
+      assert.equal(sample.settled.result?.properties[0]?.value.x, 64);
+    } else if (mode === 'input-quit-at-release') {
+      assert.equal(sample.input.outcome, 'interrupted', JSON.stringify(sample.input));
+      assert.equal(sample.input.terminal.reason, 'run_ended');
+      assert.equal(sample.input.terminal.owner, 'released');
+      assert.equal(sample.input.terminal.releaseStepCompleted, false);
+      assert.equal(BigInt(sample.input.terminal.up.physics) - BigInt(sample.input.terminal.down.physics), 4n);
+    } else if (mode === 'input-physical') {
+      assert.equal(sample.input.ok, true, JSON.stringify(sample.input));
+      assert(sample.after.result?.properties[0]?.value.x >= 144, JSON.stringify(sample.after));
+    } else {
+      assert.equal(sample.input.ok, true, JSON.stringify(sample.input));
+      assert.equal(BigInt(sample.input.result.up.physics) - BigInt(sample.input.result.down.physics), 4n);
+      assert.equal(sample.after.result?.properties[0]?.value.x, 128, JSON.stringify(sample.after));
+      assert.equal(sample.settled.result?.properties[0]?.value.x, 128);
+      if (mode === 'input-snake') assert(sample.markers.includes('G0_NATIVE_INPUT_UNCHANGED'), JSON.stringify(sample));
+      if (mode === 'input-same-scene') assert(sample.markers.includes('G0_SAME_SCENE_HELD=true'), JSON.stringify(sample.markers));
+      if (mode === 'input-zero') {
+        assert(sample.markers.includes('G0_PHYSICS_CADENCE=0'), JSON.stringify(sample));
+        assert.equal(BigInt(sample.input.result.down.physics) - BigInt(sample.input.result.base), 2n);
+      }
+      if (mode === 'input-multi') assert(sample.markers.some(marker => marker.startsWith('G0_PHYSICS_CADENCE=') && Number(marker.split('=')[1]) > 1), JSON.stringify(sample));
+    }
+    assert.equal(sample.exit?.hostCleanup?.status, 'complete', JSON.stringify(sample.exit));
+    assert.equal(sample.exit.engineOutcome?.code, 0, JSON.stringify(sample.exit));
+  }
+}
+
 const evidence = {status: 'failed', engineExecuted: false, templateSha256: report.template.sha256,
   engineReportSha256: hash(reportBytes), cases: []};
 let browser, page;
@@ -124,15 +310,22 @@ try {
     engineJs: fromTemplate('godot.js', 'text/javascript'),
     engineWasm: fromTemplate('godot.wasm', 'application/wasm'),
     worklets: ['godot.audio.worklet.js', 'godot.audio.position.worklet.js'].map(name => ({name, ...fromTemplate(name, 'text/javascript')})),
-    runtimeWorker: asset('runtime.worker.js', await bundle(
-      'import {installWorkerRuntime} from "@godot-js/engine/browser/dedicated/worker-runtime"; installWorkerRuntime();')),
+    runtimeWorker: asset('runtime.worker.js', await bundle(`
+      import {installWorkerRuntime} from '@godot-js/engine/browser/dedicated/worker-runtime';
+      ${inputOnly ? `globalThis.g0PauseAnimation = () => {
+        const schedule = globalThis.requestAnimationFrame.bind(globalThis);
+        globalThis.requestAnimationFrame = callback => { setTimeout(() => schedule(callback), 600); return 0; };
+        setTimeout(() => { globalThis.requestAnimationFrame = schedule; }, 550);
+      };` : ''}
+      installWorkerRuntime();`)),
     runtimeAudioWorklet: asset('runtime.audio.worklet.js', await bundle('import "../../packages/engine/src/browser/dedicated/worker-audio-worklet.ts";')),
   };
   release.releaseId = hash(JSON.stringify({engine: [release.engineJs.sha256, release.engineWasm.sha256],
     host: [release.runtimeWorker.sha256, release.runtimeAudioWorklet.sha256], abi: release.runtimeAbi}));
   evidence.releaseId = release.releaseId;
   const artifacts = {};
-  const modes = ['live', 'paused-render', 'manual', 'pre-force', 'post-force', 'non-root', 'direct-to-screen', 'quit'];
+  const modes = inputOnly ? inputModes :
+    ['live', 'paused-render', 'manual', 'pre-force', 'post-force', 'non-root', 'direct-to-screen', 'quit'];
   for (const mode of modes) {
     const files = fixture(mode), pack = packProject(files).pack;
     const outputs = [...files].map(([path, bytes]) => ({path, disposition: 'generated', outputHash: hash(bytes)}));
@@ -190,6 +383,8 @@ try {
   page.on('pageerror', error => pageErrors.push(String(error)));
   page.on('console', msg => { if (msg.type() === 'error') browserErrors.push(msg.text()); });
   await page.goto(editor.origin);
+  if (inputOnly) await verifyInputScripts(page, evidence);
+  else {
   const live = await page.evaluate(() => window.startProbeFixture('live'));
   evidence.engineExecuted = true;
   const picture = await page.evaluate(async ({runId}) => {
@@ -273,6 +468,7 @@ try {
   assert.equal(quit.exit.engineOutcome?.code, 0);
   assert.equal(quit.exit.hostCleanup?.status, 'complete');
   evidence.cases.push({name: 'quit-after-commit', ...quit});
+  }
   assert.deepEqual(pageErrors, []);
   assert.deepEqual(browserErrors.filter(message => /WebGL|GL_INVALID/i.test(message)), []);
   evidence.status = 'passed';
@@ -286,5 +482,5 @@ try {
   if (page) evidence.logs = await page.evaluate(() => window.probeLogs).catch(() => []);
   await browser?.close();
   for (const {server} of [preview, editor]) {server.close(); server.closeAllConnections();}
-  await writeFile(path.join(out, 'game-probe-g0.json'), JSON.stringify(evidence, null, 2) + '\n');
+  await writeFile(path.join(out, inputOnly ? 'input-script-g0.json' : 'game-probe-g0.json'), JSON.stringify(evidence, null, 2) + '\n');
 }

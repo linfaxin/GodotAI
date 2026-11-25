@@ -1,5 +1,5 @@
 import {PreviewRunner} from '@godot-js/engine/browser/runner';
-import {WorkerPreviewRunner,supportsWorkerInteraction,supportsWorkerObservation,supportsWorkerRuntimeWrite,type WorkerRunnerEvent} from '@godot-js/engine/browser/dedicated/worker-runner';
+import {WorkerPreviewRunner,supportsWorkerInteraction,supportsWorkerObservation,supportsWorkerRuntimeWrite,supportsInputScript,type WorkerRunnerEvent} from '@godot-js/engine/browser/dedicated/worker-runner';
 import type {RunnerEvent} from '@godot-js/engine/browser/protocol';
 import type {VerifiedRelease} from '@godot-js/engine/browser/verified-loader';
 import {prepareWorkerRelease} from '@godot-js/engine/browser/release-adapter';
@@ -65,7 +65,8 @@ export async function createEnginePreview(container:HTMLElement, listener:(event
  const supportsObservation=supportsWorkerObservation(release);
  const supportsRuntimeWrite=configuration!==undefined&&supportsWorkerRuntimeWrite(release,configuration.presentationBackend);
  const supportsRuntimeProperties=configuration?.presentationBackend==='direct'&&release.runtimeAbi?.runtimeProperties===1;
- return {manifest,context,runner,configuration,supportsPlaytest,supportsObservation,supportsRuntimeWrite,supportsRuntimeProperties,async run(pack:Uint8Array|undefined,revision:number,details:unknown,artifactSet?:ArtifactSet,registerDebug?:(generation:string|number)=>()=>void,signal?:AbortSignal){
+ const supportsInputExample=release.runtimeAbi?.gameProbe===1&&supportsInputScript(release,configuration?.presentationBackend,globalThis.navigator?.userAgent??'');
+ return {manifest,context,runner,configuration,supportsPlaytest,supportsObservation,supportsRuntimeWrite,supportsRuntimeProperties,supportsInputExample,async run(pack:Uint8Array|undefined,revision:number,details:unknown,artifactSet?:ArtifactSet,registerDebug?:(generation:string|number)=>()=>void,signal?:AbortSignal){
   if(disposed)throw Error('E_RUNNER_DISPOSED');
   if(signal?.aborted)throw new DOMException('Superseded','AbortError');
   const compiled=structuredClone(details) as {buildKey?:unknown;generation?:unknown;packSha256?:unknown;artifactId?:string;artifactReceipt?:{buildKey?:unknown;packSha256?:unknown}};
@@ -114,5 +115,6 @@ export async function createEnginePreview(container:HTMLElement, listener:(event
  runtimeWrite:runner instanceof WorkerPreviewRunner ? runner : undefined,
  runtimeProperties:runner instanceof WorkerPreviewRunner ? runner : undefined,
  runtimeCall:runner instanceof WorkerPreviewRunner ? runner : undefined,
+ inputScript:runner instanceof WorkerPreviewRunner ? runner : undefined,
  stop:()=>{++operationSequence;return runner.stop();},dispose:()=>{disposed=true;++operationSequence;return runner.dispose();}};
 }

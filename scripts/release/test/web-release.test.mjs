@@ -12,13 +12,16 @@ import { pinRelease } from '../pin-web-release.mjs';
 import { collectBrowserEvidence } from '../collect-browser-evidence.mjs';
 import { buildBrowserEngine, snapshotBrowserSources } from '../../test/build-browser-engine.mjs';
 import { inspectBrowserEngineArtifact, packageBrowserEngineArtifact, publishBrowserEngineArtifact } from '../../test/package-browser-engine-artifact.mjs';
-import { canonical, digest, inspectRelease, json, writeJson, identity, hashSiteRuntimeFiles, assertSourcePatchChains,
+import { resolvePlaygroundEngine } from '../browser-engine-artifacts.mjs';
+import { canonical, digest, inspectRelease, json, writeJson, identity, hashSiteRuntimeFiles, assertSourcePatchChains, assertInputScriptBuildProof,
   GAME_PROBE_EXPORTS, OBSERVATION_EXPORTS, OBSERVATION_SOURCE_PATHS, RUNTIME_WRITE_EXPORTS } from '../web-release-utils.mjs';
 import { patchAudioLifecycle } from '../patch-web-audio-lifecycle.mjs';
 import { webLifecycleBuildProof } from '../patch-web-lifecycle.mjs';
+import { executionFromReport } from '../execution-contract.mjs';
 import { artifactSetMountBuildProof } from '../patch-artifact-set-mount.mjs';
 import { managedShutdownBuildProof } from '../patch-managed-shutdown-queue.mjs';
 import { GAME_PROBE_PATCH, GAME_PROBE_PATHS } from '../patch-web-game-probe.mjs';
+import { INPUT_SCRIPT_EXPORTS, INPUT_SCRIPT_PATCH, INPUT_SCRIPT_PATHS, INPUT_SCRIPT_WASM_MARKER } from '../patch-web-input-script.mjs';
 import {getEngineProfile} from '../engine-profiles.mjs';
 import {workerBuildReportFixture} from '../../../apps/playground/scripts/fixtures/worker-build-report.mjs';
 import {propertiesProofFixture,runtimeCallProofFixture} from '../../../apps/playground/scripts/fixtures/runtime-properties-build-report.mjs';
@@ -86,6 +89,37 @@ test('static release verification requires the evidence for an advertised observ
   await assert.rejects(inspectRelease(f.dir), /E_RUNTIME_OBSERVATION_BUILD_PROOF/);
 });
 
+test('development release can retain Input Script patches with the capability disabled', async t => {
+  const f = await fixture(t);
+  await buildRelease(f.configuration);
+  const descriptorPath = resolve(f.dir, 'release.json');
+  const descriptor = await json(descriptorPath);
+  const attestationPath = resolve(f.dir, descriptor.attestation);
+  const attestation = await json(attestationPath);
+  const path = 'scene/main/scene_tree.cpp';
+  const afterSha256 = digest('compiled Input Script fixture');
+  attestation.recipe.patches = [{patchId:INPUT_SCRIPT_PATCH,path,beforeSha256:digest('upstream scene tree'),afterSha256}];
+  attestation.recipeSha256 = digest(canonical(attestation.recipe));
+  attestation.godotSource.inputs[path] = afterSha256;
+  attestation.godotSource.snapshotHash = digest(canonical(attestation.godotSource.inputs));
+
+  async function seal(next) {
+    await writeJson(attestationPath, next);
+    const bytes = await readFile(attestationPath);
+    Object.assign(descriptor.files.find(item => item.path === descriptor.attestation), {bytes:bytes.length,sha256:digest(bytes)});
+    descriptor.id = descriptor.runtimeRelease = identity(descriptor);
+    await writeJson(descriptorPath, descriptor);
+  }
+
+  assert.throws(() => assertInputScriptBuildProof(attestation), /E_INPUT_SCRIPT_BUILD_PROOF/);
+  await seal(attestation);
+  assert.equal((await inspectRelease(f.dir)).sourceCertified, false);
+  await seal({...attestation,runtimeAbi:{inputScript:1}});
+  await assert.rejects(inspectRelease(f.dir), /E_INPUT_SCRIPT_BUILD_PROOF/);
+  await seal({...attestation,godotSource:{...attestation.godotSource,inputs:{}}});
+  await assert.rejects(inspectRelease(f.dir), /E_RELEASE_RECIPE/);
+});
+
 test('portable runtime write evidence must match the WASM inside the ZIP', async t => {
   const f = await fixture(t, true);
   const report = {...f.report, ...workerBuildReportFixture(), sourceCertified: true, runtimeProfile: 'full-engine-v1'};
@@ -135,7 +169,7 @@ test('portable runtime write evidence must match the WASM inside the ZIP', async
   await assert.rejects(inspectBrowserEngineArtifact(out), /E_RUNTIME_WRITE_BUILD_PROOF/);
 });
 
-test('portable Game Probe requires both the Observation ABI and its source-bound proof', async t => {
+test('portable Game Probe and Input Script require source proof and Input Script runtime exports', async t => {
   const f = await fixture(t, true);
   const wasmSha256 = digest(await readFile(resolve(f.root, 'engine/godot.wasm')));
   const javascriptSha256 = digest(await readFile(resolve(f.root, 'engine/godot.js')));
@@ -165,6 +199,104 @@ test('portable Game Probe requires both the Observation ABI and its source-bound
   const packed = await packageBrowserEngineArtifact({report: reportPath, out});
   assert.equal(packed.manifest.development, false);
   assert.equal(packed.report.runtimeAbi.gameProbe, 1);
+
+  const inputReport = structuredClone(report);
+  const inputImplementation = {path: 'scripts/release/patch-web-input-script.mjs', sha256: digest('input script patch')};
+  const profile = getEngineProfile(inputReport.runtimeProfile);
+  inputReport.modules = profile.requiredModules;
+  inputReport.resolvedFeatures = profile.features;
+  inputReport.runtimeAbi.inputScript = 1;
+  inputReport.inputScript = {abi: 1, exports: INPUT_SCRIPT_EXPORTS, wasmSha256, javascriptSha256};
+  inputReport.source.inputs[inputImplementation.path] = inputImplementation.sha256;
+  for (const extension of ['cpp', 'h']) inputReport.source.inputs['bridge/jsb_runtime_input_script.' + extension] = digest(extension);
+  inputReport.source.snapshotHash = digest(canonical(inputReport.source.inputs));
+  for (const path of INPUT_SCRIPT_PATHS) {
+    const probeIndex = inputReport.recipe.patches.findIndex(patch => patch.path === path && patch.patchId === GAME_PROBE_PATCH);
+    const probe = inputReport.recipe.patches[probeIndex];
+    const beforeSha256 = probe?.beforeSha256 ?? inputReport.godotSource.inputs[path] ?? digest('upstream ' + path);
+    const afterSha256 = digest('input script ' + path);
+    const patch = {path, patchId: INPUT_SCRIPT_PATCH, beforeSha256, afterSha256, implementation: inputImplementation};
+    if (probe) {
+      probe.beforeSha256 = afterSha256;
+      inputReport.recipe.patches.splice(probeIndex, 0, patch);
+    } else {
+      inputReport.recipe.patches.push(patch);
+      inputReport.godotSource.inputs[path] = afterSha256;
+    }
+  }
+  inputReport.godotSource.snapshotHash = digest(canonical(inputReport.godotSource.inputs));
+  inputReport.recipeSha256 = digest(canonical(inputReport.recipe));
+  Object.assign(inputReport, webLifecycleBuildProof(inputReport.recipe.patches), managedShutdownBuildProof(inputReport.recipe.patches));
+  assert.equal(executionFromReport(inputReport).lifecycleAbi, 1);
+  assert.doesNotThrow(() => assertInputScriptBuildProof(inputReport));
+  const wasmPath = resolve(f.root, 'engine/godot.wasm');
+  const javascriptPath = resolve(f.root, 'engine/godot.js');
+  const wasmHeader = await readFile(wasmPath);
+  const originalGlue = await readFile(javascriptPath, 'utf8');
+  const names = [...'abcde'];
+  const functions = names.flatMap((name, index) => [1, name.charCodeAt(0), 0, index]);
+  const body = [4, 0, 0x41, 0, 0x0b]; // No locals, i32.const 0, end.
+  const wasm = Buffer.concat([wasmHeader, Buffer.from([
+    1, 5, 1, 0x60, 0, 1, 0x7f, // One () -> i32 type.
+    3, 1 + names.length, names.length, ...names.map(() => 0),
+    7, 1 + functions.length, names.length, ...functions,
+    10, 1 + names.length * body.length, names.length, ...names.flatMap(() => body),
+  ])]);
+  const bindings = INPUT_SCRIPT_EXPORTS.map((symbol, index) =>
+    `Module["${symbol}"] = ${symbol} = wasmExports["${names[index]}"];`).join('\n');
+  const linkedGlue = (exports, linkedWasm) => `${originalGlue}\n${exports}\n${INPUT_SCRIPT_WASM_MARKER}${digest(linkedWasm)}\n`;
+  async function writeInputTemplate(name, wasm, glue) {
+    await writeFile(wasmPath, wasm);
+    await writeFile(javascriptPath, glue);
+    const archive = resolve(f.root, `${name}.zip`);
+    const zipped = spawnSync('zip', ['-q', archive, 'godot.js', 'godot.wasm'], {cwd: resolve(f.root, 'engine')});
+    assert.equal(zipped.status, 0);
+    const wasmSha256 = digest(wasm), javascriptSha256 = digest(glue);
+    inputReport.template = {path: archive, sha256: digest(await readFile(archive)),
+      assets: [{path: 'godot.wasm', sha256: wasmSha256}, {path: 'godot.js', sha256: javascriptSha256}]};
+    inputReport.runtimeObservation.wasmSha256 = wasmSha256;
+    Object.assign(inputReport.gameProbe, {wasmSha256, javascriptSha256});
+    Object.assign(inputReport.inputScript, {wasmSha256, javascriptSha256});
+    await writeJson(reportPath, inputReport);
+  }
+  await writeInputTemplate('missing-bindings', wasm, linkedGlue(`var ${INPUT_SCRIPT_EXPORTS.join(', ')};`, wasm));
+  await assert.rejects(packageBrowserEngineArtifact({report: reportPath, out: resolve(f.root, 'missing-bindings')}),
+    /E_INPUT_SCRIPT_EXPORT: Missing JavaScript binding/);
+  await assert.rejects(resolvePlaygroundEngine({repository: f.root, reportPath}), /E_INPUT_SCRIPT_EXPORT: Missing JavaScript binding/);
+  await writeInputTemplate('missing-wasm-functions', wasmHeader, linkedGlue(bindings, wasmHeader));
+  await assert.rejects(packageBrowserEngineArtifact({report: reportPath, out: resolve(f.root, 'missing-wasm-functions')}),
+    /E_INPUT_SCRIPT_EXPORT: Missing WebAssembly function/);
+  await assert.rejects(buildRelease(f.configuration), /E_INPUT_SCRIPT_EXPORT: Missing WebAssembly function/);
+  const otherWasm = Buffer.from(wasm);
+  otherWasm[otherWasm.length - 2] = 1; // Change the last function's return value without changing exports or types.
+  const validGlue = linkedGlue(bindings, wasm);
+  await writeInputTemplate('mixed-input-script', otherWasm, validGlue);
+  await assert.rejects(packageBrowserEngineArtifact({report: reportPath, out: resolve(f.root, 'mixed-input-script')}),
+    /E_INPUT_SCRIPT_WASM_PAIR/);
+  await assert.rejects(resolvePlaygroundEngine({repository: f.root, reportPath}), /E_INPUT_SCRIPT_WASM_PAIR/);
+  await assert.rejects(buildRelease(f.configuration), /E_INPUT_SCRIPT_WASM_PAIR/);
+  await writeInputTemplate('input-script-without-link-digest', wasm, `${originalGlue}\n${bindings}`);
+  await assert.rejects(packageBrowserEngineArtifact({report: reportPath, out: resolve(f.root, 'input-script-without-link-digest')}),
+    /E_INPUT_SCRIPT_WASM_PAIR/);
+  await writeInputTemplate('input-script', wasm, validGlue);
+  const inputArtifact = await packageBrowserEngineArtifact({report: reportPath, out: resolve(f.root, 'input-script')});
+  assert.equal(inputArtifact.report.runtimeAbi.inputScript, 1);
+  for (const change of [
+    candidate => delete candidate.runtimeAbi.inputScript,
+    candidate => {candidate.inputScript.javascriptSha256 = digest('other JavaScript');},
+    candidate => {
+      const path = GAME_PROBE_PATHS.find(path => INPUT_SCRIPT_PATHS.includes(path));
+      const input = candidate.recipe.patches.find(patch => patch.path === path && patch.patchId === INPUT_SCRIPT_PATCH);
+      const probe = candidate.recipe.patches.find(patch => patch.path === path && patch.patchId === GAME_PROBE_PATCH);
+      [input.patchId, probe.patchId] = [probe.patchId, input.patchId];
+      [input.implementation, probe.implementation] = [probe.implementation, input.implementation];
+      candidate.recipeSha256 = digest(canonical(candidate.recipe));
+    },
+  ]) {
+    const changed = structuredClone(inputReport);
+    change(changed);
+    assert.throws(() => assertInputScriptBuildProof(changed), /E_INPUT_SCRIPT_BUILD_PROOF/);
+  }
 
   delete report.runtimeObservation;
   await writeJson(reportPath, report);
