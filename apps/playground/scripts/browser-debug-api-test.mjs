@@ -17,8 +17,8 @@ const readOnlyCase='runtime-set-unsupported';
 const propertiesCase='runtime-script-properties';
 const propertiesBoundariesCase='runtime-script-properties-boundaries';
 const propertiesUnsupportedCase='runtime-script-properties-unsupported';
-const publicMethods=['call_runtime_method','check','describe_runtime_methods','describe_runtime_properties','game_input','get_build','get_diagnostics','get_project_context','get_run','get_runtime_tree',
- 'inspect_runtime_node','play','read_run_events','read_runtime_properties','runtime_set','schemaVersion','screenshot','stop','summer_call','wait_for_event','wait_for_input','write_runtime_property'];
+const publicMethods=['call_runtime_method','check','describe_runtime_methods','describe_runtime_properties','game_input','game_probe','get_build','get_diagnostics','get_project_context','get_run','get_runtime_tree',
+ 'inspect_runtime_node','play','read_run_events','read_runtime_properties','run_game_input_script','runtime_set','schemaVersion','screenshot','stop','summer_call','wait_for_event','wait_for_input','write_runtime_property'];
 await runReportedBrowserTest({scope,reportFile:process.env.PLAYGROUND_DEBUG_API_REPORT,run:async test=>{
  const directory=path.resolve(defaultTestDirectory());
  const {site,release,candidateId,descriptorHash}=await test.preflight(directory,{worker:true});

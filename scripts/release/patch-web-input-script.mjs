@@ -1,0 +1,119 @@
+export const INPUT_SCRIPT_PATCH = 'godotjs-web-input-script-v1';
+export const INPUT_SCRIPT_REMOVAL_PATCH = 'godotjs-web-input-script-removal-v1';
+export const INPUT_SCRIPT_EXPORTS = Object.freeze(['abi', 'buffer', 'stage', 'cancel', 'take']
+  .map(name => `_godotjs_input_script_${name}`));
+export const INPUT_SCRIPT_WASM_MARKER = '// godotjs-input-script-wasm-sha256:';
+
+const include = '#if defined(WEB_ENABLED) && !defined(THREADS_ENABLED)\n#include "modules/GodotJS/bridge/jsb_runtime_input_script.h"\n#endif';
+const guard = source => `#ifdef GODOTJS_INPUT_SCRIPT_ABI\n${source}\n#endif`;
+const legacyScenePause = 'void SceneTree::set_pause(bool p_enabled) {';
+const legacyScenePauseBlock = `${include}\n${guard('namespace jsb::input_script { void pause(); }')}\n\n${legacyScenePause}`;
+const hook = (anchor, code) => [anchor, `${anchor}\n${guard(code)}`];
+function sceneAssignment(indent, next, prefix = '', suffix = '') {
+  const assignment = `${indent}current_scene = ${next};`;
+  const notify = guard(`${indent}jsb::input_script::scene_will_change(current_scene, ${next});`);
+  return [prefix + assignment + suffix, prefix + notify + '\n' + assignment + suffix];
+}
+const bind = original => [original, `#ifdef GODOTJS_INPUT_SCRIPT_ABI\n${original.replace(/&Input::(\w+)/, '&Input::godotjs_$1')}\n#else\n${original}\n#endif`];
+const methods = `bool Input::godotjs_is_action_pressed(const StringName &action, bool exact) const {
+\treturn (!exact && jsb::input_script::pressed(action)) || is_action_pressed(action, exact);
+}
+
+float Input::godotjs_get_action_strength(const StringName &action, bool exact) const {
+\treturn !exact && jsb::input_script::pressed(action) ? 1.0f : get_action_strength(action, exact);
+}
+
+float Input::godotjs_get_axis(const StringName &negative, const StringName &positive) const {
+\treturn godotjs_get_action_strength(positive, false) - godotjs_get_action_strength(negative, false);
+}
+
+void Input::godotjs_action_release(const StringName &action) {
+\tjsb::input_script::release(action);
+\taction_release(action);
+}`;
+const exports = `extern "C" EMSCRIPTEN_KEEPALIVE uint32_t godotjs_input_script_abi() { return GODOTJS_INPUT_SCRIPT_ABI; }
+extern "C" EMSCRIPTEN_KEEPALIVE uintptr_t godotjs_input_script_buffer() { return reinterpret_cast<uintptr_t>(jsb::input_script::buffer()); }
+extern "C" EMSCRIPTEN_KEEPALIVE uint32_t godotjs_input_script_stage(uint32_t seq, uint32_t size, uint32_t us) {
+\treturn jsb::input_script::stage(seq, size, us);
+}
+extern "C" EMSCRIPTEN_KEEPALIVE void godotjs_input_script_cancel(uint32_t seq, uint32_t reason) { jsb::input_script::cancel(seq, reason); }
+extern "C" EMSCRIPTEN_KEEPALIVE uint32_t godotjs_input_script_take(uint32_t seq) { return jsb::input_script::take(seq); }`;
+const linkAnchor = 'sys_env.Depends(build[0], sys_env["JS_LIBS"])';
+const bindLinkedWasm = `# Record the exact WASM produced by this link, before wrapping or packaging the JavaScript.
+def bind_input_script_wasm(target, source, env):
+    from hashlib import sha256
+    from pathlib import Path
+
+    javascript, wasm = (Path(node.abspath) for node in target)
+    digest = sha256(wasm.read_bytes()).hexdigest()
+    with javascript.open("ab") as glue:
+        glue.write(("\\n${INPUT_SCRIPT_WASM_MARKER}" + digest + "\\n").encode("ascii"))
+
+
+sys_env.AddPostAction(build[0], sys_env.Action(bind_input_script_wasm, "Binding Input Script WebAssembly"))
+
+${linkAnchor}`;
+
+const edits = {
+  'platform/web/SCsub': [[linkAnchor, bindLinkedWasm]],
+  'core/input/input.h': [hook('\tvoid release_pressed_events();', `\tbool godotjs_is_action_pressed(const StringName &, bool) const;
+\tfloat godotjs_get_action_strength(const StringName &, bool) const;
+\tfloat godotjs_get_axis(const StringName &, const StringName &) const;
+\tvoid godotjs_action_release(const StringName &);`),
+  ['class Input : public Object {', include + '\n\nclass Input : public Object {']],
+  'core/input/input.cpp': [
+    ['void Input::_bind_methods() {', guard(methods) + '\n\nvoid Input::_bind_methods() {'],
+    bind('\tClassDB::bind_method(D_METHOD("is_action_pressed", "action", "exact_match"), &Input::is_action_pressed, DEFVAL(false));'),
+    bind('\tClassDB::bind_method(D_METHOD("get_action_strength", "action", "exact_match"), &Input::get_action_strength, DEFVAL(false));'),
+    bind('\tClassDB::bind_method(D_METHOD("get_axis", "negative_action", "positive_action"), &Input::get_axis);'),
+    bind('\tClassDB::bind_method(D_METHOD("action_release", "action"), &Input::action_release);'),
+    hook('void Input::release_pressed_events() {', '\tjsb::input_script::reset();'),
+  ],
+  'scene/main/scene_tree.cpp': [
+    ['#include "core/config/project_settings.h"', include + '\n' + guard(`namespace jsb::input_script {
+void pause();
+void scene_will_change(const Node *current, const Node *next);
+}`) + '\n\n#include "core/config/project_settings.h"'],
+    hook('\tpaused = p_enabled;', '\tif (p_enabled) jsb::input_script::pause();'),
+    hook('\tsuspended = p_enabled;', '\tif (p_enabled) jsb::input_script::pause();'),
+    sceneAssignment('\t\t', 'nullptr', '\tif (current_scene == p_node) {\n'),
+    sceneAssignment('\t', 'p_scene'),
+    sceneAssignment('\t\t', 'pending_new_scene'),
+    sceneAssignment('\t\t', 'nullptr', '', '\n\t\tpending_new_scene_id = ObjectID();'),
+    sceneAssignment('\t\t', 'nullptr', '\t\tmemdelete(current_scene);\n'),
+    sceneAssignment('\t', 'p_current'),
+  ],
+  'main/main.cpp': [
+    ['/* Static members */', include + '\n\n/* Static members */'],
+    ['\t\tEngine::get_singleton()->_in_physics = true;\n\t\tEngine::get_singleton()->_physics_frames++;',
+      guard('\t\tjsb::input_script::before_physics();') + '\n\t\tEngine::get_singleton()->_in_physics = true;\n\t\tEngine::get_singleton()->_physics_frames++;'],
+    ['\t\tEngine::get_singleton()->_in_physics = false;\n\t}',
+      '\t\tEngine::get_singleton()->_in_physics = false;\n' + guard('\t\tjsb::input_script::after_physics();') + '\n\t}'],
+  ],
+  'platform/web/web_main.cpp': [
+    ['static bool shutdown_complete = false;', include + '\n\nstatic bool shutdown_complete = false;'],
+    ['extern "C" void godot_web_worker_frame_committed() {', guard(exports) + '\nextern "C" void godot_web_worker_frame_committed() {'],
+    hook('\tworker_in_iteration = true;', '\tjsb::input_script::begin_iteration(worker_iteration);'),
+    ['\tEM_ASM({ if (Module[\'godotWorkerEndIteration\'])',
+      guard(`\tjsb::input_script::end_iteration(should_exit);
+\tEM_ASM({ if (Module['godotInputScriptTerminal']) Module['godotInputScriptTerminal'](); });`) +
+      "\n\tEM_ASM({ if (Module['godotWorkerEndIteration'])"],
+  ],
+};
+export const INPUT_SCRIPT_PATHS = Object.freeze(Object.keys(edits));
+
+export function patchInputScript(path, source) {
+  for (const [before, after] of edits[path]) {
+    if (source.includes(after)) continue;
+    if (source.split(before).length !== 2) throw Error('E_INPUT_SCRIPT_PATCH: ' + path + ' ' + before);
+    source = source.replace(before, after);
+  }
+  return source;
+}
+
+export function unpatchInputScript(path, source) {
+  for (const [before, after] of [...(edits[path] ?? [])].reverse()) source = source.replace(after, before);
+  // Builds recorded before same-step scene change tracking declared only the pause hook here.
+  if (path === 'scene/main/scene_tree.cpp') source = source.replace(legacyScenePauseBlock, legacyScenePause);
+  return source;
+}

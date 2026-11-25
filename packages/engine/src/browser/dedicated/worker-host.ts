@@ -23,6 +23,9 @@ import {RUNTIME_PROPERTIES_VERSION, supportsWorkerRuntimeProperties} from './wor
 import {RUNTIME_CALL_VERSION, supportsWorkerRuntimeCall} from './worker-runtime-call.js';
 
 import {GAME_PROBE_VERSION, gameProbeError, readGameProbeRequest, readGameProbeSequence, readGameProbeWireResult, supportsGameProbe} from './worker-game-probe.js';
+import {INPUT_SCRIPT_VERSION, matchesInputScript, noInputScript, readInputScriptKey, readInputScriptRequest,
+  readInputScriptTerminal, supportsInputScript, type InputScriptKey, type InputScriptRequest,
+  type InputScriptTerminal} from './worker-input-script.js';
 
 export interface WorkerPreviewHostOptions {
   canvas: HTMLCanvasElement;
@@ -44,6 +47,11 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
   let runtimePropertiesReady = false;
   let runtimeCallReady = false;
   let gameProbeReady = false;
+  let inputScriptReleaseId = '';
+  let inputScriptReady = false;
+  let lastInputScriptSequence = 0;
+  let inputScript: InputScriptRequest | undefined;
+  let inputScriptCancelled = false;
   let lastProbeSequence = 0;
   let probe: (NonNullable<ReturnType<typeof readGameProbeRequest>> & {minGeometryEpoch: number}) | undefined;
   let captureRequest: string | undefined, inputOperation: string | undefined;
@@ -95,6 +103,40 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
       {result: result.ok ? gameProbeError('probe_failed', 'dispatch_failed') : result}, image ? [image.bytes] : []);
   }
   const toWorker = (fields: object) => control?.postMessage({ ...identity, protocolVersion: WORKER_PROTOCOL, ...fields });
+  function postInputScript(key: InputScriptKey, terminal: InputScriptTerminal) {
+    try { post({type: 'input-script-terminal', releaseId: key.releaseId, requestId: key.requestId, sequence: key.sequence, terminal}); }
+    catch (error) { fail(error); }
+  }
+  function cancelInputScript(hidden = false) {
+    if (!inputScript || !control || inputScriptCancelled) return;
+    const {releaseId, requestId, sequence} = inputScript;
+    inputScriptCancelled = true;
+    try { toWorker({type: 'input-script-cancel', releaseId, requestId, sequence, hidden}); }
+    catch { /* The original execution and drain deadlines still apply. */ }
+  }
+  function receiveInputScript(message: Record<string, unknown>) {
+    const key = readInputScriptKey(message, identity.runId, inputScriptReleaseId);
+    if (!key) return;
+    if (message.type === 'input-script-cancel') {
+      if (inputScript && matchesInputScript(inputScript, key)) cancelInputScript();
+      return;
+    }
+    if (key.sequence <= lastInputScriptSequence) return;
+    lastInputScriptSequence = key.sequence;
+    const request = readInputScriptRequest(message, key);
+    const reason = !request ? 'invalid_input' : !lease.active ? 'run_ended' : !running ? 'not_ready' :
+      !inputScriptReady ? 'unsupported' : document.hidden ? 'hidden' :
+      request.deadline <= interactionNow() ? 'timeout' : inputScript ? 'busy' : undefined;
+    if (reason || !request || !control) {
+      postInputScript(key, noInputScript('host', reason ?? 'dispatch_failed'));
+      return;
+    }
+    try {
+      toWorker({type: 'input-script-request', ...request});
+      inputScript = request;
+      inputScriptCancelled = false;
+    } catch { postInputScript(key, noInputScript('host', 'dispatch_failed')); }
+  }
   const toData = (fields: object, optional = false): boolean => {
     const packet=fields as {type?:string;state?:{requestId?:unknown}};
     const cleanup=managedClose&&ending&&(['host-command-receipt','present-ack'].includes(packet.type??'')||(packet.type==='host-state'&&packet.state?.requestId!==undefined));
@@ -249,7 +291,7 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
   }, 250);
   function visibility(): void {
     if (!lease.active) return;
-    if (document.hidden) heartbeat.suspend();
+    if (document.hidden) { heartbeat.suspend(); cancelInputScript(true); }
     else {
       const resumeEpoch = heartbeat.beginResume(performance.now());
       post({ type: 'visibility', visible: true, resumeEpoch }); toWorker({ type: 'resume', resumeEpoch });
@@ -263,6 +305,7 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
     if (!isWorkerEnvelope(raw) || !sameWorkerRun(raw, identity)) return;
     const m: any = raw;
     if (m.type === 'stop') { stop(m.cause, m.detail); return; }
+    if (m.type === 'input-script-request' || m.type === 'input-script-cancel') { receiveInputScript(raw); return; }
     if(m.type==='project-receipt'&&Number.isSafeInteger(m.projectSequence)){if(!finalized)toWorker({type:'project-receipt',projectSequence:m.projectSequence});return;}
     if (m.type === 'runtime-observation-request' && validInteractionId(m.requestId)) {
       const request = readRuntimeObservationRequest(m);
@@ -370,6 +413,7 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
       projectRuntime = message.artifact?.manifest?.runtime === 'godot' ? 'godot' : message.artifact?.manifest?.runtime === 'react' ? 'react' : null;
       if (frozen.hash !== identity.runConfigurationHash) throw Error('E_WORKER_CONFIGURATION_HASH');
       const release = message.release as VerifiedRelease;
+      inputScriptReleaseId = release.releaseId;
       managedClose=release.runtimeAbi?.lifecycle===1||release.execution?.lifecycleAbi===1;
       if (!release.runtimeAbi || !release.runtimeWorker || !release.runtimeAudioWorklet) throw Error('E_WORKER_RELEASE_ABI');
       if (release.runtimeAbi.host !== configuration.hostAbiVersion || release.runtimeAbi.audio !== configuration.audioAbiVersion || release.runtimeAbi.presentation !== configuration.presentationAbiVersion) throw Error('E_WORKER_RELEASE_ABI');
@@ -406,6 +450,17 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
         const raw = event.data;
         if (!isWorkerEnvelope(raw) || !sameWorkerRun(raw, identity) || finalized) return;
         const m: any = raw;
+        if (m.type === 'input-script-terminal') {
+          const key = readInputScriptKey(raw, identity.runId, inputScriptReleaseId);
+          if (!inputScript || !matchesInputScript(inputScript, key)) return;
+          const terminal = readInputScriptTerminal(raw.terminal, inputScript.command);
+          if (terminal && terminal.source !== 'host') {
+            const request = inputScript;
+            inputScript = undefined;
+            postInputScript(request, terminal);
+          }
+          return;
+        }
         if (m.type === 'runtime-observation-result') {
           observation.reply(m);
           return;
@@ -506,13 +561,18 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
             const version = interactionReady && supportsGameProbe(release, configuration!.presentationBackend) ? GAME_PROBE_VERSION : undefined;
             if (m.gameProbeVersion !== version) { fail(Error('E_GAME_PROBE_ABI')); return; }
             gameProbeReady = version !== undefined;
+            const inputVersion = supportsInputScript(release, configuration!.presentationBackend, navigator.userAgent) ?
+              INPUT_SCRIPT_VERSION : undefined;
+            if (m.inputScriptVersion !== inputVersion) { fail(Error('E_INPUT_SCRIPT_ABI')); return; }
+            inputScriptReady = inputVersion !== undefined;
           }
           post({type: 'phase', phase: m.phase, ...(interactionReady ? {interactionVersion: INTERACTION_VERSION} : {}),
             ...(observationReady ? {observationVersion: RUNTIME_OBSERVATION_VERSION} : {}),
             ...(runtimeWriteReady ? {runtimeWriteVersion: RUNTIME_WRITE_VERSION} : {}),
             ...(runtimePropertiesReady ? {runtimePropertiesVersion: RUNTIME_PROPERTIES_VERSION} : {}),
             ...(runtimeCallReady ? {runtimeCallVersion: RUNTIME_CALL_VERSION} : {}),
-            ...(gameProbeReady ? {gameProbeVersion: GAME_PROBE_VERSION} : {})});
+            ...(gameProbeReady ? {gameProbeVersion: GAME_PROBE_VERSION} : {}),
+            ...(inputScriptReady ? {inputScriptVersion: INPUT_SCRIPT_VERSION} : {})});
           publish();
         }
       };

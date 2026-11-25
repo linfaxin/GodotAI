@@ -21,6 +21,7 @@ import {createDebugRecorder,debugFailure,type DebugRelease} from './debug-api';
 import {createPlaygroundApi,type PlaygroundApi} from './playground-api';
 import {createAgentPanel} from './workbench/agent-panel';
 import {createInteractionDemo, INTERACTION_DEMO_ID, matchesInteractionDemo} from './interaction-demo';
+import {createInputScriptDemo, INPUT_SCRIPT_DEMO_ID, matchesInputScriptDemo} from './input-script-demo';
 import {createRuntimeMethodDemo,createRuntimePropertiesDemo, matchesRuntimePropertiesDemo, RUNTIME_PROPERTIES_DEMO_ID} from './runtime-properties-demo';
 import {createSummerDispatcher} from './summer-adapter';
 import {createConsoleGate,createApiConsoleSession} from './workbench/api-console-session';
@@ -66,6 +67,7 @@ const playground=createPlaygroundApi(debugRecorder,{
  runtimeProperties:()=>nativePreview?.runtimeProperties,
  runtimeCall:()=>nativePreview?.runtimeCall,
  gameProbe:()=>nativePreview?.runtimeCall,
+ inputScript:()=>nativePreview?.inputScript,
  summerCall:(input,signal,selected)=>summerDispatcher(input,signal,selected),
 });
 const summerDispatcher=createSummerDispatcher({
@@ -87,6 +89,7 @@ const summerDispatcher=createSummerDispatcher({
  runtimeSet:(input,signal)=>playground.api.runtime_set(input,signal),
  screenshot:(input,signal)=>playground.api.screenshot(input,signal),
  gameProbe:(input,signal)=>playground.api.game_probe(input,signal),
+ inputScript:(input,signal)=>playground.api.run_game_input_script(input,signal),
 });
 Object.defineProperty(window,'godotPlayground',{value:playground.api,enumerable:true});
 const debugPanel=createDebugPanel(debugRecorder.api,playground.api);
@@ -128,19 +131,24 @@ function readConsoleContext():ConsoleEnvironment{
   runtimeProperties:nativePreview.runtimeProperties?.runtimePropertiesState(run.runId),
   runtimeCall:nativePreview.runtimeCall?.runtimeCallState(run.runId),
   gameProbe:nativePreview.runtimeCall?.gameProbeState(run.runId),
+  inputScript:nativePreview.inputScript?.inputScriptState(run.runId),
   interaction:nativePreview.interaction?.interactionState(run.runId),
  }:undefined;
  return {anchor:{
   editorProjectId:context.projectId,editorRevision:context.editorRevision,
   activeRunId:context.activeRunId,activeRunProjectId:run?.projectId??null,
   activeRunRevision:run?.revision??null,pendingAttemptId:playIntent?.attemptId??null,
- },activeRunState:run?.state??null,capabilities,methodExampleAvailable};
+ },activeRunState:run?.state??null,capabilities,methodExampleAvailable,inputExampleAvailable:ready&&nativePreview?.supportsInputExample===true};
 }
 const consoleSession=createApiConsoleSession(playground.api,{
  readContext:readConsoleContext,
  subscribeContext(listener){consoleContextListeners.add(listener);return()=>consoleContextListeners.delete(listener);},
  callSelectedMethod:(input,signal,selected)=>playground.summerCall({op:'engine.runtime_call',input},signal,selected),
  openExample:operationId=>{
+  if(operationId==='engine.game_input'){
+   if(!ready||!nativePreview?.supportsInputExample)throw Error('当前预览不支持输入脚本示例');
+   return openAgentDemo(createInputScriptDemo(siteEngineProfile),matchesInputScriptDemo);
+  }
   if(operationId==='engine.game_probe')return openAgentDemo(createInteractionDemo(siteEngineProfile),matchesInteractionDemo);
   if(operationId==='engine.runtime_call'||operationId==='describe_runtime_methods'){
    if(!methodExampleAvailable)throw Error('当前引擎发布不支持玩法方法示例');
@@ -262,8 +270,8 @@ function appendDemoButton(demo:Demo){
 function registerProjectDemo(id:string,project:EditorProject):Demo{
  const existing=demos.find(d=>d.id===id);if(existing)return existing;
  const source=demos.find(d=>d.id===project.demoId),file=(project.entry||project.selected).split('/').at(-1)!;
- const properties=project.demoId===RUNTIME_PROPERTIES_DEMO_ID,playtest=project.demoId===INTERACTION_DEMO_ID;
- const demo:Demo=source?{...source,id,name:source.name+' · 副本'}:{id,name:properties?'公开脚本属性验证':playtest?'试玩验证':'导入项目 · '+file,subtitle:properties?'Summer API / GodotJS':playtest?'Godot 原生示例':project.engineProfile,file,
+ const properties=project.demoId===RUNTIME_PROPERTIES_DEMO_ID,playtest=project.demoId===INTERACTION_DEMO_ID,inputScript=project.demoId===INPUT_SCRIPT_DEMO_ID;
+ const demo:Demo=source?{...source,id,name:source.name+' · 副本'}:{id,name:inputScript?'物理帧输入验证':properties?'公开脚本属性验证':playtest?'试玩验证':'导入项目 · '+file,subtitle:properties||inputScript?'Summer API / GodotJS':playtest?'Godot 原生示例':project.engineProfile,file,
   hint:playtest?'按右箭头移动 Player，按左箭头移除 Player。':project.engineProfile===siteEngineProfile?'独立项目，修改会单独保存。':'此项目需要 '+project.engineProfile+'；可查看与导出原文。',
   source:typeof project.files[project.entry]==='string'?project.files[project.entry] as string:'',runtime:project.runtime,controls:[]};
  demos.push(demo);appendDemoButton(demo);return demo;

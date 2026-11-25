@@ -5,6 +5,7 @@ import {readFileSync} from 'node:fs';
 import {setTimeout as delay} from 'node:timers/promises';
 import {createRuntimeAccessRelay, createWorkerRuntimeAccess, readAccessId} from '../dist/browser/dedicated/worker-runtime-access-transport.js';
 import {interactionNow} from '../dist/browser/dedicated/worker-interaction.js';
+import {createNativeInputScript, prepareInputScript, readInputScriptTerminal} from '../dist/browser/dedicated/worker-input-script.js';
 import {MAX_RUNTIME_REQUEST_BYTES} from '../dist/browser/dedicated/worker-runtime-observation.js';
 import {createNativeRuntimeCall, prepareRuntimeMethod, WorkerPreviewRunner} from '../dist/browser/dedicated/worker-runner.js';
 import {legacyExecution} from '../dist/execution.js';
@@ -83,10 +84,12 @@ test('relay owns request and cancel deliveries separately across expiration and 
   assert.equal(replies.at(-1).sequence, 5);
 });
 
-async function runnerFixture(t, {properties = true, confirmed = properties, presentationBackend = 'direct', method = false, methodConfirmed = method} = {}) {
+async function runnerFixture(t, {properties = true, confirmed = properties, presentationBackend = 'direct', method = false,
+  methodConfirmed = method, inputScript = false, inputScriptConfirmed = inputScript} = {}) {
   const asset = name => ({url: 'https://preview.example/' + name, sha256: '1'.repeat(64)});
   let port, header;
-  const document = {location: {origin: 'https://editor.example'}, visibilityState: 'hidden', createElement() {
+  const document = {location: {origin: 'https://editor.example'}, visibilityState: inputScript ? 'visible' : 'hidden',
+    defaultView: {navigator: {userAgent: 'Mozilla/5.0 Chrome/154.0.0.0'}}, createElement() {
     return {ownerDocument: document, setAttribute() {}, remove() {}, contentWindow: {postMessage(connect, _origin, [host]) {
       port = host; const {type, editorOrigin, ...identity} = connect; header = identity;
       host.on('message', message => {
@@ -94,7 +97,8 @@ async function runnerFixture(t, {properties = true, confirmed = properties, pres
           ...(phase === 'running' ? {observationVersion: 1,
             ...(presentationBackend === 'direct' ? {runtimeWriteVersion: 1} : {}),
             ...(confirmed && presentationBackend === 'direct' ? {runtimePropertiesVersion: 1} : {}),
-            ...(methodConfirmed && presentationBackend === 'direct' ? {runtimeCallVersion: 1} : {})} : {})});
+            ...(methodConfirmed && presentationBackend === 'direct' ? {runtimeCallVersion: 1} : {}),
+            ...(inputScriptConfirmed ? {inputScriptVersion: 1} : {})} : {})});
         if (message.type === 'stop') host.postMessage({...identity, type: 'exit-report', engineOutcome: {kind: 'native-exit', code: 0},
           hostCleanup: {status: 'complete'}, sessionFacts: createSessionFacts({nativeExit: {code: 0}, hostCleanup: 'complete'})});
       });
@@ -104,7 +108,8 @@ async function runnerFixture(t, {properties = true, confirmed = properties, pres
   const container = {ownerDocument: document, append(frame) {queueMicrotask(() => frame.onload());}};
   const runner = new WorkerPreviewRunner({container, previewUrl: 'https://preview.example/', configuration: {presentationBackend},
     release: {releaseId: method ? methodRelease : 'release', profile: 'full-engine-v1', engineTarget: 'template_debug',
-      runtimeAbi: {protocolVersion: 2, host: 1, audio: 1, presentation: 1, lifecycle: 1, observation: 1, runtimeWrite: 1, ...(properties ? {runtimeProperties: 1} : {}), ...(method ? {runtimeCall: 1} : {})},
+      runtimeAbi: {protocolVersion: 2, host: 1, audio: 1, presentation: 1, lifecycle: 1, observation: 1, runtimeWrite: 1,
+        ...(properties ? {runtimeProperties: 1} : {}), ...(method ? {runtimeCall: 1} : {}), ...(inputScript ? {inputScript: 1, gameProbe: 1} : {})},
       execution: {...legacyExecution(), lifecycleAbi: 1}, engineJs: asset('engine.js'), engineWasm: asset('engine.wasm'),
       runtimeWorker: asset('runtime.js'), runtimeAudioWorklet: asset('audio.js')},
   });
@@ -112,6 +117,90 @@ async function runnerFixture(t, {properties = true, confirmed = properties, pres
   const run = await runner.run({revision: 1, generation: 1, buildKey: 'build', pack: new Uint8Array([1]), manifest: {generation: 1}});
   return {runner, run, port, reply: (data, identity = header) => port.postMessage({...identity, ...data})};
 }
+
+const script = {actionName: 'move_right', pressOffset: 0, releaseOffset: 4};
+const completedScript = {kind: 'completed', source: 'native', base: '9007199254740993',
+  down: {physics: '9007199254740993', iteration: 18}, up: {physics: '9007199254740997', iteration: 19},
+  releaseStepCompleted: true, finishedIteration: 19};
+
+test('input scripts preserve exact frame evidence and reject malformed or unbounded commands', () => {
+  const command = {runId: 'run', ...script};
+  for (const fields of [{actionName: '界'.repeat(43)}, {actionName: 'x\0y'}, {actionName: '\ud800'},
+    {releaseOffset: 0}, {releaseOffset: 121}, {pressOffset: 1.5}, {timeoutMs: 0}, {timeoutMs: 30001}, {strength: 1}])
+    assert.equal(prepareInputScript({...command, ...fields}).error.code, 'invalid_input');
+  assert.equal(prepareInputScript(command, AbortSignal.abort()).error.code, 'cancelled');
+  assert.deepEqual(readInputScriptTerminal(completedScript, script), completedScript);
+  assert.equal(readInputScriptTerminal({...completedScript, up: {...completedScript.up, physics: completedScript.base}}, script), undefined);
+  assert.equal(readInputScriptTerminal({...completedScript, releaseStepCompleted: false}, script), undefined);
+});
+
+test('native input staging receives the unchanged monotonic deadline in the exchange buffer', () => {
+  const memory = new Uint8Array(8192), start = 8;
+  const deadline = interactionNow() + 5000;
+  const runtime = createNativeInputScript({HEAPU8:memory,
+    _godotjs_input_script_abi:()=>1, _godotjs_input_script_buffer:()=>start,
+    _godotjs_input_script_stage(sequence, length, remaining) {
+      assert.equal(sequence, 3);
+      assert(remaining > 0 && remaining <= 5000000);
+      const bytes = memory.subarray(start, start + length);
+      assert.deepEqual(JSON.parse(new TextDecoder().decode(bytes)), {...script, deadline});
+      return 1;
+    },
+    _godotjs_input_script_cancel() {}, _godotjs_input_script_take() {return 0;},
+  });
+  assert.equal(runtime.stage({command:script,sequence:3,deadline}), true);
+});
+
+test('input cancellation keeps the original slot until a matching terminal retires it', async t => {
+  const {runner, run, port, reply} = await runnerFixture(t, {inputScript: true});
+  const command = {runId: run.runId, ...script};
+  assert.deepEqual(runner.inputScriptState(run.runId), {supported: true, ready: true});
+  const abort = new AbortController();
+  const posted = once(port, 'message');
+  const pending = runner.runGameInputScript(command, abort.signal);
+  const [{requestId, sequence, releaseId, type}] = await posted;
+  assert.equal(type, 'input-script-request');
+  const cancelled = once(port, 'message');
+  abort.abort();
+  assert.equal((await cancelled)[0].type, 'input-script-cancel');
+  const outcome = await pending;
+  assert.equal(outcome.outcome, 'outcome_unknown');
+  const terminal = {type: 'input-script-terminal', releaseId, sequence, requestId, terminal: completedScript};
+  reply({...terminal, releaseId: 'old-release'});
+  reply({...terminal, sequence: sequence + 1});
+  await delay(15);
+  assert.equal((await runner.runGameInputScript(command)).error.code, 'busy');
+  reply(terminal);
+  await delay(15);
+  const next = once(port, 'message');
+  const result = runner.runGameInputScript(command);
+  const [request] = await next;
+  assert.equal(request.sequence, sequence + 1);
+  reply({...terminal, sequence: request.sequence, requestId: request.requestId});
+  assert.deepEqual((await result).result, completedScript);
+  assert.equal(outcome.outcome, 'outcome_unknown');
+});
+
+test('unconfirmed input cleanup stops the original run after the bounded drain', async t => {
+  const {runner, run, port} = await runnerFixture(t, {inputScript: true});
+  const command = {runId: run.runId, ...script};
+  const packets = [];
+  port.on('message', message => packets.push(message));
+  const exited = new Promise(resolve => {
+    const unsubscribe = runner.subscribe(event => {
+      if (event.type === 'exit') {unsubscribe(); resolve(event.report);}
+    });
+  });
+  const result = await runner.runGameInputScript({...command, timeoutMs: 50});
+  assert.equal(result.outcome, 'outcome_unknown');
+  assert.equal(result.receipt.run.runId, run.runId);
+  assert.equal((await runner.runGameInputScript(command)).error.code, 'busy');
+  assert.equal((await exited).runId, run.runId);
+  assert.deepEqual(packets.map(message => [message.type, message.runId]), [
+    ['input-script-request', run.runId], ['input-script-cancel', run.runId], ['stop', run.runId],
+  ]);
+  assert.equal((await runner.runGameInputScript(command)).error.code, 'run_ended');
+});
 
 test('Runner property calls preserve correlation and share the legacy write sequence', async t => {
   const {runner, run, port, reply} = await runnerFixture(t);

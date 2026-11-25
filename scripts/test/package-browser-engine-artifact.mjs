@@ -3,10 +3,9 @@ import {readFile,writeFile,copyFile,mkdir,mkdtemp,rename,rm,lstat,realpath} from
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {randomUUID} from 'node:crypto';
-import {spawnSync} from 'node:child_process';
-import {assertRuntimeWriteBuildProof,assertRuntimePropertiesBuildProof,assertGameProbeBuildProof,assertRuntimeCallBuildProof,canonical,digest,options,required,safePath} from '../release/web-release-utils.mjs';
+import {assertRuntimeWriteBuildProof,assertRuntimePropertiesBuildProof,assertGameProbeBuildProof,assertInputScriptBuildProof,assertRuntimeCallBuildProof,canonical,digest,options,required,safePath} from '../release/web-release-utils.mjs';
 import {isSourceCertified} from '../release/engine-build-proof.mjs';
-import {browserEnginePaths} from '../release/browser-engine-artifacts.mjs';
+import {browserEnginePaths,inspectTemplateRuntimeAssets} from '../release/browser-engine-artifacts.mjs';
 
 const json=async filename=>JSON.parse(await readFile(filename,'utf8'));
 async function regular(filename){const info=await lstat(filename);if(!info.isFile()||info.isSymbolicLink())throw Error('E_ENGINE_ARTIFACT_FILE: '+filename);return info;}
@@ -41,29 +40,6 @@ async function assertPublicationPaths(inputs,outputs,artifact){
  if(overlaps(outputPaths[0],outputPaths[1])||outputPaths.some(output=>overlaps(output,artifactPath)||inputPaths.some(input=>overlaps(output,input))))throw Error('E_ENGINE_ARTIFACT_OUTPUT: publication overlaps an input or immutable artifact');
 }
 
-function templateRuntimeHashes(templateBytes, includeJavascript) {
- const names = includeJavascript ? ['godot.wasm', 'godot.js'] : ['godot.wasm'];
- const hash = spawnSync(process.env.PYTHON ?? 'python3', ['-c', `
-import hashlib, io, sys, zipfile
-with zipfile.ZipFile(io.BytesIO(sys.stdin.buffer.read())) as archive:
-    for name in sys.argv[1:]:
-        entries = [entry for entry in archive.infolist() if entry.filename == name]
-        if len(entries) != 1:
-            sys.exit(f"Expected exactly one {name} in the template")
-        digest = hashlib.sha256()
-        with archive.open(entries[0]) as asset:
-            for chunk in iter(lambda: asset.read(1024 * 1024), b""):
-                digest.update(chunk)
-        print(digest.hexdigest())
-`, ...names], {input: templateBytes, encoding: 'utf8'});
- if (hash.error || hash.status !== 0) {
-  const code = includeJavascript ? 'E_ENGINE_ARTIFACT_RUNTIME_ASSET' : 'E_ENGINE_ARTIFACT_WASM';
-  throw Error(code + ': ' + (hash.error?.message ?? hash.stderr.trim()));
- }
- const [wasmSha256, javascriptSha256] = hash.stdout.trim().split('\n');
- return {wasmSha256, javascriptSha256};
-}
-
 /** Preserve original report bytes. The portable view changes template.path
  * only; its mapping and both report hashes are independently checked. */
 export async function inspectBrowserEngineArtifact(directory){
@@ -92,13 +68,15 @@ export async function inspectBrowserEngineArtifact(directory){
  assertRuntimePropertiesBuildProof(report);
  assertRuntimeCallBuildProof(report);
  assertGameProbeBuildProof(report);
- if(report.runtimeAbi?.runtimeWrite===1||report.runtimeAbi?.runtimeProperties===1||report.runtimeAbi?.runtimeCall===1||report.runtimeAbi?.gameProbe===1){
-  const assets=templateRuntimeHashes(templateBytes,report.runtimeAbi?.runtimeCall===1||report.runtimeAbi?.gameProbe===1);
+ assertInputScriptBuildProof(report);
+ if(report.runtimeAbi?.runtimeWrite===1||report.runtimeAbi?.runtimeProperties===1||report.runtimeAbi?.runtimeCall===1||report.runtimeAbi?.gameProbe===1||report.runtimeAbi?.inputScript===1){
+  const assets=inspectTemplateRuntimeAssets(templateBytes,report.runtimeAbi);
   const {wasmSha256}=assets;
   assertRuntimeWriteBuildProof(report,wasmSha256);
   assertRuntimePropertiesBuildProof(report,wasmSha256);
   assertRuntimeCallBuildProof(report,assets);
   assertGameProbeBuildProof(report,assets);
+  assertInputScriptBuildProof(report,assets);
  }
  if(report.logSha256&&manifest.files['build.log']?.sha256!==report.logSha256)throw Error('E_ENGINE_ARTIFACT_LOG');
  return {status:'verified',directory,manifest,report};
@@ -113,6 +91,7 @@ export async function packageBrowserEngineArtifact({report:reportFile,out,develo
  assertRuntimePropertiesBuildProof(original);
  assertRuntimeCallBuildProof(original);
  assertGameProbeBuildProof(original);
+ assertInputScriptBuildProof(original);
  if(!original.template?.path)throw Error('E_ENGINE_ARTIFACT_REPORT: template missing');
  const template=path.resolve(path.dirname(reportFile),original.template.path);await regular(template);
  for(const input of [reportFile,template])if(input===out||input.startsWith(out+path.sep))throw Error('E_ENGINE_ARTIFACT_OUTPUT: output contains an input');

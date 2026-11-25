@@ -46,6 +46,41 @@ function fixture() {
 
 const set = (property = 'health', value = 40, extra = {}) => ({op: 'engine.runtime_set', input: {path: target.path, property, value, ...extra}});
 
+test('Summer input validates the supported subset and captures its original project and run', async () => {
+  const {backend, context, calls} = fixture();
+  const edges = [{type: 'action', action: 'move_right', pressed: true}, {type: 'action', action: 'move_right', pressed: false, at_frame: 4}];
+  const command = extra => ({op: 'engine.game_input', input: {action: 'script', events: edges, ...extra}});
+  const dispatch = createSummerDispatcher(backend);
+  for (const [extra, code] of [
+    [{instance: 'other'}, 'unsupported'], [{action: 'record_start'}, 'unsupported'], [{clock: 'ms'}, 'unsupported'],
+    [{wait: false}, 'unsupported'], [{events: [{...edges[0], type: 'key'}, edges[1]]}, 'unsupported'],
+    [{events: [{...edges[0], strength: 0.5}, edges[1]]}, 'unsupported'], [{events: [edges[0], {...edges[1], at_frame: 121}]}, 'invalid_input'],
+    [{events: [edges[0], {...edges[1], action: 'other'}]}, 'invalid_input'], [{events: [edges[0], {...edges[1], at_frame: 0}]}, 'invalid_input'],
+  ]) assert.equal((await dispatch(command(extra))).error.code, code);
+  assert.deepEqual(calls, []);
+  let projectId = 'other-project', dispatched;
+  backend.getRun = ({runId}) => {assert.equal(runId, identity.runId); return ok({projectId, state: 'running'});};
+  const failure = {ok: false, outcome: 'outcome_unknown', error: {code: 'outcome_unknown', message: 'transport_lost'}};
+  backend.inputScript = async (input, signal) => {
+    dispatched = {input, signal};
+    await Promise.resolve();
+    context.activeRunId = 'replacement';
+    return failure;
+  };
+  const live = createSummerDispatcher(backend);
+  assert.equal((await live(command())).error.code, 'revision_conflict');
+  projectId = context.projectId;
+  context.pendingAttemptId = 'replacement-build';
+  assert.equal((await live(command())).error.code, 'not_ready');
+  assert.equal(dispatched, undefined);
+  context.pendingAttemptId = null;
+  const signal = new AbortController().signal;
+  const response = await live(command({instance: 'main', clock: 'frame', wait: true}), signal);
+  assert.deepEqual(dispatched, {input: {runId: identity.runId, actionName: 'move_right', pressOffset: 0, releaseOffset: 4}, signal});
+  assert.equal(response.error.retry, 'no');
+  assert.deepEqual(response.error.details.godotai.receipt, failure);
+});
+
 test('unsupported and malformed parameters are rejected before any backend call', async () => {
   const {dispatch, calls} = fixture();
   const cases = [
@@ -69,6 +104,20 @@ test('unsupported and malformed parameters are rejected before any backend call'
   let getters = 0;
   assert.equal((await dispatch({get op() {getters++; return 'engine.play';}})).error.code, 'invalid_input');
   assert.equal(getters, 0);
+  assert.deepEqual(calls, []);
+});
+
+test('Summer input identifies unsupported timing and event types before the subset edge count', async () => {
+  const {dispatch, calls} = fixture();
+  const reply = events => dispatch({op:'engine.game_input',input:{action:'script',events}});
+  const action = {type:'action',action:'jump',at_frame:0};
+  for (const [event, parameter] of [[{...action,hold_ms:50},'events[0].hold_ms'],
+    [{...action,at_ms:25},'events[0].at_ms'],[{type:'key',keycode:32},'events[0].type']]) {
+    const result = await reply([event]);
+    assert.equal(result.error.code, 'unsupported');
+    assert.equal(result.error.details.godotai.parameter, parameter);
+  }
+  assert.equal((await reply([action])).error.code, 'invalid_input');
   assert.deepEqual(calls, []);
 });
 

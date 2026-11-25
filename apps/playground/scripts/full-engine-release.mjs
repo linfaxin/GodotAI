@@ -124,6 +124,11 @@ export function assembleFullEngineRelease({engine,ir,capture,irBytes,declaration
   if(runtimeAbi.runtimeProperties!==1)delete build.runtimeProperties;
   if(runtimeAbi.runtimeCall!==1)delete build.runtimeCall;
   if(runtimeAbi.gameProbe!==1)delete build.gameProbe;
+  if(runtimeAbi.inputScript!==undefined&&build.sourceCertified!==true){
+   runtimeAbi={...runtimeAbi};delete runtimeAbi.inputScript;
+  }
+  if(runtimeAbi.inputScript===1)build.inputScript=engineBuildReport.inputScript;
+  else delete build.inputScript;
   // Keep the original receipts with every declared native capability. The
   // site verifier reconstructs this same report from the sealed release.
   for(const field of ['lifecycleAbi','lifecyclePatch','artifactSetAbi','artifactSetPatch','observerAbi','nativeObserverPatch','hostResourceAbi','hostResourcePatch','shutdownQueueAbi','shutdownQueuePatch','runtimeObservation'])if(engineBuildReport[field]!==undefined)build[field]=engineBuildReport[field];
