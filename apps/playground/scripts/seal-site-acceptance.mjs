@@ -1,4 +1,5 @@
 import {readFile,writeFile,mkdir,stat,readdir} from 'node:fs/promises';
+import {existsSync} from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {randomUUID} from 'node:crypto';
@@ -24,11 +25,16 @@ export function repositorySourcePath(source){
  const relative=source.replace(/^(?:\.\.\/|\.\/)+/,'');
  const parts=relative.split('/');
  if(parts.some(part=>!part||part==='.'||part==='..'))throw Error('E_SITE_SOURCE_PATH: '+source);
- if(parts.length>1&&sourceRoots.has(parts[0]))return relative;
- // External output directories can also put the path to the checkout in the map.
- const checkoutName=path.basename(repo);
- const checkout=parts.findIndex((part,index)=>part===checkoutName&&index+2<parts.length&&sourceRoots.has(parts[index+1]));
- return checkout>=0?parts.slice(checkout+1).join('/'):'apps/playground/'+relative;
+ const local=parts.length>1&&sourceRoots.has(parts[0])?relative:'apps/playground/'+relative;
+ if(existsSync(path.join(repo,local)))return local;
+ // A map written outside the repository may include the original checkout name.
+ // Resolve an existing repository suffix, then verify its embedded bytes below.
+ for(let index=1;index<parts.length-1;index++){
+  if(!sourceRoots.has(parts[index]))continue;
+  const candidate=parts.slice(index).join('/');
+  if(existsSync(path.join(repo,candidate)))return candidate;
+ }
+ return local;
 }
 export async function sealSiteAcceptance(directory,reports,{verify=false,begin=false}={}){
  directory=path.resolve(directory);reports=path.resolve(reports);

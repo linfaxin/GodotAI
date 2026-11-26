@@ -210,6 +210,8 @@ Each preview verifies its engine and worklet bytes, receives the compiled projec
 
 ## Validation
 
+The native project tests use `GODOT` or `tests/bin/godot-host-qjs`. When building that host from Godot 4.6.1, run `pnpm prepare:native --godot-source /path/to/godot-4.6.1` before SCons so the engine can drain script and React cleanup before exiting.
+
 ```sh
 pnpm --filter @godot-js/playground typecheck
 pnpm --filter @godot-js/playground test
@@ -226,7 +228,78 @@ Run `test:browser:debug-api` against a matching Full Engine debug Worker site to
 
 Run `test:browser:runtime-call` once per Full/debug Worker Direct candidate. Set `PLAYGROUND_TEST_DIRECTORY` and `PLAYGROUND_RUNTIME_CALL_REPORT` for each site, and set `PLAYGROUND_RUNTIME_CALL_CASE` to `supported` for ABI 1 or `unsupported` for the previous template. The new template run records the method receipt, typed property readback, before/after/restart PNGs and native exit receipts. The previous template run checks the unavailable response and confirms that no method request was sent to the Worker.
 
-Run `pnpm --filter @godot-js/playground test:browser:input-script:g0 /path/to/engine-report.json /path/to/report-directory` for the minimal PCK suite on the new Full/debug template. Build both the new and previous Game Probe templates with the same current SDK. Run `test:browser:input-script` on each site with `PLAYGROUND_TEST_DIRECTORY` and `PLAYGROUND_INPUT_SCRIPT_REPORT` set, and use `PLAYGROUND_INPUT_SCRIPT_CASE=supported` or `unsupported` to select the expected capability. The reports cover movement, restart, stale run receipts and legacy physical gestures.
+### Reproduce the Summer input demo and evidence
+
+Use a Full Engine debug Dedicated Worker Direct site for each template. The current template advertises `gameProbe: 1` and `inputScript: 1`. The previous Game Probe template from `e80c754` advertises `gameProbe: 1`. Build both sites with the same SDK outputs from the current checkout. Keep the template archives, sites and reports in separate directories.
+
+If the sites already exist, use their original bytes. To build new sites, verify both portable template directories first. Each contains the template ZIP, the original and portable engine reports, and the compiler log. When rebuilding a template from source, use a separate build directory outside both source trees, the Godot `4.6.1-stable` Git checkout, and Emscripten `4.0.11`. Build the previous template from the previous checkout and assemble both sites from the current checkout. Use a verified Godot 4.6.1 editor for resource preparation and export. The full resource set needs glTF and Ogg support.
+
+Run the following commands from the repository root after `pnpm install --frozen-lockfile` and `pnpm build`. Set `COMPAT_NEW_TEMPLATE`, `COMPAT_OLD_TEMPLATE`, `COMPAT_NEW_SITE`, `COMPAT_OLD_SITE` and `COMPAT_REPORTS` to absolute paths. For site builds, also set `GODOT`, `GODOT_IMPORTER` and `PLAYWRIGHT_CHROMIUM_EXECUTABLE`. Keep `GODOT_WEB_TEMPLATE` unset so each build uses the ZIP named in its own report.
+
+```sh
+node scripts/test/package-browser-engine-artifact.mjs --verify --out "$COMPAT_NEW_TEMPLATE"
+node scripts/test/package-browser-engine-artifact.mjs --verify --out "$COMPAT_OLD_TEMPLATE"
+
+# With the locked JS dependencies and current SDK build available, G0 can run before the sites are built.
+node apps/playground/scripts/browser-game-probe-g0.mjs --input-script \
+  "$COMPAT_NEW_TEMPLATE/engine-report.json" "$COMPAT_REPORTS/g0"
+
+# Each site build uses the current SDK and its own work directory under work/playground/.
+node apps/playground/scripts/build.mjs --engine-report "$COMPAT_NEW_TEMPLATE/engine-report.json" \
+  --out "$COMPAT_NEW_SITE" --skip-sdk-build
+node apps/playground/scripts/build.mjs --engine-report "$COMPAT_OLD_TEMPLATE/engine-report.json" \
+  --out "$COMPAT_OLD_SITE" --skip-sdk-build
+
+node apps/playground/scripts/seal-site-acceptance.mjs "$COMPAT_NEW_SITE" "$COMPAT_REPORTS/new" --begin
+PLAYGROUND_TEST_DIRECTORY="$COMPAT_NEW_SITE" \
+PLAYGROUND_ACCEPTANCE_CONTEXT="$COMPAT_REPORTS/new/site-start.json" \
+PLAYGROUND_INPUT_SCRIPT_REPORT="$COMPAT_REPORTS/new/report.json" \
+PLAYGROUND_INPUT_SCRIPT_CASE=supported node apps/playground/scripts/browser-input-script-test.mjs
+
+node apps/playground/scripts/seal-site-acceptance.mjs "$COMPAT_OLD_SITE" "$COMPAT_REPORTS/old" --begin
+PLAYGROUND_TEST_DIRECTORY="$COMPAT_OLD_SITE" \
+PLAYGROUND_ACCEPTANCE_CONTEXT="$COMPAT_REPORTS/old/site-start.json" \
+PLAYGROUND_INPUT_SCRIPT_REPORT="$COMPAT_REPORTS/old/report.json" \
+PLAYGROUND_INPUT_SCRIPT_CASE=unsupported node apps/playground/scripts/browser-input-script-test.mjs
+```
+
+Archive the reports outside the site, along with command logs and exit codes. G0 verifies native input and uses its own fixture release identity. Match it to the newer site with the template and engine report hashes. The site tests report the candidate and release identities, movement and restart, stale run receipts, and previous-template physical gestures. `--begin` records the input for the targeted checks. Full release acceptance uses the separate browser matrix below.
+
+To play the archived demo, extract the new local candidate into a fresh directory, then serve the same directory twice with the product server. Use `PLAYGROUND_DIRECTORY=<absolute-site> PORT=4173 node apps/playground/scripts/serve.mjs` for the editor and the same command with `PORT=4174` for the preview. In a clean Chromium profile open `http://127.0.0.1:4173/?presentationBackend=direct&previewOrigin=http%3A%2F%2F127.0.0.1%3A4174`. Open **API 调用 → engine.game_input → 打开独立示例**, then follow **Summer：用输入验证移动**. The expected positions are `64 → 128 → 64`. The local candidate uses the root path. Candidates built with `--public-assets` use their versioned release prefix on both origins.
+
+Use the same input cases on the pinned Summer CLI and a separately verified editor to capture the native comparison. The collector records each public CLI response, original Probe image and fixture trace. Check the actual held steps, displacement, release and reset against the Playground session. Keep each side's original frame counters and result fields. [Native fixture and collection instructions](scripts/fixtures/summer-compat/README.md)
+
+To check an existing handoff, run the following from its directory with Node.js, Python 3 and Pillow installed. The block creates a fresh `replay` directory. To recheck an existing extraction, run the final three commands together in a shell with `set -e` enabled. The checks read the original reports and rerun the image measurement. A complete comparison includes both native `hold_ms` runs. On the Playground side, the expected result for that request is `unsupported` with zero input dispatches.
+
+```sh
+(
+  set -e
+  sha256sum -c SHA256SUMS
+  mkdir replay
+  tar -xf playground-sites.tar.gz -C replay
+  tar -xf playground-templates.tar.gz -C replay
+  tar -xf summer-compat-evidence.tar.gz -C replay
+  node replay/verify/verify-summer-compat.mjs replay
+  cmp report.json replay/verification-summary.json
+  cmp replay/reports/pixels.json replay/verification-pixels.json
+)
+```
+
+For a fresh capture, place the sites and templates in `sites/{new,old}` and `templates/{new,old}` under a common directory, with `COMPAT_REPORTS` pointing to its `reports/`. Collect the full native run in `reports/summer-native`. Archive the two sites, extract the archive into another directory and set `COMPAT_REPLAY_SITES` to the extracted `sites/` path. Reuse the original preflight file for each replay.
+
+```sh
+for variant in new old; do
+  mode=supported
+  if [ "$variant" = old ]; then mode=unsupported; fi
+  PLAYGROUND_TEST_DIRECTORY="$COMPAT_REPLAY_SITES/$variant" \
+  PLAYGROUND_ACCEPTANCE_CONTEXT="$COMPAT_REPORTS/$variant/site-start.json" \
+  PLAYGROUND_INPUT_SCRIPT_REPORT="$COMPAT_REPORTS/replay-$variant/report.json" \
+  PLAYGROUND_INPUT_SCRIPT_CASE="$mode" node apps/playground/scripts/browser-input-script-test.mjs || exit 1
+done
+node apps/playground/scripts/verify-summer-compat.mjs "$(dirname "$COMPAT_REPORTS")"
+```
+
+The handoff also records a separate smoke run using the archived `serve.mjs` entry point. Fresh captures show `manual.status: not_run` when that supplemental report is absent. Set `PYTHON` to select an interpreter with Pillow.
 
 Run `PLAYGROUND_DEBUG_API_CASE=runtime-set-position` on a site with write ABI 1 and `runtime-set-unsupported` on an observation ABI 1 site with a read-only template. Set `PLAYGROUND_TEST_DIRECTORY` to the matching site for each run. The write case records the write receipt, PNGs and both exits.
 `PLAYGROUND_DEBUG_API_CASE=runtime-set-boundaries` checks coordinate precision, same-origin iframe inputs and synthetic abort events on the write-capable site.
