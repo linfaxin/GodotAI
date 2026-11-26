@@ -180,7 +180,7 @@ pnpm --filter @godot-js/playground build
 pnpm --filter @godot-js/playground dev
 ```
 
-For an already prepared resource tree, `node apps/playground/scripts/build.mjs --skip-assets` reuses the imported sources. `build:frontend` refreshes an existing release's shell and demo runtime while reusing its engine. Before changing site files or delivery variants, it checks the frozen SDK and, when `runtimeCall` is declared, the actual JavaScript and WASM against the build report. The declaration inputs must also match. Rebuild the complete release to consume a new SDK or engine.
+For an already prepared resource tree, `node apps/playground/scripts/build.mjs --skip-assets` reuses the imported sources. `build:frontend` refreshes an existing release's shell and demo runtime while reusing its engine. Before changing site files or delivery variants, it checks the frozen SDK and, when `runtimeCall`, `gameProbe` or `inputScript` is declared, the actual JavaScript and WASM against the build report. Input Script also requires the sealed snake and camel browser captures for those engine bytes. The declaration inputs must also match. Rebuild the complete release to consume a new SDK or engine.
 
 Ordinary build/dev/test commands use Worker in `dist`, `dist-2d-debug`, `dist-2d-release` and `dist-full-release`. The `:worker` npm commands and `--worker-execution` remain aliases for the same path; no `-worker` output suffix is added. Explicit `--out`, `PLAYGROUND_DIRECTORY` and `PLAYGROUND_TEST_DIRECTORY` override locations. Frontend refresh requires an existing Worker release; rebuild an old legacy site with the ordinary build command. Shell-only test fixtures use `dist-shell`; SDK conformance retains `dist-conformance`.
 

@@ -42,6 +42,39 @@ test('product refresh never treats absent resources as a shell fixture and shell
  await assert.rejects(buildShell(root,{shellOnly:false}),/E_EXECUTION_BACKEND_RETIRED/);assert.deepEqual(await readdir(root),['engine-release.json']);
 });
 
+test('product refresh rejects missing or altered Input Script captures before changing site files', async t => {
+ const root = await mkdtemp(path.join(os.tmpdir(), 'refresh-input-script-'));
+ t.after(() => rm(root, {recursive: true, force: true}));
+ const javascript = 'engine JavaScript', wasm = 'engine WASM';
+ const engine = {javascript: {path: 'godot.js', sha256: digest(javascript)}, wasm: {path: 'godot.wasm', sha256: digest(wasm)}};
+ const capture = naming => JSON.stringify({
+  kind: 'godotjs-production-engine-api-capture', status: 'captured', naming, browser: 'Chromium fixture',
+  engineJsSha256: engine.javascript.sha256, engineWasmSha256: engine.wasm.sha256, inputScript: {abi: 1},
+ });
+ const payloads = {};
+ const namingProfiles = Object.fromEntries(['snake', 'camel'].map(naming => {
+  const bytes = capture(naming), file = naming + '-capture.json';
+  const asset = {path: file, sha256: digest(bytes), bytes: Buffer.byteLength(bytes)};
+  payloads[file] = asset;
+  return [naming, {capture: asset}];
+ }));
+ const release = {runtimeProfile: 'full-engine-v1', engine, payloads, api: {namingProfiles},
+  runtimeAbi: {protocolVersion: 2, host: 1, audio: 1, presentation: 1, lifecycle: 1, inputScript: 1}};
+ const files = {
+  'godot.js': javascript, 'godot.wasm': wasm, 'engine-release.json': JSON.stringify(release),
+  'snake-capture.json': capture('snake'), 'main.js': 'original frontend', 'main.js.gz': 'original encoded frontend',
+  'manifest.json': 'original candidate', 'delivery-manifest.json': 'original delivery',
+ };
+ for (const [name, bytes] of Object.entries(files)) await writeFile(path.join(root, name), bytes);
+ await assert.rejects(buildShell(root, {shellOnly: false}), /E_INPUT_SCRIPT_RUNTIME_CAPTURE.*Missing camel capture file/);
+ assert.deepEqual((await readdir(root)).sort(), Object.keys(files).sort());
+ files['camel-capture.json'] = capture('camel').replace('Chromium fixture', 'different browser');
+ await writeFile(path.join(root, 'camel-capture.json'), files['camel-capture.json']);
+ await assert.rejects(buildShell(root, {shellOnly: false}), /E_INPUT_SCRIPT_RUNTIME_CAPTURE.*camel capture bytes/);
+ assert.deepEqual((await readdir(root)).sort(), Object.keys(files).sort());
+ for (const [name, bytes] of Object.entries(files)) assert.equal(await readFile(path.join(root, name), 'utf8'), bytes, name);
+});
+
 test('candidate payloads bind editor and resource metadata while excluding the entry manifest and transport sidecars',async t=>{
  const root=await mkdtemp(path.join(os.tmpdir(),'candidate-payloads-'));t.after(()=>rm(root,{recursive:true,force:true}));
  for(const [name,body]of Object.entries({'main.js':'editor-v1','preview.js':'preview','index.html':'editor','shell-profile.json':'profile','resource-build.json':'receipt','manifest.json':'entry','main.js.br':'compressed','delivery-manifest.json':'derived delivery','site-acceptance.json':'derived receipt'}))await writeFile(path.join(root,name),body);

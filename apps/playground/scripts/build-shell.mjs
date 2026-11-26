@@ -13,7 +13,7 @@ import {invalidateSiteDelivery} from './site-delivery-state.mjs';
 import {describeWorkerCandidate} from './worker-candidate.mjs';
 import {assertWorkerRuntimeAbi} from '../../../scripts/release/engine-profiles.mjs';
 import {assertWorkerSdkBuildFrozen} from './worker-sdk-proof.mjs';
-import {assertGameProbeAssets,assertInputScriptBuildProof,assertInputScriptRuntimeExports,assertRuntimeCallAssets,digest,within} from '../../../scripts/release/web-release-utils.mjs';
+import {assertGameProbeAssets,assertInputScriptBuildProof,assertInputScriptReleaseCaptures,assertInputScriptRuntimeExports,assertRuntimeCallAssets,digest,within} from '../../../scripts/release/web-release-utils.mjs';
 const app=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const repository=path.resolve(app,'../..');
 /** Engine/SDK types are release inputs; demo helper types have their own descriptor. */
@@ -106,6 +106,9 @@ export async function buildShell(dist,options={}){
    const assets={javascriptSha256:digest(javascriptBytes),wasmSha256:digest(wasmBytes)};
    assertRuntimeCallAssets(existing.runtimeAbi,existing.build?.runtimeCall,assets);
    assertGameProbeAssets(existing.runtimeAbi,existing.build?.gameProbe,assets);
+   if(existing.runtimeAbi?.inputScript===1)await assertInputScriptReleaseCaptures(dist,existing,{
+    javascript:{sha256:assets.javascriptSha256},wasm:{sha256:assets.wasmSha256},
+   });
    if(existing.runtimeAbi?.inputScript!==undefined||existing.build?.inputScript!==undefined){
     const build=existing.build;
     assertInputScriptBuildProof({...build,status:'built',runtimeProfile,engineTarget:build?.resolvedBuildOptions?.target,
