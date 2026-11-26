@@ -53,7 +53,11 @@ def inspect_image(root, directory, sample):
 def verify(root):
     reports = root / "reports"
     observations = {}
-    for variant in ("new", "old", "replay-new", "replay-old"):
+    variants = ["new", "old", "replay-new", "replay-old"]
+    manual_report = reports / "manual-archive" / "report.json"
+    if manual_report.is_file() and read_report(manual_report.parent).get("mode") == "headed-interactive-operator-walkthrough":
+        variants.append("manual-archive")
+    for variant in variants:
         directory = reports / variant
         samples = read_report(directory)["pngs"]
         expected = ["previous-physical.png"] if variant.endswith("old") else ["before.png", "after.png", "restart.png"]
