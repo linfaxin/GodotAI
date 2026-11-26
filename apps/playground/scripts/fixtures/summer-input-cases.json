@@ -1,0 +1,26 @@
+{
+  "frameOffsets": {
+    "action": "script",
+    "clock": "frame",
+    "wait": true,
+    "events": [
+      { "at_frame": 0, "type": "action", "action": "move_right", "pressed": true },
+      { "at_frame": 4, "type": "action", "action": "move_right", "pressed": false }
+    ]
+  },
+  "holdMilliseconds": {
+    "action": "script",
+    "events": [
+      { "at_frame": 0, "type": "action", "action": "jump", "hold_ms": 50 }
+    ]
+  },
+  "unknownAction": {
+    "action": "script",
+    "clock": "frame",
+    "wait": true,
+    "events": [
+      { "at_frame": 0, "type": "action", "action": "__godotai_missing_input_action__", "pressed": true },
+      { "at_frame": 4, "type": "action", "action": "__godotai_missing_input_action__", "pressed": false }
+    ]
+  }
+}

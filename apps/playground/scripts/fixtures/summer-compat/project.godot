@@ -1,0 +1,29 @@
+config_version=5
+
+[application]
+config/name="GodotAI Summer Input Compatibility"
+run/main_scene="res://main.tscn"
+
+[display]
+window/size/viewport_width=960
+window/size/viewport_height=640
+window/stretch/mode="canvas_items"
+window/stretch/aspect="ignore"
+
+[rendering]
+renderer/rendering_method="gl_compatibility"
+environment/defaults/default_clear_color=Color(1, 0, 0, 1)
+
+[physics]
+common/physics_ticks_per_second=60
+common/physics_interpolation=false
+
+[input]
+move_right={
+"deadzone": 0.5,
+"events": []
+}
+jump={
+"deadzone": 0.5,
+"events": []
+}

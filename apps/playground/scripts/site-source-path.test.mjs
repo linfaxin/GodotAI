@@ -12,6 +12,9 @@ test('site source maps resolve package sources and relocatable app sources insid
  const checkout=basename(fileURLToPath(new URL('../../../',import.meta.url)));
  assert.equal(repositorySourcePath(`../../../workspace/${checkout}/${checkout}/packages/engine/src/runtime-host.ts`),'packages/engine/src/runtime-host.ts');
  assert.equal(repositorySourcePath(`../../../${checkout}/apps/playground/preview.ts`),'apps/playground/preview.ts');
+ assert.equal(repositorySourcePath('../../../../original-checkout/packages/engine/src/runtime-host.ts'),'packages/engine/src/runtime-host.ts');
+ assert.equal(repositorySourcePath('../../../packages/worktrees/original-checkout/apps/playground/preview.ts'),'apps/playground/preview.ts');
  assert.throws(()=>repositorySourcePath(`../../../${checkout}/packages/../app.ts`),/E_SITE_SOURCE_PATH/);
+ assert.throws(()=>repositorySourcePath('../../../original-checkout/apps/playground/../preview.ts'),/E_SITE_SOURCE_PATH/);
  for(const path of ['/etc/passwd','file:///etc/passwd','C:/repo/file.ts','packages/engine/../../private','packages//engine.ts','src/../private','packages/engine/src/./host.ts','packages\\engine\\host.ts','packages/engine/\u0000host.ts'])assert.throws(()=>repositorySourcePath(path),/E_SITE_SOURCE_PATH/);
 });
