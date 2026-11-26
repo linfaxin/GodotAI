@@ -97,12 +97,25 @@ async function workerFixture(){
  // closure and self. No globals or module caches are replaced by this fixture.
  new Function('require','self','fixture',await workerBundle())(fixtureRequire,self,fixture);
  const request=async fields=>{
-  await self.onmessage({data:{id:1,runtime:'engine',engineProfile:'full-engine-v1',releaseContext:fixture.context,
+  await self.onmessage({data:{id:1,runtime:'engine',engineProfile:fixture.context.engineProfile,releaseContext:fixture.context,
    launch:{kind:'script',module:'/start.ts'},documentId:'document',revision:1,...fields}});
   return messages.findLast(message=>message.id===(fields.id??1));
  };
  return {fixture,messages,request};
 }
+
+test('Worker compiles legacy launches against the active 2D engine profile',async()=>{
+ const {fixture,request}=await workerFixture();
+ fixture.context.engineProfile='engine-2d-v1';
+ const built=await request({runtime:'godot',launch:undefined,entry:'/src/main.ts',mainScene:'/main.tscn',files:{
+  '/src/main.ts':'export const value = 1;',
+  '/main.tscn':'[gd_scene format=3]\n\n[node name="Main" type="Node2D"]\n',
+ }});
+ assert.equal(built.error,undefined);
+ assert.deepEqual(built.diagnostics,[]);
+ assert.equal(built.manifest.engineProfile,'engine-2d-v1');
+ assert(built.pack);
+});
 
 test('Worker check and build share final demo environment and composed source identity',async()=>{
  const {fixture,request}=await workerFixture();

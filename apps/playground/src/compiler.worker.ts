@@ -104,6 +104,7 @@ self.onmessage=async(event:MessageEvent<Request>)=>{
    }
    if(request.resourceImports?.length&&facts.resources.status!=='available')throw new ProjectToolError('E_RESOURCE_CONVERTER_TARGET',facts.resources.reason);
    const result=await compileEngineProject({files,runtime,entry:request.entry??'/src/'+request.file,mainScene:request.mainScene,
+    identityInputs:{engineProfile:releaseContext.engineProfile},
     ...(request.launch!==undefined?{launch:request.launch}:{}),...(request.importReceipts?{importReceipts:request.importReceipts}:{}),...(request.importCacheObservations?{importCacheObservations:request.importCacheObservations}:{}),
     ...(request.resourceImports?.length&&facts.resources.status==='available'?{resourceImports:request.resourceImports,resourceConverters:projectResourceConverters(),resourceTarget:facts.resources.target}:{}),
     sourceSnapshot:captured.source,buildCache,languageService,signal:aborter?.signal,artifactSet:facts.release.artifactSetAbi===1,
