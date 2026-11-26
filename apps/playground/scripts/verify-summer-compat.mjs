@@ -10,6 +10,7 @@ import {operationResult, checkUnknownAction, checkProbeImageFrame, parseProbePos
 const profile = 'full-engine-v1';
 const target = 'template_debug';
 const siteFields = ['candidateId', 'descriptorHash', 'releaseId', 'siteHash'];
+const runFields = ['runId', 'revision', 'buildKey', 'generation', 'documentId', 'workerId', 'runConfigurationHash'];
 const playerPath = '/root/Main/Player';
 const position = x => ({x, y: 256});
 const frameRequest = action => ({
@@ -94,7 +95,7 @@ function heldTicks(input, run, releaseId) {
   return Number(BigInt(up.physics) - BigInt(down.physics));
 }
 
-function verifyBrowser(report, supported) {
+export function verifyBrowser(report, supported) {
   const {browser, runConfiguration, publicCalls, inputEvidence, releaseId, pngs} = report;
   assert(report.status === 'passed' && report.engineExecuted && report.scriptExecuted === supported);
   assert(browser.name === 'chromium' && runConfiguration.presentationBackend === 'direct');
@@ -105,6 +106,29 @@ function verifyBrowser(report, supported) {
     const probe = supported ? byId(report.calls, sample.callId).replyProjection.result.data : call(sample.callId).reply.result;
     assert.deepEqual(fields(probe, ['run', 'frame', 'releaseId']), {run: sample.run, frame: sample.frame, releaseId});
     assert.deepEqual(probe.properties[0].value, sample.position);
+    for (const field of ['iteration', 'renderSerial']) {
+      assert(Number.isSafeInteger(probe.frame[field]) && probe.frame[field] > 0, `Missing probe ${field}: ${sample.callId}`);
+      assert.equal(probe.image?.[field], probe.frame[field], `PNG and state disagree on ${field}: ${sample.callId}`);
+    }
+  }
+  const sampledRuns = new Map(pngs.map(({run}) => [run.runId, run]));
+  assert.equal(sampledRuns.size, supported ? 2 : 1, 'Unexpected number of probed runs');
+  assert.deepEqual(report.runs.map(({run}) => run.runId), [...sampledRuns.keys()], 'Exit receipts must cover each probed run');
+  for (const {run, exit} of report.runs) {
+    const sampledRun = sampledRuns.get(run.runId);
+    assert.deepEqual(fields(run, runFields), sampledRun, 'Run record belongs to a different Worker session');
+    assert.equal(exit?.evidence, 'host-report', `Missing host exit receipt: ${run.runId}`);
+    assert.deepEqual(fields(exit.report ?? {}, runFields), sampledRun, 'Exit receipt belongs to a different Worker session');
+    const facts = exit.report?.sessionFacts;
+    // Apply the clean-exit conditions from packages/engine/src/session-facts.ts to the archived facts.
+    assert.equal(facts?.schemaVersion, 1, `Missing or unsupported session facts: ${run.runId}`);
+    assert.equal(facts.failure, undefined, `Runtime reported a failure: ${run.runId}`);
+    assert.deepEqual(facts.nativeExit, {code: 0}, `Native exit did not succeed: ${run.runId}`);
+    assert.equal(facts.hostCleanup, 'complete', `Host cleanup was incomplete: ${run.runId}`);
+    assert.equal(facts.forcedTerminationIssued, false, `Expected a cooperative exit: ${run.runId}`);
+    assert.equal(facts.runtimeSummary, 'sealed', `Runtime summary was not sealed: ${run.runId}`);
+    assert(['complete', 'not-applicable'].includes(facts.entryCleanup), `Entry cleanup was incomplete: ${run.runId}`);
+    assert.equal(exit.report.reason, 'clean-exit', `Expected a clean exit: ${run.runId}`);
   }
   if (!supported) {
     const old = inputEvidence.previousTemplate;
@@ -353,19 +377,23 @@ async function verify(root, summary) {
   return verifyNative(path.join(reports, 'summer-native'), native, summary.cases, playground);
 }
 
-const args = process.argv.slice(2);
-if (args.length > 1 || args[0] === '--help') {
-  console.log('Usage: node verify-summer-compat.mjs [EVIDENCE_ROOT]');
-  process.exit(args.length > 1 ? 1 : 0);
+const runningAsScript = import.meta.main ?? (process.argv[1] &&
+  await realpath(process.argv[1]).catch(() => undefined) === fileURLToPath(import.meta.url));
+if (runningAsScript) {
+  const args = process.argv.slice(2);
+  if (args.length > 1 || args[0] === '--help') {
+    console.log('Usage: node verify-summer-compat.mjs [EVIDENCE_ROOT]');
+    process.exit(args.length > 1 ? 1 : 0);
+  }
+  const root = await realpath(path.resolve(args[0] ?? '.'));
+  const summary = {status: 'failed', scope: 'Chromium Full Engine debug Dedicated Worker Direct', templates: {}, browser: {}};
+  try {
+    summary.status = await verify(root, summary);
+  } catch (error) {
+    summary.error = String(error.message ?? error).replaceAll(root + path.sep, '');
+  }
+  const output = JSON.stringify(summary, null, 2) + '\n';
+  await writeFile(path.join(root, 'verification-summary.json'), output);
+  process.stdout.write(output);
+  if (summary.status !== 'passed') process.exitCode = 1;
 }
-const root = await realpath(path.resolve(args[0] ?? '.'));
-const summary = {status: 'failed', scope: 'Chromium Full Engine debug Dedicated Worker Direct', templates: {}, browser: {}};
-try {
-  summary.status = await verify(root, summary);
-} catch (error) {
-  summary.error = String(error.message ?? error).replaceAll(root + path.sep, '');
-}
-const output = JSON.stringify(summary, null, 2) + '\n';
-await writeFile(path.join(root, 'verification-summary.json'), output);
-process.stdout.write(output);
-if (summary.status !== 'passed') process.exitCode = 1;

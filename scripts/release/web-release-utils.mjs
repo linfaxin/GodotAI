@@ -164,7 +164,10 @@ export async function assertInputScriptReleaseCaptures(root, release, engine = r
     const sealed = asset && release.payloads?.[asset.path];
     if (!sealed || sealed.sha256 !== asset.sha256 || sealed.bytes !== asset.bytes)
       fail('E_INPUT_SCRIPT_RUNTIME_CAPTURE', `Missing sealed ${naming} capture`);
-    const bytes = await readFile(within(root, asset.path));
+    const bytes = await readFile(within(root, asset.path)).catch(error => {
+      if (error.code === 'ENOENT') fail('E_INPUT_SCRIPT_RUNTIME_CAPTURE', `Missing ${naming} capture file: ${asset.path}`);
+      throw error;
+    });
     if (bytes.length !== asset.bytes || digest(bytes) !== asset.sha256)
       fail('E_INPUT_SCRIPT_RUNTIME_CAPTURE', `${naming} capture bytes differ from the release`);
     assertInputScriptRuntimeCapture(JSON.parse(bytes.toString('utf8')), engine, naming);
