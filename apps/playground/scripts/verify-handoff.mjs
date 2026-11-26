@@ -4,6 +4,7 @@ import {createHash} from 'node:crypto';
 import {readFile} from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {verifyCleanExit} from './verify-summer-compat.mjs';
 
 const [mode, input, expectedReport, expectedPixels] = process.argv.slice(2);
 if (mode !== 'web' || !input || Boolean(expectedReport) !== Boolean(expectedPixels)) {
@@ -52,11 +53,9 @@ const [first, restart] = manual.runs;
 assert.notEqual(first.run.runId, restart.run.runId);
 assert.match(first.sourceHash, /^[a-f0-9]{64}$/);
 assert.equal(first.sourceHash, restart.sourceHash);
-for (const run of manual.runs) {
-  assert.equal(run.run.configuration.presentationBackend, 'direct');
-  assert.equal(run.exit.report.sessionFacts.nativeExit.code, 0);
-  assert.equal(run.exit.report.sessionFacts.hostCleanup, 'complete');
-  assert.notEqual(run.exit.report.sessionFacts.forcedTerminationIssued, true);
+for (const {run, exit} of manual.runs) {
+  assert.equal(run.configuration.presentationBackend, 'direct');
+  verifyCleanExit(run, exit);
 }
 assert.equal(manual.input.releaseStepCompleted, true);
 assert.equal(BigInt(manual.input.down.physics), BigInt(manual.input.base));

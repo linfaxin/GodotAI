@@ -5,7 +5,7 @@ import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {test} from 'node:test';
 import {fileURLToPath} from 'node:url';
-import {verifyBrowser} from './verify-summer-compat.mjs';
+import {verifyBrowser, verifyCleanExit} from './verify-summer-compat.mjs';
 
 function previousTemplateReport() {
   const run = {runId: 'previous-run', revision: 1, buildKey: 'build', generation: 1,
@@ -76,6 +76,14 @@ test('offline browser verification rejects PNGs from a different iteration or re
     report.publicCalls[0].reply.result.image[field] += 1;
     assert.throws(() => verifyBrowser(report, false), new RegExp('PNG and state disagree on ' + field));
   }
+});
+
+test('a clean exit from the first run cannot verify the restarted Worker', () => {
+  const {run, exit} = previousTemplateReport().runs[0];
+  const restart = {...run, runId: 'restart-run', workerId: 'restart-worker'};
+  verifyCleanExit(run, exit);
+  verifyCleanExit(restart, {...exit, report: {...exit.report, ...restart}});
+  assert.throws(() => verifyCleanExit(restart, exit), /Exit receipt belongs to a different Worker session/);
 });
 
 test('invoking the verifier through a symlink still runs the CLI and fails on missing evidence', async t => {

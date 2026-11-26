@@ -95,6 +95,22 @@ function heldTicks(input, run, releaseId) {
   return Number(BigInt(up.physics) - BigInt(down.physics));
 }
 
+export function verifyCleanExit(run, exit) {
+  const {runId} = run;
+  assert.equal(exit?.evidence, 'host-report', `Missing host exit receipt: ${runId}`);
+  assert.deepEqual(fields(exit.report ?? {}, runFields), fields(run, runFields), 'Exit receipt belongs to a different Worker session');
+  const facts = exit.report?.sessionFacts;
+  // Apply the clean-exit conditions from packages/engine/src/session-facts.ts to the archived facts.
+  assert.equal(facts?.schemaVersion, 1, `Missing or unsupported session facts: ${runId}`);
+  assert.equal(facts.failure, undefined, `Runtime reported a failure: ${runId}`);
+  assert.deepEqual(facts.nativeExit, {code: 0}, `Native exit did not succeed: ${runId}`);
+  assert.equal(facts.hostCleanup, 'complete', `Host cleanup was incomplete: ${runId}`);
+  assert.equal(facts.forcedTerminationIssued, false, `Expected a cooperative exit: ${runId}`);
+  assert.equal(facts.runtimeSummary, 'sealed', `Runtime summary was not sealed: ${runId}`);
+  assert(['complete', 'not-applicable'].includes(facts.entryCleanup), `Entry cleanup was incomplete: ${runId}`);
+  assert.equal(exit.report.reason, 'clean-exit', `Expected a clean exit: ${runId}`);
+}
+
 export function verifyBrowser(report, supported) {
   const {browser, runConfiguration, publicCalls, inputEvidence, releaseId, pngs} = report;
   assert(report.status === 'passed' && report.engineExecuted && report.scriptExecuted === supported);
@@ -117,18 +133,7 @@ export function verifyBrowser(report, supported) {
   for (const {run, exit} of report.runs) {
     const sampledRun = sampledRuns.get(run.runId);
     assert.deepEqual(fields(run, runFields), sampledRun, 'Run record belongs to a different Worker session');
-    assert.equal(exit?.evidence, 'host-report', `Missing host exit receipt: ${run.runId}`);
-    assert.deepEqual(fields(exit.report ?? {}, runFields), sampledRun, 'Exit receipt belongs to a different Worker session');
-    const facts = exit.report?.sessionFacts;
-    // Apply the clean-exit conditions from packages/engine/src/session-facts.ts to the archived facts.
-    assert.equal(facts?.schemaVersion, 1, `Missing or unsupported session facts: ${run.runId}`);
-    assert.equal(facts.failure, undefined, `Runtime reported a failure: ${run.runId}`);
-    assert.deepEqual(facts.nativeExit, {code: 0}, `Native exit did not succeed: ${run.runId}`);
-    assert.equal(facts.hostCleanup, 'complete', `Host cleanup was incomplete: ${run.runId}`);
-    assert.equal(facts.forcedTerminationIssued, false, `Expected a cooperative exit: ${run.runId}`);
-    assert.equal(facts.runtimeSummary, 'sealed', `Runtime summary was not sealed: ${run.runId}`);
-    assert(['complete', 'not-applicable'].includes(facts.entryCleanup), `Entry cleanup was incomplete: ${run.runId}`);
-    assert.equal(exit.report.reason, 'clean-exit', `Expected a clean exit: ${run.runId}`);
+    verifyCleanExit(sampledRun, exit);
   }
   if (!supported) {
     const old = inputEvidence.previousTemplate;
