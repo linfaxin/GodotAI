@@ -269,6 +269,21 @@ To play the archived demo, extract the new local candidate into a fresh director
 
 Use the same input cases on the pinned Summer CLI and a separately verified editor to capture the native comparison. The collector records each public CLI response, original Probe image and fixture trace. Check the actual held steps, displacement, release and reset against the Playground session. Keep each side's original frame counters and result fields. [Native fixture and collection instructions](scripts/fixtures/summer-compat/README.md)
 
+#### Check the R4 browser demo handoff
+
+Open the archived `START-HERE.md` to run the local demo. To play, extract `playground-sites.tar.gz` and run the included `tools/serve.mjs` on both ports with Node.js 24, then open Chromium. The demo covers frame input, same-frame game probes, stop and restart.
+
+To verify the R4 handoff, check `SHA256SUMS` and extract all three nested archives into the same `replay` directory. From this repository root run the following with Node.js, Python 3 and Pillow. Use the outer `report.json` next to `playground-sites.tar.gz`.
+
+```sh
+node apps/playground/scripts/verify-handoff.mjs web /path/to/replay \
+  /path/to/handoff/report.json /path/to/replay/reports/pixels.json
+```
+
+`web handoff verified` confirms that the four Chromium reports, 19 G0 cases, headed walkthrough and screenshot measurements pass. Read the delivery result in `DELIVERY-STATUS.json`. The underlying `report.json` retains `partial` for the optional Summer desktop comparison.
+
+#### Check a full compatibility handoff
+
 To check an existing handoff, run the following from its directory with Node.js, Python 3 and Pillow installed. The block creates a fresh `replay` directory. To recheck an existing extraction, run the final three commands together in a shell with `set -e` enabled. The checks read the original reports and rerun the image measurement. A complete comparison includes both native `hold_ms` runs. On the Playground side, the expected result for that request is `unsupported` with zero input dispatches.
 
 ```sh
