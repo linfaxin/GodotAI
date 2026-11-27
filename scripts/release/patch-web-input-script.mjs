@@ -60,7 +60,10 @@ const edits = {
 \tfloat godotjs_get_action_strength(const StringName &, bool) const;
 \tfloat godotjs_get_axis(const StringName &, const StringName &) const;
 \tvoid godotjs_action_release(const StringName &);`),
-  ['class Input : public Object {', include + '\n\nclass Input : public Object {']],
+  ['class Input : public Object {', include + '\n\nclass Input : public Object {'],
+  hook('\tvoid flush_buffered_events();', '\tvoid godotjs_script_event(const Ref<InputEvent> &, bool);'),
+  ['void _parse_input_event_impl(const Ref<InputEvent> &p_event, bool p_is_emulated);',
+    'void _parse_input_event_impl(const Ref<InputEvent> &p_event, bool p_is_emulated, bool p_dispatch = true);']],
   'core/input/input.cpp': [
     ['void Input::_bind_methods() {', guard(methods) + '\n\nvoid Input::_bind_methods() {'],
     bind('\tClassDB::bind_method(D_METHOD("is_action_pressed", "action", "exact_match"), &Input::is_action_pressed, DEFVAL(false));'),
@@ -68,6 +71,13 @@ const edits = {
     bind('\tClassDB::bind_method(D_METHOD("get_axis", "negative_action", "positive_action"), &Input::get_axis);'),
     bind('\tClassDB::bind_method(D_METHOD("action_release", "action"), &Input::action_release);'),
     hook('void Input::release_pressed_events() {', '\tjsb::input_script::reset();'),
+    ['void Input::_parse_input_event_impl(const Ref<InputEvent> &p_event, bool p_is_emulated) {',
+      guard(`void Input::godotjs_script_event(const Ref<InputEvent> &event, bool dispatch) {
+\t_THREAD_SAFE_METHOD_
+\t_parse_input_event_impl(event, false, dispatch);
+}`) + '\n\nvoid Input::_parse_input_event_impl(const Ref<InputEvent> &p_event, bool p_is_emulated, bool p_dispatch) {'],
+    ['\tif (event_dispatch_function) {\n\t\t_THREAD_SAFE_UNLOCK_\n\t\tevent_dispatch_function(p_event);',
+      '\tif (p_dispatch && event_dispatch_function) {\n\t\t_THREAD_SAFE_UNLOCK_\n\t\tevent_dispatch_function(p_event);'],
   ],
   'scene/main/scene_tree.cpp': [
     ['#include "core/config/project_settings.h"', include + '\n' + guard(`namespace jsb::input_script {
@@ -93,6 +103,8 @@ void scene_will_change(const Node *current, const Node *next);
   'platform/web/web_main.cpp': [
     ['static bool shutdown_complete = false;', include + '\n\nstatic bool shutdown_complete = false;'],
     ['extern "C" void godot_web_worker_frame_committed() {', guard(exports) + '\nextern "C" void godot_web_worker_frame_committed() {'],
+    hook('static bool shutdown_complete = false;',
+      'extern "C" EMSCRIPTEN_KEEPALIVE uint32_t godotjs_input_script_devices() { return 1; }'),
     hook('\tworker_in_iteration = true;', '\tjsb::input_script::begin_iteration(worker_iteration);'),
     ['\tEM_ASM({ if (Module[\'godotWorkerEndIteration\'])',
       guard(`\tjsb::input_script::end_iteration(should_exit);

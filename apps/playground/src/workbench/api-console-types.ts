@@ -46,6 +46,7 @@ export interface ConsoleResultFacts {
   properties?: {name: string; type: RuntimeType}[];
   methods?: {name: string; signature: string; token: RuntimeMethodToken; parameterTypes: SelectedRuntimeMethod['parameterTypes']}[];
   input?: {runId: string; operationId: string};
+  geometryEpoch?: number;
   stoppedRunIds?: string[];
   eventCursor?: {since: number; stream_id: string};
   truncated?: true;

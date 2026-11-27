@@ -152,6 +152,10 @@ startup adapter. The neutral compiler imports no React or application code.
 `ProjectWorkspace` pins immutable revisions and releases each job independently.
 After an initial `capture`, `captureChanges(changed, removed)` shares unchanged
 private `SourceFile` records without reading or hashing their binary payloads.
+Pass `{expectedBaseRevision: snapshot.revision}` as the third argument to apply
+a guarded delta. A stale base or a competing accepted update raises
+`E_PROJECT_REVISION_CONFLICT`. The batch either commits all changes and
+deletions as one revision or leaves the workspace unchanged.
 `ProjectLanguageService` preserves the TypeScript service while file versions,
 resolution routes and the declaration environment invalidate affected work.
 `ProjectBuildCache` bounds text, emit and PCK records; its private verified package

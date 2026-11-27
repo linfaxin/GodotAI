@@ -5,7 +5,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {isWorkerRunIdentity, sameWorkerRun} from '@godot-js/engine/browser/dedicated/worker-protocol';
 import inputCases from './fixtures/summer-input-cases.json' with {type: 'json'};
-import {verifyCleanExit} from './verify-summer-compat.mjs';
+import {verifyCleanExit} from './verify-worker-exit.mjs';
 
 const hash = /^[a-f0-9]{64}$/;
 const stages = ['play.started', 'play.stopped', 'play.started', 'play.stopped'];
@@ -18,6 +18,70 @@ function assertSameRun(expected, observed) {
 export function verifyLifecycleCleanExit(run, exit) {
   assertSameRun(run, exit?.report);
   verifyCleanExit(run, exit);
+}
+
+export function verifyDiagnosticRepair(report, first, startIndex, waitIndex) {
+  const repair = report.repair;
+  assert(repair, 'Missing diagnostic repair evidence');
+  let previous = -1;
+  function read(key, op, min = previous) {
+    const index = report.calls.findIndex(call => call.callId === repair[key]);
+    assert(index > min, 'Missing or out-of-order repair call: ' + key);
+    const {request, reply} = report.calls[index];
+    const facade = op.startsWith('engine.');
+    assert.equal(facade ? request.op : request.method, op);
+    assert.equal(reply.ok, true);
+    previous = index;
+    return facade ? reply.result.data : reply.result;
+  }
+  const initial = read('initial', 'engine.play');
+  const original = read('original', 'wait_for_event');
+  assert.equal(initial.accepted, true);
+  assert.equal(original.outcome, 'reached');
+  assert.equal(original.run.attemptId, initial.attemptId);
+  assert.equal(original.run.state, 'running');
+  assertSameRun(original.run, repair.stillRunning);
+  assert.equal(repair.stillRunning.state, 'running');
+  const invalidCheck = read('invalidCheck', 'check');
+  const invalid = read('invalid', 'engine.get_diagnostics');
+  const rejected = read('rejected', 'engine.play');
+  const noSession = read('noSession', 'wait_for_event');
+  const failed = read('failed', 'engine.get_diagnostics');
+  const repairedCheck = read('repairedCheck', 'check');
+  const repaired = read('repaired', 'engine.get_diagnostics');
+  assert(previous < startIndex, 'Repair check must precede Play');
+  const launched = read('launched', 'engine.get_diagnostics', waitIndex);
+  const project = first.projectId;
+  for (const record of [initial, invalidCheck, invalid, rejected, failed, repairedCheck, repaired, launched])
+    assert.equal(record.projectId, project);
+  for (const record of [invalidCheck, rejected, failed]) assert.equal(record.editorRevision, invalid.editorRevision);
+  for (const record of [repairedCheck, repaired, launched]) assert.equal(record.editorRevision, first.editorRevision);
+  assert(initial.editorRevision < invalid.editorRevision && invalid.editorRevision < first.editorRevision);
+  assert(hash.test(invalidCheck.sourceHash));
+  assert.equal(invalid.check.sourceHash, invalidCheck.sourceHash);
+  assert.equal(invalid.run, null);
+  assert(invalid.check.diagnostics.observed);
+  assert(invalid.check.diagnostics.items.some(item => item.code === 2322 &&
+    item.location?.file === '/src/Player.ts' && item.location.line === 2), 'Missing located TS2322');
+  assert.equal(rejected.accepted, true);
+  assert.equal(noSession.outcome, 'no_session');
+  assert.equal(noSession.run, undefined);
+  assert.equal(noSession.build.attemptId, rejected.attemptId);
+  assert.equal(failed.build.attemptId, rejected.attemptId);
+  assert.equal(failed.build.status, 'failed');
+  assert.equal(failed.build.sourceHash, invalidCheck.sourceHash);
+  assert(failed.build.diagnostics.items.some(item => item.code === 2322));
+  assert.equal(failed.run, null);
+  assert.equal(repaired.check.diagnostics.observed, true);
+  assert.equal(repaired.check.diagnostics.counts.error, 0);
+  assert.notEqual(first.sourceHash, invalidCheck.sourceHash);
+  for (const record of [repaired.check, repairedCheck, launched.check, launched.build])
+    assert.equal(record.sourceHash, first.sourceHash);
+  assert.equal(launched.check.diagnostics.observed, true);
+  assert.equal(launched.check.diagnostics.counts.error, 0);
+  assert.equal(launched.build.attemptId, first.attemptId);
+  assertSameRun(first.run, launched.run.identity);
+  assert.notEqual(first.run.runId, original.run.runId);
 }
 
 export function verifyLifecycleCalls(report) {
@@ -97,6 +161,8 @@ export function verifyLifecycleCalls(report) {
   }
 
   const first = verified[0].event.data, second = verified[2].event.data;
+  if (report.repair || report.calls.some(call => call.request.op === 'engine.get_diagnostics'))
+    verifyDiagnosticRepair(report, first, verified[0].cursorIndex, verified[0].waitIndex);
   assert.equal(first.sourceHash, second.sourceHash);
   for (const field of ['runId', 'documentId', 'workerId']) assert.notEqual(first.run[field], second.run[field]);
   assert.deepEqual(report.pngs.map(sample => sample.file), ['before.png', 'after.png', 'restart.png']);

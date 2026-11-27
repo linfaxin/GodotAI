@@ -125,3 +125,31 @@ test('build snapshots reject non-roundtrippable source text without rewriting it
  assert.equal(snapshotFiles(valid)['res://start.ts'],'\ufeffexport const text="\ufffd";');
  await assert.rejects(createSourceSnapshot({'/start.ts':'😀😀a'},{maxBytes:8}),error=>error.code==='E_PROJECT_BUDGET');
 });
+test('guarded project deltas reject stale bases and commit at most one competing batch', async () => {
+ const workspace = new ProjectWorkspace();
+ const base = await workspace.capture({'/main.ts': 'export {};', '/old.txt': 'old'});
+ await assert.rejects(workspace.captureChanges({'/main.ts': 'export const ignored = true;'}, ['/old.txt'],
+  {expectedBaseRevision: base.revision + 1}), /E_PROJECT_REVISION_CONFLICT/);
+ const results = await Promise.allSettled([
+  workspace.captureChanges({'/main.ts': 'export const a = true;'}, ['/old.txt'], {expectedBaseRevision: base.revision}),
+  workspace.captureChanges({'/main.ts': 'export const b = true;'}, ['/old.txt'], {expectedBaseRevision: base.revision}),
+ ]);
+ const accepted = results.filter(result => result.status === 'fulfilled');
+ assert.equal(accepted.length, 1);
+ const current = accepted[0].value;
+ assert.equal(workspace.revision, current.revision);
+ assert.match(results.find(result => result.status === 'rejected').reason.message, /E_PROJECT_REVISION_CONFLICT/);
+ assert(base.source.files.some(file => file.path.endsWith('old.txt')));
+ assert(!current.source.files.some(file => file.path.endsWith('old.txt')));
+ await assert.rejects(workspace.captureChanges({}, [], {expectedBaseRevision: base.revision}), /E_PROJECT_REVISION_CONFLICT/);
+ await assert.rejects(workspace.captureChanges({'/bad.txt': 'too large'}, [],
+  {expectedBaseRevision: current.revision, maxBytes: 1}));
+ assert.equal(workspace.revision, current.revision);
+ await assert.rejects(workspace.captureChanges({'/bad.txt': 'too large'}, [], {maxBytes: 1}));
+ const retry = await workspace.captureChanges({'/valid.txt': 'ok'}, [], {expectedBaseRevision: current.revision});
+ assert.equal(workspace.revision, retry.revision);
+ retry.release();
+ base.release();
+ current.release();
+ assert.equal(workspace.pendingSnapshots, 0);
+});

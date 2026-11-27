@@ -4,6 +4,7 @@ import {createStaticServer} from './serve.mjs';
 import {createLocalTestTls} from './browser-local-tls.mjs';
 import {runReportedBrowserTest,listenBrowserTestServer as listen,closeBrowserTestServer as close} from './browser-contract-report.mjs';
 import {createPackedConsumer} from '../../../packages/project-tools/test/fixtures/packed-consumer.mjs';
+import {createInputScriptDemo, INPUT_SCRIPT_PLAYER_PATH} from '../src/input-script-demo.ts';
 
 const identityFields=['runId','revision','buildKey','generation','documentId','workerId','runConfigurationHash'];
 function assertIdentity(value){for(const field of identityFields)assert(value[field]!==undefined,'Missing '+field);assert.match(value.runConfigurationHash,/^[a-f0-9]{64}$/);}
@@ -112,6 +113,61 @@ await runReportedBrowserTest({scope:'isolated-sdk-engine-contracts',reportFile:p
   const result=await page.evaluate(options=>globalThis.engineContractsConsumer.run(options),{...runOptions('CONTRACT_SET'),artifactSet:true,revision:4,generation:4});await native(result.result.runId,'CONTRACT_SET');
   const build=await page.evaluate(()=>globalThis.engineContractsConsumer.lastBuild);assert.equal(build.variant,'pack-set');cases.push({name:'artifact-set-early-mount',build,identity:result.result,terminal:await stopClean()});
  },{after:['ordinary-scene-entry']});
+ if (release.runtimeAbi?.gameProbe === 1 && release.runtimeAbi?.inputScript === 1)
+  await test.step('independent-game-iteration', async () => {
+   const sample = createInputScriptDemo(release.runtimeProfile);
+   const options = {releaseRoot: editorRoot, previewUrl: previewRoot + 'preview.html',
+    launch: {kind: 'scene', source: 'project'}, configuration: {budgets: {maxCanvasDimension: 2048}}};
+   const runIteration = params => page.evaluate(input => globalThis.engineContractsConsumer.runIteration(input), params);
+   const play = async (iteration, endX) => {
+    assertIdentity(iteration.run);
+    assert.equal(iteration.run.revision, iteration.revision);
+    assert.equal(iteration.run.buildKey, iteration.build.buildKey);
+    assert.equal(iteration.build.diagnostics.filter(item => item.category === 'error').length, 0);
+    const frames = await page.evaluate(async ({runId, playerPath}) => {
+     const {runner} = globalThis.engineContractsConsumer;
+     const probe = async () => {
+      const sample = await runner.gameProbe({runId, props: [{path: playerPath, property: 'position'}]});
+      if (!sample.ok || sample.result.mode !== 'rendered') throw Error(JSON.stringify(sample));
+      const {bytes, ...image} = sample.result.image;
+      return {...sample.result, image: {...image, byteLength: bytes.byteLength}};
+     };
+     const before = await probe();
+     const input = await runner.runGameInputScript({runId, actionName: 'move_right', pressOffset: 0, releaseOffset: 4});
+     return {before, input, after: await probe()};
+    }, {runId: iteration.run.runId, playerPath: INPUT_SCRIPT_PLAYER_PATH});
+    const {before, input, after} = frames;
+    for (const [frame, x] of [[before, 64], [after, endX]]) {
+     for (const field of identityFields) assert.equal(frame.run[field], iteration.run[field]);
+     assert.deepEqual(frame.properties[0].value, {x, y: 256});
+     assert.equal(frame.image.mimeType, 'image/png');
+     assert(frame.image.byteLength > 0);
+     assert.equal(frame.image.renderSerial, frame.frame.renderSerial);
+    }
+    assert.equal(before.properties[0].instanceId, after.properties[0].instanceId);
+    assert.equal(input.ok, true);
+    assert.equal(input.receipt.run.runId, iteration.run.runId);
+    assert.equal(BigInt(input.result.up.physics) - BigInt(input.result.down.physics), 4n);
+    assert(after.frame.iteration > input.result.finishedIteration);
+    const terminal = await stopClean();
+    assert.equal(terminal.runId, iteration.run.runId);
+    return {iteration, frames, terminal};
+   };
+   const first = await play(await runIteration({...options, files: sample.files}), 128);
+   const playerFile = '/src/Player.ts';
+   const delta = {baseRevision: first.iteration.revision,
+    changed: {[playerFile]: sample.files[playerFile].replace('this.position.x + 16', 'this.position.x + 24')}};
+   const second = await runIteration({...options, delta});
+   await assert.rejects(runIteration({...options, delta}), /E_PROJECT_REVISION_CONFLICT/);
+   const old = await page.evaluate(runId => globalThis.engineContractsConsumer.runner.gameProbe({runId, screenshot: false}),
+    first.iteration.run.runId);
+   assert.equal(old.ok, false);
+   assert(['run_ended', 'not_found'].includes(old.error.code));
+   assert.notEqual(first.iteration.build.sourceHash, second.build.sourceHash);
+   assert.notEqual(first.iteration.run.runId, second.run.runId);
+   assert(second.revision > first.iteration.revision);
+   cases.push({name: 'independent-game-iteration', first, second: await play(second, 160), staleRun: old});
+  }, {after: [execution?.artifactSetAbi === 1 ? 'artifact-set-early-mount' : 'ordinary-scene-entry']});
  assert.deepEqual(pageErrors,[]);
  let report={status:'passed',scope:'isolated-sdk-engine-contracts',engineExecuted,cases,pageErrors,consoleErrors,requestFailures,
   observed:await page.evaluate(()=>({state:globalThis.engineContractsConsumer.runner?.state,events:globalThis.engineContractsConsumer.events})),sdk:{packages:Object.keys(consumer.manifests),browserInputs:consumer.browserInputs},execution,

@@ -35,6 +35,13 @@ struct Script {
     int press_offset = 0;
     int release_offset = 0;
     int action_id = 0;
+    int keycode = 0;
+    bool physical = false;
+    bool key_held = false;
+    int button = 0;
+    int x = 0;
+    int y = 0;
+    int geometry_epoch = 0;
     ObjectID tree;
     ObjectID scene;
     StringName action;
@@ -45,6 +52,8 @@ struct Script {
 };
 
 Script script;
+Ref<InputEventKey> deferred_key_release;
+ObjectID deferred_key_scene;
 uint32_t iteration = 0;
 bool in_iteration = false;
 bool closing = false;
@@ -53,6 +62,43 @@ bool active() { return script.sequence != 0 && script.terminal.length() == 0; }
 
 // Same monotonic epoch and units as the Worker control channel's deadline.
 double now_ms() { return EM_ASM_DOUBLE({ return performance.timeOrigin + performance.now(); }); }
+
+Ref<InputEventKey> send_key(bool down, bool dispatch = true) {
+    Ref<InputEventKey> event;
+    event.instantiate();
+    if (script.physical) event->set_physical_keycode(static_cast<Key>(script.keycode));
+    else event->set_keycode(static_cast<Key>(script.keycode));
+    event->set_pressed(down);
+    script.key_held = down;
+    Input::get_singleton()->godotjs_script_event(event, dispatch);
+    return event;
+}
+
+void defer_key_release() {
+    // Retire the native key now. Deliver the callback when its scene can process input.
+    deferred_key_scene = script.scene;
+    deferred_key_release = send_key(false, false);
+}
+
+MouseButtonMask mouse_mask() {
+    return static_cast<MouseButtonMask>(1 << (script.button - 1));
+}
+
+void send_button(bool down, bool dispatch = true) {
+    Input *input = Input::get_singleton();
+    Ref<InputEventMouseButton> event;
+    event.instantiate();
+    const Point2 position(script.x, script.y);
+    event->set_position(position);
+    event->set_global_position(position);
+    event->set_button_index(static_cast<MouseButton>(script.button));
+    event->set_pressed(down);
+    BitField<MouseButtonMask> mask = input->get_mouse_button_mask();
+    if (down) mask.set_flag(mouse_mask());
+    else mask.clear_flag(mouse_mask());
+    event->set_button_mask(mask);
+    input->godotjs_script_event(event, dispatch);
+}
 
 void finish(const char *reason) {
     if (!active()) return;
@@ -83,14 +129,38 @@ const char *unavailable() {
         tree->get_current_scene()->get_instance_id() != script.scene) return "scene_changed";
     if (tree->is_paused() || tree->is_suspended()) return "paused";
     if (Input::get_singleton()->is_input_disabled()) return "input_disabled";
-    const auto *action = InputMap::get_singleton()->get_action_map().getptr(script.action);
-    if (!action || action->id != script.action_id) return "action_changed";
+    if (script.action_id) {
+        const auto *action = InputMap::get_singleton()->get_action_map().getptr(script.action);
+        if (!action || action->id != script.action_id) return "action_changed";
+    }
     if (now_ms() >= script.deadline_ms) return "timeout";
     return nullptr;
 }
 
 bool outside_callbacks() {
     return Thread::is_main_thread() && !in_iteration && !Main::is_iterating() && !NativeWorld::inside_interop();
+}
+
+bool read_command(const Dictionary &command, String &name) {
+    if (!read_integer(command, "pressOffset", -1, 0, 119, script.press_offset)) return false;
+    if (command.has("button")) {
+        return keys(command, {"button", "x", "y", "geometryEpoch", "pressOffset", "releaseOffset", "deadline"}) &&
+            read_integer(command, "releaseOffset", -1, script.press_offset, script.press_offset, script.release_offset) &&
+            read_integer(command, "button", -1, 1, 3, script.button) &&
+            read_integer(command, "x", -1, 0, 65535, script.x) &&
+            read_integer(command, "y", -1, 0, 65535, script.y) &&
+            read_integer(command, "geometryEpoch", -1, 1, 0x7fffffff, script.geometry_epoch);
+    }
+    if (!read_integer(command, "releaseOffset", -1, script.press_offset + 1, 120, script.release_offset)) return false;
+    if (command.has("keycode")) {
+        if (!keys(command, {"keycode", "physical", "pressOffset", "releaseOffset", "deadline"}) ||
+            !read_integer(command, "keycode", -1, 1, 0x7fffff, script.keycode) ||
+            command["physical"].get_type() != Variant::BOOL) return false;
+        script.physical = command["physical"];
+        return true;
+    }
+    return keys(command, {"actionName", "pressOffset", "releaseOffset", "deadline"}) &&
+        valid_name(command["actionName"], name) && name.utf8().length() <= 128;
 }
 } // namespace
 
@@ -109,10 +179,7 @@ uint32_t stage(uint32_t sequence, uint32_t size, uint32_t remaining_us) {
     String name;
     if (!failure && (remaining_us > 30000000 || size > buffer_size ||
         !unicode_escapes_valid(exchange_buffer, size) || !parse_request(exchange_buffer, size, command) ||
-        !keys(command, {"actionName", "pressOffset", "releaseOffset", "deadline"}) ||
-        !valid_name(command["actionName"], name) || name.utf8().length() > 128 ||
-        !read_integer(command, "pressOffset", -1, 0, 119, script.press_offset) ||
-        !read_integer(command, "releaseOffset", -1, script.press_offset + 1, 120, script.release_offset))) {
+        !read_command(command, name))) {
         failure = "invalid_input";
     }
     if (!failure) {
@@ -125,16 +192,16 @@ uint32_t stage(uint32_t sequence, uint32_t size, uint32_t remaining_us) {
             else if (now_ms() >= script.deadline_ms) failure = "timeout";
         }
     }
-    if (!failure) {
+    if (!failure && !name.is_empty()) {
         script.action = StringName(name);
         const auto *action = InputMap::get_singleton()->get_action_map().getptr(script.action);
         if (!action) failure = "unknown_action";
-        else {
-            script.action_id = action->id;
-            script.tree = tree->get_instance_id();
-            script.scene = tree->get_current_scene()->get_instance_id();
-            failure = unavailable();
-        }
+        else script.action_id = action->id;
+    }
+    if (!failure) {
+        script.tree = tree->get_instance_id();
+        script.scene = tree->get_current_scene()->get_instance_id();
+        failure = unavailable();
     }
     if (failure) finish(failure);
     return 1;
@@ -143,10 +210,14 @@ uint32_t stage(uint32_t sequence, uint32_t size, uint32_t remaining_us) {
 void cancel(uint32_t sequence, uint32_t reason) {
     if (sequence != script.sequence || !outside_callbacks()) return;
     finish(reason == 1 ? "timeout" : reason == 2 ? "run_ended" : reason == 3 ? "hidden" : "cancelled");
+    if (script.key_held) {
+        if (reason == 2) send_key(false, false);
+        else defer_key_release();
+    }
 }
 
 uint32_t take(uint32_t sequence) {
-    if (sequence != script.sequence || !outside_callbacks() || !script.terminal.length()) return 0;
+    if (sequence != script.sequence || !outside_callbacks() || !script.terminal.length() || script.key_held) return 0;
     const uint32_t size = script.terminal.length();
     if (size > buffer_size) return 0;
     std::memcpy(exchange_buffer, script.terminal.get_data(), size);
@@ -157,6 +228,18 @@ uint32_t take(uint32_t sequence) {
 void begin_iteration(uint32_t serial) {
     iteration = serial;
     in_iteration = true;
+    const SceneTree *tree = SceneTree::get_singleton();
+    if (tree && (tree->is_paused() || tree->is_suspended())) {
+        if (script.key_held && !active()) defer_key_release();
+        return;
+    }
+    if (deferred_key_release.is_valid()) {
+        Ref<InputEventKey> event = deferred_key_release;
+        deferred_key_release.unref();
+        if (tree && tree->get_current_scene() && tree->get_current_scene()->get_instance_id() == deferred_key_scene)
+            Input::get_singleton()->godotjs_script_event(event, true);
+    }
+    if (script.key_held && !active()) send_key(false);
 }
 
 void before_physics() {
@@ -164,8 +247,35 @@ void before_physics() {
     if (const char *failure = unavailable()) { finish(failure); return; }
     const uint64_t frame = Engine::get_singleton()->get_physics_frames() + 1;
     if (!script.base) script.base = frame;
-    if (frame == script.base + script.press_offset) script.down = {frame, iteration};
-    if (frame == script.base + script.release_offset) script.up = {frame, iteration};
+    Input *input = Input::get_singleton();
+    if (frame == script.base + script.press_offset) {
+        if (script.button) {
+            const bool fits = EM_ASM_INT({
+                return Module['godotInputScriptClickFits'] && Module['godotInputScriptClickFits']($0, $1, $2);
+            }, script.geometry_epoch, script.x, script.y);
+            if (!fits) { finish("geometry_conflict"); return; }
+            if (input->get_mouse_button_mask().has_flag(mouse_mask())) { finish("busy"); return; }
+        }
+        if (script.keycode) {
+            const Key key = static_cast<Key>(script.keycode);
+            if (script.physical ? input->is_physical_key_pressed(key) : input->is_key_pressed(key)) {
+                finish("busy");
+                return;
+            }
+        }
+        script.down = {frame, iteration};
+        if (script.keycode) send_key(true);
+        if (script.button) {
+            send_button(true);
+            if (active()) script.up = {frame, iteration};
+            send_button(false, active());
+            return;
+        }
+    }
+    if (active() && frame == script.base + script.release_offset) {
+        script.up = {frame, iteration};
+        if (script.key_held) send_key(false);
+    }
 }
 
 void after_physics() {
@@ -178,9 +288,12 @@ void after_physics() {
 void end_iteration(bool exiting) {
     closing = closing || exiting;
     in_iteration = false;
-    if (!active()) return;
-    if (const char *failure = unavailable()) finish(failure);
-    else if (script.release_step_completed) finish(nullptr);
+    if (active()) {
+        if (const char *failure = unavailable()) finish(failure);
+        else if (script.release_step_completed) finish(nullptr);
+    }
+    if (exiting && script.key_held) send_key(false, false);
+    if (exiting) deferred_key_release.unref();
 }
 
 bool pressed(const StringName &action) {
@@ -192,7 +305,10 @@ bool pressed(const StringName &action) {
 
 void pause() { finish("paused"); }
 void scene_will_change(const Node *current, const Node *next) {
-    if (current != next) finish("scene_changed");
+    if (current != next) {
+        deferred_key_release.unref();
+        finish("scene_changed");
+    }
 }
 void reset() { finish("input_reset"); }
 void release(const StringName &action) {

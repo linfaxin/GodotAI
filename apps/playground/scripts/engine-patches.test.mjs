@@ -24,8 +24,10 @@ async function fixture(root){
   'scene/main/node.h':await readFile(new URL('../../../scripts/jsb.react-browser/test/fixtures/godot-4.6.1-node.h',import.meta.url),'utf8'),
   'scene/main/node.cpp':await readFile(new URL('../../../scripts/jsb.react-browser/test/fixtures/godot-4.6.1-node.cpp',import.meta.url),'utf8'),
   'core/object/object.cpp':await readFile(new URL('../../../scripts/jsb.react-browser/test/fixtures/godot-4.6.1-object.cpp',import.meta.url),'utf8'),
-  'core/input/input.h':'class Input : public Object {\n\tvoid release_pressed_events();\n};\n',
+  'core/input/input.h':'class Input : public Object {\n\tvoid _parse_input_event_impl(const Ref<InputEvent> &p_event, bool p_is_emulated);\n\tvoid release_pressed_events();\n\tvoid flush_buffered_events();\n};\n',
   'core/input/input.cpp':[
+   'void Input::_parse_input_event_impl(const Ref<InputEvent> &p_event, bool p_is_emulated) {',
+   '\tif (event_dispatch_function) {', '\t\t_THREAD_SAFE_UNLOCK_', '\t\tevent_dispatch_function(p_event);', '\t}', '}',
    'void Input::release_pressed_events() {', '}', 'void Input::_bind_methods() {',
    '\tClassDB::bind_method(D_METHOD("is_action_pressed", "action", "exact_match"), &Input::is_action_pressed, DEFVAL(false));',
    '\tClassDB::bind_method(D_METHOD("get_action_strength", "action", "exact_match"), &Input::get_action_strength, DEFVAL(false));',

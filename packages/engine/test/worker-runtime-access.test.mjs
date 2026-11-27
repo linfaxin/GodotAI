@@ -155,6 +155,10 @@ test('input cancellation keeps the original slot until a matching terminal retir
   const {runner, run, port, reply} = await runnerFixture(t, {inputScript: true});
   const command = {runId: run.runId, ...script};
   assert.deepEqual(runner.inputScriptState(run.runId), {supported: true, ready: true});
+  const oldTemplate = await runner.runGameInputScript({runId: run.runId, keycode: 4194321, physical: true,
+    pressOffset: 0, releaseOffset: 4});
+  assert.equal(oldTemplate.error.code, 'unsupported');
+  assert.equal(oldTemplate.receipt, undefined);
   const abort = new AbortController();
   const posted = once(port, 'message');
   const pending = runner.runGameInputScript(command, abort.signal);
