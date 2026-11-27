@@ -78,6 +78,8 @@ const edits = {
 }`) + '\n\nvoid Input::_parse_input_event_impl(const Ref<InputEvent> &p_event, bool p_is_emulated, bool p_dispatch) {'],
     ['\tif (event_dispatch_function) {\n\t\t_THREAD_SAFE_UNLOCK_\n\t\tevent_dispatch_function(p_event);',
       '\tif (p_dispatch && event_dispatch_function) {\n\t\t_THREAD_SAFE_UNLOCK_\n\t\tevent_dispatch_function(p_event);'],
+    ['if (event_dispatch_function && emulate_touch_from_mouse && !p_is_emulated && mb->get_button_index() == MouseButton::LEFT)',
+      'if (p_dispatch && event_dispatch_function && emulate_touch_from_mouse && !p_is_emulated && mb->get_button_index() == MouseButton::LEFT)'],
   ],
   'scene/main/scene_tree.cpp': [
     ['#include "core/config/project_settings.h"', include + '\n' + guard(`namespace jsb::input_script {

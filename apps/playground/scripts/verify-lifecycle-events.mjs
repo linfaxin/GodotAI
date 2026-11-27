@@ -68,6 +68,8 @@ export function verifyDiagnosticRepair(report, first, startIndex, waitIndex) {
   assert.equal(invalid.check.sourceHash, invalidCheck.sourceHash);
   assert.equal(invalid.run, null);
   assert(invalid.check.diagnostics.observed);
+  assert(invalidCheck.diagnostics?.observed && invalidCheck.diagnostics.items.some(item => item.code === 2322 &&
+    item.location?.file === '/src/Player.ts' && item.location.line === 2), 'Script check did not locate TS2322');
   assert(invalid.check.diagnostics.items.some(item => item.code === 2322 &&
     item.location?.file === '/src/Player.ts' && item.location.line === 2), 'Missing located TS2322');
   assert.equal(rejected.accepted, true);
@@ -79,6 +81,8 @@ export function verifyDiagnosticRepair(report, first, startIndex, waitIndex) {
   assert.equal(failed.build.sourceHash, invalidCheck.sourceHash);
   assert(failed.build.diagnostics.items.some(item => item.code === 2322));
   assert.equal(failed.run, null);
+  assert.equal(repairedCheck.diagnostics?.observed, true);
+  assert.equal(repairedCheck.diagnostics.counts.error, 0, 'Script check still reports errors after repair');
   assert.equal(repaired.check.diagnostics.observed, true);
   assert.equal(repaired.check.diagnostics.counts.error, 0);
   assert.notEqual(first.sourceHash, invalidCheck.sourceHash);

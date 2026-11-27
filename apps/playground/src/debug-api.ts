@@ -231,9 +231,9 @@ const unknownDiagnostics = (): DebugDiagnostics => ({observed: false, items: [],
 
 function buildDiagnostics(value: unknown, path?: string): DebugDiagnostics {
   if (!Array.isArray(value)) return unknownDiagnostics();
-  const counts = {error: 0, warning: 0, info: 0};
-  const items: DebugDiagnostic[] = [];
-  let bytes = 2; // JSON array delimiters
+  const bySeverity: Record<DebugDiagnostic['severity'], Record<string, unknown>[]> = {
+    error: [], warning: [], info: [],
+  };
   for (const raw of value) {
     const item = record(raw);
     const severity = item?.category;
@@ -241,26 +241,34 @@ function buildDiagnostics(value: unknown, path?: string): DebugDiagnostics {
       return unknownDiagnostics();
     }
     if (path !== undefined && item.file !== path) continue;
-    counts[severity]++;
-    if (items.length >= MAX_DIAGNOSTICS) continue;
-
-    const location = diagnosticLocation(item);
-    const code = item.code === 0 && !item.file && item.line === 0 && item.column === 0 ? undefined : diagnosticCode(item.code);
-    const diagnostic: DebugDiagnostic = {
-      severity,
-      ...(code === undefined ? {} : {code}),
-      ...(Object.keys(location).length ? {location} : {}),
-    };
-    if (item.message.length <= MAX_DIAGNOSTIC_LIST_BYTES) diagnostic.message = item.message;
-    if (diagnostic.message === undefined || bytesOf(diagnostic) + 2 > MAX_DIAGNOSTIC_LIST_BYTES) {
-      delete diagnostic.message;
-      diagnostic.omitted = true;
-    }
-    const cost = bytesOf(diagnostic) + (items.length > 0 ? 1 : 0);
-    if (bytes + cost > MAX_DIAGNOSTIC_LIST_BYTES) continue;
-    items.push(diagnostic);
-    bytes += cost;
+    bySeverity[severity].push(item);
   }
+
+  const items: DebugDiagnostic[] = [];
+  let bytes = 2; // JSON array delimiters
+  for (const severity of ['error', 'warning', 'info'] as const) {
+    for (const item of bySeverity[severity]) {
+      if (items.length >= MAX_DIAGNOSTICS) break;
+      const location = diagnosticLocation(item);
+      const code = item.code === 0 && !item.file && item.line === 0 && item.column === 0 ? undefined : diagnosticCode(item.code);
+      const diagnostic: DebugDiagnostic = {
+        severity,
+        ...(code === undefined ? {} : {code}),
+        ...(Object.keys(location).length ? {location} : {}),
+      };
+      const message = item.message as string;
+      if (message.length <= MAX_DIAGNOSTIC_LIST_BYTES) diagnostic.message = message;
+      if (diagnostic.message === undefined || bytesOf(diagnostic) + 2 > MAX_DIAGNOSTIC_LIST_BYTES) {
+        delete diagnostic.message;
+        diagnostic.omitted = true;
+      }
+      const cost = bytesOf(diagnostic) + (items.length > 0 ? 1 : 0);
+      if (bytes + cost > MAX_DIAGNOSTIC_LIST_BYTES) continue;
+      items.push(diagnostic);
+      bytes += cost;
+    }
+  }
+  const counts = {error: bySeverity.error.length, warning: bySeverity.warning.length, info: bySeverity.info.length};
   return {observed: true, counts, items, omittedCount: counts.error + counts.warning + counts.info - items.length};
 }
 

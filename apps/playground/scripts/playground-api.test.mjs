@@ -219,11 +219,11 @@ test('Summer diagnostics follows the newest attempt for the captured editor vers
   assert.deepEqual(calls, {check: 0, play: 0, stop: []});
 });
 
-test('Summer diagnostics preserves source counts, retained order and exit evidence without leaking stacks', () => {
+test('diagnostics prioritize errors before truncation and preserve source counts and exit evidence', () => {
   const {agent, api, recorder, start} = fixture();
   const report = [typeError, {...typeError, code: 9000}];
-  const input = [{...typeError, category: 'warning'}, ...report,
-    ...Array.from({length: 100}, () => ({...typeError, category: 'info'}))];
+  const input = [...Array.from({length: 100}, () => ({...typeError, category: 'warning'})),
+    ...report, {...typeError, category: 'info'}];
   recorder.finishCheck(recorder.startCheck(projectId, editorRevision), {diagnostics: input, sourceHash});
   const attemptId = recorder.startBuild(projectId, editorRevision);
   const original = start(attemptId);
@@ -240,11 +240,11 @@ test('Summer diagnostics preserves source counts, retained order and exit eviden
   assert.equal(data.run.exit.diagnostic.line, 4);
   assert.equal(Object.hasOwn(data.run.exit.diagnostic, 'stack'), false);
   assert.equal(unwrap(api.get_run({runId: original.identity.runId})).exit.report.diagnostic.stack, 'retained only on the run');
-  assert.deepEqual(data.check.diagnostics.counts, {warning: 1, error: 2, info: 100});
+  assert.deepEqual(data.check.diagnostics.counts, {warning: 100, error: 2, info: 1});
   assert.equal(data.check.diagnostics.omittedCount, 3);
   assert.deepEqual(data.check.diagnostics.items.slice(0, 3).map(item => [item.severity, item.code]),
     [['error', 2322], ['error', 9000], ['warning', 2322]]);
-  assert.equal(unwrap(api.get_diagnostics({projectId, editorRevision})).check.diagnostics.items[0].severity, 'warning');
+  assert.deepEqual(unwrap(api.get_diagnostics({projectId, editorRevision})).check.diagnostics, data.check.diagnostics);
   assert.equal(data.build.diagnostics.counts.error, 0);
 
   for (let revision = editorRevision + 1; revision <= editorRevision + 2; revision++) {

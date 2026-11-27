@@ -29,13 +29,13 @@ test('repair verification binds diagnostics and recovered run to the recorded ve
   const steps = [
     ['initial', 'engine.play', {projectId, editorRevision: 1, accepted: true, attemptId: 'initial'}],
     ['original', 'wait_for_event', {outcome: 'reached', run: original}],
-    ['invalidCheck', 'check', broken],
+    ['invalidCheck', 'check', {...broken, diagnostics}],
     ['invalid', 'engine.get_diagnostics', {...broken, check: {...broken, checkId: 'latest-bad', diagnostics}, run: null}],
     ['rejected', 'engine.play', {...broken, accepted: true, attemptId: 'failed'}],
     ['noSession', 'wait_for_event', {outcome: 'no_session', build: {attemptId: 'failed'}}],
     ['failed', 'engine.get_diagnostics', {...broken,
       build: {attemptId: 'failed', status: 'failed', sourceHash: brokenHash, diagnostics}, run: null}],
-    ['repairedCheck', 'check', repaired],
+    ['repairedCheck', 'check', check],
     ['repaired', 'engine.get_diagnostics', {...repaired, check: {...check, checkId: 'latest-good'}}],
     ['cursor', 'engine.recent_events', {}],
     ['start', 'engine.wait_for_event', {}],
@@ -63,6 +63,14 @@ test('repair verification binds diagnostics and recovered run to the recorded ve
     call.reply.result = {data: {...data, path, status: 'completed'}};
   }
   verifyDiagnosticRepair(scopedEvidence, first, 9, 10);
+  for (const [index, replacement, message] of [
+    [2, {...diagnostics, items: []}, /Script check did not locate TS2322/],
+    [7, {...diagnostics, counts: {error: 1}}, /Script check still reports errors/],
+  ]) {
+    const edited = structuredClone(scopedEvidence);
+    edited.calls[index].reply.result.data.diagnostics = replacement;
+    assert.throws(() => verifyDiagnosticRepair(edited, first, 9, 10), message);
+  }
   scopedEvidence.calls[2].reply.result.data.path = 'res://src/Other.ts';
   assert.throws(() => verifyDiagnosticRepair(scopedEvidence, first, 9, 10));
 });
