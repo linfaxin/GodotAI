@@ -117,8 +117,13 @@ func _input(event):
   }).map(([name, text]) => [name, encoder.encode(text)]));
 };
 
+const keyPauseMode = 'input-key-pause-resume';
+const keyCancelMode = 'input-key-cancel-no-raf';
+const inputFixtureModes = [...inputModes, keyPauseMode, keyCancelMode];
+
 function inputScriptFixture(mode) {
   const camel = mode === 'input-camel';
+  const usesKey = mode === keyPauseMode || mode === keyCancelMode;
   const ticks = mode === 'input-zero' ? 15 : mode === 'input-multi' ? 240 : 60;
   const player = [
     'const {Input, Node2D, Vector2} = require("godot");',
@@ -171,26 +176,52 @@ function inputScriptFixture(mode) {
   if (ticks !== 60) main.push('func _process(_delta):', '    var count = Engine.get_physics_frames() - last_step',
     '    last_step = Engine.get_physics_frames()', `    if not cadence_seen and count ${ticks < 60 ? '== 0' : '> 1'}:`,
     '        cadence_seen = true', '        print("G0_PHYSICS_CADENCE=", count)');
+  if (usesKey) main.push(
+    'var key_held := false',
+    'func _input(event):',
+    '    if event is InputEventKey and event.physical_keycode == KEY_RIGHT:',
+    '        key_held = event.pressed',
+    '        if not key_held:',
+    '            print("G0_KEY_RELEASED")',
+    'func _physics_process(_delta):',
+    '    if not key_held:',
+    '        return',
+    '    $Player.position.x += 16',
+    '    if not edge_seen:',
+    '        edge_seen = true',
+    ...(mode === keyCancelMode ? [
+      '        JavaScriptBridge.eval("globalThis.g0PauseAnimation(2250)")',
+      '        print("G0_PAUSED_RAF")',
+    ] : [
+      '        get_tree().paused = true',
+      '        await get_tree().create_timer(0.4).timeout',
+      '        get_tree().paused = false',
+      '        print("G0_KEY_RESUMED")',
+    ]));
   return new Map(Object.entries({
     'res://project.godot': project,
     'res://main.tscn': '[gd_scene load_steps=3 format=3]\n[ext_resource type="Script" path="res://main.gd" id="1"]\n[ext_resource type="Script" path="res://Player.ts" id="2"]\n[node name="Main" type="Node2D"]\nscript = ExtResource("1")\n[node name="Player" type="Node2D" parent="."]\nposition = Vector2(64, 120)\nscript = ExtResource("2")\n',
     'res://main.gd': main.join('\n') + '\n',
     'res://replacement.tscn': '[gd_scene format=3]\n[node name="Replacement" type="Node2D"]\n',
     'res://Player.ts': 'export default class Player {}',
-    'res://.godot/GodotJS/Player.js': player,
+    'res://.godot/GodotJS/Player.js': usesKey
+      ? 'exports.default = class Player extends require("godot").Node2D {};'
+      : player,
     'res://.godot/global_script_class_cache.cfg': 'list=Array[Dictionary]([])\n',
   }).map(([name, text]) => [name, encoder.encode(text)]));
 }
 
 async function verifyInputScripts(page, evidence) {
-  for (const mode of inputModes) {
-    const sample = await page.evaluate(async mode => {
+  for (const mode of inputFixtureModes) {
+    const sample = await page.evaluate(async ({mode, keyPauseMode, keyCancelMode}) => {
       const runner = window.probeRunner;
       const run = await window.startProbeFixture(mode), {runId} = run;
       const query = {runId, props: [{path: '/root/Main/Player', property: 'position'}], screenshot: false};
       const read = () => runner.gameProbe(query);
       const before = await read();
-      const cancels = mode.startsWith('input-cancel') || mode === 'input-early-cancel';
+      const keyCancel = mode === keyCancelMode;
+      const usesKey = mode === keyPauseMode || keyCancel;
+      const cancels = mode.startsWith('input-cancel') || mode === 'input-early-cancel' || keyCancel;
       const stops = mode === 'input-stop';
       const expires = mode === 'input-expiry';
       const pressOffset = mode === 'input-early-cancel' ? 119 : mode === 'input-zero' ? 2 : 0;
@@ -205,9 +236,11 @@ async function verifyInputScripts(page, evidence) {
           }
         });
       }) : null;
-      const pending = runner.runGameInputScript(expires ? {...request, timeoutMs: 350} : request, controller.signal);
+      const pending = runner.runGameInputScript(usesKey
+        ? {runId, keycode: 4194321, physical: true, pressOffset: 0, releaseOffset: 120}
+        : expires ? {...request, timeoutMs: 350} : request, controller.signal);
       let stopping;
-      if (mode === 'input-cancel-no-raf') {
+      if (mode === 'input-cancel-no-raf' || keyCancel) {
         for (let index = 0; index < 80 && !window.probeLogs.some(log => log.runId === runId && log.text === 'G0_PAUSED_RAF'); index++) await wait();
         if (!window.probeLogs.some(log => log.runId === runId && log.text === 'G0_PAUSED_RAF')) throw Error('No RAF pause evidence');
         controller.abort();
@@ -230,13 +263,38 @@ async function verifyInputScripts(page, evidence) {
           await wait();
         }
       }
+      if (usesKey) {
+        for (let index = 0; index < 350; index++) {
+          if (window.probeLogs.some(log => log.runId === runId && log.text === 'G0_KEY_RELEASED')) break;
+          await wait();
+        }
+      }
       const after = onExit || stopping ? null : await read();
       const settled = after ? await read() : null;
       const exit = await (onExit ?? stopping ?? runner.stopRun(runId));
       const markers = window.probeLogs.filter(log => log.runId === runId && log.text?.startsWith('G0_')).map(log => log.text);
       return {run, before, input, retired, after, settled, exit, markers};
-    }, mode);
+    }, {mode, keyPauseMode, keyCancelMode});
     evidence.engineExecuted = true;
+    if (mode === keyPauseMode || mode === keyCancelMode) {
+      if (mode === keyPauseMode) {
+        evidence.keyPauseResume = sample;
+        assert.equal(sample.input.outcome, 'interrupted');
+        assert.equal(sample.input.terminal.reason, 'paused');
+        assert.deepEqual(sample.markers, ['G0_KEY_RESUMED', 'G0_KEY_RELEASED']);
+      } else {
+        evidence.keyCancelWithoutFrames = sample;
+        assert.equal(sample.input.outcome, 'outcome_unknown');
+        assert.equal(sample.retired.error?.code, 'unknown_action', 'The slot must retire before frames resume');
+        assert.deepEqual(sample.markers, ['G0_PAUSED_RAF', 'G0_KEY_RELEASED']);
+      }
+      const x = sample.after.result.properties[0].value.x;
+      if (mode === keyPauseMode) assert.equal(x, 80);
+      else assert(x > 64);
+      assert.equal(sample.settled.result.properties[0].value.x, x);
+      assert.equal(sample.exit.hostCleanup.status, 'complete');
+      continue;
+    }
     evidence.cases.push({name: mode, ...sample});
     verifyInputScriptCase(evidence.cases.at(-1));
   }
@@ -255,10 +313,10 @@ try {
     worklets: ['godot.audio.worklet.js', 'godot.audio.position.worklet.js'].map(name => ({name, ...fromTemplate(name, 'text/javascript')})),
     runtimeWorker: asset('runtime.worker.js', await bundle(`
       import {installWorkerRuntime} from '@godot-js/engine/browser/dedicated/worker-runtime';
-      ${inputOnly ? `globalThis.g0PauseAnimation = () => {
+      ${inputOnly ? `globalThis.g0PauseAnimation = (delay = 600) => {
         const schedule = globalThis.requestAnimationFrame.bind(globalThis);
-        globalThis.requestAnimationFrame = callback => { setTimeout(() => schedule(callback), 600); return 0; };
-        setTimeout(() => { globalThis.requestAnimationFrame = schedule; }, 550);
+        globalThis.requestAnimationFrame = callback => { setTimeout(() => schedule(callback), delay); return 0; };
+        setTimeout(() => { globalThis.requestAnimationFrame = schedule; }, delay - 50);
       };` : ''}
       installWorkerRuntime();`)),
     runtimeAudioWorklet: asset('runtime.audio.worklet.js', await bundle('import "../../packages/engine/src/browser/dedicated/worker-audio-worklet.ts";')),
@@ -267,7 +325,7 @@ try {
     host: [release.runtimeWorker.sha256, release.runtimeAudioWorklet.sha256], abi: release.runtimeAbi}));
   evidence.releaseId = release.releaseId;
   const artifacts = {};
-  const modes = inputOnly ? inputModes :
+  const modes = inputOnly ? inputFixtureModes :
     ['live', 'paused-render', 'manual', 'pre-force', 'post-force', 'non-root', 'direct-to-screen', 'quit'];
   for (const mode of modes) {
     const files = fixture(mode), pack = packProject(files).pack;

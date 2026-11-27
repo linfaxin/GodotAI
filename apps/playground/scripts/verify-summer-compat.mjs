@@ -7,6 +7,8 @@ import {promisify} from 'node:util';
 import {canonical, digest, siteIdentity} from './site-evidence.mjs';
 import {operationResult, checkUnknownAction, checkProbeImageFrame, parseProbePosition} from './summer-native-receipt.mjs';
 import {verifyInputScriptG0} from './verify-input-script-g0.mjs';
+import {verifyCleanExit} from './verify-worker-exit.mjs';
+export {verifyCleanExit};
 
 const profile = 'full-engine-v1';
 const target = 'template_debug';
@@ -111,22 +113,6 @@ export function verifyBrowserReportIdentity(identity, preflight, report) {
 export function verifyRestartSource(first, restart) {
   assert.match(first.sourceHash, hashPattern, 'Missing original source hash');
   assert.equal(first.sourceHash, restart.sourceHash, 'Restart used a different source hash');
-}
-
-export function verifyCleanExit(run, exit) {
-  const {runId} = run;
-  assert.equal(exit?.evidence, 'host-report', `Missing host exit receipt: ${runId}`);
-  assert.deepEqual(fields(exit.report ?? {}, runFields), fields(run, runFields), 'Exit receipt belongs to a different Worker session');
-  const facts = exit.report?.sessionFacts;
-  // Apply the clean-exit conditions from packages/engine/src/session-facts.ts to the archived facts.
-  assert.equal(facts?.schemaVersion, 1, `Missing or unsupported session facts: ${runId}`);
-  assert.equal(facts.failure, undefined, `Runtime reported a failure: ${runId}`);
-  assert.deepEqual(facts.nativeExit, {code: 0}, `Native exit did not succeed: ${runId}`);
-  assert.equal(facts.hostCleanup, 'complete', `Host cleanup was incomplete: ${runId}`);
-  assert.equal(facts.forcedTerminationIssued, false, `Expected a cooperative exit: ${runId}`);
-  assert.equal(facts.runtimeSummary, 'sealed', `Runtime summary was not sealed: ${runId}`);
-  assert(['complete', 'not-applicable'].includes(facts.entryCleanup), `Entry cleanup was incomplete: ${runId}`);
-  assert.equal(exit.report.reason, 'clean-exit', `Expected a clean exit: ${runId}`);
 }
 
 export function verifyBrowser(report, supported) {

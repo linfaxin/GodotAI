@@ -129,6 +129,8 @@ function resultFacts(call: ConsoleCall, input: unknown, reply: unknown, submitte
     facts.run = {identity:run,...(projectId ? {projectId} : {}),...(nonempty(runData.attemptId) ? {attemptId:runData.attemptId} : {})};
     facts.sourceAnchor.activeRunId = run.runId;facts.sourceAnchor.activeRunRevision = run.revision;
     facts.sourceAnchor.activeRunProjectId = projectId ?? null;
+    const epoch = data.image?.geometry?.epoch;
+    if (op === 'engine.game_probe' && Number.isSafeInteger(epoch) && epoch > 0) facts.geometryEpoch = epoch;
   }
   if (!call.truncated && (op === 'engine.recent_events' || op === 'engine.wait_for_event') &&
       nonempty(data.stream_id) && Number.isSafeInteger(data.next_seq) && data.next_seq >= 0) {
@@ -338,6 +340,9 @@ export function createApiConsoleSession(api: PlaygroundApi, hooks: ConsoleHooks,
           source.sourceAnchor.pendingAttemptId!==current.anchor.pendingAttemptId){
           missing('请从当前项目的稳定运行选择回执');return;
         }
+        if (id === 'engine.game_input' && source.geometryEpoch && Array.isArray(next.events) &&
+            next.events.length === 1 && object(next.events[0]) && next.events[0].type === 'mouse_click')
+          next.events[0].geometry_epoch = source.geometryEpoch;
         anchor=current.anchor;
         draft().runSourceCallId=selection.sourceCallId;
       }else if(id==='check'){

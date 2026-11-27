@@ -81,7 +81,7 @@ test('Summer input validates the supported subset and captures its original proj
   const dispatch = createSummerDispatcher(backend);
   for (const [extra, code] of [
     [{instance: 'other'}, 'unsupported'], [{action: 'record_start'}, 'unsupported'], [{clock: 'ms'}, 'unsupported'],
-    [{wait: false}, 'unsupported'], [{events: [{...edges[0], type: 'key'}, edges[1]]}, 'unsupported'],
+    [{wait: false}, 'unsupported'], [{events: [{...edges[0], type: 'key'}, edges[1]]}, 'invalid_input'],
     [{events: [{...edges[0], strength: 0.5}, edges[1]]}, 'unsupported'], [{events: [edges[0], {...edges[1], at_frame: 121}]}, 'invalid_input'],
     [{events: [edges[0], {...edges[1], action: 'other'}]}, 'invalid_input'], [{events: [edges[0], {...edges[1], at_frame: 0}]}, 'invalid_input'],
   ]) assert.equal((await dispatch(command(extra))).error.code, code);
@@ -140,13 +140,38 @@ test('Summer input identifies unsupported timing and event types before the subs
   const reply = events => dispatch({op:'engine.game_input',input:{action:'script',events}});
   const action = {type:'action',action:'jump',at_frame:0};
   for (const [event, parameter] of [[{...action,hold_ms:50},'events[0].hold_ms'],
-    [{...action,at_ms:25},'events[0].at_ms'],[{type:'key',keycode:32},'events[0].type']]) {
+    [{...action,at_ms:25},'events[0].at_ms'],[{type:'axis'},'events[0].type']]) {
     const result = await reply([event]);
     assert.equal(result.error.code, 'unsupported');
     assert.equal(result.error.details.godotai.parameter, parameter);
   }
   assert.equal((await reply([action])).error.code, 'invalid_input');
   assert.deepEqual(calls, []);
+});
+
+test('physical keys and clicks retain their native frame and geometry targets', async () => {
+  const {backend, context} = fixture();
+  const sent = [];
+  backend.getRun = () => ok({projectId: context.projectId, state: 'running'});
+  backend.inputScript = async input => {
+    sent.push(input);
+    return error('unsupported', 'sdk');
+  };
+  const dispatch = createSummerDispatcher(backend);
+  const send = (...events) => dispatch({op: 'engine.game_input', input: {action: 'script', events}});
+  const down = {type: 'key', physical_keycode: 4194321, pressed: true};
+  const up = {...down, pressed: false, at_frame: 4};
+  const click = {type: 'mouse_click', position: [24, 24], button: 1, geometry_epoch: 5, at_frame: 8};
+  await send(down, up);
+  await send(click);
+  assert.deepEqual(sent, [
+    {runId: identity.runId, keycode: 4194321, physical: true, pressOffset: 0, releaseOffset: 4},
+    {runId: identity.runId, button: 1, x: 24, y: 24, geometryEpoch: 5, pressOffset: 8, releaseOffset: 8},
+  ]);
+  for (const events of [[down], [down, {...up, keycode: 4194321}], [{...click, position: [24, -1]}],
+    [{...click, geometry_epoch: 0}], [{...click, button: null}], [{...click, at_frame: null}]])
+    assert.equal((await send(...events)).error.code, 'invalid_input');
+  assert.equal(sent.length, 2);
 });
 
 test('tree uses Summer subset defaults and inspect never invokes script getters', async () => {

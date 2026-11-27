@@ -12,16 +12,20 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8', {fatal: true, ignoreBOM: true});
 const readAborted = Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'aborted')!.get!;
 
-export type InputScriptCommand = {actionName: string; pressOffset: number; releaseOffset: number};
+type InputOffsets = {pressOffset: number; releaseOffset: number};
+export type InputScriptCommand = InputOffsets & (
+  {actionName: string} | {keycode: number; physical: boolean} |
+  {button: number; x: number; y: number; geometryEpoch?: number}
+);
 export type InputScriptInput = InputScriptCommand & {runId: string; timeoutMs?: number};
-export type InputScriptState = {supported: boolean | null; ready: boolean};
+export type InputScriptState = {supported: boolean | null; ready: boolean; devices?: true};
 export type InputScriptKey = {releaseId: string; requestId: string; sequence: number};
 export type InputScriptRequest = InputScriptKey & {command: InputScriptCommand; deadline: number};
 export type InputScriptReceipt = InputScriptKey & {run: WorkerRunIdentity};
 type Edge = {physics: string; iteration: number};
 const reasons = ['invalid_input', 'not_found', 'not_ready', 'unsupported', 'busy', 'timeout', 'cancelled', 'run_ended',
   'dispatch_failed', 'unknown_action', 'action_changed', 'action_released', 'scene_changed', 'input_reset',
-  'input_disabled', 'paused', 'hidden', 'transport_lost'] as const;
+  'input_disabled', 'paused', 'hidden', 'geometry_conflict', 'transport_lost'] as const;
 export type InputScriptReason = typeof reasons[number];
 type KnownFailure = {kind: 'not_executed'; source: 'host' | 'worker' | 'native'; reason: InputScriptReason};
 type Executed = {source: 'native'; base: string; down: Edge};
@@ -53,17 +57,32 @@ function integer(value: unknown, min: number, max: number): value is number {
 }
 
 export function readInputScriptCommand(value: unknown): InputScriptCommand | undefined {
-  if (!propertyRecord(value) || Object.keys(value).length !== 3) return;
-  const {actionName, pressOffset, releaseOffset} = value;
-  if (typeof actionName !== 'string' || actionName.length === 0 || actionName.includes('\0') ||
-    !validRuntimeString(actionName, 128) || !integer(pressOffset, 0, 119) || !integer(releaseOffset, pressOffset + 1, 120)) return;
+  if (!propertyRecord(value)) return;
+  const {pressOffset, releaseOffset, ...target} = value;
+  if (!integer(pressOffset, 0, 119)) return;
+  const fields = Object.keys(target).length;
+  if (Object.hasOwn(target, 'button')) {
+    const {button, x, y, geometryEpoch} = target;
+    if (releaseOffset !== pressOffset || !integer(button, 1, 3) ||
+        !integer(x, 0, 65535) || !integer(y, 0, 65535) ||
+        (Object.hasOwn(target, 'geometryEpoch') ? fields !== 4 || !integer(geometryEpoch, 1, 0x7fffffff) : fields !== 3)) return;
+    return {button, x, y, pressOffset, releaseOffset, ...(typeof geometryEpoch === 'number' ? {geometryEpoch} : {})};
+  }
+  if (!integer(releaseOffset, pressOffset + 1, 120)) return;
+  if (Object.hasOwn(target, 'keycode')) {
+    const {keycode, physical} = target;
+    if (fields !== 2 || !integer(keycode, 1, 0x7fffff) || typeof physical !== 'boolean') return;
+    return {keycode, physical, pressOffset, releaseOffset};
+  }
+  const {actionName} = target;
+  if (fields !== 1 || typeof actionName !== 'string' || !actionName || actionName.includes('\0') ||
+      !validRuntimeString(actionName, 128)) return;
   return {actionName, pressOffset, releaseOffset};
 }
 
 export function prepareInputScript(value: unknown, signal: AbortSignal | undefined) {
   try {
-    if (!propertyRecord(value) || Object.keys(value).some(key =>
-      !['runId', 'timeoutMs', 'actionName', 'pressOffset', 'releaseOffset'].includes(key))) return inputScriptFailure('invalid_input');
+    if (!propertyRecord(value)) return inputScriptFailure('invalid_input');
     const {runId, timeoutMs = 5000, ...command} = value;
     const checked = readInputScriptCommand(command);
     if (!checked || typeof runId !== 'string' || !runId || runId.length > 256 || !integer(timeoutMs, 1, 30000))
@@ -143,8 +162,10 @@ export function createNativeInputScript(module: Record<string, any>) {
   }
   buffer();
   return {
-    stage(request: InputScriptRequest) {
-      const bytes = encoder.encode(JSON.stringify({...request.command, deadline: request.deadline}));
+    devices: typeof module._godotjs_input_script_devices === 'function' && module._godotjs_input_script_devices() === 1,
+    stage(request: InputScriptRequest, geometryEpoch?: number) {
+      const command = request.command;
+      const bytes = encoder.encode(JSON.stringify({...command, ...('button' in command ? {geometryEpoch} : {}), deadline: request.deadline}));
       if (bytes.length > BUFFER_BYTES) return false;
       buffer().set(bytes);
       const remaining = Math.max(0, Math.min(30000000, Math.floor((request.deadline - interactionNow()) * 1000)));

@@ -124,13 +124,15 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
     const request = readInputScriptRequest(message, key);
     const reason = !request ? 'invalid_input' : !lease.active || stopping || nativeExited || closed ? 'run_ended' :
       !nativeStarted ? 'not_ready' : !inputScriptSupported || !nativeInputScript ? 'unsupported' :
+      !('actionName' in request.command) && !nativeInputScript.devices ? 'unsupported' :
       request.deadline <= interactionNow() ? 'timeout' : inputScript ? 'busy' : undefined;
     try {
       if (reason || !request || !nativeInputScript) {
         postInputScript(key, noInputScript('worker', reason ?? 'not_ready'));
         return;
       }
-      if (!nativeInputScript.stage(request)) {
+      const geometryEpoch = 'button' in request.command ? request.command.geometryEpoch ?? presentation?.geometry.epoch : undefined;
+      if (!nativeInputScript.stage(request, geometryEpoch)) {
         postInputScript(key, noInputScript('worker', 'not_ready'));
         return;
       }
@@ -300,7 +302,8 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
   const phase = (value: RunPhase) => {
     assertStarting();
     post({type: 'phase', phase: value, ...(value === 'running' && supportsInteraction ? {interactionVersion: INTERACTION_VERSION} : {}),
-      ...(value === 'running' && inputScriptSupported && nativeInputScript ? {inputScriptVersion: INPUT_SCRIPT_VERSION} : {}),
+      ...(value === 'running' && inputScriptSupported && nativeInputScript ? {inputScriptVersion: INPUT_SCRIPT_VERSION,
+        ...(nativeInputScript.devices ? {inputScriptDevices: true} : {})} : {}),
       ...(value === 'running' && sampleNativeObservation ? {observationVersion: RUNTIME_OBSERVATION_VERSION} : {}),
       ...(value === 'running' && supportsWrite && writeNativeProperty ? {runtimeWriteVersion: RUNTIME_WRITE_VERSION} : {}),
       ...(value === 'running' && supportsProperties && accessNativeProperties ? {runtimePropertiesVersion: RUNTIME_PROPERTIES_VERSION} : {}),
@@ -669,6 +672,9 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
       if (inputScriptSupported) value.godotInputScriptTerminal = () => {
         if (inputScript) queueMicrotask(drainInputScript);
       };
+      if (inputScriptSupported) value.godotInputScriptClickFits = (epoch: number, x: number, y: number) =>
+        !latestGeometry && !interactionRejection() && (epoch >>> 0) === presentation?.geometry.epoch &&
+        x < boot.canvas.width && y < boot.canvas.height;
       if (probeAvailable && supportsInteraction) {
         value.godotGameProbeMayFreeze = () => {
           const geometry = presentation?.geometry;

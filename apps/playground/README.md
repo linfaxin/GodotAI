@@ -146,6 +146,14 @@ node apps/playground/scripts/verify-lifecycle-events.mjs "$LIFECYCLE_EVIDENCE/re
 
 For a lifecycle replay archive, extract it to a fresh directory and run `node tools/start.mjs` to serve the editor and preview on distinct loopback origins. Run `node tools/verify.mjs` to check the archived checksums, candidate and original PNGs. The archive uses `start-lifecycle-replay.mjs` and `verify-lifecycle-replay.mjs` from this repository. The launcher serves the listed site assets directly.
 
+Package the verified diagnostic-and-lifecycle run with the original Full/debug engine build report. The offline verifier checks the location of TS2322, the failed build's lack of a new run, the old run's continued operation, and the source and Worker identities of the repaired run in addition to the lifecycle and pixels.
+
+```sh
+node apps/playground/scripts/package-lifecycle-replay.mjs \
+  "$LIFECYCLE_SITE" "$LIFECYCLE_EVIDENCE" "$FULL_ENGINE_REPORT" "$REPLAY_DIRECTORY"
+tar -czf playground-full-debug-replay.tar.gz -C "$REPLAY_DIRECTORY" .
+```
+
 ### Input script
 
 Open the `engine.game_input` example in the API console on a Chromium Full Engine debug Dedicated Worker Direct preview that advertises `inputScript: 1`. Run the lesson in order to capture the player's starting position, move it from `(64, 256)` to `(128, 256)`, and verify the starting position after Stop and Play. Each capture pairs the coordinates with a PNG from the same draw.
@@ -167,9 +175,26 @@ await window.godotPlayground.summer_call({
 });
 ```
 
-The subset accepts one press and release for the same registered InputMap action. The defaults are `instance: 'main'`, `clock: 'frame'`, `wait: true`, press offset `0`, and strength `1`. The release offset is greater than the press offset and at most `120`. The action is visible during eligible physics callbacks through `Input.is_action_pressed` and `Input.get_action_strength` with `exact_match: false`, and through `Input.get_axis`. Raw input, recording, replay, event callbacks and just-pressed queries are outside this subset.
+An InputMap action uses one explicit press and release for the same registered action. The defaults are `instance: 'main'`, `clock: 'frame'`, `wait: true`, press offset `0`, and strength `1`. The release offset is greater than the press offset and at most `120`. This action is visible during eligible physics callbacks through `Input.is_action_pressed` and `Input.get_action_strength` with `exact_match: false`, and through `Input.get_axis`.
+
+When `get_run({runId}).result.inputScript.devices` is true, the same operation also accepts either of these event lists.
+
+```js
+[
+  {type: 'key', physical_keycode: 4194321, pressed: true, at_frame: 0},
+  {type: 'key', physical_keycode: 4194321, pressed: false, at_frame: 4},
+]
+
+[
+  {type: 'mouse_click', position: [24, 24], button: 1, at_frame: 0},
+]
+```
+
+The key pair uses the same Godot `physical_keycode` or `keycode` on both events. A click sends both edges in one physics step. Coordinates are integer pixels in the unscaled game canvas, with button 1, 2, or 3. To act on a probe image, use its full source dimensions to map the coordinates and send `geometry_epoch` from `image.geometry.epoch`. The console fills the epoch when selecting a rendered probe receipt. If the epoch is omitted, the Worker captures current geometry at staging. A stale epoch, pending resize, or out-of-bounds click returns `geometry_conflict` before either click edge. The playtest moves the marker to x=128 with action input, then to x=192 with the physical arrow key, and clicking **Reset player** returns it to x=64. Raw input and millisecond scripts are outside this subset.
 
 Use `get_run({runId})` to read `inputScript.supported` and `inputScript.ready`. For a captured run, use `run_game_input_script({runId, actionName, pressOffset, releaseOffset, timeoutMs?}, signal?)` or `WorkerPreviewRunner.runGameInputScript(input, signal?)`. The timeout defaults to 5,000 ms and accepts integers from 1 to 30,000 ms. A completed receipt includes both native physics frames. Use the resulting `outcome` and `terminal` to distinguish a skipped request from an interruption. If the response is `outcome_unknown`, inspect the original run before deciding whether to issue another command. The existing `game_input` method on the debug API continues to accept physical gestures.
+
+On a matching Full/debug site, set `PLAYGROUND_INPUT_SCRIPT_CASE=supported` and `PLAYGROUND_INPUT_SCRIPT_DEVICES=1` for `test:browser:input-script` to verify key duration, click geometry and held-key cleanup on Stop. The independent SDK consumer verifies two versions of the same game, PNG and position samples, frame input, a stale base revision, and both clean exits via `node apps/playground/scripts/browser-engine-contracts-consumer-test.mjs`.
 
 ### Game probe
 

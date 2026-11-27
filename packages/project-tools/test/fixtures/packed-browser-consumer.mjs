@@ -1,7 +1,7 @@
 // Bundled only against installed SDK tarballs. The matching preview page
 // remains an unchanged, separately distributed asset.
 import {prepareCompilerEnvironmentInput} from '@godot-js/project-tools/environment';
-import {createCompilerEnvironment,compileProject,compileResultMetadata} from '@godot-js/project-tools/compiler';
+import {createCompilerEnvironment,compileProject,compileResultMetadata,ProjectWorkspace} from '@godot-js/project-tools/compiler';
 import {createSourceSnapshot,createBuildPlan} from '@godot-js/project-tools/build-plan';
 import {checkProjectTypes,snapshotTextFiles} from '@godot-js/project-tools/type-environment';
 import {prepareBrowserArtifact} from '@godot-js/project-tools/browser';
@@ -26,8 +26,9 @@ async function readBytes(url,maxBytes,signal) {
 
 let runner,lastArtifact,lastBuild;
 const events=[];
+const workspace = new ProjectWorkspace();
 async function dispose() {const previous=runner;runner=undefined;await previous?.dispose();}
-async function prepare(options) {
+async function prepare(options, captured) {
   await dispose();
   const root=new URL(options.releaseRoot),preview=new URL(options.previewUrl);
   if(!root.pathname.endsWith('/')||root.search||root.hash)throw Error('E_CONSUMER_RELEASE_ROOT');
@@ -41,7 +42,7 @@ async function prepare(options) {
     selection:options.selection??{kind:'engine'},signal,
     readRawAsset:(asset,read)=>readBytes(new URL(asset.path,root),read.maxStoredBytes,read.signal)});
   const environment=await createCompilerEnvironment(prepared.input);
-  const snapshot=await createSourceSnapshot(options.files);
+  const snapshot=captured?.source??await createSourceSnapshot(options.files);
   const plan=await createBuildPlan(snapshot,options.launch);
   const diagnostics=checkProjectTypes(environment.createTypeEnvironment(snapshotTextFiles(snapshot)));
   if(diagnostics.some(item=>item.category==='error'))throw Object.assign(Error('E_CONSUMER_TYPECHECK'),{diagnostics});
@@ -56,7 +57,7 @@ async function prepare(options) {
   const manifest={...compileResultMetadata(compiled),releaseContext:context};
   const output=compiled.variant==='pack-set'?{variant:'pack-set',artifactSet:compiled.artifactSet,manifest}:
     {variant:'single-pack',pack:compiled.pack,manifest};
-  lastArtifact=await prepareBrowserArtifact({output,target:worker.facts,revision:options.revision??1,generation:options.generation??1});
+  lastArtifact=await prepareBrowserArtifact({output,target:worker.facts,revision:captured?.revision??options.revision??1,generation:options.generation??1});
   lastBuild={buildKey:compiled.buildKey,sourceHash:compiled.sourceHash,artifactId:compiled.artifactId,
     variant:compiled.variant,diagnostics:compiled.diagnostics,environment:environment.identity,facts:prepared.facts};
   const container=options.container??document.body.appendChild(document.createElement('div'));
@@ -68,6 +69,19 @@ async function prepare(options) {
 }
 globalThis.engineContractsConsumer={prepare,
   async run(options){const artifact=await prepare(options);const result=await runner.run(artifact);return {result,artifact};},
+  async runIteration(options) {
+    const delta = options.delta;
+    const captured = delta
+      ? await workspace.captureChanges(delta.changed, delta.removed, {expectedBaseRevision: delta.baseRevision})
+      : await workspace.capture(options.files);
+    try {
+      const artifact = await prepare(options, captured);
+      const run = await runner.run(artifact);
+      return {run, revision: captured.revision, build: lastBuild};
+    } finally {
+      captured.release();
+    }
+  },
   stop:()=>runner?.stop(),dispose,
   get runner(){return runner;},get lastArtifact(){return lastArtifact;},get lastBuild(){return lastBuild;},
   get events(){return structuredClone(events);},

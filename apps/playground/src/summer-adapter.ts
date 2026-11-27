@@ -102,6 +102,31 @@ function validateInputScript(input: Record<string, unknown>): Validated | Facade
   if (data.clock !== undefined && data.clock !== 'frame') return localError(data.clock === 'ms' ? 'unsupported' : 'invalid_input', 'clock');
   if (data.wait !== undefined && data.wait !== true) return localError(data.wait === false ? 'unsupported' : 'invalid_input', 'wait');
   if (!Array.isArray(data.events) || !data.events.every(propertyRecord)) return localError('invalid_input', 'events');
+  const [press, release] = data.events;
+  if (press?.type === 'key' || press?.type === 'mouse_click') {
+    for (const [index, event] of data.events.entries()) {
+      for (const field of ['hold_ms', 'at_ms']) if (Object.hasOwn(event, field)) return localError('unsupported', 'events[' + index + '].' + field);
+    }
+    const pressOffset = Object.hasOwn(press, 'at_frame') ? press.at_frame : 0;
+    let command: InputScriptCommand | undefined;
+    if (press.type === 'key' && data.events.length === 2 && release.type === 'key' &&
+        press.pressed === true && release.pressed === false &&
+        [press, release].every(event => Object.keys(event).every(key =>
+          ['type', 'physical_keycode', 'keycode', 'pressed', 'at_frame'].includes(key))) &&
+        [press, release].every(event => Object.hasOwn(event, 'physical_keycode') !== Object.hasOwn(event, 'keycode'))) {
+      const physical = Object.hasOwn(press, 'physical_keycode');
+      const field = physical ? 'physical_keycode' : 'keycode';
+      if (Object.hasOwn(release, field) && press[field] === release[field])
+        command = readInputScriptCommand({keycode: press[field], physical, pressOffset, releaseOffset: release.at_frame});
+    } else if (press.type === 'mouse_click' && data.events.length === 1 &&
+        Object.keys(press).every(key => ['type', 'position', 'button', 'at_frame', 'geometry_epoch'].includes(key)) &&
+        Array.isArray(press.position) && press.position.length === 2) {
+      const [x, y] = press.position;
+      command = readInputScriptCommand({button: Object.hasOwn(press, 'button') ? press.button : 1, x, y, pressOffset, releaseOffset: pressOffset,
+        ...(Object.hasOwn(press, 'geometry_epoch') ? {geometryEpoch: press.geometry_epoch} : {})});
+    }
+    return command ? {op: 'engine.game_input', input: command} : localError('invalid_input', 'events');
+  }
   for (const [index, edge] of data.events.entries()) {
     const name = 'events[' + index + ']';
     if (edge.type !== 'action') return localError(
@@ -113,7 +138,6 @@ function validateInputScript(input: Record<string, unknown>): Validated | Facade
       return localError(typeof edge.strength === 'number' && edge.strength >= 0 && edge.strength <= 1 ? 'unsupported' : 'invalid_input', name + '.strength');
   }
   if (data.events.length !== 2) return localError('invalid_input', 'events');
-  const [press, release] = data.events;
   const command = readInputScriptCommand({actionName: press.action, pressOffset: Object.hasOwn(press, 'at_frame') ? press.at_frame : 0, releaseOffset: release.at_frame});
   if (!command || press.pressed !== true || release.pressed !== false || press.action !== release.action)
     return localError('invalid_input', 'events');

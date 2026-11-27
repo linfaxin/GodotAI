@@ -134,7 +134,7 @@ export const SUMMER_OPERATION_SPECS = Object.freeze({
     limitations: ['只支持明确登记的同步标量签名。', '超时或取消可能留下未确认结果，请先独立观察。'],
   }),
   'engine.game_input': spec({
-    title: '按物理帧发送动作', description: '为主运行安排同一个 InputMap 动作的按下和释放。',
+    title: '按物理帧输入', description: '为主运行安排一对动作或按键边沿，或执行一次鼠标点击。',
     allowed: ['action', 'instance', 'clock', 'wait', 'events'],
     unsupported: ['include_motion', 'save_as', 'recording', 'seed'],
     parameters: [
@@ -142,13 +142,14 @@ export const SUMMER_OPERATION_SPECS = Object.freeze({
       {name: 'instance', description: '省略或 main。'},
       {name: 'clock', description: 'frame，对应原生物理帧。'},
       {name: 'wait', description: '省略或 true，等待释放迭代结束。'},
-      {name: 'events', required: true, description: '同一已注册动作的两条 action 边沿，显式 pressed:true/false，偏移递增，最大 120。'},
+      {name: 'events', required: true, description: '同一 action 或 key 的显式按下与释放，或一条 mouse_click。偏移最大 120。'},
     ],
     defaultInput: {action: 'script', events: [
       {type: 'action', action: 'move_right', pressed: true, at_frame: 0},
       {type: 'action', action: 'move_right', pressed: false, at_frame: 4},
     ]},
-    limitations: ['Full/debug Chromium Worker Direct。支持物理步内的动作轮询。', '使用 game_probe 验证玩法结果。'],
+    limitations: ['Full/debug Chromium Worker Direct。键鼠要求模板提供设备输入能力。',
+      '点击使用未缩放的游戏画布像素，可传 geometry_epoch 绑定探测尺寸。使用 game_probe 验证玩法结果。'],
   }),
   'engine.game_probe': spec({
     title: '探测游戏帧', description: '读取一次正常渲染提交的节点状态和 PNG，或单独读取迭代结束时的状态。',

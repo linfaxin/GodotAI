@@ -371,6 +371,84 @@ await runReportedBrowserTest({scope, reportFile, run: async test => {
     const exit = await recordPublic('wait_for_event', {runId, until: 'exited', timeoutMs: 10000});
     recordExit(record, consoleResult(exit.reply));
   });
+  if (supported && process.env.PLAYGROUND_INPUT_SCRIPT_DEVICES === '1')
+    await test.step('native-key-and-click', async () => {
+      const played = await lesson('input-play', 'engine.play');
+      const waiting = await lesson('input-ready', 'wait_for_event', played);
+      const {run} = waiting.result;
+      await page.waitForFunction(runId => {
+        const state = window.godotPlayground.get_run({runId}).result?.inputScript;
+        return state?.ready && state.devices;
+      }, run.runId, {timeout: 30000});
+      const before = await lesson('input-before', 'engine.game_probe');
+      assert.deepEqual(before.result.properties[0].value, {x: 64, y: 256});
+      const key = (await lesson('input-key', operation, before)).result;
+      assert.deepEqual(identity(key.receipt.run), identity(run));
+      assert.equal(BigInt(key.result.up.physics) - BigInt(key.result.down.physics), 4n);
+      const moved = await lesson('input-after-key', 'engine.game_probe');
+      assert.deepEqual(moved.result.properties[0].value, {x: 128, y: 256});
+      assert(moved.result.frame.iteration > key.result.finishedIteration);
+      assert.deepEqual((await readConsolePng(page, moved.callId)).pixels.inputMarker, [255, 255, 255, 255]);
+      await page.locator('iframe[title="Godot Worker preview"]').evaluate(frame => {
+        frame.style.setProperty('width', '240px', 'important');
+        frame.style.setProperty('height', '120px', 'important');
+      });
+      await page.waitForFunction(async ({runId, previousEpoch}) => {
+        const probe = await window.godotPlayground.game_probe({runId});
+        const image = probe.result?.image;
+        return image?.sourceHeight <= 120 && image.geometry.epoch > previousEpoch;
+      }, {runId: run.runId, previousEpoch: moved.result.image.geometry.epoch});
+      const compact = await lesson('input-after-key', 'engine.game_probe');
+      const geometryEpoch = compact.result.image.geometry.epoch;
+      const stale = await recordSummer({action: 'script', events: [
+        {type: 'mouse_click', position: [0, 0], geometry_epoch: moved.result.image.geometry.epoch},
+      ]});
+      assert.equal(stale.reply.error?.code, 'geometry_conflict');
+      const click = (await lesson('input-click', operation, compact)).result;
+      assert.equal(click.result.down.physics, click.result.up.physics);
+      const reset = await lesson('input-after-click', 'engine.game_probe');
+      assert.deepEqual(reset.result.properties[0].value, {x: 64, y: 256});
+      assert(reset.result.frame.iteration > click.result.finishedIteration);
+      assert.deepEqual((await readConsolePng(page, reset.callId)).pixels.initialMarker, [255, 255, 255, 255]);
+      const interrupt = stop => page.evaluate(async ({runId, path, stop}) => {
+        const api = window.godotPlayground;
+        const abort = new AbortController();
+        const query = {runId, props: [{path, property: 'position'}], screenshot: false};
+        const probe = () => api.game_probe(query);
+        const original = (await probe()).result.properties[0].value.x;
+        const pending = api.run_game_input_script({runId, physical: true, keycode: 4194321, pressOffset: 0, releaseOffset: 120}, abort.signal);
+        const deadline = performance.now() + 1500;
+        while (performance.now() < deadline) {
+          const sample = await probe();
+          if (sample.result?.properties[0].value.x > original) {
+            if (stop) {
+              await api.stop({runId});
+              return {input: await pending, sample: sample.result};
+            }
+            abort.abort();
+            const input = await pending;
+            await new Promise(resolve => setTimeout(resolve, 150));
+            const settled = (await probe()).result;
+            await new Promise(resolve => setTimeout(resolve, 150));
+            return {input, sample: sample.result, settled, later: (await probe()).result};
+          }
+        }
+        return {input: await pending};
+      }, {runId: run.runId, path: pathToPlayer, stop});
+      const cancelled = await interrupt(false);
+      assert(cancelled.sample, 'The key must be down before cancellation');
+      assert.equal(cancelled.input.error.code, 'outcome_unknown');
+      assert(cancelled.later.frame.iteration > cancelled.settled.frame.iteration);
+      assert.deepEqual(cancelled.settled.properties[0].value, cancelled.later.properties[0].value);
+      const interruption = await interrupt(true);
+      assert(interruption.sample, 'The key must be down before Stop');
+      assert.equal(interruption.input.outcome, 'interrupted');
+      assert.equal(interruption.input.terminal.owner, 'cleared');
+      assert.deepEqual(identity(interruption.input.receipt.run), identity(run));
+      const exit = consoleResult(await api('wait_for_event', {runId: run.runId, until: 'exited', timeoutMs: 10000}));
+      recordExit({run}, exit);
+      inputEvidence.devices = {key, click, geometryEpoch, stale, cancelled, interruption, exit: exit.run.exit};
+    });
   assert.deepEqual(errors, []);
   return withAcceptanceContext({status: 'passed', scope, engineExecuted, scriptExecuted, supported,
     runs, pngs, calls, publicCalls, inputEvidence, candidateId, descriptorHash, releaseId: release.id}, {directory, browser});

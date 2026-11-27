@@ -572,7 +572,8 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
             ...(runtimePropertiesReady ? {runtimePropertiesVersion: RUNTIME_PROPERTIES_VERSION} : {}),
             ...(runtimeCallReady ? {runtimeCallVersion: RUNTIME_CALL_VERSION} : {}),
             ...(gameProbeReady ? {gameProbeVersion: GAME_PROBE_VERSION} : {}),
-            ...(inputScriptReady ? {inputScriptVersion: INPUT_SCRIPT_VERSION} : {})});
+            ...(inputScriptReady ? {inputScriptVersion: INPUT_SCRIPT_VERSION,
+              ...(m.inputScriptDevices === true ? {inputScriptDevices: true} : {})} : {})});
           publish();
         }
       };
