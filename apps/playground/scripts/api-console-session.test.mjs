@@ -315,12 +315,11 @@ test('open example shares the replay/manual gate and never launches a game',asyn
 test('event cursor fill uses structured history and cancellation releases the console gate', async () => {
   const f = createConsoleFixture();
   try {
-    f.setReply('summer_call', {ok: true, result: {data: {stream_id: 'page', next_seq: 3, events: [],
-      large: 'x'.repeat(70_000)}}});
+    f.setReply('summer_call', {ok: true, result: {data: {stream_id: 'page', next_seq: 3, events: [], truncated: true}}});
     f.session.selectOperation('engine.recent_events');
     await f.session.submit();
     const source = last(f);
-    assert.equal(source.truncated, true);
+    assert.equal(source.truncated, undefined);
     f.session.loadPreset('engine.wait_for_event', '{"kinds":["play.started"]}', false, true);
     await f.session.submit();
     assert.equal(f.session.snapshot().clientError.kind, 'missing_source');
@@ -343,6 +342,28 @@ test('event cursor fill uses structured history and cancellation releases the co
     f.session.updateTarget({sourceCallId: source.callId});
     assert.equal(f.session.snapshot().clientError.kind, 'missing_source');
     assert.equal(JSON.parse(f.session.snapshot().draft.inputText).since, 3);
+  } finally {
+    f.session.dispose();
+  }
+});
+
+test('a display-truncated event result cannot advance the console cursor', async () => {
+  const f = createConsoleFixture();
+  try {
+    const events = Array.from({length: 50}, (_, i) => ({
+      seq: i + 1, kind: 'play.stopped', data: {run: consoleIdentity, detail: 'x'.repeat(1100)},
+    }));
+    f.setReply('summer_call', {ok: true, result: {data: {stream_id: 'page', since: 0, next_seq: 50, events}}});
+    for (const [op, limit] of [['engine.recent_events', 'limit'], ['engine.wait_for_event', 'max_events']]) {
+      f.session.loadPreset(op, '{}');
+      await f.session.submit();
+      const source = last(f);
+      assert.equal(source.truncated, true);
+      assert.match(source.summary, new RegExp(`since.*${limit}`));
+      f.session.updateTarget({sourceCallId: source.callId});
+      assert.equal(f.session.snapshot().clientError.kind, 'missing_source');
+      assert.equal(f.session.snapshot().draft.inputText, '{}');
+    }
   } finally {
     f.session.dispose();
   }

@@ -404,9 +404,9 @@ function availability<T>(input: DebugAvailability<T>): DebugAvailability<T> {
   return {status: input.status, ...(input.reason === undefined ? {} : {reason: input.reason.slice(0, MAX_ERROR_TEXT)})};
 }
 
-export function createDebugRecorder(now = () => performance.now()) {
+export function createDebugRecorder() {
   const pageId = Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
-  const lifecycle = createLifecycleLog(pageId, now);
+  const lifecycle = createLifecycleLog(pageId);
   const context: PageContext = {projectId: null, editorRevision: null, release: {status: 'loading'}, preview: {status: 'loading'}};
   const builds: BuildRecord[] = [];
   const retainedBuilds = new Set<BuildRecord>();
@@ -499,7 +499,6 @@ export function createDebugRecorder(now = () => performance.now()) {
   return {
     api: Object.freeze(api),
     lifecycle,
-    notify,
     subscribe(listener: () => void) {
       listeners.add(listener);
       return () => { listeners.delete(listener); };

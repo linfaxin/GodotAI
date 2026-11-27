@@ -1,4 +1,4 @@
-import type {LifecyclePage, LifecycleQuery, WaitLifecycleEvents} from './lifecycle-events.ts';
+import type {LifecycleQuery, WaitLifecycleEvents} from './lifecycle-events.ts';
 import type {FacadeReply, SelectedRuntimeMethod, SummerMethodBackend} from './summer-adapter';
 import type {
   createDebugRecorder, DebugBuild, DebugCheck, DebugRun, DebugContext, DebugExit, ReadRunEventsOptions,
@@ -89,13 +89,9 @@ export function createPlaygroundApi(recorder: Recorder, actions: Actions) {
       return Promise.resolve(fail('cancelled', '已取消等待'));
     if (waiting.size >= MAX_WAITERS) return Promise.resolve(fail('busy', '等待操作已达上限'));
     const since = query.since ?? log.head();
-    const start = log.now();
-    const deadline = start + timeoutMs;
+    const start = performance.now();
     return new Promise(resolve => {
-      let cursor = since;
-      let gap: LifecyclePage['gap'];
       let settled = false;
-      let timer: ReturnType<typeof setTimeout> | undefined;
 
       function finish(reply: ReturnType<typeof ok<WaitLifecycleEvents>> | ToolError) {
         if (settled) return;
@@ -108,26 +104,20 @@ export function createPlaygroundApi(recorder: Recorder, actions: Actions) {
       }
 
       const cancel = () => finish(fail('cancelled', '已取消等待'));
-      function scan() {
+      function scan(timedOut = false) {
         if (settled) return;
-        const page = log.read(cursor, query.kinds, query.limit, deadline);
-        cursor = page.next_seq;
-        gap ??= page.gap;
+        const page = log.read(since, query.kinds, query.limit);
         const matched = page.events.length > 0;
-        const waited = log.now() - start;
-        if (matched || waited >= timeoutMs) finish(ok({
-          ...page, since, ...(gap ? {gap} : {}), matched, timed_out: !matched, waited_ms: waited,
+        if (matched || timedOut) finish(ok({
+          ...page, matched, timed_out: !matched, waited_ms: performance.now() - start,
         }));
-      }
-      function expire() {
-        scan();
-        if (!settled) timer = setTimeout(expire, Math.max(1, Math.ceil(deadline - log.now())));
       }
 
       const unsubscribe = recorder.subscribe(scan);
+      const timer = setTimeout(() => scan(true), timeoutMs);
       waiting.add(cancel);
       if (signal) EventTarget.prototype.addEventListener.call(signal, 'abort', cancel, {once: true});
-      expire();
+      scan();
     });
   }
 

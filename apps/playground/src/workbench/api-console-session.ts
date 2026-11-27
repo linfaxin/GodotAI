@@ -69,7 +69,7 @@ function dataFor(operationId: string, reply: unknown): Record<string, any> | und
   const data = operationId.startsWith('engine.') ? reply.result.data : reply.result;
   return object(data) ? data : undefined;
 }
-function resultSummary(operationId: string, reply: unknown): string {
+function resultSummary(operationId: string, reply: unknown, displayTruncated: boolean): string {
   if (!object(reply)) return '调用已结算';
   if (reply.ok === false) {
     const code = reply.error?.code;
@@ -90,6 +90,10 @@ function resultSummary(operationId: string, reply: unknown): string {
   if (operationId === 'game_input') return '输入已接纳，分发待确认';
   if (operationId === 'wait_for_input') return `输入等待：${data.outcome}；分发：${data.operation?.status ?? 'unknown'}`;
   if (operationId === 'engine.recent_events' || operationId === 'engine.wait_for_event') {
+    if (displayTruncated) {
+      const limit = operationId === 'engine.recent_events' ? 'limit' : 'max_events';
+      return `结果展示已截断。请从结果开头的 since 重新读取，并减小 ${limit}。`;
+    }
     const status = data.timed_out ? '等待超时' : `读取到 ${data.events?.length ?? 0} 条事件`;
     return status + (data.gap ? '；历史有缺口' : '') + (data.truncated ? '；可继续翻页' : '');
   }
@@ -116,7 +120,7 @@ function resultFacts(call: ConsoleCall, input: unknown, reply: unknown, submitte
     facts.sourceAnchor.activeRunId = run.runId;facts.sourceAnchor.activeRunRevision = run.revision;
     facts.sourceAnchor.activeRunProjectId = projectId ?? null;
   }
-  if ((op === 'engine.recent_events' || op === 'engine.wait_for_event') &&
+  if (!call.truncated && (op === 'engine.recent_events' || op === 'engine.wait_for_event') &&
       nonempty(data.stream_id) && Number.isSafeInteger(data.next_seq) && data.next_seq >= 0) {
     facts.eventCursor = {since: data.next_seq, stream_id: data.stream_id};
   }
@@ -419,7 +423,7 @@ export function createApiConsoleSession(api: PlaygroundApi, hooks: ConsoleHooks,
         const returned=bound ? hooks.callSelectedMethod(input,controller?.signal,bound) : selected.invoke(api,input,controller?.signal);emit();
         const reply=await returned;
         if(disposed)return;
-        const projected=projection(reply);call.phase='settled';call.settledAt=Date.now();call.summary=resultSummary(call.draft.operationId,reply);
+        const projected=projection(reply);call.phase='settled';call.settledAt=Date.now();call.summary=resultSummary(call.draft.operationId,reply,projected.truncated);
         call.resultProjection=projected.text;if(projected.truncated)call.truncated=true;
         call.resultFacts=resultFacts(call,input,reply,current.anchor);storeImage(call,reply);
       }catch(caught){

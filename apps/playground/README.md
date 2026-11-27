@@ -107,7 +107,7 @@ const started = observed.result?.data.events.find(event =>
 
 A match identifies the recorded event. Before using the live preview, confirm that its `runId` is the current main run, the pending launch has cleared, and the required capabilities are ready. For a Stop, compare each captured run with the corresponding `play.stopped` event or with an already returned exit receipt. A stopped event includes the observed exit reason and cleanup facts where available. If Stop only cancelled an attempt, inspect that attempt's build. When history has a `gap`, use the original attempt or run ID to check the state.
 
-The page retains up to 512 events for 10 minutes. Omit `since` to read the latest sequence window with `recent_events` or to wait only for new events with `wait_for_event`. Advance through pages using `next_seq`. Wait timeout and cancellation affect only the observation. The local ID-based `wait_for_event` remains available for exact attempt or run waits.
+The page retains the latest 512 events. Omit `since` to read the latest sequence window with `recent_events` or to wait only for new events with `wait_for_event`. Advance through pages using `next_seq`. If the console cuts off the displayed result, read again from the same `since` with a smaller page before advancing. Wait timeout and cancellation affect only the observation. The local ID-based `wait_for_event` remains available for exact attempt or run waits.
 
 To produce and independently verify the browser report, use a current Full/debug site with `gameProbe: 1` and `inputScript: 1`. Set `LIFECYCLE_SITE` and `LIFECYCLE_EVIDENCE` to absolute paths. The offline image check uses Python with Pillow.
 
@@ -119,6 +119,8 @@ PLAYGROUND_TEST_DIRECTORY="$LIFECYCLE_SITE" \
   pnpm --filter @godot-js/playground test:browser:lifecycle-events
 node apps/playground/scripts/verify-lifecycle-events.mjs "$LIFECYCLE_EVIDENCE/report.json" "$LIFECYCLE_EVIDENCE/site-start.json"
 ```
+
+For a lifecycle replay archive, extract it to a fresh directory and run `node tools/start.mjs` to serve the editor and preview on distinct loopback origins. Run `node tools/verify.mjs` to check the archived checksums, candidate and original PNGs. The archive uses `start-lifecycle-replay.mjs` and `verify-lifecycle-replay.mjs` from this repository. The launcher serves the listed site assets directly.
 
 ### Input script
 
