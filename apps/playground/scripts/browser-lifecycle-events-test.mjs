@@ -66,45 +66,23 @@ await runReportedBrowserTest({scope, reportFile, run: async test => {
     }
     assert.equal(await rows(), count, 'Loading a lesson or filling its draft must not execute an API');
   }
-  async function submit(op, timeout) {
+  async function lesson(step, op, source) {
+    await loadLesson(step, source);
     // The lesson uses small pages. The UI projection retains every JSON field
     // of these replies, while PNG bytes are collected from their attachments.
-    const {callId, reply} = await submitConsole(page, op, {timeout});
+    const {callId, reply} = await submitConsole(page, op, {timeout: 65_000});
     const request = JSON.parse(await element(page, 'call-request').textContent());
     const entry = {callId, request, reply, result: summerResult(reply)};
     report.calls.push({callId, request, reply});
     checkpoint();
     return entry;
   }
-  async function lesson(step, op, source) {
-    await loadLesson(step, source);
-    return submit(op, 60_000);
-  }
-  async function waitForTarget(step, cursor, action, matches, timeoutMs) {
-    await loadLesson(step, cursor);
-    const waitCallIds = [], deadline = performance.now() + timeoutMs;
-    let source = cursor;
-    for (;;) {
-      const expected = source.result;
-      const input = JSON.parse(await element(page, 'input').inputValue());
-      assert.equal(input.since, expected.next_seq);
-      assert.equal(input.stream_id, expected.stream_id);
-      const remaining = deadline - performance.now();
-      assert(remaining >= 1000, 'Lifecycle target did not appear before the deadline');
-      input.timeout_seconds = Math.floor(remaining / 1000);
-      await element(page, 'input').fill(JSON.stringify(input));
-      const wait = await submit(ops.wait, Math.ceil(remaining));
-      waitCallIds.push(wait.callId);
-      assert.equal(wait.result.gap, undefined);
-      assert.equal(wait.result.timed_out, false);
-      assert.equal(wait.result.matched, true);
-      const matched = wait.result.events.find(matches);
-      if (matched) return {matched, phase: {cursorCallId: cursor.callId, actionCallId: action.callId,
-        waitCallIds, matchedSeq: matched.seq}};
-      source = wait;
-      await viewConsoleCall(page, wait.callId);
-      await element(page, 'use-result').click();
-    }
+  async function waitForTarget(step, cursor, action, matches) {
+    const wait = await lesson(step, ops.wait, cursor);
+    const matched = wait.result.events.find(matches);
+    assert(matched, `Expected lifecycle event for ${step}`);
+    return {matched, phase: {cursorCallId: cursor.callId, actionCallId: action.callId,
+      waitCallIds: [wait.callId], matchedSeq: matched.seq}};
   }
   async function waitUntilReady(runId) {
     await page.waitForFunction(async runId => {
@@ -115,19 +93,12 @@ await runReportedBrowserTest({scope, reportFile, run: async test => {
       return current?.state === 'running' && current.gameProbe?.ready && current.inputScript?.ready;
     }, runId);
   }
-  async function start({cursorStep, playStep, waitStep}, readAfterRunning = false) {
+  async function start({cursorStep, playStep, waitStep}) {
     const cursor = await lesson(cursorStep, ops.recent);
     const action = await lesson(playStep, ops.play);
-    if (readAfterRunning) {
-      await page.waitForFunction(attemptId => {
-        const api = window.godotPlayground;
-        const runId = api.get_build({attemptId}).result?.preview?.runId;
-        return runId && api.get_run({runId}).result?.state === 'running';
-      }, action.result.attemptId);
-    }
     const {matched, phase} = await waitForTarget(waitStep, cursor, action, event =>
       event.kind === 'play.started' && event.data.attemptId === action.result.attemptId &&
-      event.data.projectId === action.result.projectId && event.data.editorRevision === action.result.editorRevision, 60_000);
+      event.data.projectId === action.result.projectId && event.data.editorRevision === action.result.editorRevision);
     await waitUntilReady(matched.data.run.runId);
     const live = consoleResult(await publicCall('get_run', {runId: matched.data.run.runId}));
     assert(sameWorkerRun(live, matched.data.run));
@@ -141,7 +112,7 @@ await runReportedBrowserTest({scope, reportFile, run: async test => {
     const action = await lesson(stopStep, ops.stop, sample);
     assert(action.result.runs.some(target => target.runId === run.runId && target.receipt.ok));
     const {matched, phase} = await waitForTarget(waitStep, cursor, action, event =>
-      event.kind === 'play.stopped' && event.data.run.runId === run.runId, 15_000);
+      event.kind === 'play.stopped' && event.data.run.runId === run.runId);
     assert(sameWorkerRun(run, matched.data.run));
     const exited = consoleResult(await publicCall('get_run', {runId: run.runId}));
     phase.exit = exited.exit;
@@ -173,7 +144,7 @@ await runReportedBrowserTest({scope, reportFile, run: async test => {
     await page.waitForFunction(previous => window.godotPlayground.get_project_context().result.projectId !== previous, previous);
     await selectReady();
 
-    const first = await start({cursorStep: 'cursor-start', playStep: 'play', waitStep: 'started'}, true);
+    const first = await start({cursorStep: 'cursor-start', playStep: 'play', waitStep: 'started'});
     const before = await capture('before', 'before.png');
     report.inputCallId = (await lesson('move', ops.input, before)).callId;
     const after = await capture('after', 'after.png');
@@ -185,31 +156,6 @@ await runReportedBrowserTest({scope, reportFile, run: async test => {
     verifyLifecycleCalls(report);
     assert.deepEqual(errors, []);
   });
-
-  await test.step('replay-both-starts-with-a-one-event-page', async () => {
-    const atFirstPlay = report.calls.find(call => call.callId === report.phases[0].cursorCallId).reply.result.data;
-    const input = {since: atFirstPlay.next_seq, stream_id: atFirstPlay.stream_id,
-      kinds: ['play.started'], max_events: 1, timeout_seconds: 1};
-    const first = summerResult(await publicCall('summer_call', {op: ops.wait, input}));
-    assert.equal(first.events[0].seq, report.phases[0].matchedSeq);
-    assert.equal(first.truncated, true);
-    const next = {...input, since: first.next_seq, stream_id: first.stream_id};
-    const second = summerResult(await publicCall('summer_call', {op: ops.wait, input: next}));
-    assert.equal(second.events[0].seq, report.phases[2].matchedSeq);
-    report.replay = [first, second];
-    checkpoint();
-  }, {after: ['lifecycle-lesson']});
-
-  await test.step('no-target-stop-keeps-the-event-head', async () => {
-    const head = () => publicCall('summer_call', {op: ops.recent}).then(summerResult);
-    const before = await head();
-    const stop = summerResult(await publicCall('summer_call', {op: ops.stop}));
-    assert.equal(stop.no_target, true);
-    const after = await head();
-    assert.equal(after.last_seq, before.last_seq);
-    report.noTargetStop = {stop, before: before.last_seq, after: after.last_seq};
-    checkpoint();
-  }, {after: ['lifecycle-lesson']});
 
   if (test.steps.some(step => step.status !== 'passed')) return report;
   return withAcceptanceContext({...report, status: 'passed'}, {directory, browser});

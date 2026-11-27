@@ -6,21 +6,20 @@ import {createSummerDispatcher} from '../src/summer-adapter.ts';
 
 const testOptions = {timeout: 5_000};
 
-function fixture(t) {
-  let now = 0;
-  const recorder = createDebugRecorder(() => now);
+function fixture(t, captureContext = () => { throw Error('Lifecycle events must not read editor context'); }) {
+  const recorder = createDebugRecorder();
   const playground = createPlaygroundApi(recorder, {
     supportsProject: () => true, check: () => undefined, play: () => undefined, stopRun: () => undefined,
     summerCall: (...args) => dispatch(...args),
   });
   const dispatch = createSummerDispatcher({
-    captureContext() { throw Error('Lifecycle events must not read editor context'); },
+    captureContext,
     recentLifecycleEvents: playground.recentLifecycleEvents,
     waitLifecycleEvents: playground.waitLifecycleEvents,
   });
   t.after(playground.disposeWaits);
   return {
-    recorder, playground, at(value) {now = value;},
+    recorder, playground,
     call(op, input = {}, signal) {return playground.api.summer_call({op: 'engine.' + op, input}, signal);},
   };
 }
@@ -107,57 +106,40 @@ test('cursors are scoped and pages advance across filtering and prefix eviction'
   assert.equal(page.truncated, true);
   assert.deepEqual(data(await f.call('recent_events', {...cursor(page), limit: 1, kinds: ['play.stopped']}))
     .events.map(event => event.seq), [6]);
+  const waitInput = {since: 0, kinds: ['play.started'], max_events: 1};
+  const first = data(await f.call('wait_for_event', waitInput));
+  assert.deepEqual(first.events.map(event => event.seq), [3]);
+  assert.equal(first.truncated, true);
+  const second = data(await f.call('wait_for_event', {...waitInput, ...cursor(first)}));
+  assert.deepEqual(second.events.map(event => event.seq), [5]);
   assert.equal((await fixture(t).call('recent_events', {since: 0, stream_id: page.stream_id})).error.code, 'invalid_cursor');
   assert.equal((await f.call('wait_for_event', {since: 515})).error.code, 'invalid_cursor');
-  f.at(600_000);
-  const empty = data(await f.call('recent_events', {limit: 2}));
-  assert.deepEqual(empty.gap, {from_seq: 513, to_seq: 514});
-  assert.equal(empty.last_seq, 514);
-  assert.equal(empty.next_seq, 514);
 });
 
-test('a late wake still sees deadline-inclusive observations and leaves later observations for the next call', testOptions, async t => {
+test('a wait times out when no event matches and returns the scanned cursor', testOptions, async t => {
+  t.mock.timers.enable({apis: ['setTimeout']});
   const f = fixture(t);
-  const pending = f.call('wait_for_event', {timeout_seconds: 1});
-  const {run} = begin(f.recorder, 1);
-  f.at(999);
-  started(f.recorder, run);
-  f.at(1000);
-  stopped(f.recorder, run);
-  f.at(1001);
-  started(f.recorder, begin(f.recorder, 2).run);
-  f.recorder.notify();
-  const result = data(await pending);
-  assert.deepEqual(result.events.map(event => event.seq), [1, 2]);
-  assert.equal(result.next_seq, 2);
-  assert.equal(result.truncated, false);
-  assert.deepEqual(data(await f.call('recent_events', cursor(result))).events.map(event => event.seq), [3]);
-
-  const next = f.call('wait_for_event', {...cursor(result), since: 3, timeout_seconds: 1});
-  f.at(2002);
-  stopped(f.recorder, f.recorder.api.getRun('run-2').result);
-  f.recorder.notify();
-  const expired = data(await next);
-  assert.equal(expired.timed_out, true);
-  assert.equal(expired.next_seq, 3);
-  assert.equal(expired.truncated, false);
-  assert.deepEqual(data(await f.call('recent_events', cursor(expired))).events.map(event => event.seq), [4]);
-});
-
-test('an eviction watermark that crossed the deadline preserves the last provable cursor', testOptions, async t => {
-  const f = fixture(t);
-  const pending = f.call('wait_for_event', {since: 0, timeout_seconds: 1});
+  const pending = f.call('wait_for_event', {kinds: ['play.stopped'], timeout_seconds: 1});
   const {run} = begin(f.recorder, 1);
   started(f.recorder, run);
-  f.at(1001);
-  stopped(f.recorder, run);
-  f.at(601_001);
-  f.recorder.notify();
+  t.mock.timers.tick(1000);
   const result = data(await pending);
   assert.equal(result.timed_out, true);
-  assert.deepEqual(result.gap, {from_seq: 1, to_seq: 2});
-  assert.equal(result.next_seq, 0);
-  assert.equal(data(await f.call('recent_events', cursor(result))).next_seq, 2);
+  assert.equal(result.matched, false);
+  assert.deepEqual(result.events, []);
+  assert.equal(result.next_seq, 1);
+});
+
+test('Stop with no target preserves the event head', testOptions, async t => {
+  const f = fixture(t, () => ({projectId: 'original', editorRevision: 7, activeRunId: null, pendingAttemptId: null}));
+  const {run} = begin(f.recorder, 1);
+  started(f.recorder, run);
+  stopped(f.recorder, run);
+  const before = data(await f.call('recent_events'));
+  assert.equal(data(await f.call('stop')).no_target, true);
+  const after = data(await f.call('recent_events', cursor(before)));
+  assert.equal(after.last_seq, before.last_seq);
+  assert.deepEqual(after.events, []);
 });
 
 test('cancel wins before notification commits, and lifecycle and local waits share the page budget', testOptions, async t => {

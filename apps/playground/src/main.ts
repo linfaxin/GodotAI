@@ -197,7 +197,6 @@ function reconcileCancelledLaunches(){
  }}finally{reconcilingCancelledLaunches=false;}
 }
 window.addEventListener('pagehide',event=>{if(!event.persisted)playground.disposeWaits();});
-window.addEventListener('pageshow',event=>{if(event.persisted)debugRecorder.notify();});
 const fileMenu=createFileMenu({select:selectFile,rename:path=>fileForm(path),remove:deleteFile,canDelete:path=>path!==current?.entry,canRename:path=>canRenameProjectFile(current,path),toast});
 const explorer=createExplorer(path=>{workbench.filePicked();selectFile(path);editor.focus();},(path,x,y)=>fileMenu.open(path,x,y));
 function toast(message:string){clearTimeout(toastTimer);$('toast').textContent=message;$('toast').hidden=false;toastTimer=setTimeout(()=>$('toast').hidden=true,4000);}
