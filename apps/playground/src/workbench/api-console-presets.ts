@@ -9,6 +9,7 @@ export interface ConsoleLessonStep {
   /** A complete input for requests that need no runtime-generated identity. */
   input?: Record<string, unknown>;
   needsRunSource?: boolean;
+  needsEventCursor?: boolean;
   /** Explicitly merge into this operation's valid object draft, preserving real IDs/path.
    * Invalid JSON is left untouched. This is not an expression or substitution system. */
   inputOverrides?: Record<string, unknown>;
@@ -23,7 +24,54 @@ export interface ConsoleLesson {
 
 const inputScriptReady = '收到 running 回执后，确认主运行是回执中的 runId、待启动 attempt 为「无」，且「物理帧输入」和「游戏帧探测」均为「可用」。';
 
+const takeCursor = (id: string, action: string): ConsoleLessonStep => ({
+  id, label: `${action}前取游标`, operationId: 'engine.recent_events', input: {},
+});
+const waitLifecycle = (id: string, start: boolean): ConsoleLessonStep => ({
+  id, label: start ? '确认本次启动事件' : '确认本次退出事件', operationId: 'engine.wait_for_event',
+  input: {kinds: [start ? 'play.started' : 'play.stopped'], timeout_seconds: start ? 60 : 15}, needsEventCursor: true,
+  notes: '用操作前的事件页填入游标。' + (start
+    ? '在整页事件中核对 Play 回执的 attemptId、项目和版本。' + inputScriptReady
+    : '按 Stop 回执核对 Worker 身份。正常退出需有 host-report 和 clean-exit。已退出时可查看原回执；只有取消的启动尝试时先查构建。') +
+    '若仅看到其它运行，从这次等待结果填入新游标，再显式执行一次等待。若历史有缺口，按原身份查询构建或运行。',
+});
+
+const lifecycleProbe = (id: string, x: number): ConsoleLessonStep => ({
+  id, label: `探测位置 x=${x}`, operationId: 'engine.game_probe',
+  input: {tree: {path: '/root/Main'}, props: [INPUT_SCRIPT_PLAYER_PATH + ':position']},
+});
+const stopLifecycleRun = (id: string): ConsoleLessonStep => ({
+  id, label: '停止已探测的运行', operationId: 'engine.stop', input: {}, needsRunSource: true,
+  notes: '从最近一次同帧探测的历史回执填入目标，再检查 Stop 返回的 runs。',
+});
+
 export const CONSOLE_LESSONS: readonly ConsoleLesson[] = [
+  {
+    id: 'lifecycle-events',
+    title: 'Summer：等待启动与退出',
+    description: '从 engine.game_input 打开独立示例。用游标确认两次真实启动和退出，观察位置 64 → 128 → 64。',
+    steps: [
+      takeCursor('cursor-start', 'Play'),
+      {id: 'play', label: '启动示例', operationId: 'engine.play', input: {}},
+      waitLifecycle('started', true),
+      lifecycleProbe('before', 64),
+      {id: 'move', label: '按住向右动作四步', operationId: 'engine.game_input',
+        input: {...SUMMER_OPERATION_SPECS['engine.game_input'].defaultInput}, needsRunSource: true,
+        notes: '从起点探测回执选择本次运行。'},
+      lifecycleProbe('after', 128),
+      takeCursor('cursor-stop', 'Stop'),
+      stopLifecycleRun('stop'),
+      waitLifecycle('stopped', false),
+      takeCursor('cursor-restart', '重启'),
+      {id: 'restart', label: '以同一源码重启', operationId: 'engine.play', input: {},
+        notes: '从下一次启动事件核对相同的 sourceHash 和新的 runId。'},
+      waitLifecycle('restarted', true),
+      lifecycleProbe('reset', 64),
+      takeCursor('cursor-final-stop', '第二次 Stop'),
+      stopLifecycleRun('final-stop'),
+      waitLifecycle('final-stopped', false),
+    ],
+  },
   {
     id: 'input-script',
     title: 'Summer：用输入验证移动',

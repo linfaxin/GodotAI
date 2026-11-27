@@ -205,6 +205,8 @@ export const CONSOLE_OPERATIONS: readonly ConsoleOperation[] = Object.freeze([
   summer('engine.play', 'project'),
   summer('engine.stop', 'main'),
   summer('engine.is_running', 'none'),
+  summer('engine.recent_events', 'none'),
+  summer('engine.wait_for_event', 'none', true),
   summer('engine.get_runtime_tree', 'runtime', true),
   summer('engine.inspect_runtime_node', 'runtime', true),
   summer('engine.runtime_set', 'runtime', true),

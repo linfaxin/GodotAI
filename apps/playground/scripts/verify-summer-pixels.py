@@ -14,8 +14,8 @@ def require(condition, message):
         raise ValueError(message)
 
 
-def read_report(directory):
-    return json.loads((directory / "report.json").read_text(encoding="utf-8"))
+def read_report(report):
+    return json.loads(report.read_text(encoding="utf-8"))
 
 
 def inspect_image(root, directory, sample):
@@ -50,12 +50,11 @@ def inspect_image(root, directory, sample):
             "expectedCentroid": expected, "whitePixels": count, "size": list(image.size)}
 
 
-def verify_playground_report(root, variant):
-    directory = root / "reports" / variant
-    samples = read_report(directory)["pngs"]
-    expected = ["previous-physical.png"] if variant.endswith("old") else ["before.png", "after.png", "restart.png"]
-    require([sample["file"] for sample in samples] == expected, directory)
-    return [inspect_image(root, directory, sample) for sample in samples]
+def verify_playground_report(root, report, *, previous=False):
+    samples = read_report(report)["pngs"]
+    expected = ["previous-physical.png"] if previous else ["before.png", "after.png", "restart.png"]
+    require([sample["file"] for sample in samples] == expected, report)
+    return [inspect_image(root, report.parent, sample) for sample in samples]
 
 
 def verify(root):
@@ -63,14 +62,14 @@ def verify(root):
     observations = {}
     variants = ["new", "old", "replay-new", "replay-old"]
     manual_report = reports / "manual-archive" / "report.json"
-    if manual_report.is_file() and read_report(manual_report.parent).get("mode") == "headed-interactive-operator-walkthrough":
+    if manual_report.is_file() and read_report(manual_report).get("mode") == "headed-interactive-operator-walkthrough":
         variants.append("manual-archive")
     for variant in variants:
-        observations[variant] = verify_playground_report(root, variant)
+        observations[variant] = verify_playground_report(root, reports / variant / "report.json", previous=variant.endswith("old"))
 
     directory = reports / "summer-native"
     if (directory / "report.json").is_file():
-        samples = read_report(directory)["images"]
+        samples = read_report(directory / "report.json")["images"]
         names = [Path(sample["file"]).stem for sample in samples]
         require(names == ["before", "after", "restart"][:len(names)], directory)
         observations["summer-native"] = [inspect_image(root, directory, sample) for sample in samples]
@@ -78,10 +77,14 @@ def verify(root):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 3 and sys.argv[2] == "--replay":
-        result = verify_playground_report(Path(sys.argv[1]).resolve(), "new")
+    if len(sys.argv) == 3 and sys.argv[1] == "--playground-report":
+        report = Path(sys.argv[2]).resolve()
+        result = {"status": "passed", "observations": verify_playground_report(report.parent, report)}
+    elif len(sys.argv) == 3 and sys.argv[2] == "--replay":
+        root = Path(sys.argv[1]).resolve()
+        result = verify_playground_report(root, root / "reports" / "new" / "report.json")
     elif len(sys.argv) == 2:
         result = verify(Path(sys.argv[1]).resolve())
     else:
-        sys.exit("Usage: python3 verify-summer-pixels.py EVIDENCE_ROOT [--replay]")
+        sys.exit("Usage: python3 verify-summer-pixels.py EVIDENCE_ROOT [--replay] or --playground-report REPORT")
     print(json.dumps(result, indent=2))

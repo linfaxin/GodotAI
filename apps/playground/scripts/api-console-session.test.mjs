@@ -311,3 +311,39 @@ test('open example shares the replay/manual gate and never launches a game',asyn
   const f=createConsoleFixture(),token=f.gate.acquire('replay');await f.session.openExample();assert.equal(f.gate.owner(),'replay');
   f.gate.release(token);await f.session.openExample();assert.equal(f.gate.owner(),null);assert.equal(f.calls.length,0);f.session.dispose();
 });
+
+test('event cursor fill uses structured history and cancellation releases the console gate', async () => {
+  const f = createConsoleFixture();
+  try {
+    f.setReply('summer_call', {ok: true, result: {data: {stream_id: 'page', next_seq: 3, events: [],
+      large: 'x'.repeat(70_000)}}});
+    f.session.selectOperation('engine.recent_events');
+    await f.session.submit();
+    const source = last(f);
+    assert.equal(source.truncated, true);
+    f.session.loadPreset('engine.wait_for_event', '{"kinds":["play.started"]}', false, true);
+    await f.session.submit();
+    assert.equal(f.session.snapshot().clientError.kind, 'missing_source');
+    assert.equal(f.calls.length, 1);
+    f.setContext(changeRun());
+    f.session.updateTarget({sourceCallId: source.callId});
+    assert.equal(f.calls.length, 1);
+    assert.deepEqual(JSON.parse(f.session.snapshot().draft.inputText),
+      {since: 3, stream_id: 'page', kinds: ['play.started']});
+    f.setReply('summer_call', (_input, signal) => new Promise(resolve => {
+      signal.addEventListener('abort', () => resolve({ok: false, error: {code: 'cancelled'}}), {once: true});
+    }));
+    const waiting = f.session.submit();
+    assert.equal(f.session.snapshot().owner, 'manual');
+    f.session.cancel();
+    await waiting;
+    assert.equal(f.session.snapshot().owner, null);
+    assert.match(last(f).summary, /cancelled/);
+    f.session.clearSettled();
+    f.session.updateTarget({sourceCallId: source.callId});
+    assert.equal(f.session.snapshot().clientError.kind, 'missing_source');
+    assert.equal(JSON.parse(f.session.snapshot().draft.inputText).since, 3);
+  } finally {
+    f.session.dispose();
+  }
+});

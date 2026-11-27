@@ -13,6 +13,8 @@ import {readGameProbeQuery, type GameProbeInput, type GameProbeResult} from '@go
 import {readInputScriptCommand, type InputScriptCommand, type InputScriptInput,
   type InputScriptResult} from '@godot-js/engine/browser/dedicated/worker-runner';
 import {sameWorkerRun, type WorkerRunIdentity} from '@godot-js/engine/browser/dedicated/worker-protocol';
+import {LIFECYCLE_KINDS, type LifecycleKind, type LifecycleQuery, type RecentLifecycleEvents,
+  type WaitLifecycleEvents} from './lifecycle-events.ts';
 import type {ProjectContextData, StopResult} from './playground-api';
 import {SUMMER_OPERATION_SPECS as rules, SUMMER_TREE_LIMITS, SUMMER_COMPATIBILITY, type SummerOperation} from './summer-operation-spec.ts';
 export {SUMMER_COMPATIBILITY} from './summer-operation-spec.ts';
@@ -47,6 +49,8 @@ export interface SummerBackend {
   gameProbe?(input: GameProbeInput, signal?: AbortSignal): Promise<GameProbeResult>;
   inputScript?(input: InputScriptInput, signal?: AbortSignal): Promise<InputScriptResult>;
   runtimeMethods?: SummerMethodBackend;
+  recentLifecycleEvents?(query: LifecycleQuery): BackendReply<RecentLifecycleEvents>;
+  waitLifecycleEvents?(query: LifecycleQuery, timeoutMs: number, signal?: AbortSignal): Promise<BackendReply<WaitLifecycleEvents>>;
   captureContext(): SummerContext;
   getProjectContext(): BackendReply<ProjectContextData>;
   play(input: {projectId: string; expectedEditorRevision: number}): BackendReply<{attemptId: string}>;
@@ -72,7 +76,8 @@ export type StopData = {accepted: true; cancelledAttemptId: string | null; captu
   runs: {runId: string; receipt: StopResult}[]; no_target: boolean};
 export type CallData = {route: 'runtime_call'; payload: {ok: true; receipt: Extract<MethodCallResult, {ok: true}>['receipt']; result: Extract<MethodOutcome, {outcome: 'returned'}>}};
 export type SummerData = Extract<GameProbeResult, {ok: true}>['result'] | Extract<InputScriptResult, {ok: true}> |
-  CallData | ProjectContextData | RuntimeTreeSnapshot | RuntimeNodeSnapshot | GameScreenshot | WriteData | PlayData | RunningData | StopData;
+  CallData | ProjectContextData | RuntimeTreeSnapshot | RuntimeNodeSnapshot | GameScreenshot | WriteData | PlayData | RunningData | StopData |
+  RecentLifecycleEvents | WaitLifecycleEvents;
 export type FacadeSuccess<T = SummerData> = {ok: true; status: 'done'; result: {data: T; godotai: {compatibility: typeof SUMMER_COMPATIBILITY}}};
 export type FacadeFailure = {ok: false; error: {code: FacadeErrorCode; message: string; source?: AccessError['source']; retry: 'no';
   details: {godotai: {compatibility: typeof SUMMER_COMPATIBILITY; route?: 'runtime_properties' | 'legacy_write' | 'runtime_call';
@@ -285,6 +290,40 @@ async function runtimeCall(backend: SummerMethodBackend, input: Record<string, u
   return fail(code, message, {route, stage: 'invoke', receipt: response});
 }
 
+const OTHER_SUMMER_EVENT_KINDS = ['op.applied', 'op.failed', 'script.error', 'scene.saved', 'scene.opened',
+  'import.completed', 'selection.changed', 'snapshot.published'];
+
+function readLifecycleQuery(input: Record<string, unknown>, wait: boolean):
+  {query: LifecycleQuery; timeoutMs: number} | FacadeFailure {
+  const limitKey = wait ? 'max_events' : 'limit';
+  const limit = input[limitKey] === undefined ? (wait ? 20 : 50) : input[limitKey];
+  const {since, stream_id, kinds = [], timeout_seconds: timeout = 30} = input;
+  if (since !== undefined && (typeof since !== 'number' || !Number.isSafeInteger(since) || since < 0))
+    return localError('invalid_input', 'since');
+  if (stream_id !== undefined && (typeof stream_id !== 'string' || !stream_id.length || stream_id.length > 256 || since === undefined))
+    return localError('invalid_input', 'stream_id', 'stream_id 需要与 since 一起提交');
+  if (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1)
+    return localError('invalid_input', limitKey);
+  if (typeof timeout !== 'number' || !Number.isFinite(timeout))
+    return localError('invalid_input', 'timeout_seconds');
+  const ownedKinds = snapshotRuntimePropertyData(kinds);
+  if (!Array.isArray(ownedKinds)) return localError('invalid_input', 'kinds');
+  const selected = new Set<LifecycleKind>();
+  for (const raw of ownedKinds) {
+    if (typeof raw !== 'string' || !raw.length) return localError('invalid_input', 'kinds');
+    const kind = raw.trim() as LifecycleKind;
+    if (!kind) continue;
+    if (!LIFECYCLE_KINDS.includes(kind)) return localError(
+      OTHER_SUMMER_EVENT_KINDS.includes(kind) ? 'unsupported' : 'invalid_input', 'kinds',
+      `当前生命周期事件类型为 ${LIFECYCLE_KINDS.join('、')}`);
+    selected.add(kind);
+  }
+  return {
+    query: {since, stream_id, kinds: [...selected], limit: Math.min(limit, wait ? 500 : 200)},
+    timeoutMs: Math.min(120, Math.max(1, Math.round(timeout))) * 1000,
+  };
+}
+
 /** The dispatcher binds each call once; it never re-reads the active run after an await. */
 export function createSummerDispatcher(backend: SummerBackend) {
   return async (raw: unknown, signal?: AbortSignal, selected?: SelectedRuntimeMethod): Promise<FacadeReply> => {
@@ -297,6 +336,16 @@ export function createSummerDispatcher(backend: SummerBackend) {
     } catch {return localError('invalid_input', 'signal');}
     if (op === 'engine.runtime_call') return backend.runtimeMethods ?
       runtimeCall(backend.runtimeMethods, input, signal, methodDeadline, selected) : localError('unsupported', 'runtimeCall');
+    if (op === 'engine.recent_events' || op === 'engine.wait_for_event') {
+      const wait = op === 'engine.wait_for_event';
+      const prepared = readLifecycleQuery(input, wait);
+      if ('ok' in prepared) return prepared;
+      const response = wait
+        ? await backend.waitLifecycleEvents?.(prepared.query, prepared.timeoutMs, signal)
+        : backend.recentLifecycleEvents?.(prepared.query);
+      return response === undefined ? localError('unsupported', 'events') :
+        response.ok ? done(response.result) : backendFailure(response);
+    }
     const context = {...backend.captureContext()};
     if (op === 'engine.get_project_context') {
       const response = backend.getProjectContext();

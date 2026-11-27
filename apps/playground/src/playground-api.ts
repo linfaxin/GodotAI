@@ -1,3 +1,4 @@
+import type {LifecyclePage, LifecycleQuery, WaitLifecycleEvents} from './lifecycle-events.ts';
 import type {FacadeReply, SelectedRuntimeMethod, SummerMethodBackend} from './summer-adapter';
 import type {
   createDebugRecorder, DebugBuild, DebugCheck, DebugRun, DebugContext, DebugExit, ReadRunEventsOptions,
@@ -68,6 +69,67 @@ export function createPlaygroundApi(recorder: Recorder, actions: Actions) {
   const debug = recorder.api;
   const observers = new Set<(call: PlaygroundApiCall) => void>();
   const waiting = new Set<() => void>();
+  let waitsDisposed = false;
+
+  function cancelWaits() {
+    for (const cancel of waiting) cancel();
+  }
+
+  const invalidCursor = () => fail('invalid_cursor', '游标不属于当前页面事件流或超出范围');
+
+  function recentLifecycleEvents(query: LifecycleQuery) {
+    return recorder.lifecycle.accepts(query) ? ok(recorder.lifecycle.recent(query)) : invalidCursor();
+  }
+
+  function waitLifecycleEvents(query: LifecycleQuery, timeoutMs: number, signal?: AbortSignal):
+    Promise<ReturnType<typeof ok<WaitLifecycleEvents>> | ToolError> {
+    const log = recorder.lifecycle;
+    if (!log.accepts(query)) return Promise.resolve(invalidCursor());
+    if (waitsDisposed || (signal && readAborted.call(signal)))
+      return Promise.resolve(fail('cancelled', '已取消等待'));
+    if (waiting.size >= MAX_WAITERS) return Promise.resolve(fail('busy', '等待操作已达上限'));
+    const since = query.since ?? log.head();
+    const start = log.now();
+    const deadline = start + timeoutMs;
+    return new Promise(resolve => {
+      let cursor = since;
+      let gap: LifecyclePage['gap'];
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+
+      function finish(reply: ReturnType<typeof ok<WaitLifecycleEvents>> | ToolError) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        unsubscribe();
+        waiting.delete(cancel);
+        if (signal) EventTarget.prototype.removeEventListener.call(signal, 'abort', cancel);
+        resolve(reply);
+      }
+
+      const cancel = () => finish(fail('cancelled', '已取消等待'));
+      function scan() {
+        if (settled) return;
+        const page = log.read(cursor, query.kinds, query.limit, deadline);
+        cursor = page.next_seq;
+        gap ??= page.gap;
+        const matched = page.events.length > 0;
+        const waited = log.now() - start;
+        if (matched || waited >= timeoutMs) finish(ok({
+          ...page, since, ...(gap ? {gap} : {}), matched, timed_out: !matched, waited_ms: waited,
+        }));
+      }
+      function expire() {
+        scan();
+        if (!settled) timer = setTimeout(expire, Math.max(1, Math.ceil(deadline - log.now())));
+      }
+
+      const unsubscribe = recorder.subscribe(scan);
+      waiting.add(cancel);
+      if (signal) EventTarget.prototype.addEventListener.call(signal, 'abort', cancel, {once: true});
+      expire();
+    });
+  }
 
   function publish(name: string, input: unknown, result: unknown) {
     for (const observer of observers) {
@@ -168,6 +230,7 @@ export function createPlaygroundApi(recorder: Recorder, actions: Actions) {
         return Promise.resolve(fail('invalid_input', '取消等待需要有效的 AbortSignal'));
       }
     }
+    if (waitsDisposed) return Promise.resolve(fail('cancelled', '已取消等待'));
     if (waiting.size >= MAX_WAITERS) return Promise.resolve(fail('busy', '等待操作已达上限'));
     const releaseBuild = attemptId === undefined ? undefined : recorder.retainBuild(attemptId);
     if (attemptId !== undefined && !releaseBuild) return Promise.resolve(fail('not_found', '构建记录不可用'));
@@ -384,8 +447,10 @@ export function createPlaygroundApi(recorder: Recorder, actions: Actions) {
       observers.add(observer);
       return () => { observers.delete(observer); };
     },
-    cancelWaits() {
-      for (const cancel of waiting) cancel();
+    recentLifecycleEvents, waitLifecycleEvents, cancelWaits,
+    disposeWaits() {
+      waitsDisposed = true;
+      cancelWaits();
     },
   };
 }

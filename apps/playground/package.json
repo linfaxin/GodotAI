@@ -41,6 +41,7 @@
     "test:browser:api-console:shell": "node scripts/browser-api-console-shell-test.mjs",
     "test:browser:game-probe": "node scripts/browser-game-probe-test.mjs",
     "test:browser:input-script": "node scripts/browser-input-script-test.mjs",
+    "test:browser:lifecycle-events": "node scripts/browser-lifecycle-events-test.mjs",
     "test:browser:input-script:g0": "node scripts/browser-game-probe-g0.mjs --input-script",
     "test:browser:runtime-call": "node scripts/browser-runtime-call-test.mjs",
     "test:browser:api-console:real": "node scripts/browser-api-console-real-test.mjs",
