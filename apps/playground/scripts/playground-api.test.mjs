@@ -138,6 +138,78 @@ test('an out-of-order check is queryable when returned and does not supersede a 
   assert.equal(api.get_diagnostics({...query, checkId: completed[0].checkId}).error.code, 'not_found');
 });
 
+test('Summer diagnostics follows the newest attempt for the captured editor version', () => {
+  const {agent, api, recorder, calls, start} = fixture();
+  recorder.setContext({editorRevision: null});
+  assert.equal(agent.getSummerDiagnostics().error.code, 'not_ready');
+  recorder.setContext({editorRevision});
+  assert.deepEqual(unwrap(agent.getSummerDiagnostics()), {projectId, editorRevision, check: null, build: null, run: null});
+  const attemptId = recorder.startBuild(projectId, editorRevision);
+  const original = start(attemptId);
+  original.state('running');
+  assert.equal(unwrap(agent.getSummerDiagnostics()).run.identity.runId, original.identity.runId);
+  assert.equal(unwrap(api.get_diagnostics({projectId, editorRevision})).run, null);
+  const newer = recorder.startBuild(projectId, editorRevision);
+  const pending = unwrap(agent.getSummerDiagnostics());
+  assert.equal(pending.build.attemptId, newer);
+  assert.equal(pending.build.status, 'pending');
+  assert.equal(pending.build.diagnostics.observed, false);
+  assert.equal(pending.build.diagnostics.counts, undefined);
+  assert.equal(pending.run, null);
+  recorder.recordCompileResponse(newer, {diagnostics: [typeError]});
+  assert.equal(unwrap(agent.getSummerDiagnostics()).build.status, 'failed');
+  assert.equal(unwrap(agent.getSummerDiagnostics()).run, null);
+  assert.equal(unwrap(api.get_run({runId: original.identity.runId})).state, 'running');
+
+  const previous = recorder.startCheck(projectId, editorRevision);
+  recorder.setContext({editorRevision: editorRevision + 1});
+  const repaired = recorder.startCheck(projectId, editorRevision + 1);
+  recorder.finishCheck(repaired, {diagnostics: [], sourceHash});
+  recorder.finishCheck(previous, {diagnostics: [typeError], sourceHash});
+  const scoped = unwrap(agent.getSummerDiagnostics());
+  assert.equal(scoped.check.checkId, repaired.checkId);
+  assert.equal(scoped.check.diagnostics.counts.error, 0);
+  assert.equal(scoped.build, null);
+  assert.equal(scoped.run, null);
+  recorder.setContext({projectId: 'another-project'});
+  assert.equal(unwrap(agent.getSummerDiagnostics()).check, null);
+  assert.deepEqual(calls, {check: 0, play: 0, stop: []});
+});
+
+test('Summer diagnostics preserves source counts, retained order and exit evidence without leaking stacks', () => {
+  const {agent, api, recorder, start} = fixture();
+  const report = [typeError, {...typeError, code: 9000}];
+  const input = [{...typeError, category: 'warning'}, ...report,
+    ...Array.from({length: 100}, () => ({...typeError, category: 'info'}))];
+  recorder.finishCheck(recorder.startCheck(projectId, editorRevision), {diagnostics: input, sourceHash});
+  const attemptId = recorder.startBuild(projectId, editorRevision);
+  const original = start(attemptId);
+  original.state('exited');
+  assert.equal(unwrap(agent.getSummerDiagnostics()).run.exit, null);
+  recorder.recordRunEvent({type: 'exit', report: {...original.identity, reason: 'crashed',
+    diagnostic: {source: 'browser', message: 'Worker crashed', stack: 'retained only on the run', filename: '/src/start.ts', line: 4}}});
+  const data = unwrap(agent.getSummerDiagnostics());
+  assert.equal(data.run.availability, 'retained');
+  assert.deepEqual(data.run.identity, original.identity);
+  assert.equal(data.run.artifactId, artifactId);
+  assert.equal(data.run.exit.evidence, 'editor-local');
+  assert.equal(data.run.exit.reason, 'crashed');
+  assert.equal(data.run.exit.diagnostic.line, 4);
+  assert.equal(Object.hasOwn(data.run.exit.diagnostic, 'stack'), false);
+  assert.equal(unwrap(api.get_run({runId: original.identity.runId})).exit.report.diagnostic.stack, 'retained only on the run');
+  assert.deepEqual(data.check.diagnostics.counts, {warning: 1, error: 2, info: 100});
+  assert.equal(data.check.diagnostics.omittedCount, 3);
+  assert.deepEqual(data.check.diagnostics.items.slice(0, 3).map(item => [item.severity, item.code]),
+    [['error', 2322], ['error', 9000], ['warning', 2322]]);
+  assert.equal(unwrap(api.get_diagnostics({projectId, editorRevision})).check.diagnostics.items[0].severity, 'warning');
+  assert.equal(data.build.diagnostics.counts.error, 0);
+
+  for (let revision = editorRevision + 1; revision <= editorRevision + 2; revision++) {
+    start(recorder.startBuild(projectId, revision), revision).exit();
+  }
+  assert.deepEqual(unwrap(agent.getSummerDiagnostics()).run, {availability: 'unavailable', runId: original.identity.runId, attemptId});
+});
+
 test('attempt waits bind their own run, while exit requires a receipt', async () => {
   const {recorder, api, start} = fixture();
   const attemptId = unwrap(api.play(request)).attemptId;

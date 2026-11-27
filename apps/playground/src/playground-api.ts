@@ -1,8 +1,9 @@
 import type {LifecycleQuery, WaitLifecycleEvents} from './lifecycle-events.ts';
 import type {FacadeReply, SelectedRuntimeMethod, SummerMethodBackend} from './summer-adapter';
 import type {
-  createDebugRecorder, DebugBuild, DebugCheck, DebugRun, DebugContext, DebugExit, ReadRunEventsOptions,
+  createDebugRecorder, DebugBuild, DebugCheck, DebugRun, DebugContext, DebugDiagnostics, DebugExit, ReadRunEventsOptions,
 } from './debug-api';
+import type {WorkerRunIdentity} from '@godot-js/engine/browser/dedicated/worker-protocol';
 import {snapshotRuntimePropertyData, prepareRuntimeProperties, runtimePropertiesError, type DescribeInput, type ReadInput, type WriteInput, type PropertyKind, type PropertyResult, prepareRuntimeObservation, prepareRuntimeSet, runtimeWriteError, type GameInput, type GameScreenshot, type InteractionResult,
   type ObservationResult, type PreparedRuntimeObservation, type RuntimeNodeInput, type RuntimeTreeInput, type ScreenshotInput,
   type RuntimeSetInput, type RuntimeSetResult, type WaitForInput, type WorkerPreviewRunner,
@@ -15,6 +16,17 @@ type ErrorCode = 'invalid_input' | 'not_found' | 'invalid_cursor' | 'revision_co
 type ToolError = {ok: false; error: {code: ErrorCode; message: string}};
 type ProjectInput = {projectId: string; expectedEditorRevision: number};
 type DiagnosticInput = {projectId: string; editorRevision: number; checkId?: string; attemptId?: string; runId?: string; path?: string};
+type DiagnosticRecordsInput = Pick<DiagnosticInput, 'projectId' | 'editorRevision' | 'checkId' | 'attemptId'>;
+type ExitDiagnostic = Pick<NonNullable<DebugExit['report']['diagnostic']>, 'source' | 'message' | 'name' | 'filename' | 'line' | 'column'>;
+export interface SummerDiagnosticsData {
+  projectId: string;
+  editorRevision: number;
+  check: Pick<DebugCheck, 'checkId' | 'status' | 'sourceHash' | 'diagnostics' | 'error'> | null;
+  build: Pick<DebugBuild, 'attemptId' | 'status' | 'sourceHash' | 'diagnostics' | 'error' | 'artifact' | 'preview'> | null;
+  run: null | {availability: 'unavailable'; runId: string; attemptId: string} |
+    {availability: 'retained'; identity: WorkerRunIdentity; attemptId: string; releaseId: string; artifactId: string;
+      state: DebugRun['state']; exit: null | {evidence: DebugExit['evidence']; reason: DebugExit['report']['reason']; diagnostic: ExitDiagnostic | null}};
+}
 type WaitInput = ({attemptId: string; runId?: never} | {runId: string; attemptId?: never}) & {
   until: 'running' | 'exited';
   timeoutMs?: number;
@@ -64,6 +76,27 @@ const MAX_WAITERS = 16;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_TIMEOUT_MS = 60_000;
 const readAborted = Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'aborted')!.get!;
+const diagnosticPriority = {error: 0, warning: 1, info: 2} as const;
+
+function prioritizeRecordedDiagnostics(diagnostics: DebugDiagnostics): DebugDiagnostics {
+  return {...diagnostics, items: [...diagnostics.items].sort((left, right) =>
+    diagnosticPriority[left.severity] - diagnosticPriority[right.severity])};
+}
+
+function projectDiagnosticRun(run: DebugRun): Extract<SummerDiagnosticsData['run'], {availability: 'retained'}> {
+  const {runId, revision, buildKey, generation, documentId, workerId, runConfigurationHash, state, attemptId} = run;
+  const exit = run.exit;
+  const diagnostic = exit?.report.diagnostic;
+  return {
+    availability: 'retained',
+    identity: {runId, revision, buildKey, generation, documentId, workerId, runConfigurationHash},
+    attemptId, state, releaseId: run.release.releaseId, artifactId: run.artifact.artifactId,
+    exit: exit ? {evidence: exit.evidence, reason: exit.report.reason, diagnostic: diagnostic ? {
+      source: diagnostic.source, message: diagnostic.message, name: diagnostic.name,
+      filename: diagnostic.filename, line: diagnostic.line, column: diagnostic.column,
+    } : null} : null,
+  };
+}
 
 export function createPlaygroundApi(recorder: Recorder, actions: Actions) {
   const debug = recorder.api;
@@ -169,6 +202,18 @@ export function createPlaygroundApi(recorder: Recorder, actions: Actions) {
       fail(capabilities[action], '当前项目的执行环境不可用');
   }
 
+  function diagnosticRecords({projectId, editorRevision, checkId, attemptId}: DiagnosticRecordsInput) {
+    const queriedBuild = attemptId === undefined ? undefined : debug.getBuild(attemptId);
+    if (queriedBuild && !queriedBuild.ok) return queriedBuild;
+    const build = queriedBuild?.result ?? recorder.getBuildForRevision(projectId, editorRevision);
+    const check = checkId === undefined ? recorder.getCheckForRevision(projectId, editorRevision) : recorder.getCheck(checkId);
+    if (checkId !== undefined && !check) return fail('not_found', '检查记录不可用');
+    if ([check, build].some(item => item && (item.projectId !== projectId || item.editorRevision !== editorRevision))) {
+      return fail('revision_conflict', '诊断记录不属于同一项目版本或构建');
+    }
+    return ok({check, build});
+  }
+
   function diagnostics(input: DiagnosticInput) {
     if (!isId(input?.projectId) || !isRevision(input.editorRevision) ||
         [input.checkId, input.attemptId, input.runId].some(id => id !== undefined && !isId(id)) ||
@@ -179,14 +224,10 @@ export function createPlaygroundApi(recorder: Recorder, actions: Actions) {
     const queriedRun = runId === undefined ? undefined : debug.getRun(runId);
     if (queriedRun && !queriedRun.ok) return queriedRun;
     const run = queriedRun?.result;
-    const queriedBuildId = attemptId ?? run?.attemptId;
-    const queriedBuild = queriedBuildId === undefined ? undefined : debug.getBuild(queriedBuildId);
-    if (queriedBuild && !queriedBuild.ok) return queriedBuild;
-    const build = queriedBuild?.result ?? recorder.getBuildForRevision(projectId, editorRevision);
-    const check = checkId === undefined ? recorder.getCheckForRevision(projectId, editorRevision) : recorder.getCheck(checkId);
-    if (checkId !== undefined && !check) return fail('not_found', '检查记录不可用');
-    if ([check, build].some(item => item && (item.projectId !== projectId || item.editorRevision !== editorRevision)) ||
-        run && (run.projectId !== projectId || run.revision !== editorRevision || run.attemptId !== build?.attemptId)) {
+    const records = diagnosticRecords({projectId, editorRevision, checkId, attemptId: attemptId ?? run?.attemptId});
+    if (!records.ok) return records;
+    const {check, build} = records.result;
+    if (run && (run.projectId !== projectId || run.revision !== editorRevision || run.attemptId !== build?.attemptId)) {
       return fail('revision_conflict', '诊断记录不属于同一项目版本或构建');
     }
     const path = input.path?.replace(/^res:\/\//, '/');
@@ -201,6 +242,39 @@ export function createPlaygroundApi(recorder: Recorder, actions: Actions) {
       run: run ? {runId: run.runId, attemptId: run.attemptId, state: run.state, evidence: run.exit?.evidence,
         observed: report?.sessionFacts !== undefined || diagnostic !== undefined,
         ...(runtime ? {diagnostic: runtime} : {})} : null,
+    });
+  }
+
+  function getSummerDiagnostics() {
+    const {projectId, editorRevision} = debug.getContext().result;
+    if (projectId === null || editorRevision === null) return fail('not_ready', '当前编辑项目或版本尚未就绪');
+    const records = diagnosticRecords({projectId, editorRevision});
+    if (!records.ok) return records;
+    const {check, build} = records.result;
+    let run: SummerDiagnosticsData['run'] = null;
+    if (build?.preview?.status === 'session-created') {
+      const {runId} = build.preview;
+      const found = debug.getRun(runId);
+      if (!found.ok) {
+        if (found.error.code !== 'not_found') return found;
+        run = {availability: 'unavailable', runId, attemptId: build.attemptId};
+      } else {
+        const recorded = found.result;
+        if (recorded.runId !== runId || recorded.projectId !== projectId || recorded.revision !== editorRevision ||
+            recorded.attemptId !== build.attemptId || recorded.buildKey !== build.artifact?.buildKey ||
+            recorded.artifact.artifactId !== build.artifact?.artifactId) {
+          return fail('revision_conflict', '运行记录不属于本次诊断的构建');
+        }
+        run = projectDiagnosticRun(recorded);
+      }
+    }
+    return ok<SummerDiagnosticsData>({
+      projectId, editorRevision,
+      check: check ? {checkId: check.checkId, status: check.status, sourceHash: check.sourceHash,
+        diagnostics: prioritizeRecordedDiagnostics(check.diagnostics), error: check.error} : null,
+      build: build ? {attemptId: build.attemptId, status: build.status, sourceHash: build.sourceHash,
+        diagnostics: prioritizeRecordedDiagnostics(build.diagnostics), error: build.error, artifact: build.artifact, preview: build.preview} : null,
+      run,
     });
   }
 
@@ -432,7 +506,7 @@ export function createPlaygroundApi(recorder: Recorder, actions: Actions) {
   });
 
   return {
-    api, methodBackend, summerCall,
+    api, methodBackend, summerCall, getSummerDiagnostics,
     subscribe(observer: (call: PlaygroundApiCall) => void) {
       observers.add(observer);
       return () => { observers.delete(observer); };

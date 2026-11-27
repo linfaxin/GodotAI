@@ -202,6 +202,7 @@ const localOperations: readonly ConsoleOperation[] = [
 /** Explicit allowlist: adding a public method does not silently expand the console. */
 export const CONSOLE_OPERATIONS: readonly ConsoleOperation[] = Object.freeze([
   summer('engine.get_project_context', 'none'),
+  summer('engine.get_diagnostics', 'none'),
   summer('engine.play', 'project'),
   summer('engine.stop', 'main'),
   summer('engine.is_running', 'none'),

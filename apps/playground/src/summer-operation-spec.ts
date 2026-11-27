@@ -44,6 +44,13 @@ export const SUMMER_OPERATION_SPECS = Object.freeze({
     allowed: [], unsupported: ['include', 'settingsPrefix', 'settingsPrefixes'], parameters: [], defaultInput: {},
     limitations: ['返回 GodotAI context；activeRunId 可能属于之前的项目。', '不支持 include 与项目设置筛选。'],
   }),
+  'engine.get_diagnostics': spec({
+    title: '读取检查、构建和退出诊断', description: '读取当前编辑版本的诊断记录，并追踪该次构建关联的运行。',
+    allowed: ['includeAll'], unsupported: [], defaultInput: {},
+    parameters: [{name: 'includeAll', description: '省略或 false。true 请求未裁剪结果，当前不支持。'}],
+    limitations: ['只读现有记录。需要新结果时先执行 check 或 Play。', '缺少记录或未观测时无法判断错误数。',
+      '运行诊断来自退出回执。运行中的 Worker 日志见 read_run_events。'],
+  }),
   'engine.recent_events': spec({
     title: '读取最近的生命周期事件', description: '读取页面事件流，并取得 Play 或 Stop 前的游标。',
     allowed: ['since', 'kinds', 'limit', 'stream_id'], unsupported: [],

@@ -1,14 +1,16 @@
 # 引擎下一阶段改造建议
 
-状态：待评审建议。日期：2026 年 11 月 17 日。分析基线：`a518dab`。
+状态：待评审建议。原分析日期：2026 年 11 月 17 日（`a518dab`）。实施进展更新至 2026 年 11 月 27 日（`595d135`）。
 
 已确认的产品定位与引擎平台边界见[引擎核心目标与平台边界](engine-goals.zh-CN.md)。本阶段建议交付一条可由独立平台调用的项目修改、构建、浏览器运行、观察与交互验证链路。
 
-Playground 接入 AI 助手的前置子方案[引擎最小合同与核心回归 V4](design/engine-minimum-contracts-v4.zh-CN.md)已完成实施与选定范围验收，环境、检查构建、产物衔接和运行事实已落地，见[交付与接入记录](engine-minimum-contracts-delivery.zh-CN.md)。本页其余建议仍为后续阶段范围，公共画面与输入能力继续作为扩展推进。
+Playground 接入 AI 助手的前置方案已完成选定范围的验收。环境、检查构建、产物衔接和运行事实已落地。Playground 随后验收了基于 Summer 4.9.2 的物理帧输入、同帧采样和生命周期回放。 [引擎最小合同与核心回归 V4](design/engine-minimum-contracts-v4.zh-CN.md) · [交付与接入记录](engine-minimum-contracts-delivery.zh-CN.md) · [Playground 回放验收](../apps/playground/README.md#lifecycle-events)
+
+Playground 已接入 `engine.get_diagnostics({})`，按编辑版本读取现有检查、构建和关联运行的退出诊断。真实 2D/debug Worker 已验收类型错误定位、失败构建与旧运行隔离、修复后启动和启动异常诊断。Full/debug Worker Direct 串联验收从修复版继续试玩，离线检查确认同帧画面位置为 `64 → 128 → 64`，两次试玩运行均正常退出并完成宿主清理。 [诊断与修复演示](../apps/playground/README.md#diagnostics-and-repair) · [本地诊断合同](design/playground-agent-api-p0.zh-CN.md)
 
 ## 优先结论
 
-**以独立接入方完成真实游戏迭代为牵引，抽取必要的公共装配能力，并补齐画面与交互反馈。** 首个工程切口是脱离 Playground 的公共接入链路；画面、有限输入和结构化结果是本阶段的重要新增能力。
+**让独立接入方完成一次真实游戏迭代。** 抽取必要的公共装配能力，在 Playground 之外验证现有画面、有限输入和结构化结果，再补齐接入中暴露的缺口。
 
 共享编译、增量缓存、资源生产器、Worker runner 和退出事实已经存在。下一阶段应复用这些实现，将投入集中在平台接入的实际断点与 AI 自主验证所缺的运行能力。
 
@@ -17,7 +19,7 @@ Playground 接入 AI 助手的前置子方案[引擎最小合同与核心回归 
 | 视角 | 第一优先项 | 对阶段范围的影响 |
 | --- | --- | --- |
 | 通用平台接入 | 独立消费公共编译与预览链路 | 以第二个接入方暴露真实缺口；补基础版本校验与结果关联 |
-| 运行反馈 | 公共画面观察与有界输入 | 阶段完成需要能试玩和观察，避免仅增加一层现有方法包装 |
+| 运行反馈 | 在独立接入链路验证画面观察与有界输入 | 用真实试玩验证采样、输入回执和退出 |
 | 构建素材与交付 | 可搬迁的编译预览资产与独立消费验证 | 复用发布身份和校验；素材扩展先提高能力可发现性 |
 | 架构与投入产出 | 独立消费者验证最小闭环 | 先以真实调用决定抽取范围；已能独立使用的部分保持现状 |
 
@@ -30,8 +32,7 @@ Playground 接入 AI 助手的前置子方案[引擎最小合同与核心回归 
 | 类型检查、编译环境、统一准备与打包、不可变快照和增量 delta | 浏览器发布资产、声明、可选运行模块到编译环境的组装仍混在工作台中 | [共享 compiler](../packages/project-tools/src/compiler.ts#L43)、[工作台 compiler Worker](../apps/playground/src/compiler.worker.ts#L23) |
 | 可配置容器、预览来源与 release 的公共 Worker runner | 产品仍负责将发布清单和编译结果组装成运行输入，并夹带站点、示例与页面约定 | [Worker runner](../packages/engine/src/browser/dedicated/worker-runner.ts#L13)、[预览适配](../apps/playground/src/engine-preview.ts#L11)、[资产加载](../apps/playground/src/engine-assets.ts#L25) |
 | Workspace revision、构建 pin 和过期结果判断 | 通用项目变更缺少调用方基础版本校验；编辑器 source sync 的版本规则尚属产品传输合同 | [Workspace](../packages/project-tools/src/workspace.ts#L20)、[source sync](../apps/playground/src/compiler-source-sync.ts#L66) |
-| 项目命令、状态日志、业务事件和退出事实 | 公共画面观察、有限输入及操作完成结果尚未形成合同 | [公共事件](../packages/engine/src/browser/protocol.ts#L81)、[项目命令](../packages/engine/src/browser/dedicated/worker-runner.ts#L221)、[运行宿主](../packages/engine/src/runtime-host.ts#L233) |
-| 原生渲染提交、direct 与 bitmap 呈现、浏览器输入桥 | 采样与自动化输入需要复用实际执行端，并遵守各自资源所有权与时序 | [呈现提交](../packages/engine/src/browser/dedicated/worker-presentation.ts#L122)、[输入桥](../packages/engine/src/browser/dedicated/worker-dom-host.ts#L41) |
+| 公共 Worker runner 的截图、同帧采样、有界输入及回执，另有运行事件与退出事实 | 独立接入方尚需用公共接口组合并验证这些能力 | [同帧采样](../packages/engine/src/browser/dedicated/worker-runner.ts#L797) · [物理帧输入](../packages/engine/src/browser/dedicated/worker-runner.ts#L874) · [运行宿主](../packages/engine/src/runtime-host.ts#L233) |
 | PNG、JPEG、WAV 生产器，来源收据、缓存和 ArtifactSet | 接入方需要查询当前目标的可执行导入方式、参数和限制 | [资源格式](../packages/project-tools/src/resource-formats.ts#L13)、[资源生产器](../packages/project-tools/src/resource-converters.ts#L222) |
 | engine tarball 隔离消费测试、静态 Web 引擎包外部安装验证 | 仍需可编程 SDK 与真实构建预览组合的外部消费门禁 | [engine 消费测试](../packages/engine/test/packed-consumer.test.mjs#L16)、[静态包验证](../scripts/release/verify-web-release.mjs#L16) |
 
@@ -55,9 +56,9 @@ Playground 接入 AI 助手的前置子方案[引擎最小合同与核心回归 
 
 成本量级为中，主要是 TypeScript 装配、发布工具和接入验证。SDK 接入本身不以新增原生 ABI 为前提；抽取改变源码路径、SDK 输出或宿主字节时，继续更新对应证明、身份和候选验收。
 
-## 同阶段补齐运行观察与交互
+## 在独立接入链路验证运行观察与交互
 
-首批公共运行能力包括带身份的渲染画面、有界诊断、有限键鼠输入和有截止时间的观察等待。平台负责决定操作步骤、理解画面和判断游戏是否符合用户意图。
+独立接入先复用已验收的 Dedicated Worker Direct 画面采样与输入，再按实际缺口补齐键鼠操作、诊断和等待。平台负责决定操作步骤、理解画面和判断游戏是否符合用户意图。
 
 | 能力 | 最小交付范围 |
 | --- | --- |
@@ -68,7 +69,7 @@ Playground 接入 AI 助手的前置子方案[引擎最小合同与核心回归 
 
 保留既有项目命令和 transport receipt 的含义。新操作区分本地准入、进入输入桥、实际原生消费和后续渲染采样；只有存在对应执行端观察时才能声明该阶段已完成。后续画面提交也不能独立证明游戏规则正确。
 
-默认 Dedicated Worker 的 direct 呈现需要真实采样验收；bitmap 使用同一公共合同并单独验收。采样发生在资源所属 realm 和正确时点，输出拥有独立字节或明确释放责任，不能窃取呈现中的 ImageBitmap 或 frame ticket。尚未支持的模式显式报告能力限制。
+独立接入先使用已通过 Playground 真实采样验收的 Dedicated Worker Direct。扩展到 Bitmap 时，以实际支持的能力单独验收。采样发生在资源所属 realm 和正确时点，输出拥有独立字节或明确释放责任，不能窃取呈现中的 ImageBitmap 或 frame ticket。尚未支持的模式显式报告能力限制。
 
 停止或替换运行时，撤销新请求准入，取消排队操作，释放自动化持有的键和指针，并结算所有等待者。已经发出的输入不能因取消而回滚；执行端已销毁或结果丢失时保留未确认阶段。迟到响应只属于原运行。
 

@@ -15,7 +15,7 @@ import {readInputScriptCommand, type InputScriptCommand, type InputScriptInput,
 import {sameWorkerRun, type WorkerRunIdentity} from '@godot-js/engine/browser/dedicated/worker-protocol';
 import {LIFECYCLE_KINDS, type LifecycleKind, type LifecycleQuery, type RecentLifecycleEvents,
   type WaitLifecycleEvents} from './lifecycle-events.ts';
-import type {ProjectContextData, StopResult} from './playground-api';
+import type {ProjectContextData, StopResult, SummerDiagnosticsData} from './playground-api';
 import {SUMMER_OPERATION_SPECS as rules, SUMMER_TREE_LIMITS, SUMMER_COMPATIBILITY, type SummerOperation} from './summer-operation-spec.ts';
 export {SUMMER_COMPATIBILITY} from './summer-operation-spec.ts';
 
@@ -53,6 +53,7 @@ export interface SummerBackend {
   waitLifecycleEvents?(query: LifecycleQuery, timeoutMs: number, signal?: AbortSignal): Promise<BackendReply<WaitLifecycleEvents>>;
   captureContext(): SummerContext;
   getProjectContext(): BackendReply<ProjectContextData>;
+  getDiagnostics?(): BackendReply<SummerDiagnosticsData>;
   play(input: {projectId: string; expectedEditorRevision: number}): BackendReply<{attemptId: string}>;
   cancelLaunch(attemptId: string): void;
   getBuild(input: {attemptId: string}): BackendReply<{preview?: {status: string; runId?: string}}>;
@@ -77,7 +78,7 @@ export type StopData = {accepted: true; cancelledAttemptId: string | null; captu
 export type CallData = {route: 'runtime_call'; payload: {ok: true; receipt: Extract<MethodCallResult, {ok: true}>['receipt']; result: Extract<MethodOutcome, {outcome: 'returned'}>}};
 export type SummerData = Extract<GameProbeResult, {ok: true}>['result'] | Extract<InputScriptResult, {ok: true}> |
   CallData | ProjectContextData | RuntimeTreeSnapshot | RuntimeNodeSnapshot | GameScreenshot | WriteData | PlayData | RunningData | StopData |
-  RecentLifecycleEvents | WaitLifecycleEvents;
+  RecentLifecycleEvents | WaitLifecycleEvents | SummerDiagnosticsData;
 export type FacadeSuccess<T = SummerData> = {ok: true; status: 'done'; result: {data: T; godotai: {compatibility: typeof SUMMER_COMPATIBILITY}}};
 export type FacadeFailure = {ok: false; error: {code: FacadeErrorCode; message: string; source?: AccessError['source']; retry: 'no';
   details: {godotai: {compatibility: typeof SUMMER_COMPATIBILITY; route?: 'runtime_properties' | 'legacy_write' | 'runtime_call';
@@ -142,6 +143,10 @@ function validate(raw: unknown): Validated | FacadeFailure {
     const unknownKeys = Object.keys(input).filter(key => !allowed.includes(key) && !unsupported.includes(key));
     if (unknownKeys.length) return fail('invalid_input', '未知操作参数', {unknownKeys}, 'sdk');
     for (const key of unsupported) if (Object.hasOwn(input, key)) return localError('unsupported', key, '当前不支持该参数');
+    if (op === 'engine.get_diagnostics' && Object.hasOwn(input, 'includeAll')) {
+      if (typeof input.includeAll !== 'boolean') return localError('invalid_input', 'includeAll');
+      if (input.includeAll) return localError('unsupported', 'includeAll', '当前只读取有界诊断记录');
+    }
     if (Object.hasOwn(input, 'instance') && input.instance !== 'main') return localError(typeof input.instance === 'string' ? 'unsupported' : 'invalid_input', 'instance');
     if (op === 'engine.game_input') return validateInputScript(input);
     if (op === 'engine.inspect_runtime_node' || op === 'engine.runtime_set' || op === 'engine.runtime_call' || Object.hasOwn(input, 'path')) {
@@ -336,6 +341,11 @@ export function createSummerDispatcher(backend: SummerBackend) {
     } catch {return localError('invalid_input', 'signal');}
     if (op === 'engine.runtime_call') return backend.runtimeMethods ?
       runtimeCall(backend.runtimeMethods, input, signal, methodDeadline, selected) : localError('unsupported', 'runtimeCall');
+    if (op === 'engine.get_diagnostics') {
+      const response = backend.getDiagnostics?.();
+      return response === undefined ? localError('unsupported', 'diagnostics') :
+        response.ok ? done(response.result) : backendFailure(response);
+    }
     if (op === 'engine.recent_events' || op === 'engine.wait_for_event') {
       const wait = op === 'engine.wait_for_event';
       const prepared = readLifecycleQuery(input, wait);

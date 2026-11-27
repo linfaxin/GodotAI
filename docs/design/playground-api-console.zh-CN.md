@@ -2,7 +2,7 @@
 
 日期：2026 年 11 月 22 日。分析基线：`87ab9ef`（PR #23）。
 
-状态：四个子会话评审后的方案已实施并通过真实引擎验收，交付记录见第 11 节。本文保留首期范围与交接合同。遵循 [初建阶段开发原则](../../CONTRIBUTING.md#framework-development-stage-and-reviews)。
+首期方案已实施并通过真实引擎验收，交付记录见第 11 节。后续调用台已扩展到 14 项 Summer 风格操作和 7 项本地辅助，包含诊断、玩法方法、同帧探测、物理帧输入和启停事件。 [现行调用台](../../apps/playground/README.md#agent-tools) · [诊断与修复](../../apps/playground/README.md#diagnostics-and-repair) · [生命周期回放](../../apps/playground/README.md#lifecycle-events) · [初建阶段开发原则](../../CONTRIBUTING.md#framework-development-stage-and-reviews)
 
 ## 1. 结论与目标
 
@@ -12,7 +12,7 @@
 
 调用台与新增引擎能力分开：本期无需 runtime_call、game_probe、新原生 ABI、MCP server、ops.describe 或外部服务。位置修改、公开脚本属性与输入都使用已有实现。完整 Inspector、通用 JSON Schema 表单、任意 JS/eval、步骤脚本语言、持久历史与分享不在本期。
 
-**开工判断：所有工作包均有可执行的起始任务，可以开工；联调按依赖衔接。当前环境没有匹配的 Web 模板、报告和完整站点，真实引擎验收暂不能执行。恢复资产是并行工作包，不阻塞目录、调用器、界面和受控测试开发。**
+**实施前的开工判断。** 当时缺少匹配的 Web 模板、报告和完整站点。资产恢复与目录、调用器、界面和受控测试并行推进，真实验收结果见第 11 节。
 
 ## 2. 评审结论与修订
 
