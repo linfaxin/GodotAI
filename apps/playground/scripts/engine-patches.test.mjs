@@ -27,6 +27,8 @@ async function fixture(root){
   'core/input/input.h':'class Input : public Object {\n\tvoid _parse_input_event_impl(const Ref<InputEvent> &p_event, bool p_is_emulated);\n\tvoid release_pressed_events();\n\tvoid flush_buffered_events();\n};\n',
   'core/input/input.cpp':[
    'void Input::_parse_input_event_impl(const Ref<InputEvent> &p_event, bool p_is_emulated) {',
+   '\tif (event_dispatch_function && emulate_touch_from_mouse && !p_is_emulated && mb->get_button_index() == MouseButton::LEFT) {',
+   '\t\tevent_dispatch_function(touch_event);', '\t}',
    '\tif (event_dispatch_function) {', '\t\t_THREAD_SAFE_UNLOCK_', '\t\tevent_dispatch_function(p_event);', '\t}', '}',
    'void Input::release_pressed_events() {', '}', 'void Input::_bind_methods() {',
    '\tClassDB::bind_method(D_METHOD("is_action_pressed", "action", "exact_match"), &Input::is_action_pressed, DEFVAL(false));',

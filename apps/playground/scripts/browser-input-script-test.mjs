@@ -371,7 +371,7 @@ await runReportedBrowserTest({scope, reportFile, run: async test => {
     const exit = await recordPublic('wait_for_event', {runId, until: 'exited', timeoutMs: 10000});
     recordExit(record, consoleResult(exit.reply));
   });
-  if (supported && process.env.PLAYGROUND_INPUT_SCRIPT_DEVICES === '1')
+  if (supported && process.env.PLAYGROUND_INPUT_SCRIPT_DEVICES === '1') {
     await test.step('native-key-and-click', async () => {
       const played = await lesson('input-play', 'engine.play');
       const waiting = await lesson('input-ready', 'wait_for_event', played);
@@ -449,6 +449,47 @@ await runReportedBrowserTest({scope, reportFile, run: async test => {
       recordExit({run}, exit);
       inputEvidence.devices = {key, click, geometryEpoch, stale, cancelled, interruption, exit: exit.run.exit};
     });
+    await test.step('interrupted-click-does-not-dispatch-emulated-touch-release', async () => {
+      const {editorRevision} = consoleResult(await api('get_project_context'));
+      await page.locator('#tabs [data-file-tab="/src/Player.ts"]').click();
+      await page.locator('#source .monaco-editor').click({position: {x: 105, y: 30}});
+      await page.keyboard.press('ControlOrMeta+a');
+      await page.keyboard.insertText(`import {Input, InputEvent, InputEventScreenTouch, Node2D, Vector2} from 'godot';
+export default class Player extends Node2D {
+  _ready() {
+    this.process_mode = 3; // PROCESS_MODE_ALWAYS
+    Input.emulate_touch_from_mouse = true;
+  }
+  _input(event: InputEvent) {
+    if (!(event instanceof InputEventScreenTouch)) return;
+    this.position = new Vector2(event.pressed ? 100 : 200, 256);
+    if (event.pressed) this.get_tree()!.paused = true;
+  }
+}
+`);
+      await page.waitForFunction(revision => window.godotPlayground.get_project_context().result.editorRevision > revision, editorRevision);
+      const {attemptId} = summerResult(await api('summer_call', {op: 'engine.play'}));
+      const {run} = consoleResult(await api('wait_for_event', {attemptId, until: 'running', timeoutMs: 60000}));
+      const {runId} = run;
+      await page.waitForFunction(async id => {
+        const api = window.godotPlayground;
+        const active = (await api.summer_call({op: 'engine.is_running'})).result?.data;
+        return active?.capturedRunId === id && active.pendingAttemptId === null &&
+          api.get_run({runId: id}).result?.inputScript?.devices;
+      }, runId);
+      const {reply} = await recordSummer({action: 'script', events: [{type: 'mouse_click', position: [0, 0]}]});
+      const input = reply.error?.details?.godotai?.receipt;
+      assert.equal(input?.outcome, 'interrupted');
+      assert.equal(input.terminal.reason, 'paused');
+      assert.equal(input.terminal.owner, 'cleared');
+      const sample = consoleResult(await api('game_probe', {runId, props: [{path: pathToPlayer, property: 'position'}], screenshot: false}));
+      assert.deepEqual(sample.properties[0].value, {x: 100, y: 256});
+      consoleResult(await api('stop', {runId}));
+      const exit = consoleResult(await api('wait_for_event', {runId, until: 'exited', timeoutMs: 10000}));
+      recordExit({run}, exit);
+      inputEvidence.interruptedTouch = {input, sample, exit: exit.run.exit};
+    });
+  }
   assert.deepEqual(errors, []);
   return withAcceptanceContext({status: 'passed', scope, engineExecuted, scriptExecuted, supported,
     runs, pngs, calls, publicCalls, inputEvidence, candidateId, descriptorHash, releaseId: release.id}, {directory, browser});

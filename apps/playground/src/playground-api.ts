@@ -1,7 +1,7 @@
 import type {LifecycleQuery, WaitLifecycleEvents} from './lifecycle-events.ts';
 import type {FacadeReply, SelectedRuntimeMethod, SummerMethodBackend} from './summer-adapter';
 import type {
-  createDebugRecorder, DebugBuild, DebugCheck, DebugRun, DebugContext, DebugDiagnostics, DebugExit, ReadRunEventsOptions,
+  createDebugRecorder, DebugBuild, DebugCheck, DebugRun, DebugContext, DebugExit, ReadRunEventsOptions,
 } from './debug-api';
 import type {WorkerRunIdentity} from '@godot-js/engine/browser/dedicated/worker-protocol';
 import {snapshotRuntimePropertyData, prepareRuntimeProperties, runtimePropertiesError, type DescribeInput, type ReadInput, type WriteInput, type PropertyKind, type PropertyResult, prepareRuntimeObservation, prepareRuntimeSet, runtimeWriteError, type GameInput, type GameScreenshot, type InteractionResult,
@@ -78,12 +78,6 @@ const MAX_WAITERS = 16;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_TIMEOUT_MS = 60_000;
 const readAborted = Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'aborted')!.get!;
-const diagnosticPriority = {error: 0, warning: 1, info: 2} as const;
-
-function prioritizeRecordedDiagnostics(diagnostics: DebugDiagnostics): DebugDiagnostics {
-  return {...diagnostics, items: [...diagnostics.items].sort((left, right) =>
-    diagnosticPriority[left.severity] - diagnosticPriority[right.severity])};
-}
 
 function projectDiagnosticRun(run: DebugRun): Extract<SummerDiagnosticsData['run'], {availability: 'retained'}> {
   const {runId, revision, buildKey, generation, documentId, workerId, runConfigurationHash, state, attemptId} = run;
@@ -273,9 +267,9 @@ export function createPlaygroundApi(recorder: Recorder, actions: Actions) {
     return ok<SummerDiagnosticsData>({
       projectId, editorRevision,
       check: check ? {checkId: check.checkId, status: check.status, sourceHash: check.sourceHash,
-        diagnostics: prioritizeRecordedDiagnostics(check.diagnostics), error: check.error} : null,
+        diagnostics: check.diagnostics, error: check.error} : null,
       build: build ? {attemptId: build.attemptId, status: build.status, sourceHash: build.sourceHash,
-        diagnostics: prioritizeRecordedDiagnostics(build.diagnostics), error: build.error, artifact: build.artifact, preview: build.preview} : null,
+        diagnostics: build.diagnostics, error: build.error, artifact: build.artifact, preview: build.preview} : null,
       run,
     });
   }

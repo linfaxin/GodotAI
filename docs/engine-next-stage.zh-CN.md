@@ -31,7 +31,7 @@ Playground 已接入 `engine.get_diagnostics({})`，按编辑版本读取现有�
 | --- | --- | --- |
 | 类型检查、编译环境、统一准备与打包、不可变快照和增量 delta | 浏览器发布资产、声明、可选运行模块到编译环境的组装仍混在工作台中 | [共享 compiler](../packages/project-tools/src/compiler.ts#L43)、[工作台 compiler Worker](../apps/playground/src/compiler.worker.ts#L23) |
 | 可配置容器、预览来源与 release 的公共 Worker runner | 产品仍负责将发布清单和编译结果组装成运行输入，并夹带站点、示例与页面约定 | [Worker runner](../packages/engine/src/browser/dedicated/worker-runner.ts#L13)、[预览适配](../apps/playground/src/engine-preview.ts#L11)、[资产加载](../apps/playground/src/engine-assets.ts#L25) |
-| Workspace revision、构建 pin 和过期结果判断 | 通用项目变更缺少调用方基础版本校验；编辑器 source sync 的版本规则尚属产品传输合同 | [Workspace](../packages/project-tools/src/workspace.ts#L20)、[source sync](../apps/playground/src/compiler-source-sync.ts#L66) |
+| Workspace revision、构建 pin 和带基础版本校验的增量更新 | 编辑器 source sync 保留产品传输规则，独立消费者按版本提交增量 | [Workspace](../packages/project-tools/README.md#shared-compiler-and-node-adapter)、[source sync](../apps/playground/src/compiler-source-sync.ts#L66) |
 | 公共 Worker runner 的截图、同帧采样、有界输入及回执，另有运行事件与退出事实 | 独立接入方尚需用公共接口组合并验证这些能力 | [同帧采样](../packages/engine/src/browser/dedicated/worker-runner.ts#L797) · [物理帧输入](../packages/engine/src/browser/dedicated/worker-runner.ts#L874) · [运行宿主](../packages/engine/src/runtime-host.ts#L233) |
 | PNG、JPEG、WAV 生产器，来源收据、缓存和 ArtifactSet | 接入方需要查询当前目标的可执行导入方式、参数和限制 | [资源格式](../packages/project-tools/src/resource-formats.ts#L13)、[资源生产器](../packages/project-tools/src/resource-converters.ts#L222) |
 | engine tarball 隔离消费测试、静态 Web 引擎包外部安装验证 | 仍需可编程 SDK 与真实构建预览组合的外部消费门禁 | [engine 消费测试](../packages/engine/test/packed-consumer.test.mjs#L16)、[静态包验证](../scripts/release/verify-web-release.mjs#L16) |
@@ -47,7 +47,7 @@ Playground 已接入 `engine.get_diagnostics({})`，按编辑版本读取现有�
 - 从工作台抽取发布清单、声明、命名配置和所需运行模块的通用装配，复用 `CompilerEnvironment`、目标和身份验证。
 - 从预览适配抽取编译产物到公共运行输入的必要转换，保留实际包、收据、目标及宿主资产闭包校验。
 - 由平台显式提供资产位置、读取或授权适配、存储和预览容器；示例选择、Monaco、IndexedDB、全局页面 URL 与产品重试策略留在应用。
-- 复用现有快照与 delta，提供带基础快照身份的文件替换、删除批次。先支持完整文件变更，失败批次无部分生效；过期基础版本返回冲突。
+- 用现有快照与带基础版本的 delta 提交文件替换、删除批次。独立接入方先等待初始快照完成，再按版本提交增量。
 - 将检查、构建、运行及后续观察的结果关联到实际源版本、操作、构建、产物和运行身份；重试、取消与过期结果有明确处理。
 
 引擎的内存版本与输入快照不能代替平台数据库事务。平台继续负责持久化提交、协作合并和历史回退。同步工作不能被 `AbortSignal` 立即抢占时，应撤销结果发布与后续执行，并准确报告取消状态。
