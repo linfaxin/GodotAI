@@ -14,7 +14,8 @@ import {createInputScriptDemo} from '../src/input-script-demo.ts';
 const scope = 'playground-lifecycle-events';
 const reportFile = path.resolve(process.env.PLAYGROUND_LIFECYCLE_REPORT ?? 'work/lifecycle-events/report.json');
 const ops = {recent: 'engine.recent_events', wait: 'engine.wait_for_event', play: 'engine.play',
-  stop: 'engine.stop', probe: 'engine.game_probe', input: 'engine.game_input', diagnostics: 'engine.get_diagnostics'};
+  stop: 'engine.stop', probe: 'engine.game_probe', input: 'engine.game_input', diagnostics: 'engine.get_diagnostics',
+  scriptErrors: 'engine.get_script_errors'};
 const repairLesson = 'diagnostic-repair';
 const playerFile = '/src/Player.ts';
 
@@ -68,7 +69,6 @@ await runReportedBrowserTest({scope, reportFile, run: async test => {
   }
   async function lesson(step, op, source, lessonId = 'lifecycle-events') {
     await loadLesson(step, source, lessonId);
-    if (op === 'check') await element(page, 'update-target').click();
     // The lesson uses small pages. The UI projection retains every JSON field
     // of these replies, while PNG bytes are collected from their attachments.
     const {callId, reply} = await submitConsole(page, op, {timeout: 65_000});
@@ -96,7 +96,8 @@ await runReportedBrowserTest({scope, reportFile, run: async test => {
     report.engineExecuted = true;
     const source = createInputScriptDemo(release.runtimeProfile).files[playerFile];
     await editPlayer(source.replace('\n', '\nconst step: number = "bad";\n'));
-    const invalidCheck = await teach('check-broken', 'check');
+    const invalidCheck = await teach('check-broken', ops.scriptErrors);
+    assert(invalidCheck.result.diagnostics.items.some(item => item.code === 2322 && item.location?.file === playerFile));
     const invalid = await teach('read-broken', ops.diagnostics);
     const rejected = await teach('play-broken', ops.play);
     const noSession = await teach('wait-broken', 'wait_for_event', rejected);
@@ -104,7 +105,8 @@ await runReportedBrowserTest({scope, reportFile, run: async test => {
     const failed = await teach('read-failed-build', ops.diagnostics);
     const stillRunning = consoleResult(await publicCall('get_run', {runId: original.result.run.runId}));
     await editPlayer(source);
-    const repairedCheck = await teach('check-repaired', 'check');
+    const repairedCheck = await teach('check-repaired', ops.scriptErrors);
+    assert.equal(repairedCheck.result.diagnostics.counts.error, 0);
     const repaired = await teach('read-repaired', ops.diagnostics);
     report.repair = {
       initial: initial.callId, original: original.callId,

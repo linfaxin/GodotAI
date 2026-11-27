@@ -5,7 +5,7 @@ import path from 'node:path';
 import {defaultTestDirectory,launchBrowser,withAcceptanceContext} from './browser-harness.mjs';
 import {createStaticServer} from './serve.mjs';
 import {runReportedBrowserTest,listenBrowserTestServer as listen,closeBrowserTestServer as close} from './browser-contract-report.mjs';
-import {consoleElement, invokeConsole, summerResult} from './api-console-browser-helpers.mjs';
+import {consoleElement, invokeConsole, openConsoleOperation, submitConsole, summerResult} from './api-console-browser-helpers.mjs';
 import {createRuntimePropertiesDemo} from '../src/runtime-properties-demo.ts';
 import {exportProject} from '../src/project-model.ts';
 
@@ -383,9 +383,12 @@ export default class Replacement extends Node2D {
   const first=await waitForRun(page,beforeMarker,await importProject(page,runProgram(beforeMarker)));
   const original=await projectInput(page);
   const invalid=await editScript(page,'export function start(){ const answer: number = "not a number"; return void answer; }');
-  const bad=unwrap(await invoke(page,'check',invalid));
+  const scriptInput={path:'res://src/start.ts'};
+  const bad=summerResult((await invokeConsole(page,'engine.get_script_errors',scriptInput,{refreshTarget:false})).reply);
   assert.equal(bad.status,'completed');
   assert.equal(bad.scope,'typecheck');
+  assert.equal(bad.editorRevision,invalid.expectedEditorRevision);
+  assert.equal(bad.path,scriptInput.path);
   assert(bad.diagnostics.items.some(item=>item.code===2322&&item.location?.file==='/src/start.ts'&&item.location.line>0));
   assert.equal((await read(page)).context.latestBuildAttemptId,first.build.attemptId);
   assert.equal((await read(page)).context.activeRunId,first.run.runId);
@@ -424,7 +427,7 @@ export default class Replacement extends Node2D {
   const marker='AGENT_P0_REPAIRED_RUN';
   await page.locator('#tabs [data-file-tab="/src/start.ts"]').click();
   const repaired=await editScript(page,runProgram(marker));
-  const checked=unwrap(await invoke(page,'check',repaired));
+  const checked=summerResult(await invoke(page,'summer_call',{op:'engine.get_script_errors',input:scriptInput}));
   assert.equal(checked.status,'completed');assert.equal(checked.diagnostics.counts.error,0);
   assert.notEqual(checked.sourceHash,bad.sourceHash);
 
@@ -461,8 +464,24 @@ export default class Replacement extends Node2D {
   const terminals=(await readWire(page)).messages.filter(packet=>packet.type==='exit-report'&&packet.runId===second.run.runId);
   assert.equal(terminals.length,1);
   assert.deepEqual(terminals[0].sessionFacts,exit.report.sessionFacts);
+  const op='engine.get_script_errors';
+  await openConsoleOperation(page,op);
+  await consoleElement(page,'open-example').click();
+  await page.locator('#tabs [data-file-tab="/src/Player.ts"]').waitFor({timeout});
+  await openConsoleOperation(page,op);
+  const lessons=consoleElement(page,'lessons');
+  if(!await lessons.evaluate(node=>node.open))await lessons.locator('summary').click();
+  await lessons.locator('[data-lesson-id="diagnostic-repair"][data-step-id="check-repaired"]').click();
+  const demo=summerResult((await submitConsole(page,op)).reply);
+  assert.equal(demo.path,'res://src/Player.ts');
+  assert.equal(demo.diagnostics.counts.error,0);
+  assert.match(await consoleElement(page,'result-status').textContent(),/0 个错误/);
+  const demoContext=(await read(page)).context;
+  assert.equal(demoContext.projectId,demo.projectId);
+  assert.equal(demoContext.latestBuildAttemptId,null);
+  assert.equal(demoContext.activeRunId,null);
   return {attemptIds:[rejected.attemptId,second.build.attemptId],runIds:[first.run.runId,second.run.runId],exit,
-    diagnostics:{broken,rejected:rejectedDiagnostics,repaired:repairedDiagnostics}};
+    scriptChecks:{bad,checked,demo},diagnostics:{broken,rejected:rejectedDiagnostics,repaired:repairedDiagnostics}};
  });
 
  await browserCase('stop-replacement-during-startup',async page=>{

@@ -2,7 +2,7 @@
 
 日期：2026 年 11 月 22 日。分析基线：`87ab9ef`（PR #23）。
 
-首期方案已实施并通过真实引擎验收，交付记录见第 11 节。后续调用台已扩展到 14 项 Summer 风格操作和 7 项本地辅助，包含诊断、玩法方法、同帧探测、物理帧输入和启停事件。 [现行调用台](../../apps/playground/README.md#agent-tools) · [诊断与修复](../../apps/playground/README.md#diagnostics-and-repair) · [生命周期回放](../../apps/playground/README.md#lifecycle-events) · [初建阶段开发原则](../../CONTRIBUTING.md#framework-development-stage-and-reviews)
+首期方案已实施并通过真实引擎验收，交付记录见第 11 节。调用台现有 15 项 Summer 风格操作和 7 项本地辅助，包含主动脚本检查、诊断、玩法方法、同帧探测、物理帧输入和启停事件。 [现行调用台](../../apps/playground/README.md#agent-tools) · [诊断与修复](../../apps/playground/README.md#diagnostics-and-repair) · [生命周期回放](../../apps/playground/README.md#lifecycle-events) · [初建阶段开发原则](../../CONTRIBUTING.md#framework-development-stage-and-reviews)
 
 ## 1. 结论与目标
 

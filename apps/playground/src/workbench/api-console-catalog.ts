@@ -203,6 +203,7 @@ const localOperations: readonly ConsoleOperation[] = [
 export const CONSOLE_OPERATIONS: readonly ConsoleOperation[] = Object.freeze([
   summer('engine.get_project_context', 'none'),
   summer('engine.get_diagnostics', 'none'),
+  summer('engine.get_script_errors', 'none'),
   summer('engine.play', 'project'),
   summer('engine.stop', 'main'),
   summer('engine.is_running', 'none'),

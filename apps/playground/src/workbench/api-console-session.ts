@@ -83,6 +83,10 @@ function resultSummary(operationId: string, reply: unknown, displayTruncated: bo
   const data = dataFor(operationId,reply);
   if (!data) return '调用已结算';
   if (operationId === 'check') return data.status === 'completed' && data.diagnostics?.counts?.error === 0 ? '类型检查通过' : '检查已结算，请查看诊断';
+  if (operationId === 'engine.get_script_errors') {
+    const count = data.diagnostics?.counts?.error;
+    return data.status === 'completed' && typeof count === 'number' ? `脚本检查完成，${count} 个错误` : '脚本检查失败，错误数未观测';
+  }
   if (operationId === 'engine.get_diagnostics') {
     const record = (item: Record<string, any> | null) => item === null ? '无记录' :
       item.diagnostics?.observed === true ? `${item.status}，${item.diagnostics.counts.error} 个错误` : `${item.status}，错误数未观测`;

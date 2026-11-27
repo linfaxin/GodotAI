@@ -13,9 +13,10 @@ import {readGameProbeQuery, type GameProbeInput, type GameProbeResult} from '@go
 import {readInputScriptCommand, type InputScriptCommand, type InputScriptInput,
   type InputScriptResult} from '@godot-js/engine/browser/dedicated/worker-runner';
 import {sameWorkerRun, type WorkerRunIdentity} from '@godot-js/engine/browser/dedicated/worker-protocol';
+import {canonicalPath} from '@godot-js/project-tools/paths';
 import {LIFECYCLE_KINDS, type LifecycleKind, type LifecycleQuery, type RecentLifecycleEvents,
   type WaitLifecycleEvents} from './lifecycle-events.ts';
-import type {ProjectContextData, StopResult, SummerDiagnosticsData} from './playground-api';
+import type {ProjectContextData, StopResult, SummerDiagnosticsData, SummerScriptErrorsData} from './playground-api';
 import {SUMMER_OPERATION_SPECS as rules, SUMMER_TREE_LIMITS, SUMMER_COMPATIBILITY, type SummerOperation} from './summer-operation-spec.ts';
 export {SUMMER_COMPATIBILITY} from './summer-operation-spec.ts';
 
@@ -54,6 +55,7 @@ export interface SummerBackend {
   captureContext(): SummerContext;
   getProjectContext(): BackendReply<ProjectContextData>;
   getDiagnostics?(): BackendReply<SummerDiagnosticsData>;
+  getScriptErrors?(path: string): Promise<BackendReply<SummerScriptErrorsData>>;
   play(input: {projectId: string; expectedEditorRevision: number}): BackendReply<{attemptId: string}>;
   cancelLaunch(attemptId: string): void;
   getBuild(input: {attemptId: string}): BackendReply<{preview?: {status: string; runId?: string}}>;
@@ -78,7 +80,7 @@ export type StopData = {accepted: true; cancelledAttemptId: string | null; captu
 export type CallData = {route: 'runtime_call'; payload: {ok: true; receipt: Extract<MethodCallResult, {ok: true}>['receipt']; result: Extract<MethodOutcome, {outcome: 'returned'}>}};
 export type SummerData = Extract<GameProbeResult, {ok: true}>['result'] | Extract<InputScriptResult, {ok: true}> |
   CallData | ProjectContextData | RuntimeTreeSnapshot | RuntimeNodeSnapshot | GameScreenshot | WriteData | PlayData | RunningData | StopData |
-  RecentLifecycleEvents | WaitLifecycleEvents | SummerDiagnosticsData;
+  RecentLifecycleEvents | WaitLifecycleEvents | SummerDiagnosticsData | SummerScriptErrorsData;
 export type FacadeSuccess<T = SummerData> = {ok: true; status: 'done'; result: {data: T; godotai: {compatibility: typeof SUMMER_COMPATIBILITY}}};
 export type FacadeFailure = {ok: false; error: {code: FacadeErrorCode; message: string; source?: AccessError['source']; retry: 'no';
   details: {godotai: {compatibility: typeof SUMMER_COMPATIBILITY; route?: 'runtime_properties' | 'legacy_write' | 'runtime_call';
@@ -173,6 +175,16 @@ function validate(raw: unknown): Validated | FacadeFailure {
     }
     if (Object.hasOwn(input, 'instance') && input.instance !== 'main') return localError(typeof input.instance === 'string' ? 'unsupported' : 'invalid_input', 'instance');
     if (op === 'engine.game_input') return validateInputScript(input);
+    if (op === 'engine.get_script_errors') {
+      const {path} = input;
+      if (typeof path !== 'string' || path.length > 2048 || !path.startsWith('res://')) return localError('invalid_input', 'path');
+      const projectPath = path.slice('res:/'.length);
+      try {
+        if (canonicalPath(projectPath) !== projectPath) return localError('invalid_input', 'path');
+      } catch {return localError('invalid_input', 'path');}
+      if (!/\.tsx?$/i.test(projectPath) || /\.d\.ts$/i.test(projectPath)) return localError('unsupported', 'path');
+      return {op, input: {path: projectPath}};
+    }
     if (op === 'engine.inspect_runtime_node' || op === 'engine.runtime_set' || op === 'engine.runtime_call' || Object.hasOwn(input, 'path')) {
       if (!pathIsCanonical(input.path)) return localError('invalid_input', 'path');
     }
@@ -368,6 +380,11 @@ export function createSummerDispatcher(backend: SummerBackend) {
     if (op === 'engine.get_diagnostics') {
       const response = backend.getDiagnostics?.();
       return response === undefined ? localError('unsupported', 'diagnostics') :
+        response.ok ? done(response.result) : backendFailure(response);
+    }
+    if (op === 'engine.get_script_errors') {
+      const response = await backend.getScriptErrors?.(input.path as string);
+      return response === undefined ? localError('unsupported', 'get_script_errors') :
         response.ok ? done(response.result) : backendFailure(response);
     }
     if (op === 'engine.recent_events' || op === 'engine.wait_for_event') {

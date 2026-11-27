@@ -74,6 +74,27 @@ test('Summer diagnostics validates the MCP input subset before reading records a
   assert.equal((await dispatch({op})).error.code, 'unsupported');
 });
 
+test('Summer script errors validates project paths before dispatching a script check', async () => {
+  const {backend, calls} = fixture();
+  const op = 'engine.get_script_errors';
+  const data = {status: 'completed', path: 'res://src/Player.tsx'};
+  backend.captureContext = () => assert.fail('Script checks do not bind a runtime');
+  backend.getScriptErrors = async path => {calls.push(path); return ok(data);};
+  const dispatch = createSummerDispatcher(backend);
+  for (const input of [{}, {path: '/src/Player.ts'}, {path: 'res://'}, {path: 'res:///src/Player.ts'},
+    {path: 'res://src/../Player.ts'}, {path: 'res://src/Player.ts\n'}, {path: 'res://src/%2e%2e/Player.ts'},
+    {path: 'res://src/Player.ts', instance: 'main'}]) {
+    assert.equal((await dispatch({op, input})).error.code, 'invalid_input');
+  }
+  for (const path of ['res://src/Player.gd', 'res://src/Player.d.ts']) {
+    assert.equal((await dispatch({op, input: {path}})).error.code, 'unsupported');
+  }
+  assert.equal((await dispatch({op, input: {path: data.path}}, AbortSignal.abort())).error.code, 'cancelled');
+  assert.deepEqual(calls, []);
+  assert.deepEqual((await dispatch({op, input: {path: data.path}})).result.data, data);
+  assert.deepEqual(calls, ['/src/Player.tsx']);
+});
+
 test('Summer input validates the supported subset and captures its original project and run', async () => {
   const {backend, context, calls} = fixture();
   const edges = [{type: 'action', action: 'move_right', pressed: true}, {type: 'action', action: 'move_right', pressed: false, at_frame: 4}];
