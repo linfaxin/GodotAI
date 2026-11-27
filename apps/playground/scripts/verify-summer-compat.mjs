@@ -6,6 +6,7 @@ import {fileURLToPath} from 'node:url';
 import {promisify} from 'node:util';
 import {canonical, digest, siteIdentity} from './site-evidence.mjs';
 import {operationResult, checkUnknownAction, checkProbeImageFrame, parseProbePosition} from './summer-native-receipt.mjs';
+import {verifyInputScriptG0} from './verify-input-script-g0.mjs';
 
 const profile = 'full-engine-v1';
 const target = 'template_debug';
@@ -95,6 +96,23 @@ function heldTicks(input, run, releaseId) {
   return Number(BigInt(up.physics) - BigInt(down.physics));
 }
 
+export function verifyBrowserPreflight(identity, preflight) {
+  assert.deepEqual(fields(preflight, siteFields), fields(identity, siteFields));
+  assert.equal(digest(canonical(preflight.payloads)), identity.siteHash);
+  assert(preflight.acceptanceBatchId);
+  assert(Object.values(preflight.testSources).every(digest => hashPattern.test(digest)));
+}
+
+export function verifyBrowserReportIdentity(identity, preflight, report) {
+  assert.equal(report.acceptanceBatchId, preflight.acceptanceBatchId);
+  assert.deepEqual(fields(report, siteFields), fields(identity, siteFields));
+}
+
+export function verifyRestartSource(first, restart) {
+  assert.match(first.sourceHash, hashPattern, 'Missing original source hash');
+  assert.equal(first.sourceHash, restart.sourceHash, 'Restart used a different source hash');
+}
+
 export function verifyCleanExit(run, exit) {
   const {runId} = run;
   assert.equal(exit?.evidence, 'host-report', `Missing host exit receipt: ${runId}`);
@@ -145,6 +163,10 @@ export function verifyBrowser(report, supported) {
   }
 
   const [before, after, reset] = pngs;
+  const [firstRun, restartRun] = report.runs;
+  verifyRestartSource(firstRun, restartRun);
+  for (const {sourceHash, build} of report.runs)
+    assert.equal(build?.sourceHash, sourceHash, 'Run source hash differs from its build');
   const tutorial = byId(report.calls, inputEvidence.completedCallId);
   assert.deepEqual(tutorial.request, {op: 'engine.game_input', input: {action: 'script', events: requests.frameOffsets.events}});
   assert.deepEqual(before.run, after.run);
@@ -311,16 +333,12 @@ async function verify(root, summary) {
     const candidate = await verifyCandidate(root, variant);
     summary.templates[variant] = candidate;
     const preflight = await readJson(path.join(reports, variant, 'site-start.json'));
-    assert.deepEqual(fields(preflight, siteFields), fields(candidate, siteFields));
-    assert.equal(digest(canonical(preflight.payloads)), candidate.siteHash);
-    assert(preflight.acceptanceBatchId);
-    assert(Object.values(preflight.testSources).every(digest => hashPattern.test(digest)));
+    verifyBrowserPreflight(candidate, preflight);
     const priorRuns = new Set();
     for (const name of [variant, 'replay-' + variant]) {
       const reportPath = 'reports/' + name + '/report.json';
       const report = await readJson(path.join(root, reportPath));
-      assert.equal(report.acceptanceBatchId, preflight.acceptanceBatchId);
-      assert.deepEqual(fields(report, siteFields), fields(candidate, siteFields));
+      verifyBrowserReportIdentity(candidate, preflight, report);
       results[name] = verifyBrowser(report, variant === 'new');
       for (const {run} of report.runs) {
         assert(!priorRuns.has(run.runId), 'Replay reused an original run: ' + run.runId);
@@ -336,12 +354,7 @@ async function verify(root, summary) {
 
   const g0Path = 'reports/g0/input-script-g0.json';
   const g0 = await readJson(path.join(root, g0Path));
-  assert.equal(g0.status, 'passed');
-  assert.equal(g0.engineExecuted, true);
-  assert.equal(g0.engineReportSha256, summary.templates.new.reportHash);
-  assert.equal(g0.templateSha256, summary.templates.new.sha256);
-  assert.equal(g0.cases.length, 19);
-  assert.equal(new Set(g0.cases.map(item => item.name)).size, 19);
+  verifyInputScriptG0(g0, summary.templates.new);
   summary.g0 = {status: g0.status, cases: g0.cases.length, templateSha256: g0.templateSha256, report: g0Path};
 
   const manualPath = 'reports/manual-archive/report.json';

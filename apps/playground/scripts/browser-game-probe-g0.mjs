@@ -11,6 +11,7 @@ import {packProject} from '@godot-js/react-browser/pck';
 import {createArtifactIdentity} from '@godot-js/engine/identities';
 import {assertWorkerBuildProof} from './worker-candidate.mjs';
 import {launchBrowser} from './browser-harness.mjs';
+import {inputModes, verifyInputScriptCase} from './verify-input-script-g0.mjs';
 
 const inputOnly = process.argv[2] === '--input-script';
 const [reportFile, out] = process.argv.slice(inputOnly ? 3 : 2);
@@ -115,14 +116,6 @@ func _input(event):
     'res://.godot/global_script_class_cache.cfg': 'list=Array[Dictionary]([])\n',
   }).map(([name, text]) => [name, encoder.encode(text)]));
 };
-
-const inputModes = ['input-snake', 'input-camel', 'input-zero', 'input-multi', 'input-cancel', 'input-cancel-no-raf',
-  'input-replace-action', 'input-change-scene', 'input-restore-scene', 'input-same-scene', 'input-pause', 'input-release', 'input-physical',
-  'input-pause-resume', 'input-expiry', 'input-early-cancel', 'input-stop',
-  'input-quit', 'input-quit-at-release'];
-const interruptedInputReasons = {'input-quit': 'run_ended', 'input-stop': 'run_ended', 'input-replace-action': 'action_changed',
-  'input-change-scene': 'scene_changed', 'input-restore-scene': 'scene_changed', 'input-pause': 'paused', 'input-pause-resume': 'paused',
-  'input-release': 'action_released'};
 
 function inputScriptFixture(mode) {
   const camel = mode === 'input-camel';
@@ -245,57 +238,7 @@ async function verifyInputScripts(page, evidence) {
     }, mode);
     evidence.engineExecuted = true;
     evidence.cases.push({name: mode, ...sample});
-    assert.equal(sample.before.result?.properties[0]?.value.x, 64, JSON.stringify(sample.before));
-    if (mode.startsWith('input-cancel') || mode === 'input-early-cancel') {
-      assert.equal(sample.input.outcome, 'outcome_unknown');
-      assert.equal(sample.retired.error?.code, 'unknown_action', JSON.stringify(sample.retired));
-      if (mode === 'input-early-cancel') assert.equal(sample.after.result?.properties[0]?.value.x, 64);
-      else assert(sample.after.result?.properties[0]?.value.x > 64);
-      assert.equal(sample.settled.result?.properties[0]?.value.x, sample.after.result?.properties[0]?.value.x);
-    } else if (interruptedInputReasons[mode]) {
-      assert.equal(sample.input.outcome, 'interrupted', JSON.stringify(sample.input));
-      assert.equal(sample.input.terminal.owner, 'cleared');
-      assert.equal(sample.input.terminal.reason, interruptedInputReasons[mode]);
-      if (mode.endsWith('-resume')) {
-        assert(sample.markers.includes('G0_AFTER_RESUME=false'), JSON.stringify(sample.markers));
-        assert.equal(sample.after.result?.properties[0]?.value.x, 64);
-      }
-      if (mode === 'input-restore-scene') {
-        assert.deepEqual(sample.markers, ['G0_SCENE_RESTORED=true', 'G0_AFTER_RESTORE=false']);
-        assert.equal(sample.after.result?.properties[0]?.value.x, 64);
-        assert.equal(sample.settled.result?.properties[0]?.value.x, 64);
-      }
-    } else if (mode === 'input-expiry') {
-      assert.equal(sample.input.outcome, 'outcome_unknown', JSON.stringify(sample.input));
-      assert.equal(sample.input.error.message, 'timeout');
-      assert(sample.markers.includes('G0_AFTER_DEADLINE=false'), JSON.stringify(sample.markers));
-      assert.equal(sample.retired.error?.code, 'unknown_action', JSON.stringify(sample.retired));
-      assert.equal(sample.after.result?.properties[0]?.value.x, 64);
-      assert.equal(sample.settled.result?.properties[0]?.value.x, 64);
-    } else if (mode === 'input-quit-at-release') {
-      assert.equal(sample.input.outcome, 'interrupted', JSON.stringify(sample.input));
-      assert.equal(sample.input.terminal.reason, 'run_ended');
-      assert.equal(sample.input.terminal.owner, 'released');
-      assert.equal(sample.input.terminal.releaseStepCompleted, false);
-      assert.equal(BigInt(sample.input.terminal.up.physics) - BigInt(sample.input.terminal.down.physics), 4n);
-    } else if (mode === 'input-physical') {
-      assert.equal(sample.input.ok, true, JSON.stringify(sample.input));
-      assert(sample.after.result?.properties[0]?.value.x >= 144, JSON.stringify(sample.after));
-    } else {
-      assert.equal(sample.input.ok, true, JSON.stringify(sample.input));
-      assert.equal(BigInt(sample.input.result.up.physics) - BigInt(sample.input.result.down.physics), 4n);
-      assert.equal(sample.after.result?.properties[0]?.value.x, 128, JSON.stringify(sample.after));
-      assert.equal(sample.settled.result?.properties[0]?.value.x, 128);
-      if (mode === 'input-snake') assert(sample.markers.includes('G0_NATIVE_INPUT_UNCHANGED'), JSON.stringify(sample));
-      if (mode === 'input-same-scene') assert(sample.markers.includes('G0_SAME_SCENE_HELD=true'), JSON.stringify(sample.markers));
-      if (mode === 'input-zero') {
-        assert(sample.markers.includes('G0_PHYSICS_CADENCE=0'), JSON.stringify(sample));
-        assert.equal(BigInt(sample.input.result.down.physics) - BigInt(sample.input.result.base), 2n);
-      }
-      if (mode === 'input-multi') assert(sample.markers.some(marker => marker.startsWith('G0_PHYSICS_CADENCE=') && Number(marker.split('=')[1]) > 1), JSON.stringify(sample));
-    }
-    assert.equal(sample.exit?.hostCleanup?.status, 'complete', JSON.stringify(sample.exit));
-    assert.equal(sample.exit.engineOutcome?.code, 0, JSON.stringify(sample.exit));
+    verifyInputScriptCase(evidence.cases.at(-1));
   }
 }
 

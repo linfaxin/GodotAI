@@ -271,6 +271,17 @@ Use the same input cases on the pinned Summer CLI and a separately verified edit
 
 #### Check the R4 browser demo handoff
 
+For the single-candidate `playground-r4-replay.tar.gz` delivery, extract the archive and run the following from the extracted root. Use Node.js 24, Python 3 and Pillow. The verifier checks the site bytes, Chromium receipts and original PNG measurements, and the 19 native Input Script G0 cases associated with the site's template. Set `PYTHON` if Pillow is installed in a different interpreter.
+
+```sh
+sha256sum -c SHA256SUMS
+node tools/verify-replay.mjs .
+```
+
+If the archive predates the bundled verifier, pass the extracted directory to `node apps/playground/scripts/verify-replay.mjs` from this checkout.
+
+#### Check the historical R4 archive
+
 Open the archived `START-HERE.md` to run the local demo. To play, extract `playground-sites.tar.gz` and run the included `tools/serve.mjs` on both ports with Node.js 24, then open Chromium. The demo covers frame input, same-frame game probes, stop and restart.
 
 To verify the R4 handoff, check `SHA256SUMS` and extract all three nested archives into the same `replay` directory. From this repository root run the following with Node.js, Python 3 and Pillow. Use the outer `report.json` next to `playground-sites.tar.gz`.

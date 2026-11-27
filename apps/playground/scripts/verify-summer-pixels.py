@@ -50,6 +50,14 @@ def inspect_image(root, directory, sample):
             "expectedCentroid": expected, "whitePixels": count, "size": list(image.size)}
 
 
+def verify_playground_report(root, variant):
+    directory = root / "reports" / variant
+    samples = read_report(directory)["pngs"]
+    expected = ["previous-physical.png"] if variant.endswith("old") else ["before.png", "after.png", "restart.png"]
+    require([sample["file"] for sample in samples] == expected, directory)
+    return [inspect_image(root, directory, sample) for sample in samples]
+
+
 def verify(root):
     reports = root / "reports"
     observations = {}
@@ -58,11 +66,7 @@ def verify(root):
     if manual_report.is_file() and read_report(manual_report.parent).get("mode") == "headed-interactive-operator-walkthrough":
         variants.append("manual-archive")
     for variant in variants:
-        directory = reports / variant
-        samples = read_report(directory)["pngs"]
-        expected = ["previous-physical.png"] if variant.endswith("old") else ["before.png", "after.png", "restart.png"]
-        require([sample["file"] for sample in samples] == expected, directory)
-        observations[variant] = [inspect_image(root, directory, sample) for sample in samples]
+        observations[variant] = verify_playground_report(root, variant)
 
     directory = reports / "summer-native"
     if (directory / "report.json").is_file():
@@ -74,6 +78,10 @@ def verify(root):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        sys.exit("Usage: python3 verify-summer-pixels.py EVIDENCE_ROOT")
-    print(json.dumps(verify(Path(sys.argv[1]).resolve()), indent=2))
+    if len(sys.argv) == 3 and sys.argv[2] == "--replay":
+        result = verify_playground_report(Path(sys.argv[1]).resolve(), "new")
+    elif len(sys.argv) == 2:
+        result = verify(Path(sys.argv[1]).resolve())
+    else:
+        sys.exit("Usage: python3 verify-summer-pixels.py EVIDENCE_ROOT [--replay]")
+    print(json.dumps(result, indent=2))

@@ -6,6 +6,7 @@ import path from 'node:path';
 import {test} from 'node:test';
 import {fileURLToPath} from 'node:url';
 import {verifyBrowser, verifyCleanExit} from './verify-summer-compat.mjs';
+import {inputModes, verifyInputScriptCase, verifyInputScriptG0} from './verify-input-script-g0.mjs';
 
 function previousTemplateReport() {
   const run = {runId: 'previous-run', revision: 1, buildKey: 'build', generation: 1,
@@ -84,6 +85,47 @@ test('a clean exit from the first run cannot verify the restarted Worker', () =>
   verifyCleanExit(run, exit);
   verifyCleanExit(restart, {...exit, report: {...exit.report, ...restart}});
   assert.throws(() => verifyCleanExit(restart, exit), /Exit receipt belongs to a different Worker session/);
+});
+
+test('offline browser verification rejects a restart with a different source hash', () => {
+  const report = previousTemplateReport();
+  const first = report.runs[0];
+  const restart = structuredClone(first);
+  restart.run.runId = restart.exit.report.runId = 'restart-run';
+  restart.run.workerId = restart.exit.report.workerId = 'restart-worker';
+  first.sourceHash = 'a'.repeat(64);
+  restart.sourceHash = 'b'.repeat(64);
+  report.runs.push(restart);
+  report.scriptExecuted = true;
+  report.pngs = [first.run, first.run, restart.run].map((run, index) => ({
+    ...report.pngs[0], run, callId: 'probe-' + index, position: {x: [64, 128, 64][index], y: 256},
+  }));
+  report.calls = report.pngs.map(({callId, run, frame, position}) => ({
+    callId, replyProjection: {result: {data: {run, frame, releaseId: report.releaseId,
+      image: {...frame}, properties: [{value: position}]}}},
+  }));
+  assert.throws(() => verifyBrowser(report, true), /Restart used a different source hash/);
+});
+
+test('offline G0 verification requires the recorded cases and execution evidence', () => {
+  const sha256 = 'a'.repeat(64), reportHash = 'b'.repeat(64);
+  const report = {status: 'passed', engineExecuted: true, engineReportSha256: reportHash, templateSha256: sha256,
+    releaseId: 'fixture-release', cases: inputModes.map(name => ({name, run: {releaseId: 'fixture-release'}}))};
+  const replaced = structuredClone(report);
+  replaced.cases[0].name = 'input-unexpected';
+  assert.throws(() => verifyInputScriptG0(replaced, {reportHash, sha256}), /G0 case names differ/);
+  assert.throws(() => verifyInputScriptG0(report, {reportHash, sha256}), /G0 fixture differs: input-snake/);
+
+  const run = {generation: 'input-snake', runId: 'run', workerId: 'worker', releaseId: report.releaseId};
+  const probe = x => ({ok: true, result: {run, releaseId: run.releaseId, properties: [{value: {x}}]}});
+  const sample = {name: run.generation, run, before: probe(64), after: probe(128), settled: probe(128),
+    input: {ok: true, receipt: {run, releaseId: run.releaseId},
+      result: {releaseStepCompleted: true, down: {physics: '6'}, up: {physics: '10'}}},
+    markers: ['G0_NATIVE_INPUT_UNCHANGED'],
+    exit: {runId: run.runId, workerId: run.workerId, engineOutcome: {code: 0}, hostCleanup: {status: 'complete'}}};
+  verifyInputScriptCase(sample);
+  sample.input.result.up.physics = '9';
+  assert.throws(() => verifyInputScriptCase(sample));
 });
 
 test('invoking the verifier through a symlink still runs the CLI and fails on missing evidence', async t => {
