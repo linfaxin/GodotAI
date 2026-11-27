@@ -62,7 +62,7 @@ During framework development, rename supports ordinary scripts and text `.tscn` 
 
 ## Agent tools
 
-Expand **API 调用** in the sidebar to browse eleven Summer-style operations and seven GodotAI helpers. Each entry shows the API name and a one-line summary. Open an API to edit its JSON input and inspect results or PNGs alongside the live preview. Each API has its own tab, draft and result view, with shared call history. Requests use the same `window.godotPlayground` API (`schemaVersion: 1`) as external callers. Ctrl/Cmd+Enter executes the active API draft in the request editor and builds the project in the code editor.
+Expand **API 调用** in the sidebar to browse thirteen Summer-style operations and seven GodotAI helpers. Each entry shows the API name and a one-line summary. Open an API to edit its JSON input and inspect results or PNGs alongside the live preview. Each API has its own tab, draft and result view, with shared call history. Requests use the same `window.godotPlayground` API (`schemaVersion: 1`) as external callers. Ctrl/Cmd+Enter executes the active API draft in the request editor and builds the project in the code editor.
 
 The console retains per-operation drafts and bounded in-memory history. Loading a preset or historical request never executes it. **更新目标 / 填入上下文** uses explicit project, run, node and method selections. PNGs are separate attachments and JSON results identify binary summaries. **打开独立示例** switches to the selected sample and ends the previous preview without automatically playing it. The lesson lists cover position changes, exported gameplay properties, and registered method calls. [Console design and lifecycle rules](../../docs/design/playground-api-console.zh-CN.md)
 
@@ -70,7 +70,7 @@ Open **API 调试** for the existing **自动验证** replays; these retain thei
 
 The runtime property workbench adds `describe_runtime_properties`, `read_runtime_properties`, `write_runtime_property` and `summer_call` to the same entry. The independent scripted sample exposes `health`, `move_step`, `can_move` and `display_name` using standard GodotJS export decorators. Its replay changes health and movement, checks actual values and PNGs, then restarts the same source to verify defaults return. Property access requires a matching Full/debug Worker Direct engine with `runtimeProperties: 1`; older write-capable templates continue to support the original position replay.
 
-`summer_call({op, input})` accepts selected Summer 4.9.2-style inputs and returns GodotAI typed results. It supports selected context, main play/stop/state, runtime tree, native node inspection, property writes, registered method calls, game screenshots, game probes and `engine.game_input` frame scripts. Script properties use explicit typed read operations. `engine.inspect_runtime_node` uses the native observation path. Game screenshots require an explicit `target: 'game'`. See the [Input Script contract](#input-script) and the [Summer adapter and runtime property contracts](../../docs/design/runtime-properties-and-summer-api-v2.zh-CN.md).
+`summer_call({op, input})` accepts selected Summer 4.9.2-style inputs and returns GodotAI typed results. It supports selected context, main play/stop/state, lifecycle events, runtime tree, native node inspection, property writes, registered method calls, game screenshots, game probes and `engine.game_input` frame scripts. Script properties use explicit typed read operations. `engine.inspect_runtime_node` uses the native observation path. Game screenshots require an explicit `target: 'game'`. See the [Input Script contract](#input-script) and the [Summer adapter and runtime property contracts](../../docs/design/runtime-properties-and-summer-api-v2.zh-CN.md).
 
 On a Full Engine debug Worker Direct preview with `runtimeProperties: 1` and `runtimeCall: 1`, open **打开独立示例** from `engine.runtime_call` and follow **Summer：调用玩法方法** under **手工教学流程**. The sample registers `take_damage` on `/root/Main/Player` with `@bind.runtimeMethod({args: ['int'], returns: 'int'})`. Each step opens its API tab and loads a draft. When a step asks you to fill parameters from an earlier call, select the source in shared history and fill the current operation. Check the draft and then execute it. Read `health` and capture the game before and after `take_damage(25)` to verify `100 → 75`. Wait for the original run to exit. Start the same source and discover the player again to verify `100` and a full health bar in the new run.
 
@@ -84,6 +84,41 @@ await window.godotPlayground.summer_call({
 ```
 
 For a caller with an exact run and node instance, use `describe_runtime_methods` to obtain a method token and pass it to `call_runtime_method` with typed arguments. Tokens are scoped to the registered method, instance, run and release. If a call reports `outcome_unknown`, read the live state before deciding whether to call again. Older templates report `unsupported`. The generated `godot.annotations` declaration follows the annotation observed in the exact engine template.
+
+### Lifecycle events
+
+Open **API 调用 → engine.game_input → 打开独立示例**, then follow **Summer：等待启动与退出**. On a Full/debug Dedicated Worker Direct site, the lesson uses the moving marker to verify `64 → 128 → 64`, with a matching start and exit event for each Worker.
+
+Read a cursor before triggering Play or Stop. Resume from the same response's `next_seq` and `stream_id`. An ID from a previous page is rejected. A cursor is valid across project changes and restarts within one page.
+
+```js
+const api = window.godotPlayground
+const cursor = (await api.summer_call({op: 'engine.recent_events'})).result.data
+const play = (await api.summer_call({op: 'engine.play'})).result.data
+const observed = await api.summer_call({
+  op: 'engine.wait_for_event',
+  input: {since: cursor.next_seq, stream_id: cursor.stream_id, kinds: ['play.started']},
+})
+const started = observed.result?.data.events.find(event =>
+  event.data.attemptId === play.attemptId &&
+  event.data.projectId === play.projectId &&
+  event.data.editorRevision === play.editorRevision)
+```
+
+A match identifies the recorded event. Before using the live preview, confirm that its `runId` is the current main run, the pending launch has cleared, and the required capabilities are ready. For a Stop, compare each captured run with the corresponding `play.stopped` event or with an already returned exit receipt. A stopped event includes the observed exit reason and cleanup facts where available. If Stop only cancelled an attempt, inspect that attempt's build. When history has a `gap`, use the original attempt or run ID to check the state.
+
+The page retains up to 512 events for 10 minutes. Omit `since` to read the latest sequence window with `recent_events` or to wait only for new events with `wait_for_event`. Advance through pages using `next_seq`. Wait timeout and cancellation affect only the observation. The local ID-based `wait_for_event` remains available for exact attempt or run waits.
+
+To produce and independently verify the browser report, use a current Full/debug site with `gameProbe: 1` and `inputScript: 1`. Set `LIFECYCLE_SITE` and `LIFECYCLE_EVIDENCE` to absolute paths. The offline image check uses Python with Pillow.
+
+```sh
+node apps/playground/scripts/seal-site-acceptance.mjs "$LIFECYCLE_SITE" "$LIFECYCLE_EVIDENCE" --begin
+PLAYGROUND_TEST_DIRECTORY="$LIFECYCLE_SITE" \
+  PLAYGROUND_ACCEPTANCE_CONTEXT="$LIFECYCLE_EVIDENCE/site-start.json" \
+  PLAYGROUND_LIFECYCLE_REPORT="$LIFECYCLE_EVIDENCE/report.json" \
+  pnpm --filter @godot-js/playground test:browser:lifecycle-events
+node apps/playground/scripts/verify-lifecycle-events.mjs "$LIFECYCLE_EVIDENCE/report.json" "$LIFECYCLE_EVIDENCE/site-start.json"
+```
 
 ### Input script
 

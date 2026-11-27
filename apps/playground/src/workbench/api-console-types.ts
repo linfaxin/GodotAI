@@ -34,6 +34,7 @@ export interface ConsoleDraft {
   anchor: ConsoleAnchor;
   selectedMethod?: SelectedRuntimeMethod;
   runSourceCallId?: string | null;
+  needsEventCursor?: boolean;
 }
 export interface ConsoleResultFacts {
   sourceCallId: string;
@@ -46,6 +47,7 @@ export interface ConsoleResultFacts {
   methods?: {name: string; signature: string; token: RuntimeMethodToken; parameterTypes: SelectedRuntimeMethod['parameterTypes']}[];
   input?: {runId: string; operationId: string};
   stoppedRunIds?: string[];
+  eventCursor?: {since: number; stream_id: string};
   truncated?: true;
 }
 export interface ConsoleCall {
@@ -99,7 +101,7 @@ export interface ConsoleSession {
   subscribe(listener: () => void): () => void;
   selectOperation(operationId: string): void;
   updateDraft(inputText: string): void;
-  loadPreset(operationId: string, inputText: string, needsRunSource?: boolean): void;
+  loadPreset(operationId: string, inputText: string, needsRunSource?: boolean, needsEventCursor?: boolean): void;
   loadHistory(callId: string): void;
   updateTarget(source?: ConsoleFillSelection): void;
   submit(): Promise<void>;

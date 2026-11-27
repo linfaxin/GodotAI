@@ -319,6 +319,8 @@ function createApiConsoleCard(container: HTMLElement, session: ConsoleSession, o
       for (const runId of facts.stoppedRunIds) {const option = element('option', '', runId); option.value = runId; stopped.append(option);}
       stopped.value = saved?.stoppedRunId ?? '';
     }
+    if (kind === 'event-cursor' && facts.eventCursor)
+      sources.append(element('p', 'api-console-note', `续读序号 ${facts.eventCursor.since}`));
     if (kind === 'attempt') sources.append(element('p', 'api-console-note', `attemptId: ${facts.attemptId}`));
     if (facts.run) sources.append(element('p', 'api-console-note', `runId: ${facts.run.identity.runId}`));
     if (kind === 'input' && facts.input) sources.append(element('p', 'api-console-note', `输入: ${facts.input.runId} / ${facts.input.operationId}`));
@@ -426,7 +428,7 @@ function createApiConsoleCard(container: HTMLElement, session: ConsoleSession, o
     },
     loadLesson(step: ConsoleLessonStep) {
       act(() => {
-        if (step.input !== undefined) session.loadPreset(operation.id, stringifyConsoleJson(step.input), step.needsRunSource);
+        if (step.input !== undefined) session.loadPreset(operation.id, stringifyConsoleJson(step.input), step.needsRunSource, step.needsEventCursor);
         if (step.inputOverrides !== undefined) {
           const current: unknown = JSON.parse(session.snapshot().draft.inputText);
           if (!current || typeof current !== 'object' || Array.isArray(current)) throw new Error('请先准备有效的 input 对象。');

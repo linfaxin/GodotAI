@@ -1,6 +1,7 @@
 import type {PreviewDiagnostic, RunnerState} from '@godot-js/engine/browser/protocol';
 import {sameWorkerRun, type WorkerRunIdentity} from '@godot-js/engine/browser/dedicated/worker-protocol';
 import type {WorkerRunnerEvent, WorkerRunnerExit} from '@godot-js/engine/browser/dedicated/worker-runner';
+import {createLifecycleLog, type LifecycleExit} from './lifecycle-events.ts';
 
 export interface DebugDiagnostic {
   severity: 'error' | 'warning' | 'info';
@@ -159,6 +160,7 @@ type RunRecord = {
   events: EventRecord[];
   seq: number;
   eventBytes: number;
+  startedObserved: boolean;
 };
 
 const MAX_BUILDS = 16;
@@ -334,6 +336,14 @@ function runIdentity(event: WorkerRunIdentity): WorkerRunIdentity {
   return {runId, revision, buildKey, generation, documentId, workerId, runConfigurationHash};
 }
 
+function lifecycleData({view, build}: RunRecord) {
+  return {
+    projectId: view.projectId, editorRevision: build.view.editorRevision,
+    attemptId: view.attemptId, run: runIdentity(view), artifactId: view.artifact.artifactId,
+    releaseId: view.release.releaseId, ...(build.view.sourceHash ? {sourceHash: build.view.sourceHash} : {}),
+  };
+}
+
 function runtimeDiagnostic(value: PreviewDiagnostic): PreviewDiagnostic {
   const {source, message, name, stack, filename, line, column} = value;
   return {
@@ -394,8 +404,9 @@ function availability<T>(input: DebugAvailability<T>): DebugAvailability<T> {
   return {status: input.status, ...(input.reason === undefined ? {} : {reason: input.reason.slice(0, MAX_ERROR_TEXT)})};
 }
 
-export function createDebugRecorder() {
+export function createDebugRecorder(now = () => performance.now()) {
   const pageId = Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
+  const lifecycle = createLifecycleLog(pageId, now);
   const context: PageContext = {projectId: null, editorRevision: null, release: {status: 'loading'}, preview: {status: 'loading'}};
   const builds: BuildRecord[] = [];
   const retainedBuilds = new Set<BuildRecord>();
@@ -487,6 +498,8 @@ export function createDebugRecorder() {
 
   return {
     api: Object.freeze(api),
+    lifecycle,
+    notify,
     subscribe(listener: () => void) {
       listeners.add(listener);
       return () => { listeners.delete(listener); };
@@ -638,7 +651,7 @@ export function createDebugRecorder() {
           projectId: build.projectId, attemptId: build.attemptId, artifact: build.artifact,
           release: pending.release, configuration: pending.configuration, state: 'loading-frame',
         };
-        run = activeRun = {build: pending.build, view, seq: 0, eventBytes: 0, events: []};
+        run = activeRun = {build: pending.build, view, seq: 0, eventBytes: 0, events: [], startedObserved: false};
         previews.delete(identity.generation);
         build.preview = {status: 'session-created', runId: identity.runId};
       }
@@ -647,6 +660,10 @@ export function createDebugRecorder() {
         case 'state':
           run.view.state = event.state;
           appendEvent(run, {type: 'state', state: event.state});
+          if (event.state === 'running' && !run.startedObserved) {
+            run.startedObserved = true;
+            lifecycle.append({kind: 'play.started', data: lifecycleData(run)});
+          }
           break;
         case 'log':
           appendEvent(run, {type: 'log', level: event.level, text: event.text, untrusted: true, source: 'preview-worker'});
@@ -659,6 +676,14 @@ export function createDebugRecorder() {
           run.view.state = 'exited';
           run.view.exit = exit;
           appendEvent(run, {type: 'exit', exit});
+          const summary: LifecycleExit = {evidence: exit.evidence, reason: exit.report.reason};
+          if (exit.report.sessionFacts) {
+            const {failure, ...facts} = exit.report.sessionFacts;
+            summary.facts = {...facts, failureObserved: failure !== undefined};
+          }
+          lifecycle.append({kind: 'play.stopped', data: {
+            ...lifecycleData(run), startedObserved: run.startedObserved, exit: summary,
+          }});
           activeRun = undefined;
           exitedRuns.push(run);
           if (exitedRuns.length > MAX_EXITED_RUNS) exitedRuns.shift();

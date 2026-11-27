@@ -89,6 +89,10 @@ function resultSummary(operationId: string, reply: unknown): string {
   if (operationId === 'engine.game_input') return '输入脚本已完成，使用帧探测验证玩法';
   if (operationId === 'game_input') return '输入已接纳，分发待确认';
   if (operationId === 'wait_for_input') return `输入等待：${data.outcome}；分发：${data.operation?.status ?? 'unknown'}`;
+  if (operationId === 'engine.recent_events' || operationId === 'engine.wait_for_event') {
+    const status = data.timed_out ? '等待超时' : `读取到 ${data.events?.length ?? 0} 条事件`;
+    return status + (data.gap ? '；历史有缺口' : '') + (data.truncated ? '；可继续翻页' : '');
+  }
   if (operationId === 'wait_for_event') return `等待结果：${data.outcome}`;
   const outcome = data.payload?.result?.outcome ?? data.outcome;
   if (outcome === 'completed') return '属性批次已结算，请逐项查看';
@@ -111,6 +115,10 @@ function resultFacts(call: ConsoleCall, input: unknown, reply: unknown, submitte
     facts.run = {identity:run,...(projectId ? {projectId} : {}),...(nonempty(runData.attemptId) ? {attemptId:runData.attemptId} : {})};
     facts.sourceAnchor.activeRunId = run.runId;facts.sourceAnchor.activeRunRevision = run.revision;
     facts.sourceAnchor.activeRunProjectId = projectId ?? null;
+  }
+  if ((op === 'engine.recent_events' || op === 'engine.wait_for_event') &&
+      nonempty(data.stream_id) && Number.isSafeInteger(data.next_seq) && data.next_seq >= 0) {
+    facts.eventCursor = {since: data.next_seq, stream_id: data.stream_id};
   }
   if (op === 'engine.play' && nonempty(data.attemptId)) facts.attemptId=data.attemptId;
   const nodes = op === 'engine.get_runtime_tree' ? data.nodes : op === 'engine.game_probe' ? data.tree?.nodes : undefined;
@@ -155,7 +163,7 @@ function resultFacts(call: ConsoleCall, input: unknown, reply: unknown, submitte
     facts.stoppedRunIds=data.runs.filter((item:unknown)=>object(item)&&nonempty(item.runId)).slice(0,16).map((item:any)=>item.runId);
     if(data.runs.length>16)facts.truncated=true;
   }
-  if (!facts.attemptId && !facts.run && !facts.nodes && !facts.propertyTarget && !facts.input && !facts.stoppedRunIds) return;
+  if (!facts.attemptId && !facts.run && !facts.nodes && !facts.propertyTarget && !facts.input && !facts.stoppedRunIds && !facts.eventCursor) return;
   while(encoder.encode(JSON.stringify(facts)).byteLength>FACT_BYTES) {
     facts.truncated=true;
     if(facts.nodes?.length)facts.nodes.pop();else if(facts.properties?.length)facts.properties.pop();
@@ -169,6 +177,9 @@ export function consoleResultSource(operationId: string, facts: ConsoleResultFac
   if (!facts) return;
   const hasNode = facts.run && !!facts.nodes?.length;
   switch (operationId) {
+    case 'engine.recent_events':
+    case 'engine.wait_for_event':
+      return facts.eventCursor ? 'event-cursor' : undefined;
     case 'engine.game_probe':
     case 'engine.get_runtime_tree':
     case 'engine.inspect_runtime_node':
@@ -236,6 +247,10 @@ export function createApiConsoleSession(api: PlaygroundApi, hooks: ConsoleHooks,
   function admissible(input:unknown,current:ConsoleEnvironment):boolean {
     const selected=getConsoleOperation(operationId)!;const original=draft().anchor,now=current.anchor;
     const stale=()=>{error('stale_target','目标已变化，请显式更新目标后提交');return false;};
+    if (draft().needsEventCursor && (!object(input) || !Number.isSafeInteger(input.since) || input.since < 0 || !nonempty(input.stream_id))) {
+      error('missing_source', '请从操作前的历史回执填入 since 和 stream_id');
+      return false;
+    }
     if(draft().runSourceCallId===null){error('missing_source','请从运行历史选择本次操作的目标');return false;}
     if(draft().runSourceCallId!==undefined&&(!same(original,now,['editorProjectId','activeRunProjectId','activeRunId','activeRunRevision','pendingAttemptId'])||
       now.pendingAttemptId!==null||current.activeRunState!=='running')){
@@ -264,11 +279,12 @@ export function createApiConsoleSession(api: PlaygroundApi, hooks: ConsoleHooks,
     subscribe(listener){listeners.add(listener);return()=>{listeners.delete(listener);};},
     selectOperation(id){if(disposed||!getConsoleOperation(id))return;operationId=id;draft();emit();},
     updateDraft(inputText){if(disposed)return;draft().inputText=inputText;clearError();emit();},
-    loadPreset(id,inputText,needsRunSource){
+    loadPreset(id,inputText,needsRunSource,needsEventCursor){
       if(disposed||!getConsoleOperation(id))return;
       operationId=id;
       const anchor=needsRunSource?draft().anchor:environment().anchor;
-      drafts.set(id,{operationId:id,inputText,anchor,...(needsRunSource?{runSourceCallId:null}:{})});
+      drafts.set(id,{operationId:id,inputText,anchor,...(needsRunSource?{runSourceCallId:null}:{}),
+        ...(needsEventCursor ? {needsEventCursor: true} : {})});
       clearError();emit();
     },
     loadHistory(callId){const call=history.find(item=>item.callId===callId);if(disposed||!call)return;operationId=call.draft.operationId;drafts.set(operationId,copy(call.draft));clearError();emit();},
@@ -299,7 +315,9 @@ export function createApiConsoleSession(api: PlaygroundApi, hooks: ConsoleHooks,
       const missing=(message:string)=>error('missing_source',message+'；原草稿已保留');
       const node=source?.nodes?.find(item=>item.path===selection?.nodePath);
       const target=node&&source?.run?{runId:source.run.identity.runId,path:node.path,expectedInstanceId:node.instanceId}:source?.propertyTarget;
-      if((id==='engine.game_input'||id==='engine.stop')&&selection){
+      if ((id === 'engine.recent_events' || id === 'engine.wait_for_event') && source?.eventCursor) {
+        Object.assign(next, source.eventCursor);
+      } else if((id==='engine.game_input'||id==='engine.stop')&&selection){
         if(!source?.run||source.run.identity.runId!==current.anchor.activeRunId||
           source.run.identity.revision!==current.anchor.activeRunRevision||current.activeRunState!=='running'||
           source.run.projectId!==current.anchor.editorProjectId||current.anchor.pendingAttemptId!==null||

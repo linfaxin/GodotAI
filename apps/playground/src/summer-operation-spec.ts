@@ -44,6 +44,29 @@ export const SUMMER_OPERATION_SPECS = Object.freeze({
     allowed: [], unsupported: ['include', 'settingsPrefix', 'settingsPrefixes'], parameters: [], defaultInput: {},
     limitations: ['返回 GodotAI context；activeRunId 可能属于之前的项目。', '不支持 include 与项目设置筛选。'],
   }),
+  'engine.recent_events': spec({
+    title: '读取最近的生命周期事件', description: '读取页面事件流，并取得 Play 或 Stop 前的游标。',
+    allowed: ['since', 'kinds', 'limit', 'stream_id'], unsupported: [],
+    parameters: [
+      {name: 'since', description: '仅返回序号大于 since 的事件。省略时读取尾部窗口。'},
+      {name: 'kinds', description: '支持 play.started 和 play.stopped。'},
+      {name: 'limit', description: '默认 50，上限 200。'},
+      {name: 'stream_id', description: 'GodotAI 扩展。与上次回执的 next_seq 成对使用。'},
+    ], defaultInput: {},
+    limitations: ['游标以页面为单位，刷新后重新获取。gap 表示部分历史已淘汰。'],
+  }),
+  'engine.wait_for_event': spec({
+    title: '等待生命周期事件', description: '从指定游标等待启动或退出事件。',
+    allowed: ['since', 'kinds', 'timeout_seconds', 'max_events', 'stream_id'], unsupported: ['match'],
+    parameters: [
+      {name: 'since', description: '优先使用操作前取得的 next_seq。省略时等待新事件。'},
+      {name: 'kinds', description: '支持 play.started 和 play.stopped。'},
+      {name: 'timeout_seconds', description: '默认 30 秒，限制在 1–120 秒。'},
+      {name: 'max_events', description: '默认 20，上限 500。'},
+      {name: 'stream_id', description: 'GodotAI 扩展。与上次回执的 next_seq 成对使用。'},
+    ], defaultInput: {kinds: ['play.started']},
+    limitations: ['事件命中后核对 attemptId 或 Worker 身份。超时和取消只结束等待。'],
+  }),
   'engine.play': spec({
     title: '构建并启动游戏', description: '捕获当前编辑版本并开始构建；接纳后返回 attemptId。',
     allowed: ['instance'], unsupported: ['scene', 'mode', 'focus', 'deterministic', 'seed', 'fixed_fps', 'time_scale', 'speed', 'players', 'spectators', 'queue'],

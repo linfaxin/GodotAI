@@ -5,7 +5,7 @@ import {fileURLToPath} from 'node:url';
 import {launchBrowser, defaultTestDirectory} from './browser-harness.mjs';
 import {createStaticServer} from './serve.mjs';
 import {runReportedBrowserTest, listenBrowserTestServer as listen, closeBrowserTestServer as close} from './browser-contract-report.mjs';
-import {consoleElement as element, openConsoleOperation} from './api-console-browser-helpers.mjs';
+import {consoleElement as element, openConsoleOperation, submitConsole, summerResult, viewConsoleCall} from './api-console-browser-helpers.mjs';
 
 const directory = defaultTestDirectory({shellOnly: true});
 const output = path.resolve(process.env.PLAYGROUND_API_CONSOLE_SHELL_OUT ??
@@ -67,7 +67,7 @@ await runReportedBrowserTest({scope: 'real-main-api-console-shell',
       await openConsoleOperation(page, 'engine.get_project_context');
       assert.equal(await page.locator('#api-console-pane').isVisible(), true);
       assert.equal(await page.locator('#code-pane').isVisible(), false);
-      assert.equal(await page.locator('#api-list .api-list-summary:visible').count(), 18);
+      assert.equal(await page.locator('#api-list .api-list-summary:visible').count(), 20);
       assert.equal(await page.locator('#api-list .api-list-group').count(), 2);
       assert(await page.locator('#api-list').evaluate(node => node.scrollWidth <= node.clientWidth));
       assert(await page.locator('.api-list-summary').evaluateAll(nodes => nodes.every(node => node.scrollWidth <= node.clientWidth)));
@@ -209,21 +209,54 @@ await runReportedBrowserTest({scope: 'real-main-api-console-shell',
         contentType: 'text/html',
         body: '<!doctype html><title>History destination</title><link rel="icon" href="data:,">',
       }), {times: 1});
+      const originalStream = await page.evaluate(async () => {
+        const api = window.godotPlayground;
+        const {stream_id, next_seq} = (await api.summer_call({op: 'engine.recent_events'})).result.data;
+        api.summer_call({op: 'engine.wait_for_event', input: {stream_id, since: next_seq, timeout_seconds: 1}})
+          .then(reply => {window.restoredLifecycleWaitResult = reply;});
+        return stream_id;
+      });
       await page.goto(destination);
       await page.goBack({waitUntil: 'commit'});
       await page.locator('body[data-restored-from-history="true"]').waitFor({timeout: 10000});
       assert.equal(await element(page, 'input').inputValue(), draft);
       assert.equal(await settled.count(), previousCalls);
+      const restoredReply = await page.waitForFunction(() => window.restoredLifecycleWaitResult, null, {timeout: 5000});
+      const restoredWait = summerResult(await restoredReply.jsonValue());
+      assert.equal(restoredWait.stream_id, originalStream);
+      assert.equal(restoredWait.timed_out, true);
       await element(page, 'input').fill('{}');
       await element(page, 'execute').click();
       await page.waitForFunction(count => document.querySelectorAll('.api-console-card:not([hidden]) [data-testid="api-console-history"] [data-phase="settled"]').length === count, previousCalls + 1);
       assert.equal(JSON.parse(await element(page, 'result').textContent()).ok, true);
     }, {after: ['opening-example-during-workspace-loading-is-a-client-error']});
+    await test.step('lifecycle-cursor-fill-and-cancel-through-the-real-console', async () => {
+      await page.setViewportSize({width: 1536, height: 1000});
+      await openConsoleOperation(page, 'engine.recent_events');
+      await element(page, 'input').fill('{}');
+      const recent = await submitConsole(page, 'engine.recent_events');
+      const cursor = summerResult(recent.reply);
+      assert.equal(cursor.next_seq, 0);
+      const count = await element(page, 'history').locator('[data-call-id]').count();
+      await openConsoleOperation(page, 'engine.wait_for_event');
+      await element(page, 'input').fill('{"kinds":["play.started"],"timeout_seconds":30}');
+      await viewConsoleCall(page, recent.callId);
+      await element(page, 'use-result').click();
+      assert.equal(await element(page, 'history').locator('[data-call-id]').count(), count);
+      assert.deepEqual(JSON.parse(await element(page, 'input').inputValue()),
+        {kinds: ['play.started'], timeout_seconds: 30, since: 0, stream_id: cursor.stream_id});
+      await element(page, 'execute').click();
+      await element(page, 'cancel').click();
+      await page.waitForFunction(() => document.querySelector('.api-console-card:not([hidden]) [data-testid="api-console-result"]')
+        ?.textContent.includes('"cancelled"'));
+      assert.equal(await element(page, 'execute').isEnabled(), true);
+      assert.equal((await inspect()).build, null);
+    }, {after: ['browser-back-keeps-the-api-console-and-its-session']});
     await test.step('no-page-or-console-errors', async () => {
       assert.deepEqual(pageErrors, []);
       assert.deepEqual(consoleErrors, []);
       assert.deepEqual(failedRequests, []);
-    }, {after: ['browser-back-keeps-the-api-console-and-its-session']});
+    }, {after: ['lifecycle-cursor-fill-and-cancel-through-the-real-console']});
     return {status: 'passed', browser: {name: browser.browserType().name(), version: browser.version()},
       engineExecuted: false, mainReplaced: false, compilerReplaced: false, nodeVersion: process.version,
       profile, pageErrors, consoleErrors, failedRequests, screenshots};
