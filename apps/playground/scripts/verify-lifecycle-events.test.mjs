@@ -55,4 +55,14 @@ test('repair verification binds diagnostics and recovered run to the recorded ve
     update(edited.calls[index].reply.result.data);
     assert.throws(() => verifyDiagnosticRepair(edited, first, 9, 10));
   }
+  const scopedEvidence = structuredClone(evidence);
+  const op = 'engine.get_script_errors', path = 'res://src/Player.ts';
+  for (const [index, data] of [[2, {...broken, diagnostics}], [7, check]]) {
+    const call = scopedEvidence.calls[index];
+    call.request = {op, input: {path}};
+    call.reply.result = {data: {...data, path, status: 'completed'}};
+  }
+  verifyDiagnosticRepair(scopedEvidence, first, 9, 10);
+  scopedEvidence.calls[2].reply.result.data.path = 'res://src/Other.ts';
+  assert.throws(() => verifyDiagnosticRepair(scopedEvidence, first, 9, 10));
 });

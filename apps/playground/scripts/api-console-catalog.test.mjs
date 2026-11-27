@@ -4,7 +4,7 @@ import {CONSOLE_OPERATIONS, getConsoleOperation} from '../src/workbench/api-cons
 import {SUMMER_OPERATION_SPECS, SUMMER_TREE_LIMITS, SUMMER_COMPATIBILITY, SUMMER_REFERENCE} from '../src/summer-operation-spec.ts';
 import {createSummerDispatcher} from '../src/summer-adapter.ts';
 
-const summerIds = ['engine.get_project_context', 'engine.get_diagnostics', 'engine.play', 'engine.stop', 'engine.is_running', 'engine.recent_events', 'engine.wait_for_event',
+const summerIds = ['engine.get_project_context', 'engine.get_diagnostics', 'engine.get_script_errors', 'engine.play', 'engine.stop', 'engine.is_running', 'engine.recent_events', 'engine.wait_for_event',
   'engine.get_runtime_tree', 'engine.inspect_runtime_node', 'engine.runtime_set', 'engine.runtime_call', 'engine.screenshot', 'engine.game_probe', 'engine.game_input'];
 const localIds = ['describe_runtime_methods', 'check', 'wait_for_event', 'describe_runtime_properties', 'read_runtime_properties', 'game_input', 'wait_for_input'];
 const cancellable = new Set(['engine.get_runtime_tree', 'engine.inspect_runtime_node', 'engine.runtime_set', 'engine.runtime_call', 'engine.screenshot', 'engine.game_probe', 'engine.game_input',
@@ -15,11 +15,11 @@ const operation = id => {
   return item;
 };
 
-test('the console exposes fourteen Summer operations and seven local helpers', () => {
+test('the console exposes fifteen Summer operations and seven local helpers', () => {
   assert.deepEqual(CONSOLE_OPERATIONS.map(item => item.id), [...summerIds, ...localIds]);
   assert.deepEqual(CONSOLE_OPERATIONS.filter(item => item.family === 'summer').map(item => item.id), summerIds);
   assert.deepEqual(CONSOLE_OPERATIONS.filter(item => item.family === 'local').map(item => item.id), localIds);
-  assert.equal(new Set(CONSOLE_OPERATIONS.map(item => item.id)).size, 21);
+  assert.equal(new Set(CONSOLE_OPERATIONS.map(item => item.id)).size, 22);
   assert.equal(operation('engine.get_diagnostics').binding, 'none');
   assert.deepEqual(operation('engine.get_diagnostics').createPreset(), {input: {}, missing: []});
   for (const item of CONSOLE_OPERATIONS) {

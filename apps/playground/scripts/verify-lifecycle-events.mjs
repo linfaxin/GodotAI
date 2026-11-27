@@ -28,11 +28,18 @@ export function verifyDiagnosticRepair(report, first, startIndex, waitIndex) {
     const index = report.calls.findIndex(call => call.callId === repair[key]);
     assert(index > min, 'Missing or out-of-order repair call: ' + key);
     const {request, reply} = report.calls[index];
-    const facade = op.startsWith('engine.');
-    assert.equal(facade ? request.op : request.method, op);
+    const operation = request.op ?? request.method;
+    assert(operation === op || op === 'check' && operation === 'engine.get_script_errors', 'Unexpected repair operation for ' + key);
     assert.equal(reply.ok, true);
     previous = index;
-    return facade ? reply.result.data : reply.result;
+    const data = request.op ? reply.result.data : reply.result;
+    if (operation === 'engine.get_script_errors') {
+      assert.equal(request.input?.path, 'res://src/Player.ts');
+      assert.equal(data.path, request.input.path);
+      assert.equal(data.status, 'completed');
+      assert.equal(data.diagnostics.observed, true);
+    }
+    return data;
   }
   const initial = read('initial', 'engine.play');
   const original = read('original', 'wait_for_event');

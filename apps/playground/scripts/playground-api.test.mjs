@@ -122,6 +122,49 @@ test('check admission, original revision, and diagnostic projection preserve sou
   assert.equal(rejected.diagnostics.observed, false);
 });
 
+test('script check scopes raw diagnostics before truncation and retains the original project check', async () => {
+  const recorder = createDebugRecorder();
+  const otherErrors = Array.from({length: 110}, () => ({...typeError, file: '/src/other.ts'}));
+  let checks = 0, finish;
+  const agent = createPlaygroundApi(recorder, {
+    supportsProject: () => true,
+    hasScript: path => path === typeError.file,
+    check(path) {
+      const context = recorder.api.getContext().result;
+      const request = recorder.startCheck(context.projectId, context.editorRevision);
+      checks++;
+      return new Promise(resolve => {finish = response => resolve(recorder.finishCheck(request, response, undefined, path));});
+    },
+    play: () => assert.fail('Script checking must not start a build'),
+    stopRun: () => assert.fail('Script checking must not stop a run'),
+  });
+  assert.equal((await agent.getScriptErrors(typeError.file)).error.code, 'not_ready');
+  recorder.setContext({projectId, editorRevision, release: {status: 'available', value: release}});
+  assert.equal((await agent.getScriptErrors('/src/missing.ts')).error.code, 'not_found');
+  assert.equal(checks, 0);
+
+  const pending = agent.getScriptErrors(typeError.file);
+  recorder.setContext({editorRevision: 8});
+  finish({diagnostics: [...otherErrors, typeError], sourceHash});
+  const scoped = unwrap(await pending);
+  assert.equal(scoped.editorRevision, editorRevision);
+  assert.equal(scoped.sourceHash, sourceHash);
+  assert.equal(scoped.path, 'res://src/start.ts');
+  assert.deepEqual(scoped.diagnostics, {observed: true, counts: {error: 1, warning: 0, info: 0}, omittedCount: 0,
+    items: [{severity: 'error', code: 2322, message: typeError.message, location: {file: typeError.file, line: 4, column: 6}}]});
+  const retained = recorder.getCheck(scoped.checkId);
+  assert.equal(retained.diagnostics.counts.error, 111);
+  assert(retained.diagnostics.items.every(item => item.location.file === '/src/other.ts'));
+
+  const clean = agent.getScriptErrors(typeError.file);
+  finish({diagnostics: otherErrors, sourceHash});
+  assert.equal(unwrap(await clean).diagnostics.counts.error, 0);
+  const failed = agent.getScriptErrors(typeError.file);
+  finish({error: 'Worker reported an error'});
+  assert.equal(unwrap(await failed).status, 'failed');
+  assert.equal(unwrap(await failed).diagnostics.observed, false);
+});
+
 test('an out-of-order check is queryable when returned and does not supersede a newer default', async () => {
   let finishFirst;
   const gate = new Promise(resolve => { finishFirst = resolve; });

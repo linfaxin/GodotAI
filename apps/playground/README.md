@@ -62,7 +62,7 @@ During framework development, rename supports ordinary scripts and text `.tscn` 
 
 ## Agent tools
 
-Expand **API 调用** in the sidebar to browse fourteen Summer-style operations and seven GodotAI helpers. Each entry shows the API name and a one-line summary. Open an API to edit its JSON input and inspect results or PNGs alongside the live preview. Each API has its own tab, draft and result view, with shared call history. Requests use the same `window.godotPlayground` API (`schemaVersion: 1`) as external callers. Ctrl/Cmd+Enter executes the active API draft in the request editor and builds the project in the code editor.
+Expand **API 调用** in the sidebar to browse fifteen Summer-style operations and seven GodotAI helpers. Each entry shows the API name and a one-line summary. Open an API to edit its JSON input and inspect results or PNGs alongside the live preview. Each API has its own tab, draft and result view, with shared call history. Requests use the same `window.godotPlayground` API (`schemaVersion: 1`) as external callers. Ctrl/Cmd+Enter executes the active API draft in the request editor and builds the project in the code editor.
 
 The console retains per-operation drafts and bounded in-memory history. Loading a preset or historical request never executes it. **更新目标 / 填入上下文** uses explicit project, run, node and method selections. PNGs are separate attachments and JSON results identify binary summaries. **打开独立示例** switches to the selected sample and ends the previous preview without automatically playing it. Lessons cover diagnostics and repair, position changes, exported gameplay properties, registered method calls, same-frame probes, physics-frame input and lifecycle events. [Console design](../../docs/design/playground-api-console.zh-CN.md)
 
@@ -87,7 +87,16 @@ For a caller with an exact run and node instance, use `describe_runtime_methods`
 
 ### Diagnostics and repair
 
-`summer_call({op: 'engine.get_diagnostics', input: {}})` reads retained diagnostics for the current editor project and revision. After editing, execute the same request to read the new revision. Omit `input` or pass `{includeAll: false}` for the same result. `includeAll: true` returns `unsupported`. Use the local `check` or `engine.play` to produce a new result, then read diagnostics after that operation has settled.
+```js
+await window.godotPlayground.summer_call({
+  op: 'engine.get_script_errors',
+  input: {path: 'res://src/Player.ts'},
+});
+```
+
+`engine.get_script_errors` checks the captured editor revision using the project's TypeScript environment. It accepts an existing `.ts` or `.tsx` source file under `res://`, with declaration files excluded. It can run before the first preview. `result.data` includes the requested path, `checkId`, `projectId`, `editorRevision`, `sourceHash` when available, and diagnostics with source locations and severity. Counts and omissions apply to the requested script. A failed check reports `status: 'failed'` and unobserved diagnostics. The full project check is retained for `engine.get_diagnostics`. [Summer MCP contract](https://github.com/SummerEngine/summer/blob/5d0bc70c6228a2f718485913449f20482434b47b/src/mcp/tools/debug-tools.ts#L305-L315)
+
+`summer_call({op: 'engine.get_diagnostics', input: {}})` reads retained diagnostics for the current editor project and revision. After editing, execute the same request to read the new revision. Omit `input` or pass `{includeAll: false}` for the same result. `includeAll: true` returns `unsupported`. Run `engine.get_script_errors`, the local `check`, or `engine.play` first to produce a new result.
 
 The adapter supports the default input of the Summer 4.9.2 MCP operation. Its sources are GodotAI check, build and exit records, with the existing `godotai-typed-v1` envelope. [Summer MCP contract](https://github.com/SummerEngine/summer/blob/5d0bc70c6228a2f718485913449f20482434b47b/src/mcp/tools/debug-tools.ts#L104-L131)
 
@@ -95,7 +104,7 @@ The reply has separate `check`, `build` and `run` fields. `check` is the latest 
 
 `run` follows the selected build's preview session. If a new build fails while an older game keeps playing, the reply shows the failed build with `run: null`. A known session whose record has expired returns `availability: 'unavailable'` and its IDs. Retained runs expose their identity and the observed exit receipt, when available. Use local `get_diagnostics` for exact historical IDs or path filtering and `read_run_events` for live Worker logs.
 
-On a 2D/debug or Full/debug Dedicated Worker Direct site, open **API 调用 → engine.get_diagnostics → 打开独立示例** and follow **Summer：定位并修复类型错误**. Start the sample, add `const step: number = "bad";` after the import in `/src/Player.ts`, run `check`, and read diagnostic 2322 with its file and line. Play the broken revision to see the failed attempt while the existing preview stays running. Remove the line, run `check` again, and start the repaired revision. Compare its build's `sourceHash` with the successful check and confirm the new run identity. On Full/debug, start that repaired revision through the lifecycle lesson to continue with input and same-frame verification.
+On a 2D/debug or Full/debug Dedicated Worker Direct site, open **API 调用 → engine.get_script_errors → 打开独立示例** and follow **Summer：定位并修复类型错误**. Start the sample, add `const step: number = "bad";` after the import in `/src/Player.ts`, and run `engine.get_script_errors` to locate TS2322. Play the broken revision to see the failed attempt while the existing preview stays running. Remove the line, check the script again, and start the repaired revision. Compare its build's `sourceHash` with the successful check and confirm the new run identity. On Full/debug, start that repaired revision through the lifecycle lesson to continue with input and same-frame verification.
 
 Run the two focused real Chromium cases against a matching 2D or Full Engine Worker site. From the repository root, set `PLAYGROUND_TEST_DIRECTORY` to the site and `PLAYGROUND_DIAGNOSTICS_REPORTS` to a separate output directory.
 

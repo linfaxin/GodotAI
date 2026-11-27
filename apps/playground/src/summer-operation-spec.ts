@@ -51,6 +51,12 @@ export const SUMMER_OPERATION_SPECS = Object.freeze({
     limitations: ['只读现有记录。需要新结果时先执行 check 或 Play。', '缺少记录或未观测时无法判断错误数。',
       '运行诊断来自退出回执。运行中的 Worker 日志见 read_run_events。'],
   }),
+  'engine.get_script_errors': spec({
+    title: '检查指定脚本', description: '检查当前编辑版本，返回指定 TypeScript 脚本的诊断。',
+    allowed: ['path'], unsupported: [], defaultInput: {path: 'res://src/Player.ts'},
+    parameters: [{name: 'path', required: true, description: '项目内现有 .ts 或 .tsx 脚本的 res:// 路径。'}],
+    limitations: ['使用整个项目的类型环境，仅返回目标脚本的诊断。', '可在启动游戏前检查，结果带有实际检查的编辑版本。'],
+  }),
   'engine.recent_events': spec({
     title: '读取最近的生命周期事件', description: '读取页面事件流，并取得 Play 或 Stop 前的游标。',
     allowed: ['since', 'kinds', 'limit', 'stream_id'], unsupported: [],

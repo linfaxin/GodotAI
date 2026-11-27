@@ -229,7 +229,7 @@ function diagnosticLocation(item: Record<string, unknown>): NonNullable<DebugDia
 
 const unknownDiagnostics = (): DebugDiagnostics => ({observed: false, items: [], omittedCount: 0});
 
-function buildDiagnostics(value: unknown): DebugDiagnostics {
+function buildDiagnostics(value: unknown, path?: string): DebugDiagnostics {
   if (!Array.isArray(value)) return unknownDiagnostics();
   const counts = {error: 0, warning: 0, info: 0};
   const items: DebugDiagnostic[] = [];
@@ -240,6 +240,7 @@ function buildDiagnostics(value: unknown): DebugDiagnostics {
     if (!item || typeof item.message !== 'string' || severity !== 'error' && severity !== 'warning' && severity !== 'info') {
       return unknownDiagnostics();
     }
+    if (path !== undefined && item.file !== path) continue;
     counts[severity]++;
     if (items.length >= MAX_DIAGNOSTICS) continue;
 
@@ -260,7 +261,7 @@ function buildDiagnostics(value: unknown): DebugDiagnostics {
     items.push(diagnostic);
     bytes += cost;
   }
-  return {observed: true, counts, items, omittedCount: value.length - items.length};
+  return {observed: true, counts, items, omittedCount: counts.error + counts.warning + counts.info - items.length};
 }
 
 function releaseSnapshot(value: Record<string, unknown>): DebugRelease | undefined {
@@ -520,7 +521,7 @@ export function createDebugRecorder() {
     startCheck(projectId: string, editorRevision: number): CheckRequest {
       return {order: ++checkOrder, checkId: 'check-' + checkOrder, projectId, editorRevision};
     },
-    finishCheck({order, ...request}: CheckRequest, response: unknown, requestError?: DebugFailure): DebugCheck {
+    finishCheck({order, ...request}: CheckRequest, response: unknown, requestError?: DebugFailure, path?: string): DebugCheck {
       const result = record(response);
       const diagnostics = result?.error === undefined ? buildDiagnostics(result?.diagnostics) : unknownDiagnostics();
       const error = requestError ?? (diagnostics.observed ? undefined :
@@ -532,10 +533,14 @@ export function createDebugRecorder() {
         ...(compilerIdentity ? {compilerIdentity} : {}),
         diagnostics, ...(error ? {error} : {}),
       };
+      // Retain the project check and scope the reply from the uncapped compiler diagnostics.
+      const scoped = path && view.status === 'completed'
+        ? {...view, diagnostics: buildDiagnostics(result?.diagnostics, path)}
+        : view;
       checks.push({order, view});
       if (checks.length > MAX_BUILDS) checks.shift();
       notify();
-      return structuredClone(view);
+      return structuredClone(scoped);
     },
     setContext(patch: Partial<PageContext>) {
       if (patch.projectId !== undefined) context.projectId = patch.projectId;

@@ -27,6 +27,7 @@ export interface SummerDiagnosticsData {
     {availability: 'retained'; identity: WorkerRunIdentity; attemptId: string; releaseId: string; artifactId: string;
       state: DebugRun['state']; exit: null | {evidence: DebugExit['evidence']; reason: DebugExit['report']['reason']; diagnostic: ExitDiagnostic | null}};
 }
+export type SummerScriptErrorsData = DebugCheck & {path: string};
 type WaitInput = ({attemptId: string; runId?: never} | {runId: string; attemptId?: never}) & {
   until: 'running' | 'exited';
   timeoutMs?: number;
@@ -49,7 +50,8 @@ type ObservationInput<Kind extends ObservationKind> = Pick<PreparedRuntimeObserv
 
 interface Actions {
   supportsProject(): boolean;
-  check(): Promise<DebugCheck> | undefined;
+  check(path?: string): Promise<DebugCheck> | undefined;
+  hasScript(path: string): boolean;
   play(): string | undefined;
   stopRun(runId: string): Promise<unknown> | undefined;
   interaction?(): Pick<WorkerPreviewRunner, 'interactionState' | 'screenshot' | 'gameInput' | 'waitForInput'> | undefined;
@@ -276,6 +278,17 @@ export function createPlaygroundApi(recorder: Recorder, actions: Actions) {
         diagnostics: prioritizeRecordedDiagnostics(build.diagnostics), error: build.error, artifact: build.artifact, preview: build.preview} : null,
       run,
     });
+  }
+
+  async function getScriptErrors(path: string) {
+    const {projectId, editorRevision, capabilities} = getProjectContext().result;
+    if (projectId === null || editorRevision === null) return fail('not_ready', '当前编辑项目或版本尚未就绪');
+    if (capabilities.check !== 'available') return fail(capabilities.check, '当前项目的执行环境不可用');
+    if (!actions.hasScript(path)) return fail('not_found', '当前项目没有此脚本');
+    const pending = actions.check(path);
+    if (!pending) return fail('busy', '检查操作已达上限');
+    const check = await pending;
+    return ok<SummerScriptErrorsData>({...check, path: 'res:/' + path});
   }
 
   function waitFor(input: WaitInput, signal?: AbortSignal): Promise<ReturnType<typeof ok<WaitResult>> | ToolError> {
@@ -506,7 +519,7 @@ export function createPlaygroundApi(recorder: Recorder, actions: Actions) {
   });
 
   return {
-    api, methodBackend, summerCall, getSummerDiagnostics,
+    api, methodBackend, summerCall, getSummerDiagnostics, getScriptErrors,
     subscribe(observer: (call: PlaygroundApiCall) => void) {
       observers.add(observer);
       return () => { observers.delete(observer); };

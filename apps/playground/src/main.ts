@@ -59,6 +59,7 @@ debugRecorder.subscribe(notifyConsoleContext);
 const playground=createPlaygroundApi(debugRecorder,{
  supportsProject:()=>current?.engineProfile===siteEngineProfile,
  check,
+ hasScript:path=>typeof current?.files[path]==='string',
  play:()=>compile(),
  stopRun:runId=>nativePreview?.stopRun(runId),
  interaction:()=>nativePreview?.interaction,
@@ -80,6 +81,7 @@ const summerDispatcher=createSummerDispatcher({
  };},
  getProjectContext:()=>playground.api.get_project_context(),
  getDiagnostics:playground.getSummerDiagnostics,
+ getScriptErrors:playground.getScriptErrors,
  play:input=>playground.api.play(input),
  cancelLaunch,
  getBuild:input=>playground.api.get_build(input),
@@ -148,7 +150,7 @@ const consoleSession=createApiConsoleSession(playground.api,{
  subscribeContext(listener){consoleContextListeners.add(listener);return()=>consoleContextListeners.delete(listener);},
  callSelectedMethod:(input,signal,selected)=>playground.summerCall({op:'engine.runtime_call',input},signal,selected),
  openExample:operationId=>{
-  if(operationId==='engine.get_diagnostics')return openAgentDemo(createInputScriptDemo(siteEngineProfile),matchesInputScriptDemo);
+  if(operationId==='engine.get_diagnostics'||operationId==='engine.get_script_errors')return openAgentDemo(createInputScriptDemo(siteEngineProfile),matchesInputScriptDemo);
   if(operationId==='engine.game_input'){
    if(!ready||!nativePreview?.supportsInputExample)throw Error('当前预览不支持输入脚本示例');
    return openAgentDemo(createInputScriptDemo(siteEngineProfile),matchesInputScriptDemo);
@@ -316,7 +318,7 @@ function setDiagnostics(items:TypeDiagnostic[],reveal=false){
  for(const item of items){const button=document.createElement('button');button.className='diagnostic-item';const code=document.createElement('code');code.textContent=`${item.file?.split('/').at(-1)??'项目'}:${item.line??0}:${item.column??0}`;const text=document.createElement('span');text.textContent=item.message;button.append(code,text);button.onclick=()=>{if(item.file&&Object.hasOwn(current.files,item.file)){selectFile(item.file,true);editor.reveal(item.start??0,item.length??1);}};$('diagnostics').append(button);}
  if(reveal&&items.length)workbench.showProblems();
 }
-function check(){
+function check(path?:string){
  if(!current||pendingChecks>=MAX_PENDING_OPERATIONS)return;
  const key=++checking,rev=revision,request=debugRecorder.startCheck(selected.id,rev);
  pendingChecks++;
@@ -325,7 +327,7 @@ function check(){
   try{response=await rpc('check');}
   catch(error){failure=debugFailure('check-request',error);}
   finally{pendingChecks--;}
-  const result=debugRecorder.finishCheck(request,response,failure);
+  const result=debugRecorder.finishCheck(request,response,failure,path);
   if(key===checking&&rev===revision){
    if(result.status==='completed')setDiagnostics(response.diagnostics);
    else log(result.error?.diagnostic.message??'类型检查失败','error');
