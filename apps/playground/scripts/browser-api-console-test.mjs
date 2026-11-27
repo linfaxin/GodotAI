@@ -5,7 +5,7 @@ import {build} from 'esbuild';
 import {launchBrowser} from './browser-harness.mjs';
 import {createStaticServer} from './serve.mjs';
 import {runReportedBrowserTest, listenBrowserTestServer as listen, closeBrowserTestServer as close} from './browser-contract-report.mjs';
-import {consoleElement as element, openConsoleOperation, viewConsoleCall, invokeConsole, consoleResult, summerResult, readConsolePng} from './api-console-browser-helpers.mjs';
+import {consoleElement as element, openConsoleOperation, viewConsoleCall, invokeConsole, submitConsole, consoleResult, summerResult, readConsolePng} from './api-console-browser-helpers.mjs';
 
 const app = fileURLToPath(new URL('../', import.meta.url));
 const scope = 'controlled-api-console';
@@ -21,6 +21,7 @@ await runReportedBrowserTest({scope, reportFile: process.env.PLAYGROUND_API_CONS
     URL.createObjectURL=blob=>{const url=createUrl(blob);createdUrls.push(url);return url;};
     URL.revokeObjectURL=url=>{revokedUrls.push(url);revokeUrl(url);};
     let compileCount=0,stopCount=0,openCount=0,health=100,moveStep=64,x=64,serial=1,inputSerial=0,frameSerial=0;
+    let reportedErrors;
     let environment=structuredClone(consoleEnvironment),heldRead,finishRead,replayToken;
     const identity=()=>({...consoleIdentity,runId:environment.anchor.activeRunId,generation:'generation-'+serial,workerId:'worker-'+serial});
     const node=()=>({...consoleNode,instanceId:String(100+serial)});
@@ -32,6 +33,12 @@ await runReportedBrowserTest({scope, reportFile: process.env.PLAYGROUND_API_CONS
     fixture.setReply('summer_call',async input=>{
       switch(input.op){
         case 'engine.get_project_context':return facade({...environment.anchor});
+        case 'engine.get_diagnostics':return facade({
+          projectId: environment.anchor.editorProjectId, editorRevision: environment.anchor.editorRevision,
+          check: {checkId: 'check-1', status: 'completed', diagnostics: {observed: reportedErrors !== undefined,
+            counts: reportedErrors === undefined ? undefined : {error: reportedErrors, warning: 0, info: 0}, items: [], omittedCount: 0}},
+          build: null, run: null,
+        });
         case 'engine.play':health=100;moveStep=64;x=64;environment.anchor.pendingAttemptId='build-'+serial;update();return facade({accepted:true,state:'pending',attemptId:'build-'+serial,run:null});
         case 'engine.is_running':return facade({playing:environment.activeRunState==='running',capturedRunId:environment.anchor.activeRunId});
         case 'engine.stop':{const runId=environment.anchor.activeRunId;environment.activeRunState='exited';environment.anchor.pendingAttemptId=null;update();return facade({accepted:true,runs:[{runId,receipt:ok({status:'exited',runId})}],no_target:false});}
@@ -67,6 +74,7 @@ await runReportedBrowserTest({scope, reportFile: process.env.PLAYGROUND_API_CONS
     window.consoleFixture={
       snapshot:()=>session.snapshot(),calls:()=>fixture.calls.map(({name,input})=>({name,input})),
       counts:()=>({compileCount,stopCount,openCount}),lessons:CONSOLE_LESSONS,
+      setReportedErrors(value){reportedErrors=value;},
       resources:()=>({created:createdUrls.length,revoked:revokedUrls.length,attachments:session.snapshot().history.filter(call=>call.attachmentId&&session.getAttachment(call.attachmentId)).length}),
       setContext(anchor,state='running'){environment={anchor:{...environment.anchor,...anchor},activeRunState:state};update();},
       newRun(){serial++;health=100;moveStep=64;x=64;environment.anchor.activeRunId='run-'+serial;environment.activeRunState='running';update();},
@@ -95,7 +103,7 @@ await runReportedBrowserTest({scope, reportFile: process.env.PLAYGROUND_API_CONS
 
   await step('directory-drafts-shortcuts-and-modes', async () => {
     const entries = page.locator('#api-list [data-api-operation]');
-    assert.equal(await entries.count(), 20);
+    assert.equal(await entries.count(), 21);
     assert.equal(await page.locator('#api-list .api-list-group').count(), 2);
     for (const entry of await entries.all()) {
       assert.equal(await entry.locator('.api-list-name').textContent(), await entry.getAttribute('data-api-operation'));
@@ -284,7 +292,27 @@ await runReportedBrowserTest({scope, reportFile: process.env.PLAYGROUND_API_CONS
     assert.equal(await page.evaluate(() => window.consoleFixture.calls().length), beforeLoad);
     assert((await element(page, 'history').locator('[data-call-id]').count()) <= 20);
     assert.deepEqual(await page.evaluate(() => window.consoleFixture.lessons.map(lesson => lesson.id)),
-      ['lifecycle-events', 'input-script', 'game-probe', 'runtime-method', 'summer-position', 'gameplay-properties']);
+      ['diagnostic-repair', 'lifecycle-events', 'input-script', 'game-probe', 'runtime-method', 'summer-position', 'gameplay-properties']);
+  });
+
+  await step('diagnostics-reads-the-current-revision-and-shows-observed-counts', async () => {
+    const operation = 'engine.get_diagnostics';
+    await openConsoleOperation(page, operation);
+    const original = await page.evaluate(() => window.consoleFixture.snapshot().environment.anchor);
+    assert.deepEqual(JSON.parse(await element(page, 'input').inputValue()), {});
+    await page.evaluate(revision => window.consoleFixture.setContext({editorRevision: revision + 1}), original.editorRevision);
+    const result = element(page, 'result-status');
+    const {reply} = await submitConsole(page, operation);
+    assert.equal(summerResult(reply).editorRevision, original.editorRevision + 1);
+    assert.match(await result.textContent(), /错误数未观测/);
+    assert.match(await result.textContent(), /构建：无记录/);
+    await page.evaluate(() => window.consoleFixture.setReportedErrors(0));
+    await submitConsole(page, operation);
+    assert.match(await result.textContent(), /0 个错误/);
+    await page.evaluate(() => window.consoleFixture.setReportedErrors(2));
+    await submitConsole(page, operation);
+    assert.match(await result.textContent(), /2 个错误/);
+    await page.evaluate(anchor => window.consoleFixture.setContext(anchor), original);
   });
 
   await step('bounded-png-lifecycle-and-explicit-stop', async () => {

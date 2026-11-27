@@ -62,15 +62,15 @@ During framework development, rename supports ordinary scripts and text `.tscn` 
 
 ## Agent tools
 
-Expand **API 调用** in the sidebar to browse thirteen Summer-style operations and seven GodotAI helpers. Each entry shows the API name and a one-line summary. Open an API to edit its JSON input and inspect results or PNGs alongside the live preview. Each API has its own tab, draft and result view, with shared call history. Requests use the same `window.godotPlayground` API (`schemaVersion: 1`) as external callers. Ctrl/Cmd+Enter executes the active API draft in the request editor and builds the project in the code editor.
+Expand **API 调用** in the sidebar to browse fourteen Summer-style operations and seven GodotAI helpers. Each entry shows the API name and a one-line summary. Open an API to edit its JSON input and inspect results or PNGs alongside the live preview. Each API has its own tab, draft and result view, with shared call history. Requests use the same `window.godotPlayground` API (`schemaVersion: 1`) as external callers. Ctrl/Cmd+Enter executes the active API draft in the request editor and builds the project in the code editor.
 
-The console retains per-operation drafts and bounded in-memory history. Loading a preset or historical request never executes it. **更新目标 / 填入上下文** uses explicit project, run, node and method selections. PNGs are separate attachments and JSON results identify binary summaries. **打开独立示例** switches to the selected sample and ends the previous preview without automatically playing it. The lesson lists cover position changes, exported gameplay properties, and registered method calls. [Console design and lifecycle rules](../../docs/design/playground-api-console.zh-CN.md)
+The console retains per-operation drafts and bounded in-memory history. Loading a preset or historical request never executes it. **更新目标 / 填入上下文** uses explicit project, run, node and method selections. PNGs are separate attachments and JSON results identify binary summaries. **打开独立示例** switches to the selected sample and ends the previous preview without automatically playing it. Lessons cover diagnostics and repair, position changes, exported gameplay properties, registered method calls, same-frame probes, physics-frame input and lifecycle events. [Console design](../../docs/design/playground-api-console.zh-CN.md)
 
 Open **API 调试** for the existing **自动验证** replays; these retain their independent assertions and cleanup. The adjacent **API 文档** opens reference examples. Manual console calls and replays share a UI gate, while the page's Stop action remains available. Cancelling a supported request or wait does not undo an effect already performed by the game.
 
 The runtime property workbench adds `describe_runtime_properties`, `read_runtime_properties`, `write_runtime_property` and `summer_call` to the same entry. The independent scripted sample exposes `health`, `move_step`, `can_move` and `display_name` using standard GodotJS export decorators. Its replay changes health and movement, checks actual values and PNGs, then restarts the same source to verify defaults return. Property access requires a matching Full/debug Worker Direct engine with `runtimeProperties: 1`; older write-capable templates continue to support the original position replay.
 
-`summer_call({op, input})` accepts selected Summer 4.9.2-style inputs and returns GodotAI typed results. It supports selected context, main play/stop/state, lifecycle events, runtime tree, native node inspection, property writes, registered method calls, game screenshots, game probes and `engine.game_input` frame scripts. Script properties use explicit typed read operations. `engine.inspect_runtime_node` uses the native observation path. Game screenshots require an explicit `target: 'game'`. See the [Input Script contract](#input-script) and the [Summer adapter and runtime property contracts](../../docs/design/runtime-properties-and-summer-api-v2.zh-CN.md).
+`summer_call({op, input})` accepts selected Summer 4.9.2-style inputs and returns GodotAI typed results. It supports selected context, recorded diagnostics, main play/stop/state, lifecycle events, runtime tree, native node inspection, property writes, registered method calls, game screenshots, game probes and `engine.game_input` frame scripts. Script properties use explicit typed read operations. `engine.inspect_runtime_node` uses the native observation path. Game screenshots require an explicit `target: 'game'`. [Input Script contract](#input-script) · [Summer adapter and runtime property contracts](../../docs/design/runtime-properties-and-summer-api-v2.zh-CN.md)
 
 On a Full Engine debug Worker Direct preview with `runtimeProperties: 1` and `runtimeCall: 1`, open **打开独立示例** from `engine.runtime_call` and follow **Summer：调用玩法方法** under **手工教学流程**. The sample registers `take_damage` on `/root/Main/Player` with `@bind.runtimeMethod({args: ['int'], returns: 'int'})`. Each step opens its API tab and loads a draft. When a step asks you to fill parameters from an earlier call, select the source in shared history and fill the current operation. Check the draft and then execute it. Read `health` and capture the game before and after `take_damage(25)` to verify `100 → 75`. Wait for the original run to exit. Start the same source and discover the player again to verify `100` and a full health bar in the new run.
 
@@ -85,9 +85,33 @@ await window.godotPlayground.summer_call({
 
 For a caller with an exact run and node instance, use `describe_runtime_methods` to obtain a method token and pass it to `call_runtime_method` with typed arguments. Tokens are scoped to the registered method, instance, run and release. If a call reports `outcome_unknown`, read the live state before deciding whether to call again. Older templates report `unsupported`. The generated `godot.annotations` declaration follows the annotation observed in the exact engine template.
 
+### Diagnostics and repair
+
+`summer_call({op: 'engine.get_diagnostics', input: {}})` reads retained diagnostics for the current editor project and revision. After editing, execute the same request to read the new revision. Omit `input` or pass `{includeAll: false}` for the same result. `includeAll: true` returns `unsupported`. Use the local `check` or `engine.play` to produce a new result, then read diagnostics after that operation has settled.
+
+The adapter supports the default input of the Summer 4.9.2 MCP operation. Its sources are GodotAI check, build and exit records, with the existing `godotai-typed-v1` envelope. [Summer MCP contract](https://github.com/SummerEngine/summer/blob/5d0bc70c6228a2f718485913449f20482434b47b/src/mcp/tools/debug-tools.ts#L104-L131)
+
+The reply has separate `check`, `build` and `run` fields. `check` is the latest retained settled check for the editor revision. `build` is the latest retained build attempt for that revision and can still be pending. Each source keeps its own observation flag, counts and omissions. Retained entries are ordered by severity. A missing record or unobserved count leaves the error count unknown. `done` indicates that the query completed.
+
+`run` follows the selected build's preview session. If a new build fails while an older game keeps playing, the reply shows the failed build with `run: null`. A known session whose record has expired returns `availability: 'unavailable'` and its IDs. Retained runs expose their identity and the observed exit receipt, when available. Use local `get_diagnostics` for exact historical IDs or path filtering and `read_run_events` for live Worker logs.
+
+On a 2D/debug or Full/debug Dedicated Worker Direct site, open **API 调用 → engine.get_diagnostics → 打开独立示例** and follow **Summer：定位并修复类型错误**. Start the sample, add `const step: number = "bad";` after the import in `/src/Player.ts`, run `check`, and read diagnostic 2322 with its file and line. Play the broken revision to see the failed attempt while the existing preview stays running. Remove the line, run `check` again, and start the repaired revision. Compare its build's `sourceHash` with the successful check and confirm the new run identity. On Full/debug, start that repaired revision through the lifecycle lesson to continue with input and same-frame verification.
+
+Run the two focused real Chromium cases against a matching 2D or Full Engine Worker site. From the repository root, set `PLAYGROUND_TEST_DIRECTORY` to the site and `PLAYGROUND_DIAGNOSTICS_REPORTS` to a separate output directory.
+
+```sh
+for test_case in agent-check-play-and-targeted-stop session-start-failure; do
+  PLAYGROUND_DEBUG_API_CASE="$test_case" \
+  PLAYGROUND_DEBUG_API_REPORT="$PLAYGROUND_DIAGNOSTICS_REPORTS/$test_case.json" \
+    node apps/playground/scripts/browser-debug-api-test.mjs || exit 1
+done
+```
+
 ### Lifecycle events
 
-Open **API 调用 → engine.game_input → 打开独立示例**, then follow **Summer：等待启动与退出**. On a Full/debug Dedicated Worker Direct site, the lesson uses the moving marker to verify `64 → 128 → 64`, with a matching start and exit event for each Worker.
+Open **API 调用 → engine.game_input → 打开独立示例**, then follow **Summer：等待启动与退出** on a Full/debug Dedicated Worker Direct site.
+
+The lifecycle replay passed the Chromium tutorial and offline verification from a fresh archive extraction. Same-frame state and PNGs showed the marker at x positions `64 → 128 → 64`, with matching start events and clean exits for both Worker sessions. [Lifecycle replay acceptance](https://github.com/linfaxin/GodotAI/pull/38)
 
 Read a cursor before triggering Play or Stop. Resume from the same response's `next_seq` and `stream_id`. An ID from a previous page is rejected. A cursor is valid across project changes and restarts within one page.
 
@@ -109,7 +133,7 @@ A match identifies the recorded event. Before using the live preview, confirm th
 
 The page retains the latest 512 events. Omit `since` to read the latest sequence window with `recent_events` or to wait only for new events with `wait_for_event`. Advance through pages using `next_seq`. If the console cuts off the displayed result, read again from the same `since` with a smaller page before advancing. Wait timeout and cancellation affect only the observation. The local ID-based `wait_for_event` remains available for exact attempt or run waits.
 
-To produce and independently verify the browser report, use a current Full/debug site with `gameProbe: 1` and `inputScript: 1`. Set `LIFECYCLE_SITE` and `LIFECYCLE_EVIDENCE` to absolute paths. The offline image check uses Python with Pillow.
+To produce and independently verify the browser report, use a current Full/debug site with `gameProbe: 1` and `inputScript: 1`. The real browser test repairs a type error through the diagnostics lesson before starting the lifecycle walkthrough on the repaired revision. Set `LIFECYCLE_SITE` and `LIFECYCLE_EVIDENCE` to absolute paths. The offline image check uses Python with Pillow.
 
 ```sh
 node apps/playground/scripts/seal-site-acceptance.mjs "$LIFECYCLE_SITE" "$LIFECYCLE_EVIDENCE" --begin
@@ -304,9 +328,11 @@ Archive the reports outside the site, along with command logs and exit codes. G0
 
 To play the archived demo, extract the new local candidate into a fresh directory, then serve the same directory twice with the product server. Use `PLAYGROUND_DIRECTORY=<absolute-site> PORT=4173 node apps/playground/scripts/serve.mjs` for the editor and the same command with `PORT=4174` for the preview. In a clean Chromium profile open `http://127.0.0.1:4173/?presentationBackend=direct&previewOrigin=http%3A%2F%2F127.0.0.1%3A4174`. Open **API 调用 → engine.game_input → 打开独立示例**, then follow **Summer：用输入验证移动**. The expected positions are `64 → 128 → 64`. The local candidate uses the root path. Candidates built with `--public-assets` use their versioned release prefix on both origins.
 
-Use the same input cases on the pinned Summer CLI and a separately verified editor to capture the native comparison. The collector records each public CLI response, original Probe image and fixture trace. Check the actual held steps, displacement, release and reset against the Playground session. Keep each side's original frame counters and result fields. [Native fixture and collection instructions](scripts/fixtures/summer-compat/README.md)
+The comparison with Summer Desktop 0.8.8 and CLI 4.9.2 verified four held physics steps and x positions `64 → 128 → 64` on both engines for explicit frame offsets. Summer executed the literal `hold_ms: 50` request. Playground returned `unsupported` without a Worker dispatch. The collector preserves the public CLI responses, original Probe images and fixture traces for an independent comparison. [Comparison results](https://github.com/linfaxin/GodotAI/pull/31) · [Native fixture and collection instructions](scripts/fixtures/summer-compat/README.md)
 
 #### Check the R4 browser demo handoff
+
+The extracted candidate passed the Chromium input walkthrough and standalone verifier. All 19 G0 cases passed with the rebuilt Full/debug template. [R4 replay acceptance](https://github.com/linfaxin/GodotAI/pull/36)
 
 For the single-candidate `playground-r4-replay.tar.gz` delivery, extract the archive and run the following from the extracted root. Use Node.js 24, Python 3 and Pillow. The verifier checks the site bytes, Chromium receipts and original PNG measurements, and the 19 native Input Script G0 cases associated with the site's template. Set `PYTHON` if Pillow is installed in a different interpreter.
 
@@ -328,7 +354,7 @@ node apps/playground/scripts/verify-handoff.mjs web /path/to/replay \
   /path/to/handoff/report.json /path/to/replay/reports/pixels.json
 ```
 
-`web handoff verified` confirms that the four Chromium reports, 19 G0 cases, headed walkthrough and screenshot measurements pass. Read the delivery result in `DELIVERY-STATUS.json`. The underlying `report.json` retains `partial` for the optional Summer desktop comparison.
+`web handoff verified` confirms that the four Chromium reports, 19 G0 cases, headed walkthrough and screenshot measurements pass. Read the delivery result in `DELIVERY-STATUS.json`. This browser archive's `report.json` retains `partial` for the optional desktop comparison. [Browser handoff](https://github.com/linfaxin/GodotAI/pull/32)
 
 #### Check a full compatibility handoff
 

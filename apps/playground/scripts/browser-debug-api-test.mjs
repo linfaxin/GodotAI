@@ -5,10 +5,12 @@ import path from 'node:path';
 import {defaultTestDirectory,launchBrowser,withAcceptanceContext} from './browser-harness.mjs';
 import {createStaticServer} from './serve.mjs';
 import {runReportedBrowserTest,listenBrowserTestServer as listen,closeBrowserTestServer as close} from './browser-contract-report.mjs';
+import {consoleElement, invokeConsole, summerResult} from './api-console-browser-helpers.mjs';
 import {createRuntimePropertiesDemo} from '../src/runtime-properties-demo.ts';
 import {exportProject} from '../src/project-model.ts';
 
 const selectedCase=process.env.PLAYGROUND_DEBUG_API_CASE;
+const diagnosticCases=['agent-check-play-and-targeted-stop','session-start-failure'];
 const scope=selectedCase?'actual-product-debug-api-case':'actual-product-debug-api';
 const observationCase='runtime-tree-node-and-png';
 const writeCase='runtime-set-position';
@@ -21,7 +23,13 @@ const publicMethods=['call_runtime_method','check','describe_runtime_methods','d
  'inspect_runtime_node','play','read_run_events','read_runtime_properties','run_game_input_script','runtime_set','schemaVersion','screenshot','stop','summer_call','wait_for_event','wait_for_input','write_runtime_property'];
 await runReportedBrowserTest({scope,reportFile:process.env.PLAYGROUND_DEBUG_API_REPORT,run:async test=>{
  const directory=path.resolve(defaultTestDirectory());
- const {site,release,candidateId,descriptorHash}=await test.preflight(directory,{worker:true});
+ const diagnosticsOnly=diagnosticCases.includes(selectedCase);
+ const {site,release,candidateId,descriptorHash}=await test.preflight(directory,{worker:!diagnosticsOnly});
+ if(diagnosticsOnly){
+  assert(['engine-2d-v1','full-engine-v1'].includes(release.runtimeProfile));
+  assert.equal(site.schemaVersion,3);
+  assert.equal(site.runtime?.executionBackend,'worker');
+ }
  const observationDeclared=release.runtimeAbi?.observation===1;
  const writeDeclared=release.runtimeAbi?.runtimeWrite===1;
  const propertiesDeclared=release.runtimeAbi?.runtimeProperties===1;
@@ -385,20 +393,36 @@ export default class Replacement extends Node2D {
   // Wait for the editor's debounced check before observing diagnostic reads.
   await page.waitForFunction(revision=>window.__debugApiWire.requests.filter(item=>item.kind==='check'&&item.revision===revision).length>=2,
    invalid.expectedEditorRevision,{timeout});
-  const checkRequests=(await readWire(page)).requests.filter(item=>item.kind==='check').length;
+  const compilerRequests=async()=>(await readWire(page)).requests.filter(item=>['check','compile'].includes(item.kind)).length;
+  const requestCount=await compilerRequests();
   const diagnostic=unwrap(await invoke(page,'get_diagnostics',{projectId:invalid.projectId,editorRevision:invalid.expectedEditorRevision,
    checkId:bad.checkId,path:'res://src/start.ts'}));
   assert.deepEqual(diagnostic.check.diagnostics,bad.diagnostics);
-  assert.equal((await readWire(page)).requests.filter(item=>item.kind==='check').length,checkRequests);
+  const broken=summerResult((await invokeConsole(page,'engine.get_diagnostics',{},{refreshTarget:false})).reply);
+  assert.equal(broken.projectId,invalid.projectId);
+  assert.equal(broken.editorRevision,invalid.expectedEditorRevision);
+  assert.equal(broken.check.sourceHash,bad.sourceHash);
+  assert(broken.check.diagnostics.items.some(item=>item.code===2322&&item.location?.file==='/src/start.ts'&&item.location.line>0));
+  assert.equal(broken.build,null);
+  assert.equal(broken.run,null);
+  assert.equal(await compilerRequests(),requestCount);
   assert.equal((await invoke(page,'play',original)).error.code,'revision_conflict');
 
+  const originalRunIds = new Set((await readWire(page)).messages.map(message=>message.runId));
   const rejected=unwrap(await invoke(page,'play',invalid));
   const failed=unwrap(await invoke(page,'wait_for_event',{...rejected,until:'running',timeoutMs:60_000}));
   assert.equal(failed.outcome,'no_session');assert.equal(failed.build.status,'failed');
   assert.equal(failed.build.artifact,undefined);assert.equal(failed.run,undefined);
   assert.equal(unwrap(await invoke(page,'get_run',{runId:first.run.runId})).state,'running');
+  assert((await readWire(page)).messages.every(message=>originalRunIds.has(message.runId)));
+  const rejectedDiagnostics=summerResult(await invoke(page,'summer_call',{op:'engine.get_diagnostics'}));
+  assert.equal(rejectedDiagnostics.build.attemptId,rejected.attemptId);
+  assert.equal(rejectedDiagnostics.build.status,'failed');
+  assert(rejectedDiagnostics.build.diagnostics.items.some(item=>item.code===2322));
+  assert.equal(rejectedDiagnostics.run,null);
 
   const marker='AGENT_P0_REPAIRED_RUN';
+  await page.locator('#tabs [data-file-tab="/src/start.ts"]').click();
   const repaired=await editScript(page,runProgram(marker));
   const checked=unwrap(await invoke(page,'check',repaired));
   assert.equal(checked.status,'completed');assert.equal(checked.diagnostics.counts.error,0);
@@ -417,6 +441,14 @@ export default class Replacement extends Node2D {
   const old=unwrap(await invoke(page,'stop',{runId:first.run.runId}));
   assert.equal(old.status,'exited');
   assert.equal(unwrap(await invoke(page,'get_run',{runId:second.run.runId})).state,'running');
+  const repairedDiagnostics=summerResult(await invoke(page,'summer_call',{op:'engine.get_diagnostics'}));
+  assert.equal(repairedDiagnostics.editorRevision,repaired.expectedEditorRevision);
+  assert.equal(repairedDiagnostics.check.diagnostics.counts.error,0);
+  assert.equal(repairedDiagnostics.check.sourceHash,checked.sourceHash);
+  assert.equal(repairedDiagnostics.build.sourceHash,checked.sourceHash);
+  assert.equal(repairedDiagnostics.build.attemptId,second.build.attemptId);
+  assert.equal(repairedDiagnostics.run.identity.runId,second.run.runId);
+  assert.equal(repairedDiagnostics.run.exit,null);
 
   await page.locator('#agent-stop').click();
   const finished=unwrap(await invoke(page,'wait_for_event',{runId:second.run.runId,until:'exited',timeoutMs:60_000}));
@@ -429,7 +461,8 @@ export default class Replacement extends Node2D {
   const terminals=(await readWire(page)).messages.filter(packet=>packet.type==='exit-report'&&packet.runId===second.run.runId);
   assert.equal(terminals.length,1);
   assert.deepEqual(terminals[0].sessionFacts,exit.report.sessionFacts);
-  return {attemptIds:[rejected.attemptId,second.build.attemptId],runIds:[first.run.runId,second.run.runId],exit};
+  return {attemptIds:[rejected.attemptId,second.build.attemptId],runIds:[first.run.runId,second.run.runId],exit,
+    diagnostics:{broken,rejected:rejectedDiagnostics,repaired:repairedDiagnostics}};
  });
 
  await browserCase('stop-replacement-during-startup',async page=>{
@@ -535,6 +568,9 @@ export default class Replacement extends Node2D {
   assert.match(await page.locator('#debug-events').textContent(),new RegExp(marker));
   await page.locator('#stop').click();
   await waitForExit(page,first.run.runId);
+  const {reply}=await invokeConsole(page,'engine.get_diagnostics',{},{refreshTarget:false});
+  assert.equal(summerResult(reply).build.attemptId,build.attemptId);
+  assert.match(await consoleElement(page,'result-status').textContent(),/预览准备失败/);
   return {attemptId:build.attemptId,runId:first.run.runId,error:build.preview.error};
  });
 
@@ -558,7 +594,15 @@ export default class Replacement extends Node2D {
   const diagnostic=unwrap(await invoke(page,'get_diagnostics',{projectId:build.projectId,editorRevision:build.editorRevision,runId}));
   assert.equal(diagnostic.run.evidence,'host-report');
   assert.match(diagnostic.run.diagnostic.message,/DEBUG_API_START_FAILURE/);
-  return {attemptId:build.attemptId,runId,exit};
+  const summer=summerResult(await invoke(page,'summer_call',{op:'engine.get_diagnostics'}));
+  assert.equal(summer.build.attemptId,build.attemptId);
+  assert.equal(summer.run.identity.runId,runId);
+  assert.equal(summer.run.state,'exited');
+  assert.equal(summer.run.exit.evidence,'host-report');
+  assert.equal(summer.run.exit.reason,exit.report.reason);
+  assert.match(summer.run.exit.diagnostic.message,/DEBUG_API_START_FAILURE/);
+  engineExecuted=true;
+  return {attemptId:build.attemptId,runId,exit,diagnostics:summer};
  });
 
  await browserCase('lost-preview-host',async page=>{

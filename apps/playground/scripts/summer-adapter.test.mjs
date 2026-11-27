@@ -46,6 +46,34 @@ function fixture() {
 
 const set = (property = 'health', value = 40, extra = {}) => ({op: 'engine.runtime_set', input: {path: target.path, property, value, ...extra}});
 
+test('Summer diagnostics validates the MCP input subset before reading records and needs no run', async () => {
+  const {backend, calls} = fixture();
+  const data = {projectId: 'project-1', editorRevision: 7, check: null, build: null, run: null};
+  backend.captureContext = () => {throw Error('Diagnostics did not use its snapshot reader');};
+  backend.getDiagnostics = () => {calls.push('diagnostics'); return ok(data);};
+  const dispatch = createSummerDispatcher(backend), op = 'engine.get_diagnostics';
+  const accessor = {get includeAll() {throw Error('Do not evaluate');}};
+  for (const [input, code] of [[true, 'invalid_input'], [null, 'invalid_input'], [accessor, 'invalid_input'],
+    [{path: '/src/start.ts'}, 'invalid_input'], [{includeAll: null}, 'invalid_input'], [{includeAll: 'false'}, 'invalid_input'],
+    [{includeAll: undefined}, 'invalid_input'], [{includeAll: true}, 'unsupported']]) {
+    assert.equal((await dispatch({op, input})).error.code, code);
+  }
+  const aborted = new AbortController();
+  aborted.abort();
+  assert.equal((await dispatch({op}, aborted.signal)).error.code, 'cancelled');
+  assert.deepEqual(calls, []);
+  for (const request of [{op}, {op, input: {}}, {op, input: {includeAll: false}}]) {
+    const response = await dispatch(request);
+    assert.equal(response.status, 'done');
+    assert.deepEqual(response.result, {data, godotai: {compatibility: SUMMER_COMPATIBILITY}});
+  }
+  assert.deepEqual(calls, ['diagnostics', 'diagnostics', 'diagnostics']);
+  backend.getDiagnostics = () => error('not_ready', 'sdk');
+  assert.equal((await dispatch({op})).error.code, 'not_ready');
+  delete backend.getDiagnostics;
+  assert.equal((await dispatch({op})).error.code, 'unsupported');
+});
+
 test('Summer input validates the supported subset and captures its original project and run', async () => {
   const {backend, context, calls} = fixture();
   const edges = [{type: 'action', action: 'move_right', pressed: true}, {type: 'action', action: 'move_right', pressed: false, at_frame: 4}];

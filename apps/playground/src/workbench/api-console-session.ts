@@ -83,6 +83,16 @@ function resultSummary(operationId: string, reply: unknown, displayTruncated: bo
   const data = dataFor(operationId,reply);
   if (!data) return '调用已结算';
   if (operationId === 'check') return data.status === 'completed' && data.diagnostics?.counts?.error === 0 ? '类型检查通过' : '检查已结算，请查看诊断';
+  if (operationId === 'engine.get_diagnostics') {
+    const record = (item: Record<string, any> | null) => item === null ? '无记录' :
+      item.diagnostics?.observed === true ? `${item.status}，${item.diagnostics.counts.error} 个错误` : `${item.status}，错误数未观测`;
+    const run = data.run;
+    const runStatus = data.build?.preview?.status === 'rejected' ? '预览准备失败' :
+      run === null ? '没有关联会话' : run.availability === 'unavailable' ? '记录不可读' :
+      run.exit ? `${run.exit.reason}（${run.exit.evidence}）` : `${run.state}，暂无退出回执`;
+    return `检查：${record(data.check)} · 构建：${record(data.build)} · 运行：${runStatus}` +
+      (displayTruncated ? ' · 详细结果展示已截断' : '');
+  }
   if (operationId === 'engine.play') return '已接纳，待启动';
   if (operationId === 'engine.stop') return data.no_target ? '没有待停止目标' : '停止请求已接纳，退出待确认';
   if (operationId === 'engine.is_running') return data.playing ? '主运行正在运行' : '主运行未处于 running';

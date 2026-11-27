@@ -6,7 +6,7 @@
 
 本方案取代[V1](runtime-properties-and-summer-api.zh-CN.md)，将原先留给 G0 的输入、结果、序号、预算、适配路由和验收决定写入正文。以下名称和类型作为实现合同保留；交付状态与实际证据见文末实施记录。
 
-V2 运行时属性阶段已完成 A–F。新旧 full/debug 模板、同批冻结 SDK 的两个完整站点、来源证明及七项真实浏览器专项均已验收通过，交付证据见第十五节。后续增加的 `engine.game_probe` 的用法、支持条件和验收命令见[第十六节](#十六-enginegame_probe-同帧采样)。
+V2 运行时属性阶段已完成 A–F。新旧 Full/debug 模板、同批冻结 SDK 的两个完整站点、来源证明及七项真实浏览器专项均已验收通过，交付证据见第十五节。第十六节记录后续加入的同帧采样。玩法方法、物理帧输入及启停事件的现行用法和验收见 Playground README。 [同帧采样](#十六-enginegame_probe-同帧采样) · [现行 API 与演示](../../apps/playground/README.md#agent-tools)
 
 ## 一 评审决定与本期范围
 

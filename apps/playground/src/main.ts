@@ -79,6 +79,7 @@ const summerDispatcher=createSummerDispatcher({
   activeRunId:context.activeRunId,pendingAttemptId:playIntent?.attemptId??null,
  };},
  getProjectContext:()=>playground.api.get_project_context(),
+ getDiagnostics:playground.getSummerDiagnostics,
  play:input=>playground.api.play(input),
  cancelLaunch,
  getBuild:input=>playground.api.get_build(input),
@@ -147,6 +148,7 @@ const consoleSession=createApiConsoleSession(playground.api,{
  subscribeContext(listener){consoleContextListeners.add(listener);return()=>consoleContextListeners.delete(listener);},
  callSelectedMethod:(input,signal,selected)=>playground.summerCall({op:'engine.runtime_call',input},signal,selected),
  openExample:operationId=>{
+  if(operationId==='engine.get_diagnostics')return openAgentDemo(createInputScriptDemo(siteEngineProfile),matchesInputScriptDemo);
   if(operationId==='engine.game_input'){
    if(!ready||!nativePreview?.supportsInputExample)throw Error('当前预览不支持输入脚本示例');
    return openAgentDemo(createInputScriptDemo(siteEngineProfile),matchesInputScriptDemo);

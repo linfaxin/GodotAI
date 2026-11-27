@@ -8,7 +8,7 @@
 
 引擎侧提供可由程序完整调用的能力；平台侧将用户意图转化为这些能力的调用。不同平台可以选择不同的模型、Agent、会话产品、存储与部署方案，复用同一套引擎合同和实现。
 
-长期目标之一是对齐 [Summer Engine](https://summerengine.com/) 面向 Agent 的引擎 API。短期重点是运行时状态的读写，让 Agent 能检查正在运行的游戏、修改受支持的状态，并验证实际效果。能力发现、项目输入、检查与构建、预览运行和诊断支撑这一工作流。
+长期目标之一是对齐 Summer Engine 面向 Agent 的引擎 API。首期聚焦运行时状态的读写，让 Agent 能检查正在运行的游戏、修改受支持的状态，并验证实际效果。能力发现、项目输入、检查与构建、预览运行和诊断支撑这一工作流。 [Summer Engine](https://summerengine.com/)
 
 代码、场景、资源和配置是 AI 持续维护的项目产物。创作者通过描述需求、试玩和反馈控制变化；常规创作流程不能依赖用户补写代码、手动修补项目或打开原生编辑器才能继续。对于尚未支持的操作，引擎返回明确的能力限制，由平台调整方案或报告阻塞。
 
@@ -93,7 +93,7 @@
 
 新通用能力应复用已经存在的中立实现，按实际职责和接入需求抽取。Playground 的界面、数据库布局、示例选择和产品策略不能成为其它平台接入引擎的前提。
 
-当前共享编译、Worker 预览、诊断、资源打包与生命周期已有实现。Playground 已提供运行时节点树、部分属性查询、截图和交互输入。接下来需要设计和验证受支持的运行时状态修改及其结果回执，并继续完善项目输入、运行观察、交互测试和独立接入合同。 [Playground Agent API](../apps/playground/README.md#agent-tools) · [运行时属性写入方案](design/playground-runtime-set-p0.zh-CN.md)
+共享编译、Worker 预览、诊断、资源打包和生命周期已有实现。Playground 已验证运行时属性读写、注册方法调用、同帧状态与画面采样、物理帧输入及启停事件。Summer 适配采用 4.9.2 的部分入参和行为，返回 GodotAI 类型化结果。浏览器回放已通过验收，后续工作见下一阶段建议。 [Playground Agent API](../apps/playground/README.md#agent-tools) · [回放验收](../apps/playground/README.md#lifecycle-events) · [下一阶段建议](engine-next-stage.zh-CN.md)
 
 ## 成功标准
 
