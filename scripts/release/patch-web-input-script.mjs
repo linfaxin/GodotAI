@@ -15,6 +15,19 @@ function sceneAssignment(indent, next, prefix = '', suffix = '') {
   return [prefix + assignment + suffix, prefix + notify + '\n' + assignment + suffix];
 }
 const bind = original => [original, `#ifdef GODOTJS_INPUT_SCRIPT_ABI\n${original.replace(/&Input::(\w+)/, '&Input::godotjs_$1')}\n#else\n${original}\n#endif`];
+const parseInput = '_parse_input_event_impl(const Ref<InputEvent> &p_event, bool p_is_emulated';
+const oldParseInput = `${parseInput}, bool p_dispatch`;
+const scriptEvent = args => guard(`void Input::godotjs_script_event(const Ref<InputEvent> &event, bool dispatch) {
+\t_THREAD_SAFE_METHOD_
+\t_parse_input_event_impl(${args});
+}`);
+const eventParameter = '\tEXTRACT_PARAM_OR_FAIL(p_event, rp_event);';
+const earlyKeyTakeover = hook(eventParameter, `\t// Give the incoming key priority before it enters the regular input queue.
+\tRef<InputEventKey> key = p_event;
+\tif (key.is_valid()) {
+\t\tRef<InputEventKey> release = jsb::input_script::take_over_key(*key.ptr());
+\t\tif (release.is_valid()) _parse_input_event_impl(release, false, false);
+\t}`)[1];
 const methods = `bool Input::godotjs_is_action_pressed(const StringName &action, bool exact) const {
 \treturn (!exact && jsb::input_script::pressed(action)) || is_action_pressed(action, exact);
 }
@@ -62,8 +75,7 @@ const edits = {
 \tvoid godotjs_action_release(const StringName &);`),
   ['class Input : public Object {', include + '\n\nclass Input : public Object {'],
   hook('\tvoid flush_buffered_events();', '\tvoid godotjs_script_event(const Ref<InputEvent> &, bool);'),
-  ['void _parse_input_event_impl(const Ref<InputEvent> &p_event, bool p_is_emulated);',
-    'void _parse_input_event_impl(const Ref<InputEvent> &p_event, bool p_is_emulated, bool p_dispatch = true);']],
+  [`void ${parseInput});`, `void ${oldParseInput} = true, bool p_scripted = false);`]],
   'core/input/input.cpp': [
     ['void Input::_bind_methods() {', guard(methods) + '\n\nvoid Input::_bind_methods() {'],
     bind('\tClassDB::bind_method(D_METHOD("is_action_pressed", "action", "exact_match"), &Input::is_action_pressed, DEFVAL(false));'),
@@ -71,15 +83,41 @@ const edits = {
     bind('\tClassDB::bind_method(D_METHOD("get_axis", "negative_action", "positive_action"), &Input::get_axis);'),
     bind('\tClassDB::bind_method(D_METHOD("action_release", "action"), &Input::action_release);'),
     hook('void Input::release_pressed_events() {', '\tjsb::input_script::reset();'),
-    ['void Input::_parse_input_event_impl(const Ref<InputEvent> &p_event, bool p_is_emulated) {',
-      guard(`void Input::godotjs_script_event(const Ref<InputEvent> &event, bool dispatch) {
-\t_THREAD_SAFE_METHOD_
-\t_parse_input_event_impl(event, false, dispatch);
-}`) + '\n\nvoid Input::_parse_input_event_impl(const Ref<InputEvent> &p_event, bool p_is_emulated, bool p_dispatch) {'],
+    [`void Input::${parseInput}) {`,
+      scriptEvent('event, false, dispatch, true') + `\n\nvoid Input::${oldParseInput}, bool p_scripted) {`],
     ['\tif (event_dispatch_function) {\n\t\t_THREAD_SAFE_UNLOCK_\n\t\tevent_dispatch_function(p_event);',
       '\tif (p_dispatch && event_dispatch_function) {\n\t\t_THREAD_SAFE_UNLOCK_\n\t\tevent_dispatch_function(p_event);'],
     ['if (event_dispatch_function && emulate_touch_from_mouse && !p_is_emulated && mb->get_button_index() == MouseButton::LEFT)',
       'if (p_dispatch && event_dispatch_function && emulate_touch_from_mouse && !p_is_emulated && mb->get_button_index() == MouseButton::LEFT)'],
+    ['\tRef<InputEventKey> k = p_event;', `\tRef<InputEventKey> k = p_event;
+\tRef<InputEvent> scripted_release;
+${guard('\tif (!p_scripted && k.is_valid()) scripted_release = jsb::input_script::take_over_key(*k.ptr());')}`],
+    ['\t\tconst int event_index = InputMap::get_singleton()->event_get_index(p_event, E.key);',
+      `\t\t// Scripted keys have no modifiers. Exact matching on release selects
+\t\t// the same binding as the press instead of an earlier modified binding.
+\t\tconst bool scripted_key_up = p_scripted && k.is_valid() && !k->is_pressed();
+\t\tconst int incoming_index = InputMap::get_singleton()->event_get_index(p_event, E.key, scripted_key_up);
+\t\tconst int scripted_index = scripted_release.is_valid() ? InputMap::get_singleton()->event_get_index(scripted_release, E.key, true) : -1;
+\t\tconst bool had_scripted_binding = scripted_index >= 0 && scripted_index < int(MAX_EVENT);
+\t\tconst bool release_only = incoming_index == -1 && had_scripted_binding;
+\t\tconst int event_index = release_only ? scripted_index : incoming_index;
+\t\tconst Ref<InputEvent> &action_event = release_only ? scripted_release : p_event;
+\t\tif (had_scripted_binding && incoming_index >= 0 && incoming_index < int(MAX_EVENT)) {
+\t\t\t// Update both bindings before evaluating the action's pressed state.
+\t\t\tActionState::DeviceState &scripted = action_states[E.key].device_states[scripted_release->get_device()];
+\t\t\tscripted.pressed[scripted_index] = false;
+\t\t\tscripted.strength[scripted_index] = 0.0f;
+\t\t\tscripted.raw_strength[scripted_index] = 0.0f;
+\t\t}`],
+    ...[
+      '\t\tint device_id = p_event->get_device();',
+      '\t\tbool is_pressed = p_event->is_action_pressed(E.key, true);',
+      '\t\tdevice_state.strength[event_index] = p_event->get_action_strength(E.key);',
+      '\t\tdevice_state.raw_strength[event_index] = p_event->get_action_raw_strength(E.key);',
+      '\t\taction_state.exact = InputMap::get_singleton()->event_is_action(p_event, E.key, true);',
+      '\t\t\taction_state.pressed_event_id = p_event->get_instance_id();',
+      '\t\t\taction_state.released_event_id = p_event->get_instance_id();',
+    ].map(line => [line, line.replace('p_event', 'action_event')]),
   ],
   'scene/main/scene_tree.cpp': [
     ['#include "core/config/project_settings.h"', include + '\n' + guard(`namespace jsb::input_script {
@@ -127,6 +165,11 @@ export function patchInputScript(path, source) {
 
 export function unpatchInputScript(path, source) {
   for (const [before, after] of [...(edits[path] ?? [])].reverse()) source = source.replace(after, before);
+  if (path === 'core/input/input.h')
+    source = source.replace(`void ${oldParseInput} = true);`, `void ${parseInput});`);
+  if (path === 'core/input/input.cpp')
+    source = source.replace(earlyKeyTakeover, eventParameter)
+      .replace(scriptEvent('event, false, dispatch') + `\n\nvoid Input::${oldParseInput}) {`, `void Input::${parseInput}) {`);
   // Builds recorded before same-step scene change tracking declared only the pause hook here.
   if (path === 'scene/main/scene_tree.cpp') source = source.replace(legacyScenePauseBlock, legacyScenePause);
   return source;

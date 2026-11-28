@@ -1,6 +1,6 @@
 # 引擎下一阶段改造建议
 
-状态：待评审建议。原分析日期：2026 年 11 月 17 日（`a518dab`）。实施进展更新至 2026 年 11 月 27 日（`595d135`）。
+状态：待评审建议。原分析日期：2026 年 11 月 17 日（`a518dab`）。实施进展更新至 2026 年 11 月 27 日（`654f685`）。
 
 已确认的产品定位与引擎平台边界见[引擎核心目标与平台边界](engine-goals.zh-CN.md)。本阶段建议交付一条可由独立平台调用的项目修改、构建、浏览器运行、观察与交互验证链路。
 
@@ -10,7 +10,7 @@ Playground 已接入 `engine.get_diagnostics({})`，按编辑版本读取现有�
 
 ## 优先结论
 
-**让独立接入方完成一次真实游戏迭代。** 抽取必要的公共装配能力，在 Playground 之外验证现有画面、有限输入和结构化结果，再补齐接入中暴露的缺口。
+**从已通过验收的独立接入继续验证故障恢复和素材替换。** 打包 SDK 消费者已用独立页面和配套预览宿主完成同一游戏的两轮构建与试玩，覆盖帧输入、同帧状态和 PNG、过期基础版本、旧运行拒绝和两次正常退出。 [真实 Chromium 验收](https://github.com/linfaxin/GodotAI/pull/41) · [独立消费者用例](../apps/playground/scripts/browser-engine-contracts-consumer-test.mjs#L116)
 
 共享编译、增量缓存、资源生产器、Worker runner 和退出事实已经存在。下一阶段应复用这些实现，将投入集中在平台接入的实际断点与 AI 自主验证所缺的运行能力。
 
@@ -18,8 +18,8 @@ Playground 已接入 `engine.get_diagnostics({})`，按编辑版本读取现有�
 
 | 视角 | 第一优先项 | 对阶段范围的影响 |
 | --- | --- | --- |
-| 通用平台接入 | 独立消费公共编译与预览链路 | 以第二个接入方暴露真实缺口；补基础版本校验与结果关联 |
-| 运行反馈 | 在独立接入链路验证画面观察与有界输入 | 用真实试玩验证采样、输入回执和退出 |
+| 通用平台接入 | 复用打包 SDK 的独立消费链路 | 用实际项目检验发布资产、宿主和资源配置 |
+| 运行反馈 | 在独立接入链路补诊断和故障恢复用例 | 复用现有的同帧采样、输入回执和退出验收 |
 | 构建素材与交付 | 可搬迁的编译预览资产与独立消费验证 | 复用发布身份和校验；素材扩展先提高能力可发现性 |
 | 架构与投入产出 | 独立消费者验证最小闭环 | 先以真实调用决定抽取范围；已能独立使用的部分保持现状 |
 
@@ -29,23 +29,20 @@ Playground 已接入 `engine.get_diagnostics({})`，按编辑版本读取现有�
 
 | 已有实现 | 实际缺口 | 源码依据 |
 | --- | --- | --- |
-| 类型检查、编译环境、统一准备与打包、不可变快照和增量 delta | 浏览器发布资产、声明、可选运行模块到编译环境的组装仍混在工作台中 | [共享 compiler](../packages/project-tools/src/compiler.ts#L43)、[工作台 compiler Worker](../apps/playground/src/compiler.worker.ts#L23) |
-| 可配置容器、预览来源与 release 的公共 Worker runner | 产品仍负责将发布清单和编译结果组装成运行输入，并夹带站点、示例与页面约定 | [Worker runner](../packages/engine/src/browser/dedicated/worker-runner.ts#L13)、[预览适配](../apps/playground/src/engine-preview.ts#L11)、[资产加载](../apps/playground/src/engine-assets.ts#L25) |
-| Workspace revision、构建 pin 和带基础版本校验的增量更新 | 编辑器 source sync 保留产品传输规则，独立消费者按版本提交增量 | [Workspace](../packages/project-tools/README.md#shared-compiler-and-node-adapter)、[source sync](../apps/playground/src/compiler-source-sync.ts#L66) |
-| 公共 Worker runner 的截图、同帧采样、有界输入及回执，另有运行事件与退出事实 | 独立接入方尚需用公共接口组合并验证这些能力 | [同帧采样](../packages/engine/src/browser/dedicated/worker-runner.ts#L797) · [物理帧输入](../packages/engine/src/browser/dedicated/worker-runner.ts#L874) · [运行宿主](../packages/engine/src/runtime-host.ts#L233) |
+| Playground 和独立消费者已使用公共编译环境、构建和预览装配 | 独立测试复用配套分发的预览宿主。自有宿主的具体装配缺口由实际接入验证 | [交付与接入记录](engine-minimum-contracts-delivery.zh-CN.md#独立平台的参考接入) |
+| 独立消费者使用带基础版本校验的增量更新，已验证过期版本拒绝 | 素材替换、导出再导入和后续故障恢复复用同一版本合同 | [Workspace](../packages/project-tools/README.md#shared-compiler-and-node-adapter) |
+| 独立消费者已验证公共 Worker runner 的同帧采样、有界输入、运行事件与退出事实 | 用同一客户端覆盖运行异常与修复，并验证修复后的试玩 | [独立消费者用例](../apps/playground/scripts/browser-engine-contracts-consumer-test.mjs#L116) |
 | PNG、JPEG、WAV 生产器，来源收据、缓存和 ArtifactSet | 接入方需要查询当前目标的可执行导入方式、参数和限制 | [资源格式](../packages/project-tools/src/resource-formats.ts#L13)、[资源生产器](../packages/project-tools/src/resource-converters.ts#L222) |
-| engine tarball 隔离消费测试、静态 Web 引擎包外部安装验证 | 仍需可编程 SDK 与真实构建预览组合的外部消费门禁 | [engine 消费测试](../packages/engine/test/packed-consumer.test.mjs#L16)、[静态包验证](../scripts/release/verify-web-release.mjs#L16) |
 
 通用发布生产器还反向导入 Playground 的构建实现，见 [build-web-release](../scripts/release/build-web-release.mjs#L12)。抽取范围需要覆盖实际生产闭包，同时保留示例与站点组装的应用归属。
 
-## 首先改造公共接入与项目变更
+## 继续验证公共接入与项目变更
 
-交付一条无需导入应用内部代码的调用链：匹配的发布资产与宿主读取器，准备编译环境，校验并构建项目，将产物交给默认 Worker 预览，获得诊断与退出结果，再提交下一次变更。
+在现有独立客户端中复用公共编译环境、产物转换和 Worker 预览，用实际项目验证诊断恢复、素材替换和项目往返。
 
 最小改造范围：
 
-- 从工作台抽取发布清单、声明、命名配置和所需运行模块的通用装配，复用 `CompilerEnvironment`、目标和身份验证。
-- 从预览适配抽取编译产物到公共运行输入的必要转换，保留实际包、收据、目标及宿主资产闭包校验。
+- 复用已交付的公共装配接口。遇到现有接口无法完成的接入步骤时，再评估是否从应用或发布工具抽取。
 - 由平台显式提供资产位置、读取或授权适配、存储和预览容器；示例选择、Monaco、IndexedDB、全局页面 URL 与产品重试策略留在应用。
 - 用现有快照与带基础版本的 delta 提交文件替换、删除批次。独立接入方先等待初始快照完成，再按版本提交增量。
 - 将检查、构建、运行及后续观察的结果关联到实际源版本、操作、构建、产物和运行身份；重试、取消与过期结果有明确处理。
@@ -89,8 +86,8 @@ Playground 已接入 `engine.get_diagnostics({})`，按编辑版本读取现有�
 
 阶段完成应同时满足接入通用性、运行反馈和故障恢复：
 
-1. Playground 改为消费抽取后的公共能力，继续使用自己的存储、资源来源与产品界面。
-2. 另一个最小程序化客户端从打包 SDK 独立安装，使用自己的内存或其它存储、不同资源来源与独立预览配置；它不导入 `apps/playground`、其它包的 `src`，也不复制内部组装逻辑。
+1. Playground 使用已交付的公共能力和自己的存储、资源来源与产品界面。
+2. 独立客户端从打包 SDK 安装，使用自己的存储、资源来源和预览配置。现有验收复用配套分发的预览宿主。
 3. 两个接入方共用匹配 release 与公共合同，完成项目变更、检查、构建、真实浏览器运行、观察、输入、停止和再次修改运行。Node 构建产物送入独立预览作为额外交叉验证。
 4. 普通场景入口、显式 `start(ctx)` 与按需 React 入口有相应覆盖；普通项目无需加载 React vendor。相同语义构建输入使用相同目标和选项时，身份及产物字节符合现有一致性合同。
 5. 一个自包含游戏 fixture 可通过公共接口取得前后画面并接受真实输入；验收通过受控原生状态或独立观察验证效果，保留项目自报事件的来源。

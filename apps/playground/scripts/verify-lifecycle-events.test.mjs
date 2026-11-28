@@ -19,58 +19,34 @@ test('repair verification binds diagnostics and recovered run to the recorded ve
   const brokenHash = 'b'.repeat(64), sourceHash = 'c'.repeat(64), projectId = 'project';
   const run = {runId: 'run', documentId: 'document', workerId: 'worker', revision: 3, generation: 2,
     buildKey: 'build', runConfigurationHash: 'f'.repeat(64)};
-  const original = {...run, runId: 'original', revision: 1, attemptId: 'initial', state: 'running'};
+  const original = {...run, projectId, runId: 'original', revision: 1, state: 'running'};
   const first = {run, sourceHash, projectId, editorRevision: 3, attemptId: 'new'};
-  const error = {code: 2322, location: {file: '/src/Player.ts', line: 2}};
+  const error = {code: 2322, location: {file: '/src/Player.ts', line: 2, column: 7}};
   const diagnostics = {observed: true, items: [error]};
-  const broken = {projectId, editorRevision: 2, checkId: 'bad', sourceHash: brokenHash};
-  const repaired = {projectId, editorRevision: 3, checkId: 'good', sourceHash};
-  const check = {...repaired, diagnostics: {observed: true, counts: {error: 0}}};
+  const script = {projectId, path: 'res://src/Player.ts', status: 'completed'};
   const steps = [
-    ['initial', 'engine.play', {projectId, editorRevision: 1, accepted: true, attemptId: 'initial'}],
     ['original', 'wait_for_event', {outcome: 'reached', run: original}],
-    ['invalidCheck', 'check', {...broken, diagnostics}],
-    ['invalid', 'engine.get_diagnostics', {...broken, check: {...broken, checkId: 'latest-bad', diagnostics}, run: null}],
-    ['rejected', 'engine.play', {...broken, accepted: true, attemptId: 'failed'}],
-    ['noSession', 'wait_for_event', {outcome: 'no_session', build: {attemptId: 'failed'}}],
-    ['failed', 'engine.get_diagnostics', {...broken,
-      build: {attemptId: 'failed', status: 'failed', sourceHash: brokenHash, diagnostics}, run: null}],
-    ['repairedCheck', 'check', check],
-    ['repaired', 'engine.get_diagnostics', {...repaired, check: {...check, checkId: 'latest-good'}}],
-    ['cursor', 'engine.recent_events', {}],
-    ['start', 'engine.wait_for_event', {}],
-    ['launched', 'engine.get_diagnostics', {...repaired, check: {...check, checkId: 'build-check'},
-      build: {attemptId: 'new', sourceHash}, run: {identity: run}}],
+    ['invalidCheck', 'engine.get_script_errors', {...script, editorRevision: 2, sourceHash: brokenHash, diagnostics}],
+    ['failed', 'engine.get_diagnostics', {projectId, editorRevision: 2,
+      build: {status: 'failed', sourceHash: brokenHash}, run: null}],
+    ['repairedCheck', 'engine.get_script_errors', {...script, editorRevision: 3, sourceHash,
+      diagnostics: {observed: true, counts: {error: 0}}}],
+    ['launched', 'engine.get_diagnostics', {projectId, editorRevision: 3,
+      build: {attemptId: 'new', status: 'succeeded', sourceHash}, run: {identity: run}}],
   ];
   const evidence = {repair: {...Object.fromEntries(steps.map(([id]) => [id, id])), stillRunning: original},
     calls: steps.map(([callId, op, data]) => ({callId, request: op.startsWith('engine.') ? {op} : {method: op},
-      reply: {ok: true, result: op.startsWith('engine.') ? {data} : data}}))};
-  verifyDiagnosticRepair(evidence, first, 9, 10);
-  for (const [index, update] of [
-    [3, data => {data.check.diagnostics.items[0].location.line = 4;}],
-    [6, data => {data.run = {identity: original};}],
-    [11, data => {data.build.sourceHash = brokenHash;}],
+      reply: {ok: true, status: 'done', result: op.startsWith('engine.') ? {data} : data}}))};
+  verifyDiagnosticRepair(evidence, first);
+  verifyDiagnosticRepair({...evidence, calls: [...evidence.calls].reverse()}, first);
+  for (const [id, update, message] of [
+    ['invalidCheck', data => {data.diagnostics.items[0].location.file = '/src/Other.ts';}, /did not locate TS2322/],
+    ['failed', data => {data.run = {identity: original};}],
+    ['repairedCheck', data => {data.diagnostics.counts.error = 1;}, /still reports errors/],
+    ['launched', data => {data.build.sourceHash = brokenHash;}],
   ]) {
     const edited = structuredClone(evidence);
-    update(edited.calls[index].reply.result.data);
-    assert.throws(() => verifyDiagnosticRepair(edited, first, 9, 10));
+    update(edited.calls.find(call => call.callId === id).reply.result.data);
+    assert.throws(() => verifyDiagnosticRepair(edited, first), message);
   }
-  const scopedEvidence = structuredClone(evidence);
-  const op = 'engine.get_script_errors', path = 'res://src/Player.ts';
-  for (const [index, data] of [[2, {...broken, diagnostics}], [7, check]]) {
-    const call = scopedEvidence.calls[index];
-    call.request = {op, input: {path}};
-    call.reply.result = {data: {...data, path, status: 'completed'}};
-  }
-  verifyDiagnosticRepair(scopedEvidence, first, 9, 10);
-  for (const [index, replacement, message] of [
-    [2, {...diagnostics, items: []}, /Script check did not locate TS2322/],
-    [7, {...diagnostics, counts: {error: 1}}, /Script check still reports errors/],
-  ]) {
-    const edited = structuredClone(scopedEvidence);
-    edited.calls[index].reply.result.data.diagnostics = replacement;
-    assert.throws(() => verifyDiagnosticRepair(edited, first, 9, 10), message);
-  }
-  scopedEvidence.calls[2].reply.result.data.path = 'res://src/Other.ts';
-  assert.throws(() => verifyDiagnosticRepair(scopedEvidence, first, 9, 10));
 });

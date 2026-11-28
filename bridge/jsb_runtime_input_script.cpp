@@ -63,13 +63,18 @@ bool active() { return script.sequence != 0 && script.terminal.length() == 0; }
 // Same monotonic epoch and units as the Worker control channel's deadline.
 double now_ms() { return EM_ASM_DOUBLE({ return performance.timeOrigin + performance.now(); }); }
 
-Ref<InputEventKey> send_key(bool down, bool dispatch = true) {
+Ref<InputEventKey> key_edge(bool down) {
     Ref<InputEventKey> event;
     event.instantiate();
     if (script.physical) event->set_physical_keycode(static_cast<Key>(script.keycode));
     else event->set_keycode(static_cast<Key>(script.keycode));
     event->set_pressed(down);
     script.key_held = down;
+    return event;
+}
+
+Ref<InputEventKey> send_key(bool down, bool dispatch = true) {
+    Ref<InputEventKey> event = key_edge(down);
     Input::get_singleton()->godotjs_script_event(event, dispatch);
     return event;
 }
@@ -308,8 +313,23 @@ void scene_will_change(const Node *current, const Node *next) {
     if (current != next) {
         deferred_key_release.unref();
         finish("scene_changed");
+        if (script.key_held) send_key(false, false);
     }
 }
+
+Ref<InputEventKey> take_over_key(const InputEventKey &event) {
+    if (deferred_key_release.is_valid() &&
+        ((deferred_key_release->get_keycode() != Key::NONE && deferred_key_release->get_keycode() == event.get_keycode()) ||
+         (deferred_key_release->get_physical_keycode() != Key::NONE && deferred_key_release->get_physical_keycode() == event.get_physical_keycode()))) {
+        deferred_key_release.unref();
+    }
+    if (!script.key_held) return {};
+    const Key key = script.physical ? event.get_physical_keycode() : event.get_keycode();
+    if (key != static_cast<Key>(script.keycode)) return {};
+    finish("busy");
+    return key_edge(false);
+}
+
 void reset() { finish("input_reset"); }
 void release(const StringName &action) {
     if (script.action == action) finish("action_released");

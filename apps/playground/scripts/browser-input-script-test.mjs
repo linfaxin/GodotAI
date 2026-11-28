@@ -372,6 +372,32 @@ await runReportedBrowserTest({scope, reportFile, run: async test => {
     recordExit(record, consoleResult(exit.reply));
   });
   if (supported && process.env.PLAYGROUND_INPUT_SCRIPT_DEVICES === '1') {
+    async function playEditedPlayer(source) {
+      const {editorRevision} = consoleResult(await api('get_project_context'));
+      await page.locator('#tabs [data-file-tab="/src/Player.ts"]').click();
+      await page.locator('#source .monaco-editor').click({position: {x: 105, y: 30}});
+      await page.keyboard.press('ControlOrMeta+a');
+      await page.keyboard.insertText(source);
+      await page.waitForFunction(revision => window.godotPlayground.get_project_context().result.editorRevision > revision, editorRevision);
+      const {attemptId} = summerResult(await api('summer_call', {op: 'engine.play'}));
+      const {run} = consoleResult(await api('wait_for_event', {attemptId, until: 'running', timeoutMs: 60000}));
+      await page.waitForFunction(async id => {
+        const api = window.godotPlayground;
+        const active = (await api.summer_call({op: 'engine.is_running'})).result?.data;
+        return active?.capturedRunId === id && active.pendingAttemptId === null &&
+          api.get_run({runId: id}).result?.inputScript?.devices;
+      }, run.runId);
+      return run;
+    }
+
+    async function stopDeviceRun(run) {
+      const {runId} = run;
+      consoleResult(await api('stop', {runId}));
+      const exit = consoleResult(await api('wait_for_event', {runId, until: 'exited', timeoutMs: 10000}));
+      recordExit({run}, exit);
+      return exit.run.exit;
+    }
+
     await test.step('native-key-and-click', async () => {
       const played = await lesson('input-play', 'engine.play');
       const waiting = await lesson('input-ready', 'wait_for_event', played);
@@ -449,12 +475,91 @@ await runReportedBrowserTest({scope, reportFile, run: async test => {
       recordExit({run}, exit);
       inputEvidence.devices = {key, click, geometryEpoch, stale, cancelled, interruption, exit: exit.run.exit};
     });
+    await test.step('player-key-takes-over-active-frame-script', async () => {
+      const run = await playEditedPlayer(`import {Input, InputEventKey, InputMap, Key, Node2D, Vector2} from 'godot';
+export default class Player extends Node2D {
+  _ready() {
+    const shifted = new InputEventKey();
+    shifted.physical_keycode = Key.KEY_RIGHT;
+    shifted.shift_pressed = true;
+    InputMap.action_add_event('move_right', shifted);
+    const physical = new InputEventKey();
+    physical.physical_keycode = Key.KEY_RIGHT;
+    InputMap.action_add_event('move_right', physical);
+  }
+  _physics_process(_delta: number) {
+    const held = Input.is_action_pressed('move_right');
+    const released = Input.is_action_just_released('move_right');
+    this.position = new Vector2(this.position.x + (held ? 1 : 0), this.position.y + (released ? 1 : 0));
+  }
+}
+`);
+      const {runId} = run;
+      const query = {runId, props: [{path: pathToPlayer, property: 'position'}], screenshot: false};
+      const position = async () => consoleResult(await api('game_probe', query)).properties[0].value;
+      const waitForPositionChange = (axis, before) => page.waitForFunction(async ({query, axis, before}) => {
+        const sample = await window.godotPlayground.game_probe(query);
+        return sample.result?.properties[0].value[axis] > before;
+      }, {query, axis, before}, {timeout: 5000});
+      const key = {runId, physical: true, keycode: 4194321, pressOffset: 0, releaseOffset: 120};
+      await page.frameLocator('#preview iframe').locator('canvas').focus();
+      const initial = await position();
+      const released = consoleResult(await api('run_game_input_script', {...key, releaseOffset: 4}));
+      assert.equal(released.kind, 'completed');
+      await waitForPositionChange('y', initial.y);
+      assert.deepEqual(await position(), {x: initial.x + 4, y: initial.y + 1},
+        'Script release must clear its binding when a modified binding comes first');
+
+      const before = await position();
+      const pending = api('run_game_input_script', key);
+      await waitForPositionChange('x', before.x);
+      await page.keyboard.down('Shift');
+      try {
+        await page.keyboard.down('ArrowRight');
+        const interrupted = await pending;
+        assert.equal(interrupted.outcome, 'interrupted');
+        assert.equal(interrupted.terminal.reason, 'busy');
+        assert.equal(interrupted.terminal.owner, 'cleared');
+        await waitForPositionChange('x', (await position()).x);
+        assert.equal((await position()).y, before.y, 'Handoff must not release the InputMap action');
+        const competing = await api('run_game_input_script', {...key, releaseOffset: 4});
+        assert.equal(competing.error?.code, 'busy', 'Player still holds the key');
+      } finally {
+        await page.keyboard.up('ArrowRight');
+        await page.keyboard.up('Shift');
+      }
+      await waitForPositionChange('y', before.y);
+      assert.equal((await position()).y, before.y + 1, 'The real key release ends the action once');
+      await stopDeviceRun(run);
+    });
+    await test.step('changing-scene-clears-key-without-dispatching-release', async () => {
+      const run = await playEditedPlayer(`import {InputEvent, InputEventKey, Key, Node2D, Vector2} from 'godot';
+export default class Player extends Node2D {
+  _input(event: InputEvent) {
+    if (!(event instanceof InputEventKey) || event.physical_keycode !== Key.KEY_RIGHT) return;
+    if (event.pressed) {
+      const tree = this.get_tree()!;
+      const next = new Node2D();
+      tree.root!.add_child(next);
+      tree.current_scene = next;
+      this.position = new Vector2(100, 256);
+    } else {
+      this.position = new Vector2(200, 256);
+    }
+  }
+}
+`);
+      const {runId} = run;
+      const input = await api('run_game_input_script', {runId, physical: true, keycode: 4194321, pressOffset: 0, releaseOffset: 4});
+      assert.equal(input.outcome, 'interrupted');
+      assert.equal(input.terminal.reason, 'scene_changed');
+      assert.equal(input.terminal.owner, 'cleared');
+      const sample = consoleResult(await api('game_probe', {runId, props: [{path: pathToPlayer, property: 'position'}], screenshot: false}));
+      assert.deepEqual(sample.properties[0].value, {x: 100, y: 256});
+      await stopDeviceRun(run);
+    });
     await test.step('interrupted-click-does-not-dispatch-emulated-touch-release', async () => {
-      const {editorRevision} = consoleResult(await api('get_project_context'));
-      await page.locator('#tabs [data-file-tab="/src/Player.ts"]').click();
-      await page.locator('#source .monaco-editor').click({position: {x: 105, y: 30}});
-      await page.keyboard.press('ControlOrMeta+a');
-      await page.keyboard.insertText(`import {Input, InputEvent, InputEventScreenTouch, Node2D, Vector2} from 'godot';
+      const run = await playEditedPlayer(`import {Input, InputEvent, InputEventScreenTouch, Node2D, Vector2} from 'godot';
 export default class Player extends Node2D {
   _ready() {
     this.process_mode = 3; // PROCESS_MODE_ALWAYS
@@ -467,16 +572,7 @@ export default class Player extends Node2D {
   }
 }
 `);
-      await page.waitForFunction(revision => window.godotPlayground.get_project_context().result.editorRevision > revision, editorRevision);
-      const {attemptId} = summerResult(await api('summer_call', {op: 'engine.play'}));
-      const {run} = consoleResult(await api('wait_for_event', {attemptId, until: 'running', timeoutMs: 60000}));
       const {runId} = run;
-      await page.waitForFunction(async id => {
-        const api = window.godotPlayground;
-        const active = (await api.summer_call({op: 'engine.is_running'})).result?.data;
-        return active?.capturedRunId === id && active.pendingAttemptId === null &&
-          api.get_run({runId: id}).result?.inputScript?.devices;
-      }, runId);
       const {reply} = await recordSummer({action: 'script', events: [{type: 'mouse_click', position: [0, 0]}]});
       const input = reply.error?.details?.godotai?.receipt;
       assert.equal(input?.outcome, 'interrupted');
@@ -484,10 +580,7 @@ export default class Player extends Node2D {
       assert.equal(input.terminal.owner, 'cleared');
       const sample = consoleResult(await api('game_probe', {runId, props: [{path: pathToPlayer, property: 'position'}], screenshot: false}));
       assert.deepEqual(sample.properties[0].value, {x: 100, y: 256});
-      consoleResult(await api('stop', {runId}));
-      const exit = consoleResult(await api('wait_for_event', {runId, until: 'exited', timeoutMs: 10000}));
-      recordExit({run}, exit);
-      inputEvidence.interruptedTouch = {input, sample, exit: exit.run.exit};
+      inputEvidence.interruptedTouch = {input, sample, exit: await stopDeviceRun(run)};
     });
   }
   assert.deepEqual(errors, []);
