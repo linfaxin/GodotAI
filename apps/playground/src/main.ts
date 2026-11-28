@@ -22,6 +22,7 @@ import {createPlaygroundApi,type PlaygroundApi} from './playground-api';
 import {createAgentPanel} from './workbench/agent-panel';
 import {createInteractionDemo, INTERACTION_DEMO_ID, matchesInteractionDemo} from './interaction-demo';
 import {createInputScriptDemo, INPUT_SCRIPT_DEMO_ID, matchesInputScriptDemo} from './input-script-demo';
+import {createRuntimeRecoveryDemo, matchesRuntimeRecoveryDemo, RUNTIME_RECOVERY_DEMO_ID} from './runtime-recovery-demo';
 import {createRuntimeMethodDemo,createRuntimePropertiesDemo, matchesRuntimePropertiesDemo, RUNTIME_PROPERTIES_DEMO_ID} from './runtime-properties-demo';
 import {createSummerDispatcher} from './summer-adapter';
 import {createConsoleGate,createApiConsoleSession} from './workbench/api-console-session';
@@ -81,6 +82,7 @@ const summerDispatcher=createSummerDispatcher({
  };},
  getProjectContext:includeCapabilities=>playground.getSummerProjectContext(includeCapabilities,playIntent?.attemptId??null),
  getDiagnostics:playground.getSummerDiagnostics,
+ getDebuggerErrors:includeStack=>playground.getSummerDebuggerErrors(includeStack,playIntent?.attemptId??null),
  getScriptErrors:playground.getScriptErrors,
  play:input=>playground.api.play(input),
  cancelLaunch,
@@ -150,6 +152,11 @@ const consoleSession=createApiConsoleSession(playground.api,{
  subscribeContext(listener){consoleContextListeners.add(listener);return()=>consoleContextListeners.delete(listener);},
  callSelectedMethod:(input,signal,selected)=>playground.summerCall({op:'engine.runtime_call',input},signal,selected),
  openExample:operationId=>{
+  if(operationId==='get_run')throw Error('查询指定运行无需打开示例');
+  if(operationId==='engine.get_debugger_errors'){
+   if(!ready||!nativePreview?.supportsInputExample)throw Error('当前预览不支持运行错误恢复示例');
+   return openAgentDemo(createRuntimeRecoveryDemo(siteEngineProfile),matchesRuntimeRecoveryDemo);
+  }
   if(operationId==='engine.get_diagnostics'||operationId==='engine.get_script_errors')return openAgentDemo(createInputScriptDemo(siteEngineProfile),matchesInputScriptDemo);
   if(operationId==='engine.game_input'){
    if(!ready||!nativePreview?.supportsInputExample)throw Error('当前预览不支持输入脚本示例');
@@ -277,7 +284,8 @@ function registerProjectDemo(id:string,project:EditorProject):Demo{
  const existing=demos.find(d=>d.id===id);if(existing)return existing;
  const source=demos.find(d=>d.id===project.demoId),file=(project.entry||project.selected).split('/').at(-1)!;
  const properties=project.demoId===RUNTIME_PROPERTIES_DEMO_ID,playtest=project.demoId===INTERACTION_DEMO_ID,inputScript=project.demoId===INPUT_SCRIPT_DEMO_ID;
- const demo:Demo=source?{...source,id,name:source.name+' · 副本'}:{id,name:inputScript?'物理帧输入验证':properties?'公开脚本属性验证':playtest?'试玩验证':'导入项目 · '+file,subtitle:properties||inputScript?'Summer API / GodotJS':playtest?'Godot 原生示例':project.engineProfile,file,
+ const recovery=project.demoId===RUNTIME_RECOVERY_DEMO_ID;
+ const demo:Demo=source?{...source,id,name:source.name+' · 副本'}:{id,name:recovery?'运行错误恢复':inputScript?'物理帧输入验证':properties?'公开脚本属性验证':playtest?'试玩验证':'导入项目 · '+file,subtitle:properties||inputScript||recovery?'Summer API / GodotJS':playtest?'Godot 原生示例':project.engineProfile,file,
   hint:playtest?'按右箭头移动 Player，按左箭头移除 Player。':project.engineProfile===siteEngineProfile?'独立项目，修改会单独保存。':'此项目需要 '+project.engineProfile+'；可查看与导出原文。',
   source:typeof project.files[project.entry]==='string'?project.files[project.entry] as string:'',runtime:project.runtime,controls:[]};
  demos.push(demo);appendDemoButton(demo);return demo;

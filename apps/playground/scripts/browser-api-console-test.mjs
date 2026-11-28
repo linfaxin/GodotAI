@@ -21,7 +21,7 @@ await runReportedBrowserTest({scope, reportFile: process.env.PLAYGROUND_API_CONS
     URL.createObjectURL=blob=>{const url=createUrl(blob);createdUrls.push(url);return url;};
     URL.revokeObjectURL=url=>{revokedUrls.push(url);revokeUrl(url);};
     let compileCount=0,stopCount=0,openCount=0,health=100,moveStep=64,x=64,serial=1,inputSerial=0,frameSerial=0;
-    let reportedErrors;
+    let reportedErrors, debuggerStatus='observed';
     let environment=structuredClone(consoleEnvironment),heldRead,finishRead,replayToken;
     const identity=()=>({...consoleIdentity,runId:environment.anchor.activeRunId,generation:'generation-'+serial,workerId:'worker-'+serial});
     const node=()=>({...consoleNode,instanceId:String(100+serial)});
@@ -39,6 +39,8 @@ await runReportedBrowserTest({scope, reportFile: process.env.PLAYGROUND_API_CONS
             counts: reportedErrors === undefined ? undefined : {error: reportedErrors, warning: 0, info: 0}, items: [], omittedCount: 0}},
           build: null, run: null,
         });
+        case 'engine.get_debugger_errors':return facade({status:debuggerStatus,entries:debuggerStatus==='observed' ?
+          [{source:'runtime-binding',diagnostic:{source:'godotjs',message:'<b>runtime error</b>'}}] : []});
         case 'engine.play':health=100;moveStep=64;x=64;environment.anchor.pendingAttemptId='build-'+serial;update();return facade({accepted:true,state:'pending',attemptId:'build-'+serial,run:null});
         case 'engine.is_running':return facade({playing:environment.activeRunState==='running',capturedRunId:environment.anchor.activeRunId});
         case 'engine.stop':{const runId=environment.anchor.activeRunId;environment.activeRunState='exited';environment.anchor.pendingAttemptId=null;update();return facade({accepted:true,runs:[{runId,receipt:ok({status:'exited',runId})}],no_target:false});}
@@ -64,6 +66,7 @@ await runReportedBrowserTest({scope, reportFile: process.env.PLAYGROUND_API_CONS
     });
     fixture.setReply('game_input',input=>{if(input.gesture.code==='ArrowDown')x=64;else if(input.gesture.code==='ArrowRight')x+=moveStep;return ok({operationId:'input-'+(++inputSerial)});});
     fixture.setReply('wait_for_input',async input=>ok({operation:{run:identity(),operationId:input.operationId,status:'dispatched',down:'dispatched',up:'dispatched',nativeConsumption:'unconfirmed'}}));
+    fixture.setReply('get_run',input=>ok({...identity(),runId:input.runId,state:'exited',exit:{evidence:'host-report'}}));
     const workbench=createWorkbench({selectFile(){},focusEditor(){},showApi:id=>view.show(id),toast(){}});
     workbench.syncFiles(['/src/Player.ts'],'/src/Player.ts');
     document.querySelector('#source').textContent='source sentinel';
@@ -75,6 +78,8 @@ await runReportedBrowserTest({scope, reportFile: process.env.PLAYGROUND_API_CONS
       snapshot:()=>session.snapshot(),calls:()=>fixture.calls.map(({name,input})=>({name,input})),
       counts:()=>({compileCount,stopCount,openCount}),lessons:CONSOLE_LESSONS,
       setReportedErrors(value){reportedErrors=value;},
+      setDebuggerStatus(value){debuggerStatus=value;},
+      setInputExampleAvailable(value){environment.inputExampleAvailable=value;update();},
       resources:()=>({created:createdUrls.length,revoked:revokedUrls.length,attachments:session.snapshot().history.filter(call=>call.attachmentId&&session.getAttachment(call.attachmentId)).length}),
       setContext(anchor,state='running'){environment={anchor:{...environment.anchor,...anchor},activeRunState:state};update();},
       newRun(){serial++;health=100;moveStep=64;x=64;environment.anchor.activeRunId='run-'+serial;environment.activeRunState='running';update();},
@@ -103,7 +108,7 @@ await runReportedBrowserTest({scope, reportFile: process.env.PLAYGROUND_API_CONS
 
   await step('directory-drafts-shortcuts-and-modes', async () => {
     const entries = page.locator('#api-list [data-api-operation]');
-    assert.equal(await entries.count(), 22);
+    assert.equal(await entries.count(), 24);
     assert.equal(await page.locator('#api-list .api-list-group').count(), 2);
     for (const entry of await entries.all()) {
       assert.equal(await entry.locator('.api-list-name').textContent(), await entry.getAttribute('data-api-operation'));
@@ -292,7 +297,7 @@ await runReportedBrowserTest({scope, reportFile: process.env.PLAYGROUND_API_CONS
     assert.equal(await page.evaluate(() => window.consoleFixture.calls().length), beforeLoad);
     assert((await element(page, 'history').locator('[data-call-id]').count()) <= 20);
     assert.deepEqual(await page.evaluate(() => window.consoleFixture.lessons.map(lesson => lesson.id)),
-      ['diagnostic-repair', 'lifecycle-events', 'input-script', 'game-probe', 'runtime-method', 'summer-position', 'gameplay-properties']);
+      ['runtime-recovery', 'diagnostic-repair', 'lifecycle-events', 'input-script', 'game-probe', 'runtime-method', 'summer-position', 'gameplay-properties']);
   });
 
   await step('diagnostics-reads-the-current-revision-and-shows-observed-counts', async () => {
@@ -313,6 +318,34 @@ await runReportedBrowserTest({scope, reportFile: process.env.PLAYGROUND_API_CONS
     await submitConsole(page, operation);
     assert.match(await result.textContent(), /2 个错误/);
     await page.evaluate(anchor => window.consoleFixture.setContext(anchor), original);
+  });
+
+  await step('runtime-recovery-example-and-historical-run', async () => {
+    const operation = 'engine.get_debugger_errors';
+    await openConsoleOperation(page, operation);
+    assert.equal(await element(page, 'open-example').isDisabled(), true);
+    await page.evaluate(() => window.consoleFixture.setInputExampleAvailable(true));
+    const before = await page.evaluate(() => ({calls: window.consoleFixture.calls().length, ...window.consoleFixture.counts()}));
+    await element(page, 'open-example').click();
+    assert.deepEqual(await page.evaluate(() => ({calls: window.consoleFixture.calls().length, ...window.consoleFixture.counts()})),
+      {...before, openCount: before.openCount + 1});
+    const lessons = element(page, 'lessons');
+    if (!await lessons.evaluate(node => node.open)) await lessons.locator('summary').click();
+    await lessons.locator('[data-lesson-id="runtime-recovery"][data-step-id="read-error"]').click();
+    assert.deepEqual(JSON.parse(await element(page, 'input').inputValue()), {include_stack: true});
+    assert.equal(await page.evaluate(() => window.consoleFixture.calls().length), before.calls);
+    await submitConsole(page, operation);
+    assert.match(await element(page, 'result-status').textContent(), /已取得运行时错误/);
+    assert.match(await element(page, 'result').textContent(), /<b>runtime error<\/b>/);
+    assert.equal(await element(page, 'result').locator('b').count(), 0);
+    await page.evaluate(() => window.consoleFixture.setDebuggerStatus('no_reported_error'));
+    await submitConsole(page, operation);
+    assert.match(await element(page, 'result-status').textContent(), /干净退出/);
+    const {reply} = await invokeConsole(page, 'get_run', {runId: 'original-failed-run'}, {refreshTarget: false});
+    assert.equal(await element(page, 'open-example').isVisible(), false);
+    assert.equal(consoleResult(reply).runId, 'original-failed-run');
+    assert.match(await element(page, 'result-status').textContent(), /指定运行的退出回执/);
+    await page.evaluate(() => window.consoleFixture.setInputExampleAvailable(false));
   });
 
   await step('bounded-png-lifecycle-and-explicit-stop', async () => {

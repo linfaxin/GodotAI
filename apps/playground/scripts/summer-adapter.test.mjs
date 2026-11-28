@@ -98,6 +98,32 @@ test('Summer diagnostics validates the MCP input subset before reading records a
   assert.equal((await dispatch({op})).error.code, 'unsupported');
 });
 
+test('Summer debugger errors validates the documented input subset before reading terminal evidence', async () => {
+  const {backend, calls} = fixture();
+  const op = 'engine.get_debugger_errors';
+  const data = {projectId: 'project-1', editorRevision: 7, status: 'no_session', reason: 'no_retained_attempt', entries: []};
+  backend.captureContext = () => assert.fail('Debugger errors reads by editor revision, independent of the live run');
+  backend.getDebuggerErrors = includeStack => {calls.push(includeStack); return ok(data);};
+  const dispatch = createSummerDispatcher(backend);
+  for (const input of [true, null, {instance: 'main'}, {max_errors: undefined}, {max_errors: 0}, {max_errors: 201},
+    {max_errors: 1.5}, {max_errors: '50'}, {include_stack: null}, {raw: 0}, {include_warnings: 'false'},
+    {get include_stack() {assert.fail('Accessors must not run');}}]) {
+    assert.equal((await dispatch({op, input})).error.code, 'invalid_input');
+  }
+  for (const input of [{raw: true}, {include_warnings: true}, {maxCharacters: 4000}]) {
+    assert.equal((await dispatch({op, input})).error.code, 'unsupported');
+  }
+  assert.equal((await dispatch({op}, AbortSignal.abort())).error.code, 'cancelled');
+  assert.deepEqual(calls, []);
+  for (const request of [{op}, {op, input: {max_errors: 1, include_stack: false, raw: false, include_warnings: false}},
+    {op, input: {max_errors: 200, include_stack: true}}]) {
+    assert.deepEqual((await dispatch(request)).result.data, data);
+  }
+  assert.deepEqual(calls, [false, false, true]);
+  delete backend.getDebuggerErrors;
+  assert.equal((await dispatch({op})).error.code, 'unsupported');
+});
+
 test('Summer script errors validates project paths before dispatching a script check', async () => {
   const {backend, calls} = fixture();
   const op = 'engine.get_script_errors';

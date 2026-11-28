@@ -33,7 +33,7 @@ export function createConsoleFixture() {
     if(name==='wait_for_input')return Promise.resolve(ok({outcome:'settled',operation:{run:{...consoleIdentity},operationId:input.operationId,status:'dispatched',down:'dispatched',up:'dispatched',nativeConsumption:'unconfirmed'}}));
     return Promise.resolve({ok:true,receipt:{run:{...consoleIdentity},path:input.path,expectedInstanceId:input.expectedInstanceId},result:{mode:'names',properties:[{name:'health',status:'found',descriptor:{name:'health',type:'int'}}]}});
   }
-  const methods=['summer_call','check','wait_for_event','describe_runtime_properties','describe_runtime_methods','read_runtime_properties','game_input','wait_for_input'];
+  const methods=['summer_call','check','wait_for_event','describe_runtime_properties','describe_runtime_methods','read_runtime_properties','game_input','wait_for_input','get_run'];
   const api=Object.fromEntries(methods.map(name=>[name,(input:unknown,signal?:AbortSignal)=>invoke(name,input,signal)])) as unknown as PlaygroundApi;
   const gate=createConsoleGate();
   const hooks={readContext:()=>structuredClone(environment),subscribeContext:(listener:()=>void)=>{listeners.add(listener);return()=>{listeners.delete(listener);};},

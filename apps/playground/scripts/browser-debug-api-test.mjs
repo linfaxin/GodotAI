@@ -10,7 +10,7 @@ import {createRuntimePropertiesDemo} from '../src/runtime-properties-demo.ts';
 import {exportProject} from '../src/project-model.ts';
 
 const selectedCase=process.env.PLAYGROUND_DEBUG_API_CASE;
-const diagnosticCases=['agent-check-play-and-targeted-stop','session-start-failure'];
+const diagnosticCases=['agent-check-play-and-targeted-stop','session-start-failure','console-error-clean-exit','lost-preview-host'];
 const scope=selectedCase?'actual-product-debug-api-case':'actual-product-debug-api';
 const observationCase='runtime-tree-node-and-png';
 const writeCase='runtime-set-position';
@@ -121,6 +121,7 @@ export async function start(){
 }`;
  const read=(page,runId)=>page.evaluate(id=>globalThis.__readDebugApi(id),runId);
  const readWire=page=>page.evaluate(()=>globalThis.__debugApiWire);
+ const debuggerErrors=(page,input)=>invoke(page,'summer_call',{op:'engine.get_debugger_errors',input}).then(summerResult);
  async function nextBuild(page,previous){
   const result=await page.waitForFunction(previous=>{
    const {build}=globalThis.__readDebugApi();
@@ -620,8 +621,49 @@ export default class Replacement extends Node2D {
   assert.equal(summer.run.exit.evidence,'host-report');
   assert.equal(summer.run.exit.reason,exit.report.reason);
   assert.match(summer.run.exit.diagnostic.message,/DEBUG_API_START_FAILURE/);
+  const debuggerReport=await debuggerErrors(page,{max_errors:50,include_stack:true});
+  const capture=exit.report.runtimeFailureCapture;
+  assert.equal(capture,'observed');
+  assert.equal(capture,terminal.runtimeFailureCapture);
+  assert.equal(debuggerReport.status,'observed');
+  assert.equal(debuggerReport.projectId,build.projectId);
+  assert.equal(debuggerReport.editorRevision,build.editorRevision);
+  assert.equal(debuggerReport.build.attemptId,build.attemptId);
+  assert.equal(debuggerReport.build.sourceHash,build.sourceHash);
+  assert.equal(debuggerReport.runId,runId);
+  assert.deepEqual(debuggerReport.entries,[{source:'runtime-binding',diagnostic:exit.report.diagnostic}]);
+  assert.match(exit.report.diagnostic.message,/^DEBUG_API_START_FAILURE$/);
+  const withoutStack=await debuggerErrors(page,{include_stack:false});
+  assert.equal(withoutStack.entries[0].diagnostic.stack,undefined);
+  assert.equal(withoutStack.exit,undefined);
   engineExecuted=true;
-  return {attemptId:build.attemptId,runId,exit,diagnostics:summer};
+  return {attemptId:build.attemptId,runId,exit,diagnostics:summer,debuggerReport,withoutStack};
+ });
+
+ await browserCase('console-error-clean-exit',async page=>{
+  const marker='DEBUG_API_START_FAILURE';
+  const source=`export function start() {
+ console.error(${JSON.stringify(marker)});
+}`;
+  const {run,build}=await waitForRun(page,marker,await importProject(page,source));
+  const logs=unwrap(await invoke(page,'read_run_events',{runId:run.runId,kinds:['log'],levels:['error']}));
+  assert(logs.items.some(({event})=>event.level==='error'&&event.text?.includes(marker)));
+  const pending=await debuggerErrors(page,{});
+  assert.equal(pending.status,'pending');
+  assert.equal(pending.runId,run.runId);
+  assert.deepEqual(pending.entries,[]);
+  await page.locator('#stop').click();
+  const exit=await waitForExit(page,run.runId);
+  assert.equal(exit.report.reason,'clean-exit');
+  assert.equal(exit.report.runtimeFailureCapture,'settled_empty');
+  const terminal=(await readWire(page)).messages.find(packet=>packet.type==='exit-report'&&packet.runId===run.runId);
+  assert.deepEqual(terminal?.runtimeFailureCapture,exit.report.runtimeFailureCapture);
+  const settled=await debuggerErrors(page,{});
+  assert.equal(settled.status,'no_reported_error');
+  assert.equal(settled.build.attemptId,build.attemptId);
+  assert.equal(settled.runId,run.runId);
+  assert.deepEqual(settled.entries,[]);
+  return {attemptId:build.attemptId,runId:run.runId,exit,pending,settled};
  });
 
  await browserCase('lost-preview-host',async page=>{
@@ -635,9 +677,14 @@ export default class Replacement extends Node2D {
   const exit=observed.run.exit;
   assert.equal(exit.evidence,'editor-local');
   assert.equal(exit.report.reason,'forced-frame-disposal');
-  for(const field of ['engineOutcome','hostCleanup','sessionFacts','code'])assert.equal(exit.report[field],undefined,field);
+  for(const field of ['engineOutcome','hostCleanup','sessionFacts','code','runtimeFailureCapture'])assert.equal(exit.report[field],undefined,field);
   assert(!(await readWire(page)).messages.some(packet=>packet.type==='exit-report'&&packet.runId===run.runId));
-  return {runId:run.runId,exit};
+  const debuggerReport=await debuggerErrors(page,{});
+  assert.equal(debuggerReport.status,'unavailable');
+  assert.equal(debuggerReport.reason,'capture_unconfirmed');
+  assert.equal(debuggerReport.runId,run.runId);
+  assert.deepEqual(debuggerReport.entries,[]);
+  return {runId:run.runId,exit,debuggerReport};
  });
 
  await browserCase('unsupported-playtest-keeps-current-preview',async page=>{

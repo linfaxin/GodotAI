@@ -4,7 +4,8 @@ import { DEFAULT_DEADLINES, RUN_PHASES, isIdentity, isPreviewDiagnostic, isProje
 import { resolveVerifiedRelease, type VerifiedRelease } from '../verified-loader.js';
 import { WORKER_PROTOCOL, prepareWorkerRunConfiguration, isWorkerEnvelope, sameWorkerRun,
   type WorkerRunIdentity, type WorkerRunConfiguration } from './worker-protocol.js';
-import { isWorkerEngineOutcome, isWorkerHostCleanupOutcome, type WorkerEngineOutcome, type WorkerHostCleanupOutcome } from './worker-session.js';
+import { isWorkerEngineOutcome, isWorkerHostCleanupOutcome,
+  type WorkerEngineOutcome, type WorkerHostCleanupOutcome } from './worker-session.js';
 import { WorkerProjectCommandCredits,workerProjectCommandBytes } from './worker-project-channel.js';
 import { WorkerLogBudget } from './worker-log.js';
 import {captureBrowserArtifact,browserArtifactTransfers} from '../artifact-input.js';
@@ -107,6 +108,8 @@ export type WorkerObservedExit = Omit<ExitReport, 'reason' | 'cleanup' | 'sessio
   engineOutcome: Readonly<WorkerEngineOutcome>;
   hostCleanup: Readonly<WorkerHostCleanupOutcome>;
   sessionFacts: SessionFacts;
+  /** Provenance of the existing diagnostic, or confirmation of an empty capture. */
+  runtimeFailureCapture?: 'observed' | 'settled_empty';
 };
 export type WorkerLocalExit = Omit<ExitReport, 'reason' | 'cleanup' | 'sessionFacts' | 'code'> & WorkerRunIdentity & {
   reason: 'crashed' | 'forced-frame-disposal';
@@ -114,6 +117,7 @@ export type WorkerLocalExit = Omit<ExitReport, 'reason' | 'cleanup' | 'sessionFa
   engineOutcome?: never;
   hostCleanup?: never;
   sessionFacts?: never;
+  runtimeFailureCapture?: never;
 };
 export type WorkerRunnerExit = WorkerObservedExit | WorkerLocalExit;
 export type WorkerRunnerEvent =
@@ -464,9 +468,15 @@ export class WorkerPreviewRunner {
         // Outer projections cannot contradict the sealed terminal facts.
         if(cleanup.status!==facts.hostCleanup || (outcome.kind==='native-exit' ? facts.nativeExit?.code!==outcome.code : facts.nativeExit!==undefined) || (outcome.kind==='terminate-issued')!==facts.forcedTerminationIssued)return;
         const retained=createSessionFacts({...facts,...(s.failure?{failure:facts.failure??{kind:'runtime',message:s.failure.message,...(s.failure.stack?{stack:s.failure.stack}:{})}}:{})});
-        const reported=isPreviewDiagnostic(m.diagnostic)?m.diagnostic:retained.failure?{source:'godotjs' as const,message:retained.failure.message,...(retained.failure.stack?{stack:retained.failure.stack}:{})}:undefined;
-        this.finish(s,{...s.identity,reason:sessionExitReason(retained),...(retained.nativeExit?{code:retained.nativeExit.code}:{}),...(m.detail?{detail:m.detail}:{}),
-          engineOutcome:Object.freeze({...outcome}),hostCleanup:Object.freeze({...cleanup}),sessionFacts:retained,...(reported?{diagnostic:reported}:{})});
+        const diagnostic = isPreviewDiagnostic(m.diagnostic) ? m.diagnostic : undefined;
+        const reported=diagnostic??(retained.failure?{source:'godotjs' as const,message:retained.failure.message,...(retained.failure.stack?{stack:retained.failure.stack}:{})}:undefined);
+        const reason = sessionExitReason(retained);
+        const capture = m.runtimeFailureCapture;
+        const runtimeFailureCapture = (capture === 'observed' && diagnostic?.source === 'godotjs') ||
+          (capture === 'settled_empty' && reason === 'clean-exit' && !reported) ? capture : undefined;
+        this.finish(s,{...s.identity,reason,...(retained.nativeExit?{code:retained.nativeExit.code}:{}),...(m.detail?{detail:m.detail}:{}),
+          engineOutcome:Object.freeze({...outcome}),hostCleanup:Object.freeze({...cleanup}),sessionFacts:retained,...(reported?{diagnostic:reported}:{}),
+          ...(runtimeFailureCapture ? {runtimeFailureCapture} : {})});
       }
     };
     s.port.start();

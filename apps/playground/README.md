@@ -62,15 +62,41 @@ During framework development, rename supports ordinary scripts and text `.tscn` 
 
 ## Agent tools
 
-Expand **API 调用** in the sidebar to browse fifteen Summer-style operations and seven GodotAI helpers. Each entry shows the API name and a one-line summary. Open an API to edit its JSON input and inspect results or PNGs alongside the live preview. Each API has its own tab, draft and result view, with shared call history. Requests use the same `window.godotPlayground` API (`schemaVersion: 1`) as external callers. Ctrl/Cmd+Enter executes the active API draft in the request editor and builds the project in the code editor.
+Expand **API 调用** in the sidebar to browse sixteen Summer-style operations and eight GodotAI helpers. Each entry shows the API name and a one-line summary. Open an API to edit its JSON input and inspect results or PNGs alongside the live preview. Each API has its own tab, draft and result view, with shared call history. Requests use the same `window.godotPlayground` API (`schemaVersion: 1`) as external callers. Ctrl/Cmd+Enter executes the active API draft in the request editor and builds the project in the code editor.
 
-The console retains per-operation drafts and bounded in-memory history. Loading a preset or historical request never executes it. **更新目标 / 填入上下文** uses explicit project, run, node and method selections. PNGs are separate attachments and JSON results identify binary summaries. **打开独立示例** switches to the selected sample and ends the previous preview without automatically playing it. Lessons cover diagnostics and repair, position changes, exported gameplay properties, registered method calls, same-frame probes, physics-frame input and lifecycle events. [Console design](../../docs/design/playground-api-console.zh-CN.md)
+The console retains per-operation drafts and bounded in-memory history. Loading a preset or historical request never executes it. **更新目标 / 填入上下文** uses explicit project, run, node and method selections. PNGs are separate attachments and JSON results identify binary summaries. **打开独立示例** switches to the selected sample and ends the previous preview without automatically playing it. Lessons cover diagnostics and repair, startup recovery, position changes, exported gameplay properties, registered method calls, same-frame probes, physics-frame input and lifecycle events. [Console design](../../docs/design/playground-api-console.zh-CN.md)
 
 Open **API 调试** for the existing **自动验证** replays; these retain their independent assertions and cleanup. The adjacent **API 文档** opens reference examples. Manual console calls and replays share a UI gate, while the page's Stop action remains available. Cancelling a supported request or wait does not undo an effect already performed by the game.
 
 The runtime property workbench adds `describe_runtime_properties`, `read_runtime_properties`, `write_runtime_property` and `summer_call` to the same entry. The independent scripted sample exposes `health`, `move_step`, `can_move` and `display_name` using standard GodotJS export decorators. Its replay changes health and movement, checks actual values and PNGs, then restarts the same source to verify defaults return. Property access requires a matching Full/debug Worker Direct engine with `runtimeProperties: 1`; older write-capable templates continue to support the original position replay.
 
 `summer_call({op, input})` accepts selected Summer 4.9.2-style inputs and returns GodotAI typed results. It supports selected context, recorded diagnostics, main play/stop/state, lifecycle events, runtime tree, native node inspection, property writes, registered method calls, game screenshots, game probes and `engine.game_input` frame scripts. Script properties use explicit typed read operations. `engine.inspect_runtime_node` uses the native observation path. Game screenshots require an explicit `target: 'game'`. [Input Script contract](#input-script) · [Summer adapter and runtime property contracts](../../docs/design/runtime-properties-and-summer-api-v2.zh-CN.md)
+
+### Runtime errors and recovery
+
+```js
+await window.godotPlayground.summer_call({
+  op: 'engine.get_debugger_errors',
+  input: {max_errors: 50, include_stack: true},
+});
+```
+
+The query follows the latest attempt for the captured editor revision. An `observed` reply includes the first fatal report captured by the runtime binding, the build attempt ID and source hash, and the run ID. `pending` means the attempt or run is awaiting settlement. `no_session` describes the attempt within the retained history. `unavailable` covers expired records and exits without confirmed capture. `no_reported_error` requires a settled capture and a clean host exit. Use `get_run({runId})` for the full exit receipt and for historical runs. The exit can carry `runtimeFailureCapture: 'observed'` alongside its diagnostic or `'settled_empty'` after a clean run. Stack text is opt-in and may refer to generated JavaScript.
+
+On a matching Full/debug Dedicated Worker Direct preview in Chromium, open the independent example from `engine.get_debugger_errors`. The script initially passes the type check and fails during startup. Run the example, wait for it to exit, and read the debugger error. Change `startupBroken` to `false` in `/src/start.ts`, then run it again. The two probes around four physics steps report x=64 and x=128. After a clean Stop and restart, the first probe returns to x=64.
+
+Use a single candidate for the Playground walkthrough and the packed SDK round trip. Set `PLAYGROUND_TEST_DIRECTORY` to the candidate, and `PLAYGROUND_ACCEPTANCE_CONTEXT` to the `site-start.json` created by `seal-site-acceptance --begin`. From the repository root, use separate report directories outside the site.
+
+```sh
+PLAYGROUND_RUNTIME_RECOVERY_REPORT=/path/to/recovery/report.json \
+  node apps/playground/scripts/browser-runtime-recovery-test.mjs
+node apps/playground/scripts/verify-runtime-recovery.mjs \
+  /path/to/recovery/report.json "$PLAYGROUND_ACCEPTANCE_CONTEXT"
+PLAYGROUND_SDK_ROUNDTRIP_REPORT=/path/to/sdk-roundtrip/report.json \
+  node apps/playground/scripts/browser-sdk-roundtrip-test.mjs
+```
+
+The SDK test verifies the typed failure receipt, guarded repair, same-path PNG replacement and fresh Schema 4 import. It also imports the same exported JSON in Playground. Both reports retain actual PNGs and identities. [Runtime recovery and SDK contract](../../docs/design/summer-runtime-recovery-and-sdk-roundtrip.zh-CN.md)
 
 On a Full Engine debug Worker Direct preview with `runtimeProperties: 1` and `runtimeCall: 1`, open **打开独立示例** from `engine.runtime_call` and follow **Summer：调用玩法方法** under **手工教学流程**. The sample registers `take_damage` on `/root/Main/Player` with `@bind.runtimeMethod({args: ['int'], returns: 'int'})`. Each step opens its API tab and loads a draft. When a step asks you to fill parameters from an earlier call, select the source in shared history and fill the current operation. Check the draft and then execute it. Read `health` and capture the game before and after `take_damage(25)` to verify `100 → 75`. Wait for the original run to exit. Start the same source and discover the player again to verify `100` and a full health bar in the new run.
 
