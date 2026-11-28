@@ -1,5 +1,6 @@
 import type {LifecycleQuery, WaitLifecycleEvents} from './lifecycle-events.ts';
 import type {FacadeReply, SelectedRuntimeMethod, SummerMethodBackend} from './summer-adapter';
+import {SUMMER_OPERATION_SPECS, type SummerOperation} from './summer-operation-spec.ts';
 import type {
   createDebugRecorder, DebugBuild, DebugCheck, DebugRun, DebugContext, DebugExit, ReadRunEventsOptions,
 } from './debug-api';
@@ -41,6 +42,16 @@ type Capability = 'available' | 'not_ready' | 'unsupported';
 export interface ProjectContextData extends DebugContext {
   capabilities: {check: Capability; play: Capability; wait_for_event: 'available'; stop: Capability};
 }
+export interface SummerProjectContextData extends ProjectContextData {
+  capabilityDetails?: {
+    operations: SummerOperation[];
+    pendingAttemptId: string | null;
+    run: null | Pick<DebugRun, 'runId' | 'projectId' | 'revision' | 'state'> & {
+      releaseId: string;
+      capabilities: ReturnType<typeof runtimeCapabilities>;
+    };
+  };
+}
 export type StopResult = ToolError | {ok: true; result:
   {status: 'stopping'; runId: string} | {status: 'exited'; runId: string; exit: DebugExit}};
 type Observation = Pick<WorkerPreviewRunner, 'observationState' | 'getRuntimeTree' | 'inspectRuntimeNode'>;
@@ -78,6 +89,18 @@ const MAX_WAITERS = 16;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_TIMEOUT_MS = 60_000;
 const readAborted = Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'aborted')!.get!;
+
+function runtimeCapabilities(actions: Actions, runId: string) {
+  return {
+    interaction: actions.interaction?.()?.interactionState(runId) ?? {supported: false, ready: false},
+    observation: actions.observation?.()?.observationState(runId) ?? {supported: false, ready: false},
+    runtimeWrite: actions.runtimeWrite?.()?.runtimeWriteState(runId) ?? {supported: false, ready: false},
+    runtimeProperties: actions.runtimeProperties?.()?.runtimePropertiesState(runId) ?? {supported: false, ready: false},
+    runtimeCall: actions.runtimeCall?.()?.runtimeCallState(runId) ?? {supported: false, ready: false},
+    gameProbe: actions.gameProbe?.()?.gameProbeState(runId) ?? {supported: false, ready: false},
+    inputScript: actions.inputScript?.()?.inputScriptState(runId) ?? {supported: false, ready: false},
+  };
+}
 
 function projectDiagnosticRun(run: DebugRun): Extract<SummerDiagnosticsData['run'], {availability: 'retained'}> {
   const {runId, revision, buildKey, generation, documentId, workerId, runConfigurationHash, state, attemptId} = run;
@@ -184,6 +207,20 @@ export function createPlaygroundApi(recorder: Recorder, actions: Actions) {
       context.preview.status === 'available' ? 'available' :
       context.preview.status === 'unsupported' ? 'unsupported' : 'not_ready';
     return ok({...context, capabilities: {check, play, wait_for_event: 'available' as const, stop: context.activeRunId ? 'available' as const : play}});
+  }
+
+  function getSummerProjectContext(includeCapabilities: boolean, pendingAttemptId: string | null): {ok: true; result: SummerProjectContextData} {
+    const context = getProjectContext();
+    if (!includeCapabilities) return context;
+    const {activeRunId} = context.result;
+    const observed = activeRunId ? debug.getRun(activeRunId) : undefined;
+    const run = observed?.ok ? observed.result : null;
+    return ok({...context.result, capabilityDetails: {
+      operations: Object.keys(SUMMER_OPERATION_SPECS) as SummerOperation[],
+      pendingAttemptId,
+      run: run ? {runId: run.runId, projectId: run.projectId, revision: run.revision, state: run.state,
+        releaseId: run.release.releaseId, capabilities: runtimeCapabilities(actions, run.runId)} : null,
+    }});
   }
 
   function admit(input: ProjectInput, action: 'check' | 'play') {
@@ -466,16 +503,7 @@ export function createPlaygroundApi(recorder: Recorder, actions: Actions) {
     get_run: tool('get_run', (input: {runId: string}) => {
       const run = debug.getRun(input?.runId);
       if (!run.ok) return run;
-      const {runId} = run.result;
-      return ok({...run.result,
-        interaction: actions.interaction?.()?.interactionState(runId) ?? {supported: false, ready: false},
-        observation: actions.observation?.()?.observationState(runId) ?? {supported: false, ready: false},
-        runtimeWrite: actions.runtimeWrite?.()?.runtimeWriteState(runId) ?? {supported: false, ready: false},
-        runtimeProperties: actions.runtimeProperties?.()?.runtimePropertiesState(runId) ?? {supported: false, ready: false},
-        runtimeCall: actions.runtimeCall?.()?.runtimeCallState(runId) ?? {supported: false, ready: false},
-        gameProbe: actions.gameProbe?.()?.gameProbeState(runId) ?? {supported: false, ready: false},
-        inputScript: actions.inputScript?.()?.inputScriptState(runId) ?? {supported: false, ready: false},
-      });
+      return ok({...run.result, ...runtimeCapabilities(actions, run.result.runId)});
     }),
     read_run_events: tool('read_run_events', (input: {runId: string} & ReadRunEventsOptions) => {
       const {runId, ...options} = input ?? {};
@@ -513,7 +541,7 @@ export function createPlaygroundApi(recorder: Recorder, actions: Actions) {
   });
 
   return {
-    api, methodBackend, summerCall, getSummerDiagnostics, getScriptErrors,
+    api, methodBackend, summerCall, getSummerProjectContext, getSummerDiagnostics, getScriptErrors,
     subscribe(observer: (call: PlaygroundApiCall) => void) {
       observers.add(observer);
       return () => { observers.delete(observer); };

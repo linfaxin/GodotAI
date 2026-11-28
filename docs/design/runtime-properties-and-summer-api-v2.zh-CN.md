@@ -289,7 +289,7 @@ requestDelivery 和 cancelDelivery 分别保存 owner ID/dataSequence。匹配�
 
 | 操作 | 实际接受的 input/default | 明确拒绝或语义差异 |
 | --- | --- | --- |
-| engine.get_project_context | 空对象 | include、settingsPrefix/settingsPrefixes 不支持；payload 为 GodotAI context |
+| engine.get_project_context | 空对象或 `include: ["capabilities"]` | payload 为 GodotAI context；显式请求 capabilities 时附加 `capabilityDetails`；scene_tree、settings 和设置筛选不支持 |
 | engine.play | 仅 instance 可省略或 main | scene、mode、focus、deterministic、seed、fixed_fps、time_scale、speed、players、spectators、queue 均不支持，包括看似默认值；执行采用下述本地语义 |
 | engine.stop | instance 可省略或 main | 非主实例拒绝；同时捕获待启动意图与主 run |
 | engine.is_running | 空对象 | instance 是未知参数；仅真实 state=running 时 playing=true，pending 为 false |

@@ -152,6 +152,40 @@ export function verifyLifecycleCalls(report) {
   const first = verified[0].event.data, second = verified[2].event.data;
   if (report.repair || report.calls.some(call => call.request.op === 'engine.get_diagnostics'))
     verifyDiagnosticRepair(report, first);
+  const contextOp = 'engine.get_project_context';
+  const contextCalls = report.calls.filter(({request: {op, input}}) =>
+    op === contextOp && Array.isArray(input?.include) && input.include.includes('capabilities'));
+  assert.equal(contextCalls.length, 3, 'Expected three capability query receipts');
+  const [beforePlay, running, stopped] = contextCalls.map(({callId}) => {
+    const {index, data} = read(callId, contextOp);
+    assert.equal(data.projectId, first.projectId);
+    assert(data.capabilityDetails, 'Missing capability details');
+    return {index, activeRunId: data.activeRunId, details: data.capabilityDetails};
+  });
+  const firstPlayIndex = report.calls.findIndex(call => call.request.op === 'engine.play');
+  assert(beforePlay.index < firstPlayIndex, 'Expected a capability query before the first Play');
+  assert(stopped.index > verified[1].waitIndex && stopped.index < verified[2].cursorIndex,
+    'Expected a capability query after exit');
+  for (const query of [beforePlay, stopped]) {
+    assert.equal(query.activeRunId, null);
+    assert.equal(query.details.run, null);
+  }
+  const {operations} = beforePlay.details;
+  assert(operations.includes('engine.game_probe') && operations.includes('engine.game_input'));
+  assert.deepEqual(running.details.operations, operations);
+  assert.deepEqual(stopped.details.operations, operations);
+  const {run, pendingAttemptId} = running.details;
+  assert.equal(pendingAttemptId, null);
+  assert.equal(running.activeRunId, first.run.runId);
+  assert.equal(run?.runId, first.run.runId);
+  assert.equal(run.projectId, first.projectId);
+  assert.equal(run.revision, first.editorRevision);
+  assert.equal(run.releaseId, first.releaseId);
+  assert.equal(run.state, 'running');
+  for (const capability of [run.capabilities.gameProbe, run.capabilities.inputScript]) {
+    assert.equal(capability.supported, true);
+    assert.equal(capability.ready, true);
+  }
   assert.equal(first.sourceHash, second.sourceHash);
   for (const field of ['runId', 'documentId', 'workerId']) assert.notEqual(first.run[field], second.run[field]);
   assert.deepEqual(report.pngs.map(sample => sample.file), ['before.png', 'after.png', 'restart.png']);
@@ -177,6 +211,8 @@ export function verifyLifecycleCalls(report) {
     assert(probe.index > verified[startIndex].waitIndex && probe.index < verified[startIndex + 1].cursorIndex);
     return {probe, player};
   });
+  assert(running.index > verified[0].waitIndex && running.index < before.probe.index,
+    'Expected a capability query after startup and before the first probe');
   const motion = read(report.inputCallId, 'engine.game_input');
   assert.deepEqual({clock: 'frame', wait: true, ...motion.request.input}, inputCases.frameOffsets);
   assert.equal(motion.data.ok, true);

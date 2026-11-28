@@ -16,7 +16,7 @@ import {sameWorkerRun, type WorkerRunIdentity} from '@godot-js/engine/browser/de
 import {canonicalPath} from '@godot-js/project-tools/paths';
 import {LIFECYCLE_KINDS, type LifecycleKind, type LifecycleQuery, type RecentLifecycleEvents,
   type WaitLifecycleEvents} from './lifecycle-events.ts';
-import type {ProjectContextData, StopResult, SummerDiagnosticsData, SummerScriptErrorsData} from './playground-api';
+import type {SummerProjectContextData, StopResult, SummerDiagnosticsData, SummerScriptErrorsData} from './playground-api';
 import {SUMMER_OPERATION_SPECS as rules, SUMMER_TREE_LIMITS, SUMMER_COMPATIBILITY, type SummerOperation} from './summer-operation-spec.ts';
 export {SUMMER_COMPATIBILITY} from './summer-operation-spec.ts';
 
@@ -53,7 +53,7 @@ export interface SummerBackend {
   recentLifecycleEvents?(query: LifecycleQuery): BackendReply<RecentLifecycleEvents>;
   waitLifecycleEvents?(query: LifecycleQuery, timeoutMs: number, signal?: AbortSignal): Promise<BackendReply<WaitLifecycleEvents>>;
   captureContext(): SummerContext;
-  getProjectContext(): BackendReply<ProjectContextData>;
+  getProjectContext(includeCapabilities: boolean): BackendReply<SummerProjectContextData>;
   getDiagnostics?(): BackendReply<SummerDiagnosticsData>;
   getScriptErrors?(path: string): Promise<BackendReply<SummerScriptErrorsData>>;
   play(input: {projectId: string; expectedEditorRevision: number}): BackendReply<{attemptId: string}>;
@@ -79,7 +79,7 @@ export type StopData = {accepted: true; cancelledAttemptId: string | null; captu
   runs: {runId: string; receipt: StopResult}[]; no_target: boolean};
 export type CallData = {route: 'runtime_call'; payload: {ok: true; receipt: Extract<MethodCallResult, {ok: true}>['receipt']; result: Extract<MethodOutcome, {outcome: 'returned'}>}};
 export type SummerData = Extract<GameProbeResult, {ok: true}>['result'] | Extract<InputScriptResult, {ok: true}> |
-  CallData | ProjectContextData | RuntimeTreeSnapshot | RuntimeNodeSnapshot | GameScreenshot | WriteData | PlayData | RunningData | StopData |
+  CallData | SummerProjectContextData | RuntimeTreeSnapshot | RuntimeNodeSnapshot | GameScreenshot | WriteData | PlayData | RunningData | StopData |
   RecentLifecycleEvents | WaitLifecycleEvents | SummerDiagnosticsData | SummerScriptErrorsData;
 export type FacadeSuccess<T = SummerData> = {ok: true; status: 'done'; result: {data: T; godotai: {compatibility: typeof SUMMER_COMPATIBILITY}}};
 export type FacadeFailure = {ok: false; error: {code: FacadeErrorCode; message: string; source?: AccessError['source']; retry: 'no';
@@ -169,6 +169,14 @@ function validate(raw: unknown): Validated | FacadeFailure {
     const unknownKeys = Object.keys(input).filter(key => !allowed.includes(key) && !unsupported.includes(key));
     if (unknownKeys.length) return fail('invalid_input', '未知操作参数', {unknownKeys}, 'sdk');
     for (const key of unsupported) if (Object.hasOwn(input, key)) return localError('unsupported', key, '当前不支持该参数');
+    if (op === 'engine.get_project_context') {
+      const include = Object.hasOwn(input, 'include') ? snapshotRuntimePropertyData(input.include) : [];
+      if (!Array.isArray(include) || include.length > 3 ||
+          include.some(item => item !== 'capabilities' && item !== 'scene_tree' && item !== 'settings'))
+        return localError('invalid_input', 'include');
+      if (include.some(item => item !== 'capabilities')) return localError('unsupported', 'include', '当前仅支持 capabilities');
+      return {op, input: {includeCapabilities: include.length > 0}};
+    }
     if (op === 'engine.get_diagnostics' && Object.hasOwn(input, 'includeAll')) {
       if (typeof input.includeAll !== 'boolean') return localError('invalid_input', 'includeAll');
       if (input.includeAll) return localError('unsupported', 'includeAll', '当前只读取有界诊断记录');
@@ -397,11 +405,11 @@ export function createSummerDispatcher(backend: SummerBackend) {
       return response === undefined ? localError('unsupported', 'events') :
         response.ok ? done(response.result) : backendFailure(response);
     }
-    const context = {...backend.captureContext()};
     if (op === 'engine.get_project_context') {
-      const response = backend.getProjectContext();
+      const response = backend.getProjectContext(input.includeCapabilities === true);
       return response.ok ? done(response.result) : backendFailure(response);
     }
+    const context = {...backend.captureContext()};
     if (op === 'engine.play') {
       if (!context.projectId) return localError('not_ready', 'project');
       const response = backend.play({projectId: context.projectId, expectedEditorRevision: context.editorRevision});
