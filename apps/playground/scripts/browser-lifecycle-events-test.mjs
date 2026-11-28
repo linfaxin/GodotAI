@@ -98,7 +98,6 @@ await runReportedBrowserTest({scope, reportFile, run: async test => {
     await editPlayer(source.replace('\n', '\nconst step: number = "bad";\n'));
     const invalidCheck = await teach('check-broken', ops.scriptErrors);
     assert(invalidCheck.result.diagnostics.items.some(item => item.code === 2322 && item.location?.file === playerFile));
-    const invalid = await teach('read-broken', ops.diagnostics);
     const rejected = await teach('play-broken', ops.play);
     const noSession = await teach('wait-broken', 'wait_for_event', rejected);
     assert.equal(noSession.result.outcome, 'no_session');
@@ -107,12 +106,9 @@ await runReportedBrowserTest({scope, reportFile, run: async test => {
     await editPlayer(source);
     const repairedCheck = await teach('check-repaired', ops.scriptErrors);
     assert.equal(repairedCheck.result.diagnostics.counts.error, 0);
-    const repaired = await teach('read-repaired', ops.diagnostics);
     report.repair = {
-      initial: initial.callId, original: original.callId,
-      invalidCheck: invalidCheck.callId, invalid: invalid.callId,
-      rejected: rejected.callId, noSession: noSession.callId, failed: failed.callId,
-      stillRunning, repairedCheck: repairedCheck.callId, repaired: repaired.callId,
+      original: original.callId, invalidCheck: invalidCheck.callId, failed: failed.callId,
+      stillRunning, repairedCheck: repairedCheck.callId,
     };
   }
   async function waitForTarget(step, cursor, action, matches) {

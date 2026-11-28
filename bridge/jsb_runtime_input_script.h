@@ -7,7 +7,9 @@
 #define GODOTJS_INPUT_SCRIPT_ABI 1
 #include <cstdint>
 
+class InputEventKey;
 class StringName;
+template <typename T> class Ref;
 
 namespace jsb::input_script {
 char *buffer();
@@ -19,6 +21,7 @@ void end_iteration(bool exiting);
 void before_physics();
 void after_physics();
 bool pressed(const StringName &action);
+Ref<InputEventKey> take_over_key(const InputEventKey &event);
 void reset();
 void release(const StringName &action);
 } // namespace jsb::input_script

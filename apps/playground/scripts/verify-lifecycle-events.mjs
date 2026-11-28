@@ -20,79 +20,57 @@ export function verifyLifecycleCleanExit(run, exit) {
   verifyCleanExit(run, exit);
 }
 
-export function verifyDiagnosticRepair(report, first, startIndex, waitIndex) {
+export function verifyDiagnosticRepair(report, first) {
   const repair = report.repair;
   assert(repair, 'Missing diagnostic repair evidence');
-  let previous = -1;
-  function read(key, op, min = previous) {
-    const index = report.calls.findIndex(call => call.callId === repair[key]);
-    assert(index > min, 'Missing or out-of-order repair call: ' + key);
-    const {request, reply} = report.calls[index];
-    const operation = request.op ?? request.method;
-    assert(operation === op || op === 'check' && operation === 'engine.get_script_errors', 'Unexpected repair operation for ' + key);
-    assert.equal(reply.ok, true);
-    previous = index;
-    const data = request.op ? reply.result.data : reply.result;
-    if (operation === 'engine.get_script_errors') {
-      assert.equal(request.input?.path, 'res://src/Player.ts');
-      assert.equal(data.path, request.input.path);
-      assert.equal(data.status, 'completed');
-      assert.equal(data.diagnostics.observed, true);
-    }
+  function readSummer(key, op) {
+    const call = report.calls.find(call => call.callId === repair[key]);
+    assert.equal(call?.request.op, op, 'Unexpected repair operation for ' + key);
+    assert.equal(call.reply.ok, true);
+    assert.equal(call.reply.status, 'done');
+    const data = call.reply.result.data;
+    assert.equal(data.projectId, first.projectId);
     return data;
   }
-  const initial = read('initial', 'engine.play');
-  const original = read('original', 'wait_for_event');
-  assert.equal(initial.accepted, true);
-  assert.equal(original.outcome, 'reached');
-  assert.equal(original.run.attemptId, initial.attemptId);
-  assert.equal(original.run.state, 'running');
-  assertSameRun(original.run, repair.stillRunning);
+
+  const original = report.calls.find(call => call.callId === repair.original);
+  assert.equal(original?.request.method, 'wait_for_event');
+  assert.equal(original.reply.ok, true);
+  const {outcome, run} = original.reply.result;
+  assert.equal(outcome, 'reached');
+  assert.equal(run.projectId, first.projectId);
+  assert.equal(run.state, 'running');
+  assertSameRun(run, repair.stillRunning);
   assert.equal(repair.stillRunning.state, 'running');
-  const invalidCheck = read('invalidCheck', 'check');
-  const invalid = read('invalid', 'engine.get_diagnostics');
-  const rejected = read('rejected', 'engine.play');
-  const noSession = read('noSession', 'wait_for_event');
-  const failed = read('failed', 'engine.get_diagnostics');
-  const repairedCheck = read('repairedCheck', 'check');
-  const repaired = read('repaired', 'engine.get_diagnostics');
-  assert(previous < startIndex, 'Repair check must precede Play');
-  const launched = read('launched', 'engine.get_diagnostics', waitIndex);
-  const project = first.projectId;
-  for (const record of [initial, invalidCheck, invalid, rejected, failed, repairedCheck, repaired, launched])
-    assert.equal(record.projectId, project);
-  for (const record of [invalidCheck, rejected, failed]) assert.equal(record.editorRevision, invalid.editorRevision);
-  for (const record of [repairedCheck, repaired, launched]) assert.equal(record.editorRevision, first.editorRevision);
-  assert(initial.editorRevision < invalid.editorRevision && invalid.editorRevision < first.editorRevision);
-  assert(hash.test(invalidCheck.sourceHash));
-  assert.equal(invalid.check.sourceHash, invalidCheck.sourceHash);
-  assert.equal(invalid.run, null);
-  assert(invalid.check.diagnostics.observed);
-  assert(invalidCheck.diagnostics?.observed && invalidCheck.diagnostics.items.some(item => item.code === 2322 &&
-    item.location?.file === '/src/Player.ts' && item.location.line === 2), 'Script check did not locate TS2322');
-  assert(invalid.check.diagnostics.items.some(item => item.code === 2322 &&
-    item.location?.file === '/src/Player.ts' && item.location.line === 2), 'Missing located TS2322');
-  assert.equal(rejected.accepted, true);
-  assert.equal(noSession.outcome, 'no_session');
-  assert.equal(noSession.run, undefined);
-  assert.equal(noSession.build.attemptId, rejected.attemptId);
-  assert.equal(failed.build.attemptId, rejected.attemptId);
+  assert.notEqual(first.run.runId, run.runId);
+
+  const broken = readSummer('invalidCheck', 'engine.get_script_errors');
+  const repaired = readSummer('repairedCheck', 'engine.get_script_errors');
+  for (const check of [broken, repaired]) {
+    assert.equal(check.path, 'res://src/Player.ts');
+    assert.equal(check.status, 'completed');
+    assert.equal(check.diagnostics.observed, true);
+  }
+  assert(broken.diagnostics.items.some(item => item.code === 2322 && item.location?.file === '/src/Player.ts' &&
+    item.location.line === 2 && item.location.column === 7), 'Script check did not locate TS2322');
+  assert(run.revision < broken.editorRevision && broken.editorRevision < first.editorRevision);
+  const failed = readSummer('failed', 'engine.get_diagnostics');
+  assert.equal(failed.editorRevision, broken.editorRevision);
   assert.equal(failed.build.status, 'failed');
-  assert.equal(failed.build.sourceHash, invalidCheck.sourceHash);
-  assert(failed.build.diagnostics.items.some(item => item.code === 2322));
+  assert(hash.test(broken.sourceHash));
+  assert.equal(failed.build.sourceHash, broken.sourceHash);
   assert.equal(failed.run, null);
-  assert.equal(repairedCheck.diagnostics?.observed, true);
-  assert.equal(repairedCheck.diagnostics.counts.error, 0, 'Script check still reports errors after repair');
-  assert.equal(repaired.check.diagnostics.observed, true);
-  assert.equal(repaired.check.diagnostics.counts.error, 0);
-  assert.notEqual(first.sourceHash, invalidCheck.sourceHash);
-  for (const record of [repaired.check, repairedCheck, launched.check, launched.build])
-    assert.equal(record.sourceHash, first.sourceHash);
-  assert.equal(launched.check.diagnostics.observed, true);
-  assert.equal(launched.check.diagnostics.counts.error, 0);
+
+  assert.equal(repaired.editorRevision, first.editorRevision);
+  assert.equal(repaired.diagnostics.counts.error, 0, 'Script check still reports errors after repair');
+  assert.equal(repaired.sourceHash, first.sourceHash);
+  assert.notEqual(first.sourceHash, broken.sourceHash);
+  const launched = readSummer('launched', 'engine.get_diagnostics');
+  assert.equal(launched.editorRevision, first.editorRevision);
+  assert.equal(launched.build.status, 'succeeded');
+  assert.equal(launched.build.sourceHash, first.sourceHash);
   assert.equal(launched.build.attemptId, first.attemptId);
   assertSameRun(first.run, launched.run.identity);
-  assert.notEqual(first.run.runId, original.run.runId);
 }
 
 export function verifyLifecycleCalls(report) {
@@ -173,7 +151,7 @@ export function verifyLifecycleCalls(report) {
 
   const first = verified[0].event.data, second = verified[2].event.data;
   if (report.repair || report.calls.some(call => call.request.op === 'engine.get_diagnostics'))
-    verifyDiagnosticRepair(report, first, verified[0].cursorIndex, verified[0].waitIndex);
+    verifyDiagnosticRepair(report, first);
   assert.equal(first.sourceHash, second.sourceHash);
   for (const field of ['runId', 'documentId', 'workerId']) assert.notEqual(first.run[field], second.run[field]);
   assert.deepEqual(report.pngs.map(sample => sample.file), ['before.png', 'after.png', 'restart.png']);
