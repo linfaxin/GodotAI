@@ -1,6 +1,7 @@
 import type {PlaygroundApi} from '../playground-api';
 import {summerGameProbeInputError} from '../summer-adapter.ts';
-import {DEFAULT_CONSOLE_OPERATION, getConsoleOperation, MAX_CONSOLE_READ_PROPERTIES} from './api-console-catalog.ts';
+import {DEFAULT_CONSOLE_OPERATION, getConsoleOperation, MAX_CONSOLE_READ_PROPERTIES, type ConsoleOperation} from './api-console-catalog.ts';
+import {runRuntimeRecoveryReplay} from './runtime-recovery-replay.ts';
 import type {
   ConsoleAnchor, ConsoleAttachment, ConsoleCall, ConsoleEnvironment, ConsoleFillSelection,
   ConsoleGate, ConsoleHooks, ConsoleOwner, ConsoleResultFacts, ConsoleSession, ConsoleSnapshot, ConsoleToken,
@@ -250,6 +251,8 @@ export function createApiConsoleSession(api: PlaygroundApi, hooks: ConsoleHooks,
   const listeners=new Set<()=>void>();
   const clientErrors=new Map<string,NonNullable<ConsoleSnapshot['clientError']>>();
   let pending:{callId:string;controller?:AbortController}|undefined;
+  let recovery: ConsoleSnapshot['recovery'];
+  let recoveryController: AbortController | undefined;
   function environment():ConsoleEnvironment{return copy(hooks.readContext());}
   function emit(){if(!disposed)notify(listeners);}
   function error(kind:NonNullable<ConsoleSnapshot['clientError']>['kind'],message:string,id=operationId){clientErrors.set(id,{kind,message});emit();}
@@ -309,11 +312,33 @@ export function createApiConsoleSession(api: PlaygroundApi, hooks: ConsoleHooks,
     }
     return true;
   }
+  async function perform(operation: ConsoleOperation, input: unknown, submitted: ConsoleCall['draft'],
+    anchor: ConsoleAnchor, signal?: AbortSignal, manualController?: AbortController) {
+    const call:ConsoleCall={callId:'console-'+ ++sequence,draft:submitted,submittedAt:Date.now(),phase:'pending'};
+    while(history.length>=MAX_HISTORY){const index=history.findIndex(item=>item.phase!=='pending');if(index<0)break;removeRow(index);}
+    history.push(call);pending={callId:call.callId,controller:manualController};
+    try {
+      // Submit in the same turn as the target check, before notifying observers.
+      const bound=submitted.selectedMethod;
+      const returned=bound?hooks.callSelectedMethod(input,signal,bound):operation.invoke(api,input,signal);emit();
+      const reply=await returned;
+      if(!disposed){
+        const projected=projection(reply);call.phase='settled';call.settledAt=Date.now();call.summary=resultSummary(operation.id,reply,projected.truncated);
+        call.resultProjection=projected.text;if(projected.truncated)call.truncated=true;
+        call.resultFacts=resultFacts(call,input,reply,anchor);storeImage(call,reply);
+      }
+      return reply;
+    }catch(caught){
+      if(!disposed){call.phase='thrown';call.settledAt=Date.now();call.summary='调用异常；不代表未执行';
+        call.resultProjection=projection({exception:caught instanceof Error?caught.message:typeof caught==='string'?caught:'未知调用异常'}).text;}
+      throw caught;
+    }finally{pending=undefined;emit();}
+  }
   const unsubscribeContext=hooks.subscribeContext(emit),unsubscribeGate=gate.subscribe(emit);
   draft();
   return {
     snapshot(){const clientError=clientErrors.get(operationId);return {operationId,draft:copy(draft()),environment:environment(),owner:gate.owner(),history:copy(history),
-      ...(pending?{pendingCallId:pending.callId}:{}),cancellable:!!pending?.controller,...(clientError?{clientError:copy(clientError)}:{})};},
+      ...(pending?{pendingCallId:pending.callId}:{}),cancellable:!!pending?.controller,...(recovery?{recovery:copy(recovery)}:{}),...(clientError?{clientError:copy(clientError)}:{})};},
     subscribe(listener){listeners.add(listener);return()=>{listeners.delete(listener);};},
     selectOperation(id){if(disposed||!getConsoleOperation(id))return;operationId=id;draft();emit();},
     updateDraft(inputText){if(disposed)return;draft().inputText=inputText;clearError();emit();},
@@ -460,26 +485,43 @@ export function createApiConsoleSession(api: PlaygroundApi, hooks: ConsoleHooks,
       if(disposed)return;
       clearError();const input=parsed();if(clientErrors.has(operationId))return;
       const token=gate.acquire('manual');if(!token){error('missing_source','另一个调用或自动验证尚未结束');return;}
-      let call:ConsoleCall|undefined;
       try {
         const current=environment();if(!admissible(input,current))return;
         const selected=getConsoleOperation(operationId)!;
-        call={callId:'console-'+ ++sequence,draft:copy(draft()),submittedAt:Date.now(),phase:'pending'};
-        while(history.length>=MAX_HISTORY){const index=history.findIndex(item=>item.phase!=='pending');if(index<0)break;removeRow(index);}
-        history.push(call);
-        const controller=selected.acceptsSignal?new AbortController():undefined;pending={callId:call.callId,controller};
-        // Keep the last target check and API submission in the same synchronous turn.
-        const bound = call.draft.selectedMethod;
-        const returned=bound ? hooks.callSelectedMethod(input,controller?.signal,bound) : selected.invoke(api,input,controller?.signal);emit();
-        const reply=await returned;
-        if(disposed)return;
-        const projected=projection(reply);call.phase='settled';call.settledAt=Date.now();call.summary=resultSummary(call.draft.operationId,reply,projected.truncated);
-        call.resultProjection=projected.text;if(projected.truncated)call.truncated=true;
-        call.resultFacts=resultFacts(call,input,reply,current.anchor);storeImage(call,reply);
+        const controller=selected.acceptsSignal?new AbortController():undefined;
+        await perform(selected,input,copy(draft()),current.anchor,controller?.signal,controller);
+      }catch { /* The recorded call displays the exception. */ }
+      finally{gate.release(token);emit();}
+    },
+    async runRecovery(show){
+      if(disposed||!hooks.cancelLaunch||!environment().inputExampleAvailable)return;
+      const token=gate.acquire('recovery');if(!token)return;
+      const controller=new AbortController();recoveryController=controller;
+      const progress=(message:string)=>{recovery={phase:'running',message};emit();};
+      try{
+        progress('正在打开独立故障示例');
+        const projectId=await hooks.openExample('engine.get_debugger_errors');
+        if(!disposed&&environment().anchor.editorProjectId===projectId)show();
+        controller.signal.throwIfAborted();
+        await runRuntimeRecoveryReplay(api,{
+          invoke(id,input,signal){
+            const anchor=environment().anchor;
+            const operation=getConsoleOperation(id)!;
+            return perform(operation,input,{operationId:id,inputText:stringifyConsoleJson(input),anchor},anchor,
+              operation.acceptsSignal?signal:undefined);
+          },
+          cancelLaunch:hooks.cancelLaunch,progress,
+        },projectId,controller.signal);
+        recovery={phase:'passed',message:'恢复验证通过。玩家位置 64 → 128 → 64，两次试玩均正常退出并完成清理。'};
       }catch(caught){
-        if(!disposed&&call){call.phase='thrown';call.settledAt=Date.now();call.summary='调用异常；不代表未执行';
-          call.resultProjection=projection({exception:caught instanceof Error?caught.message:typeof caught==='string'?caught:'未知调用异常'}).text;}
-      }finally{if(pending?.callId===call?.callId)pending=undefined;gate.release(token);emit();}
+        recovery=controller.signal.aborted&&caught===controller.signal.reason
+          ? {phase:'cancelled',message:'演示已取消。已提交的编辑会保留。'}
+          : {phase:'failed',message:caught instanceof Error?caught.message:'恢复演示失败'};
+      }finally{recoveryController=undefined;gate.release(token);emit();}
+    },
+    cancelRecovery(){
+      if(!recoveryController)return false;
+      recoveryController.abort();return true;
     },
     cancel(){pending?.controller?.abort();},
     async openExample(){
@@ -491,6 +533,6 @@ export function createApiConsoleSession(api: PlaygroundApi, hooks: ConsoleHooks,
     hasCall(callId){return history.some(call=>call.callId===callId);},
     getAttachment(id){const attachment=attachments.get(id);return attachment?{blob:attachment.blob,metadata:copy(attachment.metadata)}:undefined;},
     clearSettled(){for(let index=history.length-1;index>=0;index--)if(history[index].phase!=='pending')removeRow(index);clearError();emit();},
-    dispose(){if(disposed)return;disposed=true;pending?.controller?.abort();unsubscribeContext();unsubscribeGate();listeners.clear();attachments.clear();history.length=0;drafts.clear();clientErrors.clear();},
+    dispose(){if(disposed)return;disposed=true;pending?.controller?.abort();recoveryController?.abort();unsubscribeContext();unsubscribeGate();listeners.clear();attachments.clear();history.length=0;drafts.clear();clientErrors.clear();},
   };
 }

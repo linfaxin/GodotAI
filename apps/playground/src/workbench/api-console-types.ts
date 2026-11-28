@@ -67,7 +67,7 @@ export interface ConsoleCall {
   attachmentReleased?: boolean;
 }
 export type ConsoleToken = symbol;
-export type ConsoleOwner = 'manual' | 'replay' | 'open-example';
+export type ConsoleOwner = 'manual' | 'replay' | 'open-example' | 'recovery';
 export interface ConsoleGate {
   acquire(owner: ConsoleOwner): ConsoleToken | undefined;
   release(token: ConsoleToken): void;
@@ -79,6 +79,7 @@ export interface ConsoleHooks {
   subscribeContext(listener: () => void): () => void;
   callSelectedMethod(input: unknown, signal: AbortSignal | undefined, selected: SelectedRuntimeMethod): Promise<FacadeReply>;
   openExample(operationId: string): Promise<string>;
+  cancelLaunch?(attemptId: string): void;
 }
 export interface ConsoleFillSelection {
   sourceCallId: string;
@@ -96,6 +97,7 @@ export interface ConsoleSnapshot {
   history: readonly ConsoleCall[];
   pendingCallId?: string;
   cancellable: boolean;
+  recovery?: {phase: 'running' | 'passed' | 'cancelled' | 'failed'; message: string};
   clientError?: {kind: 'json' | 'stale_target' | 'wrong_project' | 'missing_source'; message: string};
 }
 export interface ConsoleAttachment {blob: Blob; metadata: Omit<GameScreenshot, 'bytes'>}
@@ -110,6 +112,8 @@ export interface ConsoleSession {
   submit(): Promise<void>;
   cancel(): void;
   openExample(): Promise<void>;
+  runRecovery(show: () => void): Promise<void>;
+  cancelRecovery(): boolean;
   hasCall(callId: string): boolean;
   getAttachment(id: string): ConsoleAttachment | undefined;
   clearSettled(): void;

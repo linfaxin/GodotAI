@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createConsoleFixture,consoleEnvironment,consoleIdentity,consoleScreenshot,consoleNode} from './fixtures/api-console-fixture.ts';
-import {createConsoleGate} from '../src/workbench/api-console-session.ts';
+import {createApiConsoleSession, createConsoleGate} from '../src/workbench/api-console-session.ts';
 
 const copy=value=>structuredClone(value);
 const deferred=()=>{let resolve;const promise=new Promise(done=>{resolve=done;});return {promise,resolve};};
@@ -429,4 +429,47 @@ test('a display-truncated event result cannot advance the console cursor', async
   } finally {
     f.session.dispose();
   }
+});
+
+test('cancelling one-click recovery settles its accepted attempt before yielding the console', async () => {
+  const {api, hooks, gate, session: fixtureSession, setReply, setContext} = createConsoleFixture();
+  fixtureSession.dispose();
+  setContext({...consoleEnvironment, inputExampleAvailable: true,
+    anchor: {...consoleEnvironment.anchor, activeRunId: null}});
+  let latestBuildAttemptId = null;
+  api.get_project_context = () => ({ok: true, result: {
+    projectId: 'project-1', editorRevision: 7, activeRunId: null, latestBuildAttemptId,
+  }});
+  const starting = deferred(), dispatched = deferred(), cleanup = deferred(), settling = deferred(), cancelled = [];
+  setReply('summer_call', ({op}) => {
+    if (op === 'engine.get_project_context') return {ok: true, result: {data: {capabilities: {play: 'available'}}}};
+    assert.equal(op, 'engine.play');
+    latestBuildAttemptId = 'recovery-attempt';
+    dispatched.resolve();
+    return starting.promise;
+  });
+  setReply('wait_for_event', (input, signal) => {
+    assert.deepEqual(input, {attemptId: 'recovery-attempt', until: 'exited', timeoutMs: 10_000});
+    assert.equal(signal, undefined);
+    settling.resolve();
+    return cleanup.promise;
+  });
+  const session = createApiConsoleSession(api, {...hooks, cancelLaunch: id => cancelled.push(id)}, gate);
+  session.selectOperation('engine.get_debugger_errors');
+  session.updateDraft('{"include_stack":false}');
+  const recovery = session.runRecovery(() => {});
+  // Play has been dispatched but its acceptance has not yet returned.
+  await dispatched.promise;
+  assert.equal(session.cancelRecovery(), true);
+  assert.equal(gate.owner(), 'recovery');
+  starting.resolve({ok: true, result: {data: {attemptId: 'recovery-attempt', projectId: 'project-1', editorRevision: 7}}});
+  await settling.promise;
+  assert.deepEqual(cancelled, ['recovery-attempt']);
+  assert.equal(gate.owner(), 'recovery');
+  cleanup.resolve({ok: true, result: {outcome: 'no_session'}});
+  await recovery;
+  assert.equal(session.snapshot().recovery.phase, 'cancelled');
+  assert.equal(session.snapshot().draft.inputText, '{"include_stack":false}');
+  assert.equal(gate.owner(), null);
+  session.dispose();
 });

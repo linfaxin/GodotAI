@@ -123,3 +123,11 @@ node apps/playground/scripts/seal-site-acceptance.mjs \
 - 隔离 SDK 验收覆盖故障、修复、同路径 PNG 替换、空工作区重建，以及同一份 JSON 在 Playground 的导入。核对了 9 张原始 Probe PNG 和项目 JSON 的哈希。原运行在缺源和缺生产器两项负例后仍能响应。
 
 本地站点和证据位于 `work/summer-runtime-recovery/merge-final/`。其中 `site/` 是可运行站点，`context/site-start.json` 是验收上下文。`playground/`、`sdk/`、`diagnostics/` 和 `lifecycle/` 保存报告。可导入项目为 `sdk/sdk-roundtrip-project.json`。在站点 API 调用台打开 `engine.get_debugger_errors` 的独立示例，按「Summer：定位启动错误并恢复试玩」执行。
+
+## 一键故障恢复演示验收
+
+2026 年 11 月 28 日完成一键演示。通过 **API 调用 → `engine.get_debugger_errors` → 一键演示故障恢复** 启动独立示例。演示记录启动异常，使用读文件回执中的 SHA-256、项目 ID 和编辑版本提交修复，并核对脚本检查和随后构建的 `sourceHash`。取消时只清理演示持有的启动尝试，已提交的编辑保留在示例中。
+
+在 Full/debug Dedicated Worker Direct 候选 `208169c3185fde9c5d7223772f7b76b3c36671a88231283216ea2b8067913cc7` 上，Chromium `154.0.8037.57` 通过手工教程和 `one-click-recovery` 两个实机用例。三张原始 PNG 的像素核验确认玩家位置为 `64 → 128 → 64`，两次试玩均取得原生零退出码和宿主清理回执。Playground 491 项测试和类型检查通过。
+
+复验沿用现有恢复测试。报告的 `oneClickRecovery` 字段记录修复版源码哈希、退出运行 ID 和三张原始 PNG 的文件名、位置及 SHA-256。 [复验命令](../../apps/playground/README.md#runtime-errors-and-recovery) · [浏览器用例](../../apps/playground/scripts/browser-runtime-recovery-test.mjs)

@@ -1,12 +1,16 @@
 # 引擎下一阶段改造建议
 
-状态：待评审建议。原分析日期：2026 年 11 月 17 日（`a518dab`）。实施进展更新至 2026 年 11 月 27 日（`654f685`）。
+状态：待评审建议。原分析日期：2026 年 11 月 17 日（`a518dab`）。实施进展更新至 2026 年 11 月 28 日。
 
 已确认的产品定位与引擎平台边界见[引擎核心目标与平台边界](engine-goals.zh-CN.md)。本阶段建议交付一条可由独立平台调用的项目修改、构建、浏览器运行、观察与交互验证链路。
 
 Playground 接入 AI 助手的前置方案已完成选定范围的验收。环境、检查构建、产物衔接和运行事实已落地。Playground 随后验收了基于 Summer 4.9.2 的物理帧输入、同帧采样和生命周期回放。 [引擎最小合同与核心回归 V4](design/engine-minimum-contracts-v4.zh-CN.md) · [交付与接入记录](engine-minimum-contracts-delivery.zh-CN.md) · [Playground 回放验收](../apps/playground/README.md#lifecycle-events)
 
 Playground 已接入 `engine.get_diagnostics({})`，按编辑版本读取现有检查、构建和关联运行的退出诊断。真实 2D/debug Worker 已验收类型错误定位、失败构建与旧运行隔离、修复后启动和启动异常诊断。Full/debug Worker Direct 串联验收从修复版继续试玩，离线检查确认同帧画面位置为 `64 → 128 → 64`，两次试玩运行均正常退出并完成宿主清理。 [诊断与修复演示](../apps/playground/README.md#diagnostics-and-repair) · [本地诊断合同](design/playground-agent-api-p0.zh-CN.md)
+
+## 已完成 · Playground 一键故障恢复
+
+在 **API 调用 → `engine.get_debugger_errors` → 一键演示故障恢复** 启动。演示通过公开 API 启动故障版、读取诊断、提交受项目版本和文件哈希保护的脚本修复、检查并重跑，再验证四帧输入、重启和退出清理。调用历史保留诊断、同帧 PNG 和退出回执。Full/debug Dedicated Worker Direct 的 Chromium 实测确认玩家位置为 `64 → 128 → 64`，两次试玩均正常退出并完成宿主清理。 [演示与复验命令](../apps/playground/README.md#runtime-errors-and-recovery) · [验收记录](design/summer-runtime-recovery-and-sdk-roundtrip.zh-CN.md#一键故障恢复演示验收)
 
 ## 优先结论
 

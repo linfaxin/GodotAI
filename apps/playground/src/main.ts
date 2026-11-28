@@ -114,7 +114,7 @@ const debugPanel=createDebugPanel(debugRecorder.api,playground.api);
 debugRecorder.subscribe(debugPanel.refresh);
 debugRecorder.subscribe(reconcileCancelledLaunches);
 const consoleGate=createConsoleGate();
-consoleGate.subscribe(()=>workbench.setReplayCanStop(consoleGate.owner()==='replay'));
+consoleGate.subscribe(()=>workbench.setReplayCanStop(consoleGate.owner()==='replay'||consoleGate.owner()==='recovery'));
 const agentPanel=createAgentPanel(playground, {
  unavailable() {
   const runId=debugRecorder.api.getContext().result.activeRunId;
@@ -161,6 +161,7 @@ function readConsoleContext():ConsoleEnvironment{
 const consoleSession=createApiConsoleSession(playground.api,{
  readContext:readConsoleContext,
  subscribeContext(listener){consoleContextListeners.add(listener);return()=>consoleContextListeners.delete(listener);},
+ cancelLaunch,
  callSelectedMethod:(input,signal,selected)=>playground.summerCall({op:'engine.runtime_call',input},signal,selected),
  openExample:operationId=>{
   if(operationId==='get_run')throw Error('查询指定运行无需打开示例');
@@ -537,7 +538,7 @@ $('share').onclick=async()=>{try{const json=new TextEncoder().encode(JSON.string
 async function importShared(){if(!location.hash.startsWith('#project='))return;try{const binary=atob(location.hash.slice(9).replace(/-/g,'+').replace(/_/g,'/'));if(binary.length>24576)throw Error('分享链接过大');const bytes=Uint8Array.from(binary,c=>c.charCodeAt(0));const reader=new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip')).getReader(),chunks:Uint8Array<ArrayBuffer>[]=[];let size=0;try{for(;;){const {done,value}=await reader.read();if(done)break;size+=value.byteLength;if(size>MAX_PROJECT_DOCUMENT_BYTES)throw Error('分享项目过大');chunks.push(value.slice());}}finally{await reader.cancel();}const text=await new Blob(chunks).text();return await importDocument(JSON.parse(text),{shared:true});}catch(error){toast('无法读取分享项目：'+String(error));}}
 function importCity(){const input=document.createElement('input');input.type='file';input.accept='.json,application/json';input.onchange=async()=>{const file=input.files?.[0];if(!file)return;try{if(file.size>262144)throw Error('地图文件超过 256 KB');send({type:'import-data',data:JSON.parse(await file.text())});log(`✓ 已读取 ${file.name}`);}catch(error){log(String(error),'error');}};input.click();}
 $('run').onclick=()=>void compile(true);$('check').onclick=()=>void check();$('stop').onclick=()=>{
- if(agentPanel.abortReplay())return;
+ if(consoleSession.cancelRecovery()||agentPanel.abortReplay())return;
  invalidatePlay();runSerial++;$('run').toggleAttribute('disabled',!ready);workbench.setReady();
  if(nativePreview){void nativePreview.stop();restorePreviewStatus(nativePreview.runner.state);}
 };
