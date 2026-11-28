@@ -52,6 +52,19 @@ export const SUMMER_OPERATION_SPECS = Object.freeze({
     limitations: ['只读现有记录。需要新结果时先执行 check 或 Play。', '缺少记录或未观测时无法判断错误数。',
       '运行诊断来自退出回执。运行中的 Worker 日志见 read_run_events。'],
   }),
+  'engine.get_debugger_errors': spec({
+    title: '读取运行错误', description: '按当前编辑版本和构建读取已结算的运行绑定致命错误。',
+    allowed: ['max_errors', 'include_stack', 'include_warnings', 'raw'], unsupported: ['maxCharacters'],
+    defaultInput: {},
+    parameters: [
+      {name: 'max_errors', description: '默认 50，支持 1–200 的整数。结果至多一条。'},
+      {name: 'include_stack', description: '默认 false。为 true 时附原始堆栈。'},
+      {name: 'include_warnings', description: '省略或 false。'},
+      {name: 'raw', description: '省略或 false。'},
+    ],
+    limitations: ['等关联运行退出后读取。结果仅覆盖已观测的首个绑定致命报告。',
+      '可用的堆栈来自该次运行，可能指向生成的 JavaScript 文件。'],
+  }),
   'engine.get_script_errors': spec({
     title: '检查指定脚本', description: '检查当前编辑版本，返回指定 TypeScript 脚本的诊断。',
     allowed: ['path'], unsupported: [], defaultInput: {path: 'res://src/Player.ts'},

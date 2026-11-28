@@ -1,3 +1,4 @@
+import type {RuntimeSummary} from '../../session-facts.js';
 import {freezeWorkerRunIdentity,type WorkerRunIdentity} from './worker-protocol.js';
 
 /** Revocation is synchronous and irreversible. Callers fence every async continuation. */
@@ -31,6 +32,11 @@ function dataRecord(value:unknown):value is Record<string,unknown>{
  try{if(!value||typeof value!=='object'||Array.isArray(value))return false;const prototype=Object.getPrototypeOf(value);if(prototype!==null&&prototype!==Object.prototype)return false;
  return Reflect.ownKeys(value).every(key=>{const descriptor=Object.getOwnPropertyDescriptor(value,key);return typeof key==='string'&&!!descriptor&&descriptor.enumerable===true&&'value' in descriptor;});}catch{return false;}
 }
+export function canSettleEmptyRuntimeFailureCapture(summary: RuntimeSummary | undefined, code: number): boolean {
+  return code === 0 && summary !== undefined && summary.epoch !== 'untracked' &&
+    summary.sealed && !summary.overflow && summary.failure === undefined;
+}
+
 export function isWorkerEngineOutcome(value:unknown):value is WorkerEngineOutcome {
  if(!dataRecord(value))return false;
  if(value.kind==='native-exit')return Object.keys(value).length===2&&typeof value.code==='number'&&Number.isSafeInteger(value.code);

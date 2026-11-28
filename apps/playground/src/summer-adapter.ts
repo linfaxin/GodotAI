@@ -16,7 +16,7 @@ import {sameWorkerRun, type WorkerRunIdentity} from '@godot-js/engine/browser/de
 import {canonicalPath} from '@godot-js/project-tools/paths';
 import {LIFECYCLE_KINDS, type LifecycleKind, type LifecycleQuery, type RecentLifecycleEvents,
   type WaitLifecycleEvents} from './lifecycle-events.ts';
-import type {SummerProjectContextData, StopResult, SummerDiagnosticsData, SummerScriptErrorsData} from './playground-api';
+import type {SummerProjectContextData, StopResult, SummerDebuggerErrorsData, SummerDiagnosticsData, SummerScriptErrorsData} from './playground-api';
 import {SUMMER_OPERATION_SPECS as rules, SUMMER_TREE_LIMITS, SUMMER_COMPATIBILITY, type SummerOperation} from './summer-operation-spec.ts';
 export {SUMMER_COMPATIBILITY} from './summer-operation-spec.ts';
 
@@ -55,6 +55,7 @@ export interface SummerBackend {
   captureContext(): SummerContext;
   getProjectContext(includeCapabilities: boolean): BackendReply<SummerProjectContextData>;
   getDiagnostics?(): BackendReply<SummerDiagnosticsData>;
+  getDebuggerErrors?(includeStack: boolean): BackendReply<SummerDebuggerErrorsData>;
   getScriptErrors?(path: string): Promise<BackendReply<SummerScriptErrorsData>>;
   play(input: {projectId: string; expectedEditorRevision: number}): BackendReply<{attemptId: string}>;
   cancelLaunch(attemptId: string): void;
@@ -80,7 +81,7 @@ export type StopData = {accepted: true; cancelledAttemptId: string | null; captu
 export type CallData = {route: 'runtime_call'; payload: {ok: true; receipt: Extract<MethodCallResult, {ok: true}>['receipt']; result: Extract<MethodOutcome, {outcome: 'returned'}>}};
 export type SummerData = Extract<GameProbeResult, {ok: true}>['result'] | Extract<InputScriptResult, {ok: true}> |
   CallData | SummerProjectContextData | RuntimeTreeSnapshot | RuntimeNodeSnapshot | GameScreenshot | WriteData | PlayData | RunningData | StopData |
-  RecentLifecycleEvents | WaitLifecycleEvents | SummerDiagnosticsData | SummerScriptErrorsData;
+  RecentLifecycleEvents | WaitLifecycleEvents | SummerDiagnosticsData | SummerDebuggerErrorsData | SummerScriptErrorsData;
 export type FacadeSuccess<T = SummerData> = {ok: true; status: 'done'; result: {data: T; godotai: {compatibility: typeof SUMMER_COMPATIBILITY}}};
 export type FacadeFailure = {ok: false; error: {code: FacadeErrorCode; message: string; source?: AccessError['source']; retry: 'no';
   details: {godotai: {compatibility: typeof SUMMER_COMPATIBILITY; route?: 'runtime_properties' | 'legacy_write' | 'runtime_call';
@@ -180,6 +181,18 @@ function validate(raw: unknown): Validated | FacadeFailure {
     if (op === 'engine.get_diagnostics' && Object.hasOwn(input, 'includeAll')) {
       if (typeof input.includeAll !== 'boolean') return localError('invalid_input', 'includeAll');
       if (input.includeAll) return localError('unsupported', 'includeAll', '当前只读取有界诊断记录');
+    }
+    if (op === 'engine.get_debugger_errors') {
+      if (Object.hasOwn(input, 'max_errors') &&
+          (typeof input.max_errors !== 'number' || !Number.isInteger(input.max_errors) || input.max_errors < 1 || input.max_errors > 200))
+        return localError('invalid_input', 'max_errors');
+      for (const name of ['include_stack', 'raw', 'include_warnings']) {
+        if (Object.hasOwn(input, name) && typeof input[name] !== 'boolean') return localError('invalid_input', name);
+      }
+      for (const name of ['raw', 'include_warnings']) {
+        if (input[name] === true) return localError('unsupported', name);
+      }
+      return {op, input: {includeStack: input.include_stack === true}};
     }
     if (Object.hasOwn(input, 'instance') && input.instance !== 'main') return localError(typeof input.instance === 'string' ? 'unsupported' : 'invalid_input', 'instance');
     if (op === 'engine.game_input') return validateInputScript(input);
@@ -388,6 +401,11 @@ export function createSummerDispatcher(backend: SummerBackend) {
     if (op === 'engine.get_diagnostics') {
       const response = backend.getDiagnostics?.();
       return response === undefined ? localError('unsupported', 'diagnostics') :
+        response.ok ? done(response.result) : backendFailure(response);
+    }
+    if (op === 'engine.get_debugger_errors') {
+      const response = backend.getDebuggerErrors?.(input.includeStack === true);
+      return response === undefined ? localError('unsupported', 'get_debugger_errors') :
         response.ok ? done(response.result) : backendFailure(response);
     }
     if (op === 'engine.get_script_errors') {

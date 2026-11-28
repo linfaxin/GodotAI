@@ -5,6 +5,7 @@ import {tmpdir} from 'node:os';
 import {fileURLToPath} from 'node:url';
 import {createRequire} from 'node:module';
 import {execFile} from 'node:child_process';
+import {createHash} from 'node:crypto';
 import {promisify} from 'node:util';
 
 const exec=promisify(execFile),toolsRoot=fileURLToPath(new URL('../..',import.meta.url)),repository=path.resolve(toolsRoot,'../..');
@@ -21,7 +22,7 @@ export async function createPackedConsumer({browser=true}={}) {
     const declared=JSON.parse(await readFile(path.join(repository,'package.json'),'utf8')).packageManager;
     const expected=/^pnpm@([^+]+)/.exec(declared)?.[1];
     assert.equal((await command('pnpm',['--version'],repository)).stdout.trim(),expected,'fixture uses repository pnpm');
-    const tarballs=[],manifests={};
+    const tarballs=[],manifests={},packageArtifacts={};
     for(const packageRoot of [path.resolve(toolsRoot,'../engine'),toolsRoot]) {
       const before=new Set(await readdir(artifacts));
       await command('pnpm',['pack','--pack-destination',artifacts],packageRoot);
@@ -31,6 +32,8 @@ export async function createPackedConsumer({browser=true}={}) {
       const manifest=JSON.parse((await command('tar',['-xOf',tarball,'package/package.json'],directory)).stdout);
       assert(!JSON.stringify(manifest).includes('workspace:'),'packed manifest has no workspace protocol');
       manifests[manifest.name]=manifest;
+      const bytes=await readFile(tarball);
+      packageArtifacts[manifest.name]={file:added[0],version:manifest.version,bytes:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex')};
     }
     const overrides={};
     for(const name of Object.keys(manifests['@godot-js/project-tools'].dependencies??{})) {
@@ -68,6 +71,6 @@ export async function createPackedConsumer({browser=true}={}) {
       await writeFile(path.join(directory,'browser-consumer.js'),browserBundle);
       await writeFile(path.join(directory,'consumer.html'),'<!doctype html><meta charset="utf-8"><title>Independent engine SDK consumer</title><script src="./browser-consumer.js"></script>');
     }
-    return {directory,manifests,browserBundle,browserInputs,execute,dispose};
+    return {directory,manifests,packageArtifacts,browserBundle,browserInputs,execute,dispose};
   } catch(error) {await dispose();throw error;}
 }

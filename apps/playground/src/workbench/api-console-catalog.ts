@@ -5,7 +5,7 @@ import {SUMMER_OPERATION_SPECS, type SummerOperation, type OperationParameter} f
 export const MAX_CONSOLE_READ_PROPERTIES = 16;
 
 export type LocalConsoleOperation = 'check' | 'wait_for_event' | 'describe_runtime_properties' | 'describe_runtime_methods' |
-  'read_runtime_properties' | 'game_input' | 'wait_for_input';
+  'read_runtime_properties' | 'game_input' | 'wait_for_input' | 'get_run';
 export type ConsoleOperationId = SummerOperation | LocalConsoleOperation;
 export const DEFAULT_CONSOLE_OPERATION: ConsoleOperationId = 'engine.get_project_context';
 export type ConsoleBinding = 'none' | 'project' | 'main' | 'runtime' | 'explicit';
@@ -183,6 +183,16 @@ const localOperations: readonly ConsoleOperation[] = [
     invoke: (api, input) => api.game_input(input as Parameters<PlaygroundApi['game_input']>[0]),
   },
   {
+    id: 'get_run', name: 'get_run', family: 'local', title: '查询指定运行',
+    description: '按 runId 查询保留的运行身份和退出回执。', binding: 'explicit', acceptsSignal: false, resultKind: 'json',
+    parameters: [{name: 'runId', description: '从本次启动或退出的匹配事件取得。', required: true}],
+    limitations: ['已退出的运行只保留最近两次。当前主运行变化不会改变查询目标。'],
+    createPreset(context = {}) {
+      return context.runId ? {input: {runId: context.runId}, missing: []} : {input: {}, missing: ['要查询的运行 ID']};
+    },
+    invoke: (api, input) => api.get_run(input as Parameters<PlaygroundApi['get_run']>[0]),
+  },
+  {
     id: 'wait_for_input', name: 'wait_for_input', family: 'local', title: '等待输入分发回执',
     description: '查询同一 run 的 operationId，保留按下、释放与未确认事实。', binding: 'explicit', acceptsSignal: true, resultKind: 'json',
     parameters: [
@@ -204,6 +214,7 @@ export const CONSOLE_OPERATIONS: readonly ConsoleOperation[] = Object.freeze([
   summer('engine.get_project_context', 'none'),
   summer('engine.get_diagnostics', 'none'),
   summer('engine.get_script_errors', 'none'),
+  summer('engine.get_debugger_errors', 'project'),
   summer('engine.play', 'project'),
   summer('engine.stop', 'main'),
   summer('engine.is_running', 'none'),

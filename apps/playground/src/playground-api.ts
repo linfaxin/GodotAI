@@ -28,6 +28,17 @@ export interface SummerDiagnosticsData {
     {availability: 'retained'; identity: WorkerRunIdentity; attemptId: string; releaseId: string; artifactId: string;
       state: DebugRun['state']; exit: null | {evidence: DebugExit['evidence']; reason: DebugExit['report']['reason']; diagnostic: ExitDiagnostic | null}};
 }
+export type SummerDebuggerErrorsData = {
+  projectId: string;
+  editorRevision: number;
+  build?: Pick<DebugBuild, 'attemptId' | 'sourceHash'>;
+  runId?: string;
+} & (
+  | {status: 'observed'; entries: [{source: 'runtime-binding'; diagnostic: NonNullable<DebugExit['report']['diagnostic']>}]}
+  | {status: 'pending' | 'no_reported_error'; entries: []}
+  | {status: 'no_session'; entries: []; reason: 'no_retained_attempt' | 'attempt_ended_without_session'}
+  | {status: 'unavailable'; entries: []; reason: 'run_evicted' | 'capture_unconfirmed'}
+);
 export type SummerScriptErrorsData = DebugCheck & {path: string};
 type WaitInput = ({attemptId: string; runId?: never} | {runId: string; attemptId?: never}) & {
   until: 'running' | 'exited';
@@ -102,13 +113,18 @@ function runtimeCapabilities(actions: Actions, runId: string) {
   };
 }
 
+function runtimeIdentity(run: DebugRun): WorkerRunIdentity {
+  const {runId, revision, buildKey, generation, documentId, workerId, runConfigurationHash} = run;
+  return {runId, revision, buildKey, generation, documentId, workerId, runConfigurationHash};
+}
+
 function projectDiagnosticRun(run: DebugRun): Extract<SummerDiagnosticsData['run'], {availability: 'retained'}> {
-  const {runId, revision, buildKey, generation, documentId, workerId, runConfigurationHash, state, attemptId} = run;
+  const {state, attemptId} = run;
   const exit = run.exit;
   const diagnostic = exit?.report.diagnostic;
   return {
     availability: 'retained',
-    identity: {runId, revision, buildKey, generation, documentId, workerId, runConfigurationHash},
+    identity: runtimeIdentity(run),
     attemptId, state, releaseId: run.release.releaseId, artifactId: run.artifact.artifactId,
     exit: exit ? {evidence: exit.evidence, reason: exit.report.reason, diagnostic: diagnostic ? {
       source: diagnostic.source, message: diagnostic.message, name: diagnostic.name,
@@ -278,28 +294,32 @@ export function createPlaygroundApi(recorder: Recorder, actions: Actions) {
     });
   }
 
+  function buildRun(build: DebugBuild | undefined) {
+    if (build?.preview?.status !== 'session-created') return ok(null);
+    const {runId} = build.preview;
+    const found = debug.getRun(runId);
+    if (!found.ok) return found.error.code === 'not_found' ? ok({runId, recorded: null}) : found;
+    const recorded = found.result;
+    if (recorded.runId !== runId || recorded.projectId !== build.projectId || recorded.revision !== build.editorRevision ||
+        recorded.attemptId !== build.attemptId || recorded.buildKey !== build.artifact?.buildKey ||
+        recorded.artifact.artifactId !== build.artifact?.artifactId) {
+      return fail('revision_conflict', '运行记录不属于本次诊断的构建');
+    }
+    return ok({runId, recorded});
+  }
+
   function getSummerDiagnostics() {
     const {projectId, editorRevision} = debug.getContext().result;
     if (projectId === null || editorRevision === null) return fail('not_ready', '当前编辑项目或版本尚未就绪');
     const records = diagnosticRecords({projectId, editorRevision});
     if (!records.ok) return records;
     const {check, build} = records.result;
+    const linked = buildRun(build);
+    if (!linked.ok) return linked;
     let run: SummerDiagnosticsData['run'] = null;
-    if (build?.preview?.status === 'session-created') {
-      const {runId} = build.preview;
-      const found = debug.getRun(runId);
-      if (!found.ok) {
-        if (found.error.code !== 'not_found') return found;
-        run = {availability: 'unavailable', runId, attemptId: build.attemptId};
-      } else {
-        const recorded = found.result;
-        if (recorded.runId !== runId || recorded.projectId !== projectId || recorded.revision !== editorRevision ||
-            recorded.attemptId !== build.attemptId || recorded.buildKey !== build.artifact?.buildKey ||
-            recorded.artifact.artifactId !== build.artifact?.artifactId) {
-          return fail('revision_conflict', '运行记录不属于本次诊断的构建');
-        }
-        run = projectDiagnosticRun(recorded);
-      }
+    if (linked.result && build) {
+      const {runId, recorded} = linked.result;
+      run = recorded ? projectDiagnosticRun(recorded) : {availability: 'unavailable', runId, attemptId: build.attemptId};
     }
     return ok<SummerDiagnosticsData>({
       projectId, editorRevision,
@@ -309,6 +329,37 @@ export function createPlaygroundApi(recorder: Recorder, actions: Actions) {
         diagnostics: build.diagnostics, error: build.error, artifact: build.artifact, preview: build.preview} : null,
       run,
     });
+  }
+
+  function getSummerDebuggerErrors(includeStack: boolean, pendingAttemptId: string | null) {
+    const {projectId, editorRevision} = debug.getContext().result;
+    if (projectId === null || editorRevision === null) return fail('not_ready', '当前编辑项目或版本尚未就绪');
+    const scope = {projectId, editorRevision};
+    const build = recorder.getBuildForRevision(projectId, editorRevision);
+    if (!build) return ok<SummerDebuggerErrorsData>({...scope, status: 'no_session', reason: 'no_retained_attempt', entries: []});
+    const {attemptId, status, preview, sourceHash} = build;
+    const compiled = {...scope, build: {attemptId, ...(sourceHash === undefined ? {} : {sourceHash})}};
+    const linked = buildRun(build);
+    if (!linked.ok) return linked;
+    if (!linked.result) {
+      return ok<SummerDebuggerErrorsData>(status === 'pending' || preview?.status === 'preparing' || attemptId === pendingAttemptId ?
+        {...compiled, status: 'pending', entries: []} :
+        {...compiled, status: 'no_session', reason: 'attempt_ended_without_session', entries: []});
+    }
+    const {runId, recorded} = linked.result;
+    const running = {...compiled, runId};
+    if (!recorded) return ok<SummerDebuggerErrorsData>({...running, status: 'unavailable', reason: 'run_evicted', entries: []});
+    if (!recorded.exit) return ok<SummerDebuggerErrorsData>({...running, status: 'pending', entries: []});
+    const {report, evidence} = recorded.exit;
+    const capture = evidence === 'host-report' ? report.runtimeFailureCapture : undefined;
+    if (capture === 'observed' && report.diagnostic) {
+      const {stack, ...diagnostic} = report.diagnostic;
+      return ok<SummerDebuggerErrorsData>({...running, status: 'observed', entries: [{source: 'runtime-binding',
+        diagnostic: includeStack && stack !== undefined ? {...diagnostic, stack} : diagnostic}]});
+    }
+    return ok<SummerDebuggerErrorsData>(capture === 'settled_empty' && report.reason === 'clean-exit' ?
+      {...running, status: 'no_reported_error', entries: []} :
+      {...running, status: 'unavailable', reason: 'capture_unconfirmed', entries: []});
   }
 
   async function getScriptErrors(path: string) {
@@ -541,7 +592,7 @@ export function createPlaygroundApi(recorder: Recorder, actions: Actions) {
   });
 
   return {
-    api, methodBackend, summerCall, getSummerProjectContext, getSummerDiagnostics, getScriptErrors,
+    api, methodBackend, summerCall, getSummerProjectContext, getSummerDiagnostics, getSummerDebuggerErrors, getScriptErrors,
     subscribe(observer: (call: PlaygroundApiCall) => void) {
       observers.add(observer);
       return () => { observers.delete(observer); };

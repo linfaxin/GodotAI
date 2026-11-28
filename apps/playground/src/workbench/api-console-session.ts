@@ -87,6 +87,16 @@ function resultSummary(operationId: string, reply: unknown, displayTruncated: bo
     const count = data.diagnostics?.counts?.error;
     return data.status === 'completed' && typeof count === 'number' ? `脚本检查完成，${count} 个错误` : '脚本检查失败，错误数未观测';
   }
+  if (operationId === 'engine.get_debugger_errors') {
+    switch (data.status) {
+      case 'observed': return '已取得运行时错误';
+      case 'pending': return '等待构建或运行结算';
+      case 'no_session': return '此版本没有关联运行';
+      case 'unavailable': return '运行错误证据不可用';
+      case 'no_reported_error': return '干净退出，未报告此类运行错误';
+    }
+  }
+  if (operationId === 'get_run') return data.exit ? '已取得指定运行的退出回执' : `指定运行：${data.state}`;
   if (operationId === 'engine.get_diagnostics') {
     const record = (item: Record<string, any> | null) => item === null ? '无记录' :
       item.diagnostics?.observed === true ? `${item.status}，${item.diagnostics.counts.error} 个错误` : `${item.status}，错误数未观测`;

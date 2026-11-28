@@ -1,4 +1,5 @@
 import {INPUT_SCRIPT_PLAYER_PATH} from '../input-script-demo';
+import {RUNTIME_RECOVERY_PLAYER_PATH, RUNTIME_RECOVERY_ROOT_PATH} from '../runtime-recovery-demo';
 import {SUMMER_OPERATION_SPECS} from '../summer-operation-spec';
 
 /** Teaching data only. Loading a step never executes it or advances another step. */
@@ -23,6 +24,7 @@ export interface ConsoleLesson {
 }
 
 const inputScriptReady = '收到 running 回执后，确认主运行是回执中的 runId、待启动 attempt 为「无」，且「物理帧输入」和「游戏帧探测」均为「可用」。';
+const recoveryReady = '在调用台等「待启动 attempt」显示「无」，且「游戏帧探测」和「物理帧输入」均显示「可用」。';
 
 const takeCursor = (id: string, action: string): ConsoleLessonStep => ({
   id, label: `${action}前取游标`, operationId: 'engine.recent_events', input: {},
@@ -44,8 +46,32 @@ const stopLifecycleRun = (id: string): ConsoleLessonStep => ({
   id, label: '停止已探测的运行', operationId: 'engine.stop', input: {}, needsRunSource: true,
   notes: '从最近一次同帧探测的历史回执填入目标，再检查 Stop 返回的 runs。',
 });
+const recoveryProbe = (id: string, x: number): ConsoleLessonStep => ({
+  id, label: `探测位置 x=${x}`, operationId: 'engine.game_probe',
+  input: {tree: {path: RUNTIME_RECOVERY_ROOT_PATH}, props: [RUNTIME_RECOVERY_PLAYER_PATH + ':position']},
+});
 
 export const CONSOLE_LESSONS: readonly ConsoleLesson[] = [
+  {
+    id: 'runtime-recovery',
+    title: 'Summer：定位启动错误并恢复试玩',
+    description: '从 engine.get_debugger_errors 打开独立示例。核对失败运行、修复启动脚本，再试玩并重启同一项目。',
+    steps: [
+      {id: 'play-failure', label: '启动故障版', operationId: 'engine.play', input: {}},
+      {id: 'read-error', label: '读取本次运行错误', operationId: 'engine.get_debugger_errors',
+        input: {include_stack: true}, notes: '等待预览结束后执行。根据错误消息回到 start.ts，把 startupBroken 由 true 改为 false。'},
+      {id: 'play-fixed', label: '启动修复版', operationId: 'engine.play', input: {}, notes: recoveryReady},
+      recoveryProbe('recovery-before', 64),
+      {id: 'recovery-input', label: '按住向右动作四步', operationId: 'engine.game_input',
+        input: {...SUMMER_OPERATION_SPECS['engine.game_input'].defaultInput}, needsRunSource: true,
+        notes: '从起点探测回执选择本次运行。核对按下和释放跨四个物理帧。'},
+      recoveryProbe('recovery-after', 128),
+      stopLifecycleRun('stop-fixed'),
+      {id: 'recovery-restart', label: '用同一源码重启', operationId: 'engine.play', input: {},
+        notes: '等修复版停止后重启。' + recoveryReady},
+      {...recoveryProbe('recovery-reset', 64), notes: '确认重启后回到起点，完成后可用工具栏停止预览。'},
+    ],
+  },
   {
     id: 'diagnostic-repair',
     title: 'Summer：定位并修复类型错误',

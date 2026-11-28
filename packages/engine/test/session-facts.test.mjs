@@ -4,6 +4,7 @@ import {
   createSessionFacts, factsFromRuntimeSummary, factsFromRuntimeSummaries, isRuntimeSummary,
   isSessionFacts, runtimeSummaryCleanup, sessionExitReason,
 } from '../dist/session-facts.js';
+import {canSettleEmptyRuntimeFailureCapture} from '../dist/browser/dedicated/worker-session.js';
 
 const fatal = (message = 'fatal') => ({kind: 'runtime', message});
 const entry = (cleanup = 'complete', state = 'closed') => ({entryId: 'entry-1', state, cleanup});
@@ -72,4 +73,12 @@ test('wire validation rejects accessors, unknown fields, malformed enums and for
   for (const value of [summary({entries: [entry(), entry()]}), summary({entries: Array(129).fill(entry())}), summary({epoch: ''}), summary({failure: {kind: 'unknown', message: 'no'}}), summary({entries: [{...entry(), extra: true}]}), summary({entries: new Array(1)})]) assert.equal(isRuntimeSummary(value), false);
   assert.throws(() => createSessionFacts({nativeExit: {code: NaN}}), /E_SESSION_FACTS/);
   assert.throws(() => factsFromRuntimeSummary(summary({schemaVersion: 2})), /E_RUNTIME_SUMMARY/);
+});
+
+test('an empty failure capture requires a sealed native epoch', () => {
+  assert.equal(canSettleEmptyRuntimeFailureCapture(summary(), 0), true);
+  assert.equal(canSettleEmptyRuntimeFailureCapture(summary(), 1), false);
+  for (const state of [undefined, summary({epoch: 'untracked'}), summary({sealed: false}), summary({overflow: true}), summary({failure: fatal()})]) {
+    assert.equal(canSettleEmptyRuntimeFailureCapture(state, 0), false);
+  }
 });

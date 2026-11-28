@@ -118,6 +118,44 @@ async function runnerFixture(t, {properties = true, confirmed = properties, pres
   return {runner, run, port, reply: (data, identity = header) => port.postMessage({...identity, ...data})};
 }
 
+test('Worker exit preserves only matching and validated runtime failure capture', async t => {
+  const {runner, run, reply} = await runnerFixture(t);
+  const exits = [];
+  const exited = new Promise(resolve => runner.subscribe(event => {
+    if (event.type !== 'exit') return;
+    exits.push(event.report);
+    resolve(event.report);
+  }));
+  const message = 'project failure';
+  const diagnostic = {source: 'godotjs', message, stack: 'actual stack'};
+  const report = {type: 'exit-report', engineOutcome: {kind: 'native-exit', code: 0}, hostCleanup: {status: 'complete'},
+    sessionFacts: createSessionFacts({nativeExit: {code: 0}, hostCleanup: 'complete', runtimeSummary: 'sealed',
+      entryCleanup: 'complete', failure: {kind: 'runtime', message}}), diagnostic, runtimeFailureCapture: 'observed'};
+  reply({...report, workerId: 'older-worker', runtimeFailureCapture: 'settled_empty'});
+  reply(report);
+  reply({...report, runtimeFailureCapture: 'settled_empty'});
+  const terminal = await exited;
+  assert.equal(terminal.runId, run.runId);
+  assert.equal(terminal.code, 0);
+  assert.equal(terminal.reason, 'crashed');
+  assert.equal(terminal.runtimeFailureCapture, 'observed');
+  assert.deepEqual(terminal.diagnostic, diagnostic);
+  assert.equal(exits.length, 1);
+});
+
+test('a malformed optional failure capture does not strand a clean Worker exit', async t => {
+  const {runner, reply} = await runnerFixture(t);
+  const exited = new Promise(resolve => runner.subscribe(event => {
+    if (event.type === 'exit') resolve(event.report);
+  }));
+  reply({type: 'exit-report', engineOutcome: {kind: 'native-exit', code: 0}, hostCleanup: {status: 'complete'},
+    sessionFacts: createSessionFacts({nativeExit: {code: 0}, hostCleanup: 'complete', runtimeSummary: 'sealed', entryCleanup: 'complete'}),
+    runtimeFailureCapture: 'observed'});
+  const terminal = await exited;
+  assert.equal(terminal.reason, 'clean-exit');
+  assert.equal(terminal.runtimeFailureCapture, undefined);
+});
+
 const script = {actionName: 'move_right', pressOffset: 0, releaseOffset: 4};
 const completedScript = {kind: 'completed', source: 'native', base: '9007199254740993',
   down: {physics: '9007199254740993', iteration: 18}, up: {physics: '9007199254740997', iteration: 19},

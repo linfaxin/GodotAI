@@ -133,6 +133,7 @@ function createApiConsoleCard(container: HTMLElement, session: ConsoleSession, o
   const open = button('打开独立示例', 'open-example', () => session.openExample());
   heading.append(title, open);
   const exampleNote = element('p', 'api-console-note', '打开示例会切换项目并结束当前预览，原项目保留；不会自动运行。');
+  open.hidden = exampleNote.hidden = operation.id === 'get_run';
   const context = test(element('dl', 'api-console-context'), 'context');
   function contextRow(label: string) {
     const term = element('dt', '', label), value = element('dd'); context.append(term, value); return value;
@@ -384,14 +385,18 @@ function createApiConsoleCard(container: HTMLElement, session: ConsoleSession, o
     execute.disabled = state.owner !== null || !!state.pendingCallId;
     const methodExample = operation.id === 'engine.runtime_call' || operation.id === 'describe_runtime_methods';
     const inputExample = operation.id === 'engine.game_input';
+    const recoveryExample = operation.id === 'engine.get_debugger_errors';
     open.disabled = state.owner !== null || methodExample && state.environment.methodExampleAvailable !== true ||
-      inputExample && state.environment.inputExampleAvailable !== true;
+      (inputExample || recoveryExample) && state.environment.inputExampleAvailable !== true;
     if (methodExample) setText(exampleNote, state.environment.methodExampleAvailable === true
       ? '打开玩法方法示例。选择方法和填参后，由你执行调用。'
       : '当前引擎发布或呈现模式不支持玩法方法示例。');
     if (inputExample) setText(exampleNote, state.environment.inputExampleAvailable === true
       ? '打开物理帧输入示例，按教程从调用历史选择运行。'
       : '物理帧输入示例需要支持输入脚本和帧探测的 Chromium Direct 预览。');
+    if (recoveryExample) setText(exampleNote, state.environment.inputExampleAvailable === true
+      ? '打开故障示例并结束当前预览。需手动 Play。'
+      : '故障恢复示例需要支持输入脚本和帧探测的 Chromium Full/debug Direct 预览。');
     const pendingHere = state.history.some(call => call.callId === state.pendingCallId && call.draft.operationId === operation.id);
     cancel.hidden = !pendingHere || !state.cancellable;
     status.textContent = state.owner === 'replay' ? '自动验证正在运行；结束后可手工调用。'

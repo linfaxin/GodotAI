@@ -1,7 +1,8 @@
 import { factsFromRuntimeSummary, isRuntimeSummary, sessionExitReason, type RuntimeSummary } from '../../session-facts.js';
 import { isPreviewDiagnostic, isProjectData, previewDiagnostic, type PreviewDiagnostic,type BrowserArtifact } from '../protocol.js';
 import { WORKER_PROTOCOL, isWorkerEnvelope, prepareWorkerRunConfiguration, sameWorkerRun, type WorkerRunIdentity, type WorkerRunConfiguration } from './worker-protocol.js';
-import { WorkerSessionLease, WorkerExitLedger, WorkerHeartbeat, boundedWorkerCleanup, type WorkerEngineOutcome } from './worker-session.js';
+import { WorkerSessionLease, WorkerExitLedger, WorkerHeartbeat, boundedWorkerCleanup, canSettleEmptyRuntimeFailureCapture,
+  type WorkerEngineOutcome } from './worker-session.js';
 import { fetchVerifiedAsset, loadVerifiedRuntimeWorker, type VerifiedRelease } from '../verified-loader.js';
 import { createPresentationHost, type CanvasGeometry } from './worker-presentation.js';
 import { createInputHost } from './worker-dom-host.js';
@@ -77,6 +78,7 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
   let terminalReport: Readonly<Record<string, unknown>> | undefined;
   let cleanupFault: unknown;
   let runtimeSummary: RuntimeSummary | undefined;
+  let runtimeFailure: PreviewDiagnostic | null | undefined;
   const disposeSafely = (action: () => void) => { try { action(); } catch (error) { cleanupFault ??= error; } };
   const closeInput=()=>{
     if(inputCleanup||!input)return;
@@ -257,8 +259,11 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
       hostCleanup: cleanup.status,
     });
     const report = { ...outcomeReport, reason: sessionExitReason(sessionFacts), sessionFacts };
+    const reported = runtimeFailure ?? diagnostic;
     terminalReport = report; publish();
-    editorPort.postMessage({ ...identity, protocolVersion: WORKER_PROTOCOL, type: 'exit-report', ...report, ...(diagnostic ? { diagnostic } : {}) });
+    editorPort.postMessage({ ...identity, protocolVersion: WORKER_PROTOCOL, type: 'exit-report', ...report,
+      ...(reported ? {diagnostic: reported} : {}),
+      ...(runtimeFailure !== undefined ? {runtimeFailureCapture: runtimeFailure ? 'observed' : 'settled_empty'} : {}) });
     editorPort.onmessage = null; editorPort.close();
   }
   function terminate(detail?: string): void {
@@ -503,13 +508,17 @@ export function startWorkerPreviewHost(identity: WorkerRunIdentity, editorPort: 
         if(m.type==='worker-closing'){post({type:'worker-closing'});stop('stopped');return;}
         if (m.type === 'native-exit' && Number.isSafeInteger(m.code)) {
           if(m.runtimeSummary!==undefined&&!isRuntimeSummary(m.runtimeSummary)){fail(Error('E_RUNTIME_SUMMARY'));return;}
+          if (m.runtimeFailureCapture === 'settled_empty' && runtimeFailure === undefined &&
+              !diagnostic && canSettleEmptyRuntimeFailureCapture(m.runtimeSummary, m.code)) runtimeFailure = null;
           runtimeSummary=m.runtimeSummary??runtimeSummary;
           if(runtimeSummary?.failure)diagnostic??={source:'godotjs',message:runtimeSummary.failure.message,...(runtimeSummary.failure.stack?{stack:runtimeSummary.failure.stack}:{})};
           memory = m.memory ?? memory; void finalize({ kind: 'native-exit', code: m.code }); return;
         }
         if (m.type === 'worker-termination-required') { terminate('Native startup cannot be cooperatively cleaned'); return; }
         if (m.type === 'worker-fatal') {
-          const reported = isPreviewDiagnostic(m.diagnostic) ? m.diagnostic : previewDiagnostic(m.detail);
+          const incoming = isPreviewDiagnostic(m.diagnostic) ? m.diagnostic : undefined;
+          if (m.runtimeFailureCapture === 'observed' && incoming?.source === 'godotjs') runtimeFailure ??= incoming;
+          const reported = incoming ?? previewDiagnostic(m.detail);
           diagnostic ??= reported;
           if(workerErrors.length<64)workerErrors.push(reported.message);
           stop('runtime-failed', m.detail); return;

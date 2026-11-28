@@ -245,6 +245,92 @@ test('Summer diagnostics follows the newest attempt for the captured editor vers
   assert.deepEqual(calls, {check: 0, play: 0, stop: []});
 });
 
+test('Summer debugger errors distinguishes open launch intent from a build that ended without a session', () => {
+  const {agent, recorder, api, start} = fixture();
+  const query = (pendingAttemptId = null) => unwrap(agent.getSummerDebuggerErrors(false, pendingAttemptId));
+  recorder.setContext({editorRevision: null});
+  assert.equal(agent.getSummerDebuggerErrors(false, null).error.code, 'not_ready');
+  recorder.setContext({editorRevision});
+  assert.deepEqual(query(), {projectId, editorRevision, status: 'no_session', reason: 'no_retained_attempt', entries: []});
+  const old = start();
+  old.state('running');
+
+  const attemptId = recorder.startBuild(projectId, editorRevision);
+  assert.equal(query().status, 'pending');
+  const variant = 'single-pack';
+  recorder.recordCompileResponse(attemptId, {variant, pack: new Uint8Array([1]),
+    manifest: {variant, buildKey, artifactId}, diagnostics: [], sourceHash});
+  assert.deepEqual(query(attemptId), {projectId, editorRevision, status: 'pending', entries: [],
+    build: {attemptId, sourceHash}});
+  recorder.beginPreview(attemptId);
+  assert.equal(query().status, 'pending');
+  recorder.skipPreview(attemptId);
+  assert.equal(query().status, 'no_session');
+  assert.equal(query().reason, 'attempt_ended_without_session');
+  assert.equal(unwrap(api.get_run({runId: old.identity.runId})).state, 'running');
+});
+
+test('Summer debugger errors preserves run scope, real capture and independent terminal facts', () => {
+  const {agent, recorder, api, start} = fixture();
+  const query = (stack = false) => unwrap(agent.getSummerDebuggerErrors(stack, null));
+  // A valid multibyte stack must fit in the exit event even with session facts.
+  const diagnostic = {source: 'godotjs', message: 'shared marker', stack: '错'.repeat(32768)};
+  function hostExit(run, capture, failure) {
+    recorder.recordRunEvent({type: 'exit', report: {...run.identity, reason: failure ? 'crashed' : 'clean-exit', code: 0,
+      engineOutcome: {kind: 'native-exit', code: 0}, hostCleanup: {status: 'complete'},
+      ...(capture ? {runtimeFailureCapture: capture} : {}),
+      ...(failure ? {diagnostic: failure} : {}),
+      sessionFacts: {schemaVersion: 1, nativeExit: {code: 0}, hostCleanup: 'complete',
+        runtimeSummary: 'sealed', entryCleanup: 'complete', forcedTerminationIssued: false,
+        ...(failure ? {failure: {kind: 'runtime', message: failure.message, stack: failure.stack}} : {})}}});
+  }
+  const failed = start();
+  recorder.recordRunEvent({type: 'log', ...failed.identity, level: 'error', text: diagnostic.message, untrusted: true});
+  assert.equal(query().status, 'pending');
+  const stale = {...failed, identity: {...failed.identity, workerId: 'old-worker'}};
+  hostExit(stale, 'observed', diagnostic);
+  assert.equal(query().status, 'pending');
+  hostExit(failed, 'observed', diagnostic);
+  const data = query();
+  assert.equal(data.status, 'observed');
+  assert.equal(data.runId, failed.identity.runId);
+  assert.equal(data.build.sourceHash, sourceHash);
+  assert.deepEqual(data.entries, [{source: 'runtime-binding', diagnostic: {source: 'godotjs', message: diagnostic.message}}]);
+  assert.equal(data.exit, undefined);
+  assert(!JSON.stringify(data).includes(diagnostic.stack));
+  assert.deepEqual(query(true).entries[0].diagnostic, diagnostic);
+  const exit = unwrap(api.get_run({runId: failed.identity.runId})).exit;
+  assert.equal(exit.report.runtimeFailureCapture, 'observed');
+  assert.equal(exit.report.code, 0);
+  assert.equal(exit.report.reason, 'crashed');
+  assert.deepEqual(exit.report.diagnostic, diagnostic);
+  const {items} = unwrap(api.read_run_events({runId: failed.identity.runId, kinds: ['exit']}));
+  assert.equal(items.length, 1);
+  assert.deepEqual(items[0].event.exit, exit);
+
+  const nextRevision = editorRevision + 1;
+  recorder.setContext({editorRevision: nextRevision});
+  const repaired = start(recorder.startBuild(projectId, nextRevision), nextRevision);
+  repaired.state('running');
+  recorder.recordRunEvent({type: 'log', ...repaired.identity, level: 'error', text: diagnostic.message, untrusted: true});
+  assert.deepEqual(query().entries, []);
+  assert.equal(query().status, 'pending');
+  hostExit(repaired, 'settled_empty');
+  assert.equal(query().status, 'no_reported_error');
+  assert.deepEqual(unwrap(api.get_run({runId: failed.identity.runId})).exit, exit);
+
+  const oldAsset = start(recorder.startBuild(projectId, nextRevision), nextRevision);
+  hostExit(oldAsset, undefined);
+  assert.equal(query().reason, 'capture_unconfirmed');
+  const lost = start(recorder.startBuild(projectId, nextRevision), nextRevision);
+  lost.exit();
+  assert.equal(query().status, 'unavailable');
+  assert.equal(unwrap(api.get_run({runId: lost.identity.runId})).exit.evidence, 'editor-local');
+  recorder.setContext({editorRevision});
+  assert.equal(query().reason, 'run_evicted');
+  assert.equal(query().runId, failed.identity.runId);
+});
+
 test('diagnostics prioritize errors before truncation and preserve source counts and exit evidence', () => {
   const {agent, api, recorder, start} = fixture();
   const report = [typeError, {...typeError, code: 9000}];

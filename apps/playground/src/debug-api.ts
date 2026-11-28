@@ -383,6 +383,7 @@ function exitSnapshot(report: WorkerRunnerExit): DebugExit {
       engineOutcome: structuredClone(report.engineOutcome),
       hostCleanup: structuredClone(report.hostCleanup),
       sessionFacts: structuredClone(report.sessionFacts),
+      ...(report.runtimeFailureCapture === undefined ? {} : {runtimeFailureCapture: report.runtimeFailureCapture}),
     },
   };
 }

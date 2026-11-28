@@ -1,7 +1,7 @@
 import { createRuntimeBinding, installRuntimeHost, type RuntimeBinding } from '../../runtime-host.js';
 import { isProjectData, previewDiagnostic, type RunPhase } from '../protocol.js';
 import { WORKER_PROTOCOL, isWorkerEnvelope, prepareWorkerRunConfiguration, sameWorkerRun, type WorkerRunIdentity, type WorkerRunConfiguration } from './worker-protocol.js';
-import { WorkerSessionLease } from './worker-session.js';
+import { canSettleEmptyRuntimeFailureCapture, WorkerSessionLease } from './worker-session.js';
 import { loadVerifiedWorkerEngine, type GodotInstance, type LoadedWorkerEngine, type VerifiedRelease } from '../verified-loader.js';
 import { createWorkerPresentation, drawingBufferSize, installPresentationHooks, type CanvasGeometry } from './worker-presentation.js';
 import { createWorkerDom } from './worker-dom.js';
@@ -358,7 +358,8 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
     scope.removeEventListener('error', onError); scope.removeEventListener('unhandledrejection', onRejection);
     for (const level of ['log', 'warn', 'error'] as const) console[level] = originals[level];
   };
-  const fatal = (error: unknown, source: 'browser' | 'godotjs' = 'browser', location?: { message?: string; filename?: string; line?: number; column?: number }) => {
+  const fatal = (error: unknown, source: 'browser' | 'godotjs' = 'browser',
+    location?: { message?: string; filename?: string; line?: number; column?: number }, fromRuntimeBinding = false) => {
     if (closed || nativeExited || failed) return;
     const diagnostic = previewDiagnostic(error, location); diagnostic.source = source;
     // The binding reserves the first fatal slot synchronously. Returning from
@@ -374,7 +375,8 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
 
     }
     failed = true;
-    post({ type: 'worker-fatal', diagnostic, detail: diagnostic.message });
+    post({ type: 'worker-fatal', diagnostic, detail: diagnostic.message,
+      ...(fromRuntimeBinding ? {runtimeFailureCapture: 'observed'} : {}) });
     if(canCooperativelyClose()){beginStopping('runtime-failed');return;}
     binding?.drain();lease.cancel(error);audio?.revoke();dom?.revokeInput();
     // Never re-enter an application/native callback merely to request exit.
@@ -607,7 +609,8 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
       schedule:callback=>{void Promise.resolve().then(callback);},
       onDiagnostic:diagnostic=>{
         if(diagnostic.kind==='caught'||diagnostic.kind==='recoverable')log('warn',[diagnostic.message,diagnostic.stack??diagnostic.componentStack??'']);
-        else fatal({message:diagnostic.message,stack:diagnostic.stack??diagnostic.componentStack},pendingFatalSource??'godotjs',pendingFatalLocation);
+        else fatal({message:diagnostic.message,stack:diagnostic.stack??diagnostic.componentStack},
+          pendingFatalSource??'godotjs',pendingFatalLocation,pendingFatalSource===undefined);
         return true;
       },
       onLog:(level,message)=>{log(level,[message]);return true;},
@@ -660,7 +663,9 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
         capture.stop();
         observation.stop();
         runtimeAccess.stop();
-        post({type: 'native-exit', code, memory: metrics(), runtimeSummary: binding?.snapshotSummary()});
+        const runtimeSummary = binding?.snapshotSummary();
+        post({type: 'native-exit', code, memory: metrics(), runtimeSummary,
+          ...(!failed && canSettleEmptyRuntimeFailureCapture(runtimeSummary, code) ? {runtimeFailureCapture: 'settled_empty'} : {})});
         release(); scope.close?.();
       },
     });
