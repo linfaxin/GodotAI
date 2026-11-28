@@ -71,6 +71,26 @@ export const SUMMER_OPERATION_SPECS = Object.freeze({
     parameters: [{name: 'path', required: true, description: '项目内现有 .ts 或 .tsx 脚本的 res:// 路径。'}],
     limitations: ['使用整个项目的类型环境，仅返回目标脚本的诊断。', '可在启动游戏前检查，结果带有实际检查的编辑版本。'],
   }),
+  'engine.read_file': spec({
+    title: '读取项目脚本', description: '读取当前项目脚本的完整文本、SHA-256 和编辑版本。',
+    allowed: ['path'], unsupported: ['offset', 'limit', 'unit', 'json_path', 'keys', 'keys_only'],
+    defaultInput: {path: 'res://src/start.ts'},
+    parameters: [{name: 'path', required: true, description: '项目中已有 .ts 或 .tsx 脚本的 res:// 路径。'}],
+    limitations: ['只读取完整 UTF-8 脚本，上限 1000000 字节。用返回的散列和编辑版本保护后续覆盖。'],
+  }),
+  'engine.write_file': spec({
+    title: '覆盖项目脚本', description: '按全文件 SHA-256、项目和版本校验后提交编辑。',
+    allowed: ['path', 'content', 'expected_sha256', 'projectId', 'expectedEditorRevision'], unsupported: ['create_only'],
+    defaultInput: {path: 'res://src/start.ts'},
+    parameters: [
+      {name: 'path', required: true, description: '同一次读取返回的 res:// 路径。'},
+      {name: 'content', required: true, description: '要保存的完整 UTF-8 文本。'},
+      {name: 'expected_sha256', required: true, description: 'engine.read_file 返回的完整文件散列。'},
+      {name: 'projectId', required: true, description: 'GodotAI 扩展。读取返回的项目 ID。'},
+      {name: 'expectedEditorRevision', required: true, description: 'GodotAI 扩展。读取返回的 editorRevision。'},
+    ],
+    limitations: ['只覆盖已有脚本，上限 1000000 字节。保存和后续检查遵循编辑工作台流程。'],
+  }),
   'engine.recent_events': spec({
     title: '读取最近的生命周期事件', description: '读取页面事件流，并取得 Play 或 Stop 前的游标。',
     allowed: ['since', 'kinds', 'limit', 'stream_id'], unsupported: [],
@@ -154,7 +174,7 @@ export const SUMMER_OPERATION_SPECS = Object.freeze({
     limitations: ['只支持明确登记的同步标量签名。', '超时或取消可能留下未确认结果，请先独立观察。'],
   }),
   'engine.game_input': spec({
-    title: '按物理帧输入', description: '为主运行安排一对动作或按键边沿，或执行一次鼠标点击。',
+    title: '按物理帧输入', description: '为主运行安排一对输入边沿、一次自动释放的动作或一次鼠标点击。',
     allowed: ['action', 'instance', 'clock', 'wait', 'events'],
     unsupported: ['include_motion', 'save_as', 'recording', 'seed'],
     parameters: [
@@ -162,13 +182,14 @@ export const SUMMER_OPERATION_SPECS = Object.freeze({
       {name: 'instance', description: '省略或 main。'},
       {name: 'clock', description: 'frame，对应原生物理帧。'},
       {name: 'wait', description: '省略或 true，等待释放迭代结束。'},
-      {name: 'events', required: true, description: '同一 action 或 key 的显式按下与释放，或一条 mouse_click。偏移最大 120。'},
+      {name: 'events', required: true, description: '动作或按键边沿对、单条 action（hold_ms: 50）或一条 mouse_click。偏移最大 120。'},
     ],
     defaultInput: {action: 'script', events: [
       {type: 'action', action: 'move_right', pressed: true, at_frame: 0},
       {type: 'action', action: 'move_right', pressed: false, at_frame: 4},
     ]},
     limitations: ['Full/debug Chromium Worker Direct。键鼠要求模板提供设备输入能力。',
+      'hold_ms: 50 需要运行报告 holdMilliseconds 能力、60 Hz 物理帧率和 1× 时间倍率。原生释放在按下后三个物理帧。',
       '点击使用未缩放的游戏画布像素，可传 geometry_epoch 绑定探测尺寸。使用 game_probe 验证玩法结果。'],
   }),
   'engine.game_probe': spec({

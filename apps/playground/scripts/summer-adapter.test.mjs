@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
 import test from 'node:test';
 import {createSummerDispatcher, parseSummerValue, SUMMER_COMPATIBILITY} from '../src/summer-adapter.ts';
+import {createProjectFileAccess} from '../src/project-file-access.ts';
 
 const identity = {runId: 'run-1', revision: 7, buildKey: 'build-1', generation: 1, documentId: 'doc-1', workerId: 'worker-1', runConfigurationHash: 'a'.repeat(64)};
 const target = {path: '/root/Main/Player', instanceId: '12345', name: 'Player', type: 'Node2D', parentPath: '/root/Main'};
@@ -45,6 +47,55 @@ function fixture() {
 }
 
 const set = (property = 'health', value = 40, extra = {}) => ({op: 'engine.runtime_set', input: {path: target.path, property, value, ...extra}});
+
+test('Summer project-file calls guard existing UTF-8 scripts by full-file hash, project and revision', async () => {
+  const {backend} = fixture();
+  const path = 'res://src/start.ts';
+  const content = '\uFEFFconst label = "试玩";\r\n';
+  let projectId = 'project-1', editorRevision = 7, text = content;
+  let edits = 0;
+  const files = createProjectFileAccess(key => ({projectId, editorRevision,
+    content: key === '/src/start.ts' ? text : key === '/src/binary.ts' ? [0] : undefined}),
+  (key, replacement) => {
+    assert.equal(key, '/src/start.ts');
+    edits++;
+    text = replacement;
+    return {projectId, editorRevision: ++editorRevision};
+  });
+  backend.readFile = files.read;
+  backend.writeFile = files.write;
+  const dispatch = createSummerDispatcher(backend);
+  const read = input => dispatch({op: 'engine.read_file', input});
+  const write = input => dispatch({op: 'engine.write_file', input});
+  const sha256 = createHash('sha256').update(content).digest('hex');
+  assert.deepEqual((await read({path})).result.data, {path, content, sha256, projectId, editorRevision, bytes: Buffer.byteLength(content)});
+  assert.equal((await read({path: 'res://src/%2e%2e/start.ts'})).error.code, 'invalid_input');
+  assert.equal((await read({path: 'res://src/../start.ts'})).error.code, 'invalid_input');
+  assert.equal((await read({path, offset: 1})).error.code, 'unsupported');
+  assert.equal((await read({path: 'res://src/binary.ts'})).error.code, 'unsupported');
+  assert.equal((await read({path: 'res://src/missing.ts'})).error.code, 'not_found');
+  const input = {path, projectId, expectedEditorRevision: editorRevision, expected_sha256: sha256, content: ''};
+  assert.equal((await write({...input, expected_sha256: undefined})).error.code, 'invalid_input');
+  assert.equal((await write({...input, content: '\uD800'})).error.code, 'invalid_input');
+  assert.equal((await write({...input, create_only: true})).error.code, 'unsupported');
+  assert.equal((await write({...input, expected_sha256: '0'.repeat(64)})).error.code, 'revision_conflict');
+  assert.equal((await write({...input, expectedEditorRevision: editorRevision - 1})).error.code, 'revision_conflict');
+  assert.equal((await write({...input, projectId: 'other-project'})).error.code, 'revision_conflict');
+  assert.equal(edits, 0);
+  assert.equal((await write({...input, content})).result.data.editorRevision, editorRevision);
+  assert.equal(edits, 0);
+  const replies = await Promise.all([write(input), write({...input, content: 'different write'})]);
+  assert.equal(replies.filter(reply => reply.ok).length, 1);
+  assert.equal(replies.find(reply => !reply.ok).error.code, 'revision_conflict');
+  assert.equal(edits, 1);
+  const latest = (await read({path})).result.data;
+  assert.equal(latest.content, text);
+  assert.equal(latest.editorRevision, 8);
+  const pending = write({...input, expectedEditorRevision: latest.editorRevision, expected_sha256: latest.sha256, content: 'late'});
+  projectId = 'new-project';
+  assert.equal((await pending).error.code, 'revision_conflict');
+  assert.equal(edits, 1);
+});
 
 test('Summer project context reads capability details only when requested', async () => {
   const {backend, calls} = fixture();
@@ -210,7 +261,7 @@ test('Summer input identifies unsupported timing and event types before the subs
   const {dispatch, calls} = fixture();
   const reply = events => dispatch({op:'engine.game_input',input:{action:'script',events}});
   const action = {type:'action',action:'jump',at_frame:0};
-  for (const [event, parameter] of [[{...action,hold_ms:50},'events[0].hold_ms'],
+  for (const [event, parameter] of [[{...action,hold_ms:100},'events[0].hold_ms'],
     [{...action,at_ms:25},'events[0].at_ms'],[{type:'axis'},'events[0].type']]) {
     const result = await reply([event]);
     assert.equal(result.error.code, 'unsupported');
@@ -218,6 +269,28 @@ test('Summer input identifies unsupported timing and event types before the subs
   }
   assert.equal((await reply([action])).error.code, 'invalid_input');
   assert.deepEqual(calls, []);
+});
+
+test('Summer timed holds schedule three guarded native steps for one 50 ms action', async () => {
+  const {backend, context} = fixture();
+  const commands = [];
+  backend.getRun = () => ok({projectId: context.projectId, state: 'running'});
+  backend.inputScript = async input => {
+    commands.push(input);
+    return error('unsupported', 'sdk');
+  };
+  const dispatch = createSummerDispatcher(backend);
+  const send = (...events) => dispatch({op: 'engine.game_input', input: {action: 'script', events}});
+  const press = {type: 'action', action: 'jump', at_frame: 4, hold_ms: 50};
+  assert.equal((await send({...press, hold_ms: -1})).error.code, 'invalid_input');
+  assert.equal((await send({...press, pressed: false})).error.code, 'invalid_input');
+  assert.equal((await send({...press, at_frame: 118})).error.code, 'invalid_input');
+  assert.equal((await send(press, {type: 'action', action: 'jump', pressed: false, at_frame: 7})).error.code, 'unsupported');
+  assert.deepEqual(commands, []);
+  const oldRuntime = await send(press);
+  assert.equal(oldRuntime.error.code, 'unsupported');
+  assert.equal(oldRuntime.error.details.godotai.parameter, 'events[0].hold_ms');
+  assert.deepEqual(commands, [{runId: identity.runId, actionName: 'jump', pressOffset: 4, releaseOffset: 7, requireUnscaled60Hz: true}]);
 });
 
 test('physical keys and clicks retain their native frame and geometry targets', async () => {

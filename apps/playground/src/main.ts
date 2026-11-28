@@ -25,6 +25,7 @@ import {createInputScriptDemo, INPUT_SCRIPT_DEMO_ID, matchesInputScriptDemo} fro
 import {createRuntimeRecoveryDemo, matchesRuntimeRecoveryDemo, RUNTIME_RECOVERY_DEMO_ID} from './runtime-recovery-demo';
 import {createRuntimeMethodDemo,createRuntimePropertiesDemo, matchesRuntimePropertiesDemo, RUNTIME_PROPERTIES_DEMO_ID} from './runtime-properties-demo';
 import {createSummerDispatcher} from './summer-adapter';
+import {createProjectFileAccess} from './project-file-access';
 import {createConsoleGate,createApiConsoleSession} from './workbench/api-console-session';
 import {createApiConsole} from './workbench/api-console';
 import type {ConsoleEnvironment} from './workbench/api-console-types';
@@ -53,7 +54,15 @@ const cancelledLaunches=new Map<string,{release:()=>void;stopping:Set<string>}>(
 let reconcilingCancelledLaunches=false;
 const consoleContextListeners=new Set<()=>void>();
 function notifyConsoleContext(){for(const listener of consoleContextListeners)listener();}
-const editor=createCodeEditor({changed(path,value){if(!current)return;current.files[path]=value;changed();},position(line,column){$('position').textContent=`Ln ${line}, Col ${column}`;},query:languageQuery,run:()=>{if(workbench.leftMode()==='code')void compile(true);},toggleFiles:()=>workbench.toggleFiles()});
+const editor=createCodeEditor({changed:editProjectText,position(line,column){$('position').textContent=`Ln ${line}, Col ${column}`;},query:languageQuery,run:()=>{if(workbench.leftMode()==='code')void compile(true);},toggleFiles:()=>workbench.toggleFiles()});
+const projectFileAccess=createProjectFileAccess(
+ path=>current&&selected?{projectId:selected.id,editorRevision:revision,content:Object.hasOwn(current.files,path)?current.files[path]:undefined}:undefined,
+ (path,content)=>{
+  editProjectText(path,content);
+  if(current.selected===path)editor.show(path,content);
+  return {projectId:selected.id,editorRevision:revision};
+ },
+);
 const workbench=createWorkbench({selectFile,focusEditor:()=>editor.focus(),layoutEditor:()=>editor.instance.layout(),showApi:id=>apiConsole.show(id),toast});
 const debugRecorder=createDebugRecorder();
 debugRecorder.subscribe(notifyConsoleContext);
@@ -84,6 +93,8 @@ const summerDispatcher=createSummerDispatcher({
  getDiagnostics:playground.getSummerDiagnostics,
  getDebuggerErrors:includeStack=>playground.getSummerDebuggerErrors(includeStack,playIntent?.attemptId??null),
  getScriptErrors:playground.getScriptErrors,
+ readFile:projectFileAccess.read,
+ writeFile:projectFileAccess.write,
  play:input=>playground.api.play(input),
  cancelLaunch,
  getBuild:input=>playground.api.get_build(input),
@@ -153,7 +164,7 @@ const consoleSession=createApiConsoleSession(playground.api,{
  callSelectedMethod:(input,signal,selected)=>playground.summerCall({op:'engine.runtime_call',input},signal,selected),
  openExample:operationId=>{
   if(operationId==='get_run')throw Error('查询指定运行无需打开示例');
-  if(operationId==='engine.get_debugger_errors'){
+  if(operationId==='engine.get_debugger_errors'||operationId==='engine.read_file'||operationId==='engine.write_file'){
    if(!ready||!nativePreview?.supportsInputExample)throw Error('当前预览不支持运行错误恢复示例');
    return openAgentDemo(createRuntimeRecoveryDemo(siteEngineProfile),matchesRuntimeRecoveryDemo);
   }
@@ -315,6 +326,11 @@ async function restore(){
 }
 function invalidatePlay(){if(playIntent?.attemptId)cancelLaunch(playIntent.attemptId);else{playIntent?.controller.abort();notifyConsoleContext();}}
 function changed(){storage.stage(selected.id,current);invalidatePlay();revision++;debugRecorder.setContext({editorRevision:revision});$('saved').textContent=persistenceBlocked?'保存失败':'正在保存';clearTimeout(saveTimer);saveTimer=setTimeout(()=>void save(),250);clearTimeout(checkTimer);checkTimer=setTimeout(()=>void check(),1100);}
+function editProjectText(path:string,content:string){
+ if(!current)return;
+ current.files[path]=content;
+ changed();
+}
 function initialProject(demo:Demo):EditorProject{return demo.id==='native'||demo.id==='react'?defaultProject(demo.runtime??'react',siteEngineProfile):demoProject(demo,siteEngineProfile);}
 
 function visibleFile(path:string){return path.split('/').at(-1)!=='package.json';}

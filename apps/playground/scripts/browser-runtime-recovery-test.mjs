@@ -10,7 +10,7 @@ import {runReportedBrowserTest, listenBrowserTestServer as listen, closeBrowserT
 import {consoleElement as element, openConsoleOperation, viewConsoleCall, submitConsole,
   consoleResult, summerResult, readConsolePng} from './api-console-browser-helpers.mjs';
 import {verifyCleanExit} from './verify-worker-exit.mjs';
-import {RUNTIME_RECOVERY_ERROR, RUNTIME_RECOVERY_PLAYER_PATH, RUNTIME_RECOVERY_START_FILE, runtimeRecoveryFixture} from '../src/runtime-recovery-demo.ts';
+import {RUNTIME_RECOVERY_ERROR, RUNTIME_RECOVERY_PLAYER_PATH, RUNTIME_RECOVERY_START_FILE} from '../src/runtime-recovery-demo.ts';
 
 const scope = 'playground-runtime-recovery';
 const reportFile = path.resolve(process.env.PLAYGROUND_RUNTIME_RECOVERY_REPORT ?? 'work/runtime-recovery/report.json');
@@ -54,7 +54,7 @@ await runReportedBrowserTest({scope, reportFile, run: async test => {
   const editorReady = () => page.waitForFunction(() =>
     window.godotPlayground?.get_project_context().result.capabilities.play === 'available');
 
-  async function lesson(step, operation, source) {
+  async function prepareLesson(step, source) {
     const panel = element(page, 'lessons');
     if (!await panel.evaluate(node => node.open)) await panel.locator('summary').click();
     await panel.locator('[data-lesson-id="runtime-recovery"][data-step-id="' + step + '"]').click();
@@ -62,6 +62,10 @@ await runReportedBrowserTest({scope, reportFile, run: async test => {
       await viewConsoleCall(page, source.callId);
       await element(page, 'use-result').click();
     }
+  }
+
+  async function lesson(step, operation, source) {
+    await prepareLesson(step, source);
     const {callId, reply} = await submitConsole(page, operation);
     return {callId, result: summerResult(reply)};
   }
@@ -156,17 +160,40 @@ await runReportedBrowserTest({scope, reportFile, run: async test => {
     assert.equal(error.entries[0].diagnostic.message, RUNTIME_RECOVERY_ERROR);
     report.debuggerResult = error;
 
-    const {repairedSource} = runtimeRecoveryFixture(release.runtimeProfile);
-    await page.locator(`#tabs [data-file-tab="${RUNTIME_RECOVERY_START_FILE}"]`).click();
-    await page.locator('#source .monaco-editor').click({position: {x: 105, y: 30}});
-    await page.keyboard.press('ControlOrMeta+a');
-    await page.keyboard.insertText(repairedSource);
-    await page.waitForFunction(revision => window.godotPlayground.get_project_context().result.editorRevision > revision, failed.run.revision);
-    await openConsoleOperation(page, 'engine.get_debugger_errors');
+    const source = await lesson('read-source', 'engine.read_file');
+    const {path: scriptPath, content, sha256, projectId, editorRevision} = source.result;
+    assert.equal(scriptPath, 'res:/' + RUNTIME_RECOVERY_START_FILE);
+    assert.equal(projectId, failed.run.projectId);
+    assert.equal(editorRevision, failed.run.revision);
+    assert.equal(sha256, createHash('sha256').update(content).digest('hex'));
+    assert.equal(content.split('const startupBroken = true;').length, 2);
+    const repaired = content.replace('const startupBroken = true;', 'const startupBroken = false;');
+    await prepareLesson('write-source', source);
+    const guarded = JSON.parse(await element(page, 'input').inputValue());
+    assert.deepEqual(guarded, {path: scriptPath, expected_sha256: sha256, projectId, expectedEditorRevision: editorRevision});
+    const stale = await publicCall('summer_call', {op: 'engine.write_file', input: {
+      ...guarded, content: repaired, expected_sha256: (sha256[0] === '0' ? '1' : '0') + sha256.slice(1),
+    }});
+    assert.equal(stale.ok, false);
+    assert.equal(stale.error.code, 'revision_conflict');
+    assert.deepEqual(await summerCall('engine.read_file', {path: scriptPath}), source.result);
+    await element(page, 'input').fill(JSON.stringify({...guarded, content: repaired}));
+    const write = summerResult((await submitConsole(page, 'engine.write_file')).reply);
+    assert.deepEqual(write, {path: scriptPath, projectId, editorRevision: editorRevision + 1,
+      sha256: createHash('sha256').update(repaired).digest('hex'), bytes: Buffer.byteLength(repaired)});
+    const {result: check} = await lesson('check-source', 'engine.get_script_errors');
+    assert.equal(check.status, 'completed');
+    assert.equal(check.editorRevision, write.editorRevision);
+    assert.equal(check.path, scriptPath);
+    assert.equal(check.diagnostics.counts.error, 0);
+    report.sourceRepair = {before: {path: scriptPath, sha256, projectId, editorRevision}, write,
+      staleError: stale.error.code, check: {checkId: check.checkId, sourceHash: check.sourceHash, editorRevision: check.editorRevision}};
 
     const fixed = await play('play-fixed', 'running');
     assert.equal(fixed.run.projectId, failed.run.projectId);
     assert(fixed.run.revision > failed.run.revision);
+    assert.equal(fixed.run.revision, write.editorRevision);
+    assert.equal(fixed.sourceHash, check.sourceHash);
     assert.notEqual(fixed.sourceHash, failed.sourceHash);
     const history = consoleResult(await publicCall('get_run', {runId: error.runId}));
     assert(sameWorkerRun(history, failed.run));

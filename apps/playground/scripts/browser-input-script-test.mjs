@@ -22,8 +22,10 @@ const identity = value => Object.fromEntries(runKeys.map(key => [key, value[key]
 await runReportedBrowserTest({scope, reportFile, run: async test => {
   const directory = defaultTestDirectory();
   const {site, release, candidateId, descriptorHash} = await test.preflight(directory, {worker: true});
-  assert(['supported', 'unsupported'].includes(expected), 'Set PLAYGROUND_INPUT_SCRIPT_CASE to supported or unsupported');
-  const supported = expected === 'supported';
+  assert(['supported', 'frame-only', 'unsupported'].includes(expected),
+    'Set PLAYGROUND_INPUT_SCRIPT_CASE to supported, frame-only or unsupported');
+  const supported = expected !== 'unsupported';
+  const expectHoldMilliseconds = expected === 'supported';
   assert.equal(release.runtimeAbi?.inputScript === 1, supported);
   assert.equal(release.runtimeAbi?.gameProbe, 1);
   assert.equal(site.engineTarget, 'template_debug');
@@ -179,7 +181,7 @@ await runReportedBrowserTest({scope, reportFile, run: async test => {
     checkpoint();
     return captured;
   }
-  async function observeRejectedInput(key, record, player, input) {
+  async function observeStableInput(key, record, player, input) {
     const runId = record.run.runId;
     const query = {runId, props: [{path: pathToPlayer, property: 'position'}], screenshot: false};
     const before = await recordPublic('game_probe', query);
@@ -199,7 +201,6 @@ await runReportedBrowserTest({scope, reportFile, run: async test => {
       assert.equal(state.properties[0].instanceId, player.instanceId);
     }
     assert(after.reply.result.frame.iteration > before.reply.result.frame.iteration);
-    assert.equal(call.reply.ok, false);
     return {reply: call.reply, dispatches};
   }
   async function observePublicFrameOffsets(record) {
@@ -260,14 +261,27 @@ await runReportedBrowserTest({scope, reportFile, run: async test => {
     const play = await lesson('input-play', 'engine.play');
     const first = await recordRun(play.result.attemptId, (await lesson('input-ready', 'wait_for_event', play)).result);
     const before = await capture(first, 'input-before', 64, 'before');
-    await test.step('documented-hold-ms-is-unsupported', async () => {
-      const {reply, dispatches} = await observeRejectedInput('holdMilliseconds', first, before.result.properties[0], inputCases.holdMilliseconds);
-      assert.equal(reply.error?.code, 'unsupported');
-      assert.equal(reply.error?.details.godotai.parameter, 'events[0].hold_ms');
-      assert.deepEqual(dispatches, []);
+    await test.step('documented-hold-ms-matches-expected-capability', async () => {
+      const state = consoleResult(await api('get_run', {runId: first.run.runId})).inputScript;
+      assert.equal(state.holdMilliseconds === true, expectHoldMilliseconds,
+        'Unexpected hold_ms capability for PLAYGROUND_INPUT_SCRIPT_CASE=' + expected);
+      const {reply, dispatches} = await observeStableInput('holdMilliseconds', first, before.result.properties[0], inputCases.holdMilliseconds);
+      if (expectHoldMilliseconds) {
+        const input = summerResult(reply);
+        assert.deepEqual(dispatches, [{type: 'input-script-request', runId: first.run.runId}]);
+        assert.deepEqual(identity(input.receipt.run), identity(first.run));
+        assert.equal(input.receipt.releaseId, release.id);
+        assert.equal(input.result.kind, 'completed');
+        assert.equal(input.result.releaseStepCompleted, true);
+        assert.equal(BigInt(input.result.up.physics) - BigInt(input.result.down.physics), 3n);
+      } else {
+        assert.equal(reply.error?.code, 'unsupported');
+        assert.equal(reply.error?.details.godotai.parameter, 'events[0].hold_ms');
+        assert.deepEqual(dispatches, []);
+      }
     });
     await test.step('unknown-action-is-rejected-by-native-input-map', async () => {
-      const {reply, dispatches} = await observeRejectedInput('unknownAction', first, before.result.properties[0], inputCases.unknownAction);
+      const {reply, dispatches} = await observeStableInput('unknownAction', first, before.result.properties[0], inputCases.unknownAction);
       assert.equal(reply.error?.code, 'unknown_action');
       const outcome = reply.error?.details.godotai.receipt;
       assert.equal(outcome.outcome, 'not_executed');
@@ -371,33 +385,33 @@ await runReportedBrowserTest({scope, reportFile, run: async test => {
     const exit = await recordPublic('wait_for_event', {runId, until: 'exited', timeoutMs: 10000});
     recordExit(record, consoleResult(exit.reply));
   });
+  async function playEditedPlayer(source) {
+    const {editorRevision} = consoleResult(await api('get_project_context'));
+    await page.locator('#tabs [data-file-tab="/src/Player.ts"]').click();
+    await page.locator('#source .monaco-editor').click({position: {x: 105, y: 30}});
+    await page.keyboard.press('ControlOrMeta+a');
+    await page.keyboard.insertText(source);
+    await page.waitForFunction(revision => window.godotPlayground.get_project_context().result.editorRevision > revision, editorRevision);
+    const {attemptId} = summerResult(await api('summer_call', {op: 'engine.play'}));
+    const {run} = consoleResult(await api('wait_for_event', {attemptId, until: 'running', timeoutMs: 60000}));
+    await page.waitForFunction(async id => {
+      const api = window.godotPlayground;
+      const active = (await api.summer_call({op: 'engine.is_running'})).result?.data;
+      return active?.capturedRunId === id && active.pendingAttemptId === null &&
+        api.get_run({runId: id}).result?.inputScript?.ready;
+    }, run.runId);
+    return run;
+  }
+
+  async function stopEditedRun(run) {
+    const {runId} = run;
+    consoleResult(await api('stop', {runId}));
+    const exit = consoleResult(await api('wait_for_event', {runId, until: 'exited', timeoutMs: 10000}));
+    recordExit({run}, exit);
+    return exit.run.exit;
+  }
+
   if (supported && process.env.PLAYGROUND_INPUT_SCRIPT_DEVICES === '1') {
-    async function playEditedPlayer(source) {
-      const {editorRevision} = consoleResult(await api('get_project_context'));
-      await page.locator('#tabs [data-file-tab="/src/Player.ts"]').click();
-      await page.locator('#source .monaco-editor').click({position: {x: 105, y: 30}});
-      await page.keyboard.press('ControlOrMeta+a');
-      await page.keyboard.insertText(source);
-      await page.waitForFunction(revision => window.godotPlayground.get_project_context().result.editorRevision > revision, editorRevision);
-      const {attemptId} = summerResult(await api('summer_call', {op: 'engine.play'}));
-      const {run} = consoleResult(await api('wait_for_event', {attemptId, until: 'running', timeoutMs: 60000}));
-      await page.waitForFunction(async id => {
-        const api = window.godotPlayground;
-        const active = (await api.summer_call({op: 'engine.is_running'})).result?.data;
-        return active?.capturedRunId === id && active.pendingAttemptId === null &&
-          api.get_run({runId: id}).result?.inputScript?.devices;
-      }, run.runId);
-      return run;
-    }
-
-    async function stopDeviceRun(run) {
-      const {runId} = run;
-      consoleResult(await api('stop', {runId}));
-      const exit = consoleResult(await api('wait_for_event', {runId, until: 'exited', timeoutMs: 10000}));
-      recordExit({run}, exit);
-      return exit.run.exit;
-    }
-
     await test.step('native-key-and-click', async () => {
       const played = await lesson('input-play', 'engine.play');
       const waiting = await lesson('input-ready', 'wait_for_event', played);
@@ -530,7 +544,7 @@ export default class Player extends Node2D {
       }
       await waitForPositionChange('y', before.y);
       assert.equal((await position()).y, before.y + 1, 'The real key release ends the action once');
-      await stopDeviceRun(run);
+      await stopEditedRun(run);
     });
     await test.step('changing-scene-clears-key-without-dispatching-release', async () => {
       const run = await playEditedPlayer(`import {InputEvent, InputEventKey, Key, Node2D, Vector2} from 'godot';
@@ -556,7 +570,7 @@ export default class Player extends Node2D {
       assert.equal(input.terminal.owner, 'cleared');
       const sample = consoleResult(await api('game_probe', {runId, props: [{path: pathToPlayer, property: 'position'}], screenshot: false}));
       assert.deepEqual(sample.properties[0].value, {x: 100, y: 256});
-      await stopDeviceRun(run);
+      await stopEditedRun(run);
     });
     await test.step('interrupted-click-does-not-dispatch-emulated-touch-release', async () => {
       const run = await playEditedPlayer(`import {Input, InputEvent, InputEventScreenTouch, Node2D, Vector2} from 'godot';
@@ -580,9 +594,31 @@ export default class Player extends Node2D {
       assert.equal(input.terminal.owner, 'cleared');
       const sample = consoleResult(await api('game_probe', {runId, props: [{path: pathToPlayer, property: 'position'}], screenshot: false}));
       assert.deepEqual(sample.properties[0].value, {x: 100, y: 256});
-      inputEvidence.interruptedTouch = {input, sample, exit: await stopDeviceRun(run)};
+      inputEvidence.interruptedTouch = {input, sample, exit: await stopEditedRun(run)};
     });
   }
+  if (expectHoldMilliseconds) await test.step('native-hold-rejects-30-hz-before-press', async () => {
+    const run = await playEditedPlayer(`import {Engine, Input, Node2D, Vector2} from 'godot';
+export default class Player extends Node2D {
+  _ready() { Engine.physics_ticks_per_second = 30; }
+  _physics_process() {
+    if (Input.is_action_pressed('move_right')) this.position = new Vector2(this.position.x + 16, this.position.y);
+  }
+}
+`);
+    const {callId, reply} = await recordSummer({
+      action: 'script', events: [{type: 'action', action: 'move_right', hold_ms: 50}],
+    });
+    assert.equal(reply.error?.code, 'unsupported');
+    const receipt = reply.error.details.godotai.receipt;
+    assert.deepEqual(receipt.terminal, {kind: 'not_executed', source: 'native', reason: 'unsupported'});
+    assert.deepEqual(identity(receipt.receipt.run), identity(run));
+    const probe = consoleResult(await api('game_probe', {
+      runId: run.runId, props: [{path: pathToPlayer, property: 'position'}], screenshot: false,
+    }));
+    assert.deepEqual(probe.properties[0].value, {x: 64, y: 256});
+    inputEvidence.cadenceGuard = {callId, runId: run.runId, position: probe.properties[0].value, exit: await stopEditedRun(run)};
+  });
   assert.deepEqual(errors, []);
   return withAcceptanceContext({status: 'passed', scope, engineExecuted, scriptExecuted, supported,
     runs, pngs, calls, publicCalls, inputEvidence, candidateId, descriptorHash, releaseId: release.id}, {directory, browser});

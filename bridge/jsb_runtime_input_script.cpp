@@ -35,6 +35,7 @@ struct Script {
     int press_offset = 0;
     int release_offset = 0;
     int action_id = 0;
+    bool require_unscaled_60_hz = false;
     int keycode = 0;
     bool physical = false;
     bool key_held = false;
@@ -134,6 +135,9 @@ const char *unavailable() {
         tree->get_current_scene()->get_instance_id() != script.scene) return "scene_changed";
     if (tree->is_paused() || tree->is_suspended()) return "paused";
     if (Input::get_singleton()->is_input_disabled()) return "input_disabled";
+    const Engine *engine = Engine::get_singleton();
+    if (script.require_unscaled_60_hz && (engine->get_physics_ticks_per_second() != 60 || engine->get_time_scale() != 1.0))
+        return "unsupported";
     if (script.action_id) {
         const auto *action = InputMap::get_singleton()->get_action_map().getptr(script.action);
         if (!action || action->id != script.action_id) return "action_changed";
@@ -164,7 +168,12 @@ bool read_command(const Dictionary &command, String &name) {
         script.physical = command["physical"];
         return true;
     }
-    return keys(command, {"actionName", "pressOffset", "releaseOffset", "deadline"}) &&
+    if (command.has("requireUnscaled60Hz")) {
+        const Variant required = command["requireUnscaled60Hz"];
+        if (required.get_type() != Variant::BOOL || !static_cast<bool>(required)) return false;
+        script.require_unscaled_60_hz = true;
+    }
+    return keys(command, {"actionName", "pressOffset", "releaseOffset", "deadline"}, {"requireUnscaled60Hz"}) &&
         valid_name(command["actionName"], name) && name.utf8().length() <= 128;
 }
 } // namespace

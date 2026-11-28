@@ -62,7 +62,7 @@ During framework development, rename supports ordinary scripts and text `.tscn` 
 
 ## Agent tools
 
-Expand **API 调用** in the sidebar to browse sixteen Summer-style operations and eight GodotAI helpers. Each entry shows the API name and a one-line summary. Open an API to edit its JSON input and inspect results or PNGs alongside the live preview. Each API has its own tab, draft and result view, with shared call history. Requests use the same `window.godotPlayground` API (`schemaVersion: 1`) as external callers. Ctrl/Cmd+Enter executes the active API draft in the request editor and builds the project in the code editor.
+Expand **API 调用** in the sidebar to browse eighteen Summer-style operations and eight GodotAI helpers. Each entry shows the API name and a one-line summary. Open an API to edit its JSON input and inspect results or PNGs alongside the live preview. Each API has its own tab, draft and result view, with shared call history. Requests use the same `window.godotPlayground` API (`schemaVersion: 1`) as external callers. Ctrl/Cmd+Enter executes the active API draft in the request editor and builds the project in the code editor.
 
 The console retains per-operation drafts and bounded in-memory history. Loading a preset or historical request never executes it. **更新目标 / 填入上下文** uses explicit project, run, node and method selections. PNGs are separate attachments and JSON results identify binary summaries. **打开独立示例** switches to the selected sample and ends the previous preview without automatically playing it. Lessons cover diagnostics and repair, startup recovery, position changes, exported gameplay properties, registered method calls, same-frame probes, physics-frame input and lifecycle events. [Console design](../../docs/design/playground-api-console.zh-CN.md)
 
@@ -83,7 +83,9 @@ await window.godotPlayground.summer_call({
 
 The query follows the latest attempt for the captured editor revision. An `observed` reply includes the first fatal report captured by the runtime binding, the build attempt ID and source hash, and the run ID. `pending` means the attempt or run is awaiting settlement. `no_session` describes the attempt within the retained history. `unavailable` covers expired records and exits without confirmed capture. `no_reported_error` requires a settled capture and a clean host exit. Use `get_run({runId})` for the full exit receipt and for historical runs. The exit can carry `runtimeFailureCapture: 'observed'` alongside its diagnostic or `'settled_empty'` after a clean run. Stack text is opt-in and may refer to generated JavaScript.
 
-On a matching Full/debug Dedicated Worker Direct preview in Chromium, open the independent example from `engine.get_debugger_errors`. The script initially passes the type check and fails during startup. Run the example, wait for it to exit, and read the debugger error. Change `startupBroken` to `false` in `/src/start.ts`, then run it again. The two probes around four physics steps report x=64 and x=128. After a clean Stop and restart, the first probe returns to x=64.
+On a matching Full/debug Dedicated Worker Direct preview in Chromium, open the independent example from `engine.get_debugger_errors`. The script initially passes the type check and fails during startup. Run the example, wait for it to exit, and read the debugger error. Read `res://src/start.ts` with `engine.read_file`, use the reply to fill the target and guard in `engine.write_file`, and submit the full script with `startupBroken` set to `false`. Check the repaired script with `engine.get_script_errors`, then Play. The two probes around four physics steps report x=64 and x=128. After a clean Stop and restart, the first probe returns to x=64. With `inputScript.holdMilliseconds` available, the optional 50 ms step then moves the player to x=112 before the final stop.
+
+The file operations support existing `.ts` and `.tsx` UTF-8 scripts up to 1,000,000 bytes. The console applies its own smaller request and display limits. The hash covers the whole file. To overwrite it, send its full replacement text and the values from the same read in `path`, `expected_sha256`, `projectId` and `expectedEditorRevision`. The last two fields are Playground extensions. A conflict leaves the file and editor revision unchanged. A successful write enters the same editor and autosave flow as a manual edit. The write itself does not start a build or preview.
 
 Use a single candidate for the Playground walkthrough and the packed SDK round trip. Set `PLAYGROUND_TEST_DIRECTORY` to the candidate, and `PLAYGROUND_ACCEPTANCE_CONTEXT` to the `site-start.json` created by `seal-site-acceptance --begin`. From the repository root, use separate report directories outside the site.
 
@@ -96,7 +98,7 @@ PLAYGROUND_SDK_ROUNDTRIP_REPORT=/path/to/sdk-roundtrip/report.json \
   node apps/playground/scripts/browser-sdk-roundtrip-test.mjs
 ```
 
-The SDK test verifies the typed failure receipt, guarded repair, same-path PNG replacement and fresh Schema 4 import. It also imports the same exported JSON in Playground. Both reports retain actual PNGs and identities. [Runtime recovery and SDK contract](../../docs/design/summer-runtime-recovery-and-sdk-roundtrip.zh-CN.md)
+The Playground recovery test verifies stale hash rejection, the guarded write, and that the script check and successful build used the same source. The SDK test verifies the typed failure receipt, guarded repair, same-path PNG replacement and fresh Schema 4 import. It also imports the same exported JSON in Playground. Both reports retain actual PNGs and identities. [Runtime recovery and SDK contract](../../docs/design/summer-runtime-recovery-and-sdk-roundtrip.zh-CN.md)
 
 On a Full Engine debug Worker Direct preview with `runtimeProperties: 1` and `runtimeCall: 1`, open **打开独立示例** from `engine.runtime_call` and follow **Summer：调用玩法方法** under **手工教学流程**. The sample registers `take_damage` on `/root/Main/Player` with `@bind.runtimeMethod({args: ['int'], returns: 'int'})`. Each step opens its API tab and loads a draft. When a step asks you to fill parameters from an earlier call, select the source in shared history and fill the current operation. Check the draft and then execute it. Read `health` and capture the game before and after `take_damage(25)` to verify `100 → 75`. Wait for the original run to exit. Start the same source and discover the player again to verify `100` and a full health bar in the new run.
 
@@ -225,6 +227,8 @@ await window.godotPlayground.summer_call({
 
 An InputMap action uses one explicit press and release for the same registered action. The defaults are `instance: 'main'`, `clock: 'frame'`, `wait: true`, press offset `0`, and strength `1`. The release offset is greater than the press offset and at most `120`. This action is visible during eligible physics callbacks through `Input.is_action_pressed` and `Input.get_action_strength` with `exact_match: false`, and through `Input.get_axis`.
 
+When `get_run({runId}).result.inputScript.holdMilliseconds` is true, a single InputMap action can request `{type: 'action', action: 'move_right', hold_ms: 50}`. The Summer adapter schedules a press and release three physics steps apart. The native engine checks for a 60 Hz physics rate and a time scale of 1 before pressing and while the script is active. An incompatible rate or time scale before the press returns `unsupported` with a native `not_executed` receipt. The input browser test checks the three-frame release and rejection at 30 Hz. Other durations, the millisecond scheduling clock, key auto-release, and Summer's `fixed_fps` launch option are outside this subset.
+
 When `get_run({runId}).result.inputScript.devices` is true, the same operation also accepts either of these event lists.
 
 ```js
@@ -238,7 +242,7 @@ When `get_run({runId}).result.inputScript.devices` is true, the same operation a
 ]
 ```
 
-The key pair uses the same Godot `physical_keycode` or `keycode` on both events. A click sends both edges in one physics step. Coordinates are integer pixels in the unscaled game canvas, with button 1, 2, or 3. To act on a probe image, use its full source dimensions to map the coordinates and send `geometry_epoch` from `image.geometry.epoch`. The console fills the epoch when selecting a rendered probe receipt. If the epoch is omitted, the Worker captures current geometry at staging. A stale epoch, pending resize, or out-of-bounds click returns `geometry_conflict` before either click edge. The playtest moves the marker to x=128 with action input, then to x=192 with the physical arrow key, and clicking **Reset player** returns it to x=64. Raw input and millisecond scripts are outside this subset.
+The key pair uses the same Godot `physical_keycode` or `keycode` on both events. A click sends both edges in one physics step. Coordinates are integer pixels in the unscaled game canvas, with button 1, 2, or 3. To act on a probe image, use its full source dimensions to map the coordinates and send `geometry_epoch` from `image.geometry.epoch`. The console fills the epoch when selecting a rendered probe receipt. If the epoch is omitted, the Worker captures current geometry at staging. A stale epoch, pending resize, or out-of-bounds click returns `geometry_conflict` before either click edge. The playtest moves the marker to x=128 with action input, then to x=192 with the physical arrow key, and clicking **Reset player** returns it to x=64. Raw input is outside this subset.
 
 Player input takes priority if the same key arrives during an active script. The script ends with `busy`, and an InputMap action held by both inputs stays pressed until the player releases it. A scene change clears the scripted key without sending a release callback to the replacement scene.
 
@@ -401,9 +405,11 @@ PLAYGROUND_INPUT_SCRIPT_CASE=unsupported node apps/playground/scripts/browser-in
 
 Archive the reports outside the site, along with command logs and exit codes. G0 verifies native input and uses its own fixture release identity. Match it to the newer site with the template and engine report hashes. The site tests report the candidate and release identities, movement and restart, stale run receipts, and previous-template physical gestures. `--begin` records the input for the targeted checks. Full release acceptance uses the separate browser matrix below.
 
+The `supported` case requires `hold_ms: 50` to release after three physics steps and verifies rejection at 30 Hz. For older sites that support explicit frame offsets only, use `PLAYGROUND_INPUT_SCRIPT_CASE=frame-only` to verify that `hold_ms` returns `unsupported` without a Worker request. Use `unsupported` for sites without the Input Script ABI.
+
 To play the archived demo, extract the new local candidate into a fresh directory, then serve the same directory twice with the product server. Use `PLAYGROUND_DIRECTORY=<absolute-site> PORT=4173 node apps/playground/scripts/serve.mjs` for the editor and the same command with `PORT=4174` for the preview. In a clean Chromium profile open `http://127.0.0.1:4173/?presentationBackend=direct&previewOrigin=http%3A%2F%2F127.0.0.1%3A4174`. Open **API 调用 → engine.game_input → 打开独立示例**, then follow **Summer：用输入验证移动**. The expected positions are `64 → 128 → 64`. The local candidate uses the root path. Candidates built with `--public-assets` use their versioned release prefix on both origins.
 
-The comparison with Summer Desktop 0.8.8 and CLI 4.9.2 verified four held physics steps and x positions `64 → 128 → 64` on both engines for explicit frame offsets. Summer executed the literal `hold_ms: 50` request. Playground returned `unsupported` without a Worker dispatch. The collector preserves the public CLI responses, original Probe images and fixture traces for an independent comparison. [Comparison results](https://github.com/linfaxin/GodotAI/pull/31) · [Native fixture and collection instructions](scripts/fixtures/summer-compat/README.md)
+The comparison with Summer Desktop 0.8.8 and CLI 4.9.2 verified four held physics steps and x positions `64 → 128 → 64` on both engines for explicit frame offsets. A fresh capture of the literal `hold_ms: 50` request observed three held physics steps at Summer's default cadence and four with `fixed_fps: 60`. Both CLI replies reported the press frame as their last scheduled frame. The fixture trace separately observed the release. The current Playground subset uses the default-cadence sample as its reference and reports actual release completion. Older templates return `unsupported` without a Worker dispatch. [Original comparison](https://github.com/linfaxin/GodotAI/pull/31) · [Native fixture and collection instructions](scripts/fixtures/summer-compat/README.md)
 
 #### Check the R4 browser demo handoff
 
@@ -433,7 +439,7 @@ node apps/playground/scripts/verify-handoff.mjs web /path/to/replay \
 
 #### Check a full compatibility handoff
 
-To check an existing handoff, run the following from its directory with Node.js, Python 3 and Pillow installed. The block creates a fresh `replay` directory. To recheck an existing extraction, run the final three commands together in a shell with `set -e` enabled. The checks read the original reports and rerun the image measurement. A complete comparison includes both native `hold_ms` runs. On the Playground side, the expected result for that request is `unsupported` with zero input dispatches.
+To check an existing handoff, run the following from its directory with Node.js, Python 3 and Pillow installed. The block creates a fresh `replay` directory. To recheck an existing extraction, run the final three commands together in a shell with `set -e` enabled. The checks read the original reports and rerun the image measurement. A complete comparison includes both native `hold_ms` runs. The original Playground handoff reports `unsupported` with zero dispatches. A current timed-hold candidate reports the native frame count alongside both Summer measurements.
 
 ```sh
 (
@@ -462,6 +468,8 @@ for variant in new old; do
 done
 node apps/playground/scripts/verify-summer-compat.mjs "$(dirname "$COMPAT_REPORTS")"
 ```
+
+When replaying the original frame-only candidate with the current browser test, use `mode=frame-only` for `new`.
 
 The handoff also records a separate smoke run using the archived `serve.mjs` entry point. Fresh captures show `manual.status: not_run` when that supplemental report is absent. Set `PYTHON` to select an interpreter with Pillow.
 

@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
 import {mkdir, readFile} from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {launchBrowser, defaultTestDirectory} from './browser-harness.mjs';
 import {createStaticServer} from './serve.mjs';
 import {runReportedBrowserTest, listenBrowserTestServer as listen, closeBrowserTestServer as close} from './browser-contract-report.mjs';
-import {consoleElement as element, openConsoleOperation, submitConsole, summerResult, viewConsoleCall} from './api-console-browser-helpers.mjs';
+import {consoleElement as element, openConsoleOperation, invokeConsole, submitConsole, summerResult, viewConsoleCall} from './api-console-browser-helpers.mjs';
 
 const directory = defaultTestDirectory({shellOnly: true});
 const output = path.resolve(process.env.PLAYGROUND_API_CONSOLE_SHELL_OUT ??
@@ -67,7 +68,7 @@ await runReportedBrowserTest({scope: 'real-main-api-console-shell',
       await openConsoleOperation(page, 'engine.get_project_context');
       assert.equal(await page.locator('#api-console-pane').isVisible(), true);
       assert.equal(await page.locator('#code-pane').isVisible(), false);
-      assert.equal(await page.locator('#api-list .api-list-summary:visible').count(), 24);
+      assert.equal(await page.locator('#api-list .api-list-summary:visible').count(), 26);
       assert.equal(await page.locator('#api-list .api-list-group').count(), 2);
       assert(await page.locator('#api-list').evaluate(node => node.scrollWidth <= node.clientWidth));
       assert(await page.locator('.api-list-summary').evaluateAll(nodes => nodes.every(node => node.scrollWidth <= node.clientWidth)));
@@ -252,11 +253,40 @@ await runReportedBrowserTest({scope: 'real-main-api-console-shell',
       assert.equal(await element(page, 'execute').isEnabled(), true);
       assert.equal((await inspect()).build, null);
     }, {after: ['browser-back-keeps-the-api-console-and-its-session']});
+    await test.step('guarded-script-edit-uses-the-real-workspace', async () => {
+      const file = initial.selected;
+      const tab = page.locator(`#tabs [data-file-tab="${file}"]`);
+      await tab.click();
+      await page.keyboard.press('ControlOrMeta+End');
+      await page.keyboard.type('// Manual edit before the API write');
+      const previous = await inspect();
+      assert.match(previous.files[file], /Manual edit before the API write/);
+      const path = 'res:/' + file;
+      const read = await invokeConsole(page, 'engine.read_file', {path});
+      const source = summerResult(read.reply);
+      assert.equal(source.content, previous.files[file]);
+      assert.equal(source.sha256, createHash('sha256').update(source.content).digest('hex'));
+      const content = source.content + '\n// Source edit from the public API\n';
+      await openConsoleOperation(page, 'engine.write_file');
+      await element(page, 'input').fill(JSON.stringify({path, content}));
+      await viewConsoleCall(page, read.callId);
+      await element(page, 'use-result').click();
+      assert.deepEqual(JSON.parse(await element(page, 'input').inputValue()), {path, content,
+        projectId: previous.projectId, expectedEditorRevision: previous.revision, expected_sha256: source.sha256});
+      const written = summerResult((await submitConsole(page, 'engine.write_file')).reply);
+      assert.equal(written.editorRevision, previous.revision + 1);
+      assert.equal(written.sha256, createHash('sha256').update(content).digest('hex'));
+      assert.deepEqual(await inspect(), {...previous, revision: written.editorRevision, files: {...previous.files, [file]: content}});
+      await page.waitForFunction(() => document.querySelector('#saved')?.textContent === '已自动保存');
+      await tab.click();
+      await page.keyboard.press('ControlOrMeta+z');
+      assert.deepEqual((await inspect()).files, previous.files, 'Undo should only revert the API write');
+    }, {after: ['lifecycle-cursor-fill-and-cancel-through-the-real-console']});
     await test.step('no-page-or-console-errors', async () => {
       assert.deepEqual(pageErrors, []);
       assert.deepEqual(consoleErrors, []);
       assert.deepEqual(failedRequests, []);
-    }, {after: ['lifecycle-cursor-fill-and-cancel-through-the-real-console']});
+    }, {after: ['guarded-script-edit-uses-the-real-workspace']});
     return {status: 'passed', browser: {name: browser.browserType().name(), version: browser.version()},
       engineExecuted: false, mainReplaced: false, compilerReplaced: false, nodeVersion: process.version,
       profile, pageErrors, consoleErrors, failedRequests, screenshots};

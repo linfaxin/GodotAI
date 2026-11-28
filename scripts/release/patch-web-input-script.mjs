@@ -145,6 +145,8 @@ void scene_will_change(const Node *current, const Node *next);
     ['extern "C" void godot_web_worker_frame_committed() {', guard(exports) + '\nextern "C" void godot_web_worker_frame_committed() {'],
     hook('static bool shutdown_complete = false;',
       'extern "C" EMSCRIPTEN_KEEPALIVE uint32_t godotjs_input_script_devices() { return 1; }'),
+    hook('static bool worker_in_iteration = false;',
+      'extern "C" EMSCRIPTEN_KEEPALIVE uint32_t godotjs_input_script_unscaled_60_hz() { return 1; }'),
     hook('\tworker_in_iteration = true;', '\tjsb::input_script::begin_iteration(worker_iteration);'),
     ['\tEM_ASM({ if (Module[\'godotWorkerEndIteration\'])',
       guard(`\tjsb::input_script::end_iteration(should_exit);

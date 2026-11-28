@@ -150,6 +150,12 @@ function resultFacts(call: ConsoleCall, input: unknown, reply: unknown, submitte
       nonempty(data.stream_id) && Number.isSafeInteger(data.next_seq) && data.next_seq >= 0) {
     facts.eventCursor = {since: data.next_seq, stream_id: data.stream_id};
   }
+  if (op === 'engine.read_file' && object(input) && nonempty(data.path) && data.path === input.path &&
+      nonempty(data.projectId) && data.projectId === anchor.editorProjectId &&
+      Number.isSafeInteger(data.editorRevision) && data.editorRevision === anchor.editorRevision &&
+      typeof data.sha256 === 'string' && /^[a-f0-9]{64}$/.test(data.sha256)) {
+    facts.file = {path: data.path, projectId: data.projectId, editorRevision: data.editorRevision, sha256: data.sha256};
+  }
   if (op === 'engine.play' && nonempty(data.attemptId)) facts.attemptId=data.attemptId;
   const nodes = op === 'engine.get_runtime_tree' ? data.nodes : op === 'engine.game_probe' ? data.tree?.nodes : undefined;
   if (run && Array.isArray(nodes)) {
@@ -193,7 +199,7 @@ function resultFacts(call: ConsoleCall, input: unknown, reply: unknown, submitte
     facts.stoppedRunIds=data.runs.filter((item:unknown)=>object(item)&&nonempty(item.runId)).slice(0,16).map((item:any)=>item.runId);
     if(data.runs.length>16)facts.truncated=true;
   }
-  if (!facts.attemptId && !facts.run && !facts.nodes && !facts.propertyTarget && !facts.input && !facts.stoppedRunIds && !facts.eventCursor) return;
+  if (!facts.attemptId && !facts.run && !facts.nodes && !facts.propertyTarget && !facts.input && !facts.stoppedRunIds && !facts.eventCursor && !facts.file) return;
   while(encoder.encode(JSON.stringify(facts)).byteLength>FACT_BYTES) {
     facts.truncated=true;
     if(facts.nodes?.length)facts.nodes.pop();else if(facts.properties?.length)facts.properties.pop();
@@ -207,6 +213,8 @@ export function consoleResultSource(operationId: string, facts: ConsoleResultFac
   if (!facts) return;
   const hasNode = facts.run && !!facts.nodes?.length;
   switch (operationId) {
+    case 'engine.write_file':
+      return facts.file ? 'file' : undefined;
     case 'engine.recent_events':
     case 'engine.wait_for_event':
       return facts.eventCursor ? 'event-cursor' : undefined;
@@ -332,6 +340,7 @@ export function createApiConsoleSession(api: PlaygroundApi, hooks: ConsoleHooks,
         error('missing_source','请从当前运行的节点树重新选择目标，原草稿已保留');return;
       }
       if(id.startsWith('engine.')&&!selection){
+        if(id==='engine.write_file'){error('missing_source','请从当前脚本的读取回执填入写入目标，原草稿已保留');return;}
         if(draft().selectedMethod){error('missing_source','请从当前运行的发现结果重新选择方法');return;}
         draft().anchor=current.anchor;emit();return;
       }
@@ -347,6 +356,18 @@ export function createApiConsoleSession(api: PlaygroundApi, hooks: ConsoleHooks,
       const target=node&&source?.run?{runId:source.run.identity.runId,path:node.path,expectedInstanceId:node.instanceId}:source?.propertyTarget;
       if ((id === 'engine.recent_events' || id === 'engine.wait_for_event') && source?.eventCursor) {
         Object.assign(next, source.eventCursor);
+      } else if (id === 'engine.write_file' && source?.file) {
+        if (!same(source.sourceAnchor, current.anchor, ['editorProjectId', 'editorRevision'])) {
+          missing('请先重新读取当前版本的脚本');return;
+        }
+        const {path, sha256, projectId, editorRevision} = source.file;
+        const draftProjectId = next.projectId ?? draft().anchor.editorProjectId;
+        const sameBase = next.expected_sha256 === undefined
+          ? draft().anchor.editorRevision === editorRevision : next.expected_sha256 === sha256;
+        if (Object.hasOwn(next, 'content') && (next.path !== path || draftProjectId !== projectId || !sameBase)) {
+          missing('脚本目标或版本已变化。请先复制要保留的正文，再删除 content 字段并重新填入');return;
+        }
+        Object.assign(next, {path, expected_sha256: sha256, projectId, expectedEditorRevision: editorRevision});
       } else if((id==='engine.game_input'||id==='engine.stop')&&selection){
         if(!source?.run||source.run.identity.runId!==current.anchor.activeRunId||
           source.run.identity.revision!==current.anchor.activeRunRevision||current.activeRunState!=='running'||

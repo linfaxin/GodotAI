@@ -1,5 +1,5 @@
 import {INPUT_SCRIPT_PLAYER_PATH} from '../input-script-demo';
-import {RUNTIME_RECOVERY_PLAYER_PATH, RUNTIME_RECOVERY_ROOT_PATH} from '../runtime-recovery-demo';
+import {RUNTIME_RECOVERY_PLAYER_PATH, RUNTIME_RECOVERY_ROOT_PATH, RUNTIME_RECOVERY_START_FILE} from '../runtime-recovery-demo';
 import {SUMMER_OPERATION_SPECS} from '../summer-operation-spec';
 
 /** Teaching data only. Loading a step never executes it or advances another step. */
@@ -25,6 +25,7 @@ export interface ConsoleLesson {
 
 const inputScriptReady = '收到 running 回执后，确认主运行是回执中的 runId、待启动 attempt 为「无」，且「物理帧输入」和「游戏帧探测」均为「可用」。';
 const recoveryReady = '在调用台等「待启动 attempt」显示「无」，且「游戏帧探测」和「物理帧输入」均显示「可用」。';
+const recoveryScript = {path: 'res:/' + RUNTIME_RECOVERY_START_FILE};
 
 const takeCursor = (id: string, action: string): ConsoleLessonStep => ({
   id, label: `${action}前取游标`, operationId: 'engine.recent_events', input: {},
@@ -59,7 +60,11 @@ export const CONSOLE_LESSONS: readonly ConsoleLesson[] = [
     steps: [
       {id: 'play-failure', label: '启动故障版', operationId: 'engine.play', input: {}},
       {id: 'read-error', label: '读取本次运行错误', operationId: 'engine.get_debugger_errors',
-        input: {include_stack: true}, notes: '等待预览结束后执行。根据错误消息回到 start.ts，把 startupBroken 由 true 改为 false。'},
+        input: {include_stack: true}, notes: '等待预览结束后执行。确认故障属于刚才的运行。'},
+      {id: 'read-source', label: '读取启动脚本', operationId: 'engine.read_file', input: recoveryScript},
+      {id: 'write-source', label: '提交启动修复', operationId: 'engine.write_file', input: recoveryScript,
+        notes: '在历史中选择读取脚本的回执，点击「填入当前操作」。将读取结果的完整 content 放入草稿，把 startupBroken 的值改为 false，再执行。'},
+      {id: 'check-source', label: '检查修复后的脚本', operationId: 'engine.get_script_errors', input: recoveryScript},
       {id: 'play-fixed', label: '启动修复版', operationId: 'engine.play', input: {}, notes: recoveryReady},
       recoveryProbe('recovery-before', 64),
       {id: 'recovery-input', label: '按住向右动作四步', operationId: 'engine.game_input',
@@ -69,7 +74,11 @@ export const CONSOLE_LESSONS: readonly ConsoleLesson[] = [
       stopLifecycleRun('stop-fixed'),
       {id: 'recovery-restart', label: '用同一源码重启', operationId: 'engine.play', input: {},
         notes: '等修复版停止后重启。' + recoveryReady},
-      {...recoveryProbe('recovery-reset', 64), notes: '确认重启后回到起点，完成后可用工具栏停止预览。'},
+      {...recoveryProbe('recovery-reset', 64), notes: '确认重启后回到起点。支持 50 毫秒自动释放的运行可以接着验证下两步。'},
+      {id: 'recovery-hold', label: '按住向右动作 50 毫秒', operationId: 'engine.game_input', needsRunSource: true,
+        input: {action: 'script', events: [{type: 'action', action: 'move_right', hold_ms: 50}]},
+        notes: '从重启后的探测回执选择运行。确认 inputScript.holdMilliseconds 为 true，回执记录三个物理帧后释放。'},
+      {...recoveryProbe('recovery-after-hold', 112), notes: '确认三次移动各 16 像素，完成后用工具栏停止预览。'},
     ],
   },
   {

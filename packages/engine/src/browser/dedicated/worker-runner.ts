@@ -143,6 +143,7 @@ interface Session {
   inputSequence: number;
   inputScriptSequence: number;
   inputScriptDevices?: true;
+  inputScriptHoldMilliseconds?: true;
   inputScript?: {receipt: InputScriptReceipt; command: InputScriptCommand; deadline: number; retire(result: InputScriptResult): void};
   failure?: ReturnType<typeof previewDiagnostic>;
   timer?: ReturnType<typeof setTimeout>; watchdog?: ReturnType<typeof setInterval>;
@@ -432,6 +433,7 @@ export class WorkerPreviewRunner {
           }
           this.inputScriptVersions.set(identity.runId, inputVersion !== undefined);
           if (inputVersion !== undefined && m.inputScriptDevices === true) s.inputScriptDevices = true;
+          if (inputVersion !== undefined && m.inputScriptHoldMilliseconds === true) s.inputScriptHoldMilliseconds = true;
         }
         if (!this.transition(s, m.phase)) return;
         if (m.phase === 'running') {
@@ -882,7 +884,8 @@ export class WorkerPreviewRunner {
     const supported = this.inputScriptVersions.get(runId) ?? null;
     const session = this.active?.identity.runId === runId ? this.active : undefined;
     return {supported, ready: supported === true && session?.state === 'running',
-      ...(session?.inputScriptDevices ? {devices: true} : {})};
+      ...(session?.inputScriptDevices ? {devices: true} : {}),
+      ...(session?.inputScriptHoldMilliseconds ? {holdMilliseconds: true} : {})};
   }
 
   runGameInputScript(input: InputScriptInput, signal?: AbortSignal): Promise<InputScriptResult> {
@@ -896,6 +899,7 @@ export class WorkerPreviewRunner {
     if (session.state !== 'running') return Promise.resolve(inputScriptFailure('not_ready'));
     if (!this.inputScriptState(runId).ready) return Promise.resolve(inputScriptFailure('unsupported'));
     if (!('actionName' in command) && !session.inputScriptDevices) return Promise.resolve(inputScriptFailure('unsupported'));
+    if ('requireUnscaled60Hz' in command && !session.inputScriptHoldMilliseconds) return Promise.resolve(inputScriptFailure('unsupported'));
     if (this.options.container.ownerDocument.visibilityState === 'hidden') return Promise.resolve(inputScriptFailure('hidden'));
     if (session.inputScript || session.inputScriptSequence === 0xffffffff) return Promise.resolve(inputScriptFailure('busy'));
     const sequence = ++session.inputScriptSequence;

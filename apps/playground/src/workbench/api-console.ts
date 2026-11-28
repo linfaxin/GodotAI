@@ -322,6 +322,8 @@ function createApiConsoleCard(container: HTMLElement, session: ConsoleSession, o
     }
     if (kind === 'event-cursor' && facts.eventCursor)
       sources.append(element('p', 'api-console-note', `续读序号 ${facts.eventCursor.since}`));
+    if (kind === 'file' && facts.file)
+      sources.append(element('p', 'api-console-note', `${facts.file.path} · 编辑版本 ${facts.file.editorRevision}`));
     if (kind === 'attempt') sources.append(element('p', 'api-console-note', `attemptId: ${facts.attemptId}`));
     if (facts.run) sources.append(element('p', 'api-console-note', `runId: ${facts.run.identity.runId}`));
     if (kind === 'input' && facts.input) sources.append(element('p', 'api-console-note', `输入: ${facts.input.runId} / ${facts.input.operationId}`));
@@ -385,7 +387,7 @@ function createApiConsoleCard(container: HTMLElement, session: ConsoleSession, o
     execute.disabled = state.owner !== null || !!state.pendingCallId;
     const methodExample = operation.id === 'engine.runtime_call' || operation.id === 'describe_runtime_methods';
     const inputExample = operation.id === 'engine.game_input';
-    const recoveryExample = operation.id === 'engine.get_debugger_errors';
+    const recoveryExample = ['engine.get_debugger_errors', 'engine.read_file', 'engine.write_file'].includes(operation.id);
     open.disabled = state.owner !== null || methodExample && state.environment.methodExampleAvailable !== true ||
       (inputExample || recoveryExample) && state.environment.inputExampleAvailable !== true;
     if (methodExample) setText(exampleNote, state.environment.methodExampleAvailable === true
