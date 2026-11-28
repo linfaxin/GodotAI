@@ -120,6 +120,8 @@ done
 
 Open **API 调用 → engine.game_input → 打开独立示例**, then follow **Summer：等待启动与退出** on a Full/debug Dedicated Worker Direct site.
 
+When combining both lessons, execute **查看启动前的能力** before the diagnostics lesson's first Play. After **复查修复版 Player.ts**, resume the lifecycle lesson at **Play前取游标** to start the repaired version on the same project.
+
 The lifecycle replay passed the Chromium tutorial and offline verification from a fresh archive extraction. Same-frame state and PNGs showed the marker at x positions `64 → 128 → 64`, with matching start events and clean exits for both Worker sessions. [Lifecycle replay acceptance](https://github.com/linfaxin/GodotAI/pull/38)
 
 Read a cursor before triggering Play or Stop. Resume from the same response's `next_seq` and `stream_id`. An ID from a previous page is rejected. A cursor is valid across project changes and restarts within one page.
@@ -138,7 +140,18 @@ const started = observed.result?.data.events.find(event =>
   event.data.editorRevision === play.editorRevision)
 ```
 
-A match identifies the recorded event. Before using the live preview, confirm that its `runId` is the current main run, the pending launch has cleared, and the required capabilities are ready. For a Stop, compare each captured run with the corresponding `play.stopped` event or with an already returned exit receipt. A stopped event includes the observed exit reason and cleanup facts where available. If Stop only cancelled an attempt, inspect that attempt's build. When history has a `gap`, use the original attempt or run ID to check the state.
+A match identifies the recorded event. Query the current run before using the live preview.
+
+```js
+const {capabilityDetails} = (await api.summer_call({
+  op: 'engine.get_project_context',
+  input: {include: ['capabilities']},
+})).result.data
+```
+
+`operations` lists the supported Summer operation subset. `run` reports the active run's identity and observed Worker capabilities, or `null` when there is no active run. `supported: null` means support is still unknown. Before issuing input, confirm that the run matches the start event and current project, `pendingAttemptId` is `null`, and the required capabilities have `ready: true`. The lesson includes this query before Play, after startup, and after Stop, so you can compare all three replies. Omitting `include` or passing an empty array returns the original project context.
+
+For a Stop, compare each captured run with the corresponding `play.stopped` event or with an already returned exit receipt. A stopped event includes the observed exit reason and cleanup facts where available. If Stop only cancelled an attempt, inspect that attempt's build. When history has a `gap`, use the original attempt or run ID to check the state.
 
 The page retains the latest 512 events. Omit `since` to read the latest sequence window with `recent_events` or to wait only for new events with `wait_for_event`. Advance through pages using `next_seq`. If the console cuts off the displayed result, read again from the same `since` with a smaller page before advancing. Wait timeout and cancellation affect only the observation. The local ID-based `wait_for_event` remains available for exact attempt or run waits.
 
@@ -155,7 +168,7 @@ node apps/playground/scripts/verify-lifecycle-events.mjs "$LIFECYCLE_EVIDENCE/re
 
 For a lifecycle replay archive, extract it to a fresh directory and run `node tools/start.mjs` to serve the editor and preview on distinct loopback origins. Run `node tools/verify.mjs` to check the archived checksums, candidate and original PNGs. The archive uses `start-lifecycle-replay.mjs` and `verify-lifecycle-replay.mjs` from this repository. The launcher serves the listed site assets directly.
 
-Package the verified diagnostic-and-lifecycle run with the original Full/debug engine build report. The offline verifier checks the location of TS2322, the failed build's lack of a new run, the old run's continued operation, and the source and Worker identities of the repaired run in addition to the lifecycle and pixels.
+Package the verified diagnostic-and-lifecycle run with the original Full/debug engine build report. The offline verifier checks all three capability replies, the location of TS2322, the failed build's lack of a new run, the old run's continued operation, and the source and Worker identities of the repaired run in addition to the lifecycle and pixels.
 
 ```sh
 node apps/playground/scripts/package-lifecycle-replay.mjs \

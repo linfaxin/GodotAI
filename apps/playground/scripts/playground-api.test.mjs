@@ -56,6 +56,32 @@ function fixture(beforeCheck = () => {}, observation, runtimeWrite, runtimePrope
   return {recorder, api, agent, calls, start};
 }
 
+test('Summer project context reports the active run and its observed capabilities', () => {
+  let observation = {supported: null, ready: false};
+  const {agent, api, recorder, start} = fixture(undefined, {observationState: () => observation});
+  assert.deepEqual(agent.getSummerProjectContext(false, null), api.get_project_context());
+  assert.equal(unwrap(agent.getSummerProjectContext(true, null)).capabilityDetails.run, null);
+
+  const {identity, state, exit} = start();
+  recorder.setContext({projectId: 'other-project', editorRevision: editorRevision + 1});
+  const pending = unwrap(agent.getSummerProjectContext(true, 'pending'));
+  assert.equal(pending.projectId, 'other-project');
+  assert.equal(pending.capabilityDetails.pendingAttemptId, 'pending');
+  assert.equal(pending.capabilityDetails.run.runId, identity.runId);
+  assert.equal(pending.capabilityDetails.run.projectId, projectId);
+  assert.equal(pending.capabilityDetails.run.revision, editorRevision);
+  assert.deepEqual(pending.capabilityDetails.run.capabilities.observation, {supported: null, ready: false});
+  assert.deepEqual(pending.capabilityDetails.run.capabilities.inputScript, {supported: false, ready: false});
+
+  observation = {supported: true, ready: true};
+  state('running');
+  const ready = unwrap(agent.getSummerProjectContext(true, null)).capabilityDetails.run;
+  assert.equal(ready.state, 'running');
+  assert.deepEqual(ready.capabilities.observation, unwrap(api.get_run({runId: identity.runId})).observation);
+  exit();
+  assert.equal(unwrap(agent.getSummerProjectContext(true, null)).capabilityDetails.run, null);
+});
+
 test('runtime_set validates inputs and only forwards writes for the requested live run', async () => {
   const writes = [];
   const {api, agent, start} = fixture(undefined, undefined, {

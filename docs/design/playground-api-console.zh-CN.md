@@ -65,7 +65,7 @@
 
 | op | 默认 input / 来源 | 主要限制与结果 |
 | --- | --- | --- |
-| engine.get_project_context | `{}` | 本地 context；不支持 include/settings 筛选 |
+| engine.get_project_context | `{}` 或 `{"include":["capabilities"]}` | 显式请求时返回 `capabilityDetails`，包括操作清单、待启动尝试和当前 Worker 的能力状态 |
 | engine.play | `{}` | instance 仅省略或 main；返回 accepted/pending 和 attemptId |
 | engine.stop | `{}` | 捕获当时 main run 与 pending attempt；不是当前编辑项目专属 stop |
 | engine.is_running | `{}` | 不接受 instance；playing 不证明属性/输入 ready |

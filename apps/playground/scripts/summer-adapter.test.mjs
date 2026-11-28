@@ -46,6 +46,30 @@ function fixture() {
 
 const set = (property = 'health', value = 40, extra = {}) => ({op: 'engine.runtime_set', input: {path: target.path, property, value, ...extra}});
 
+test('Summer project context reads capability details only when requested', async () => {
+  const {backend, calls} = fixture();
+  const context = {projectId: 'project-1', editorRevision: 7};
+  const extended = {...context, capabilityDetails: {operations: ['engine.get_project_context'], pendingAttemptId: null, run: null}};
+  backend.captureContext = () => assert.fail('Project context should be read once');
+  backend.getProjectContext = include => {calls.push(include); return ok(include ? extended : context);};
+  const dispatch = createSummerDispatcher(backend), op = 'engine.get_project_context';
+  for (const include of ['capabilities', null, ['unknown'], Array(1), Array(4).fill('capabilities')]) {
+    assert.equal((await dispatch({op, input: {include}})).error.code, 'invalid_input');
+  }
+  for (const input of [{include: ['scene_tree']}, {include: ['capabilities', 'settings']}, {settingsPrefix: 'rendering'}]) {
+    assert.equal((await dispatch({op, input})).error.code, 'unsupported');
+  }
+  assert.equal((await dispatch({op, input: {include: ['capabilities']}}, AbortSignal.abort())).error.code, 'cancelled');
+  assert.deepEqual(calls, []);
+  for (const request of [{op}, {op, input: {}}, {op, input: {include: []}}]) {
+    assert.deepEqual((await dispatch(request)).result.data, context);
+  }
+  for (const include of [['capabilities'], ['capabilities', 'capabilities']]) {
+    assert.deepEqual((await dispatch({op, input: {include}})).result.data, extended);
+  }
+  assert.deepEqual(calls, [false, false, false, true, true]);
+});
+
 test('Summer diagnostics validates the MCP input subset before reading records and needs no run', async () => {
   const {backend, calls} = fixture();
   const data = {projectId: 'project-1', editorRevision: 7, check: null, build: null, run: null};

@@ -41,8 +41,9 @@ function spec<const T extends SummerOperationSpec>(value: T): Readonly<T> {
 export const SUMMER_OPERATION_SPECS = Object.freeze({
   'engine.get_project_context': spec({
     title: '读取项目上下文', description: '读取当前编辑项目、编辑版本、引擎发布与预览环境。',
-    allowed: [], unsupported: ['include', 'settingsPrefix', 'settingsPrefixes'], parameters: [], defaultInput: {},
-    limitations: ['返回 GodotAI context；activeRunId 可能属于之前的项目。', '不支持 include 与项目设置筛选。'],
+    allowed: ['include'], unsupported: ['settingsPrefix', 'settingsPrefixes'], defaultInput: {},
+    parameters: [{name: 'include', description: '传入 ["capabilities"] 可查看操作清单和当前运行的就绪状态。'}],
+    limitations: ['当前仅支持 capabilities 扩展。', 'activeRunId 可能属于之前的项目，请核对运行的项目和版本。'],
   }),
   'engine.get_diagnostics': spec({
     title: '读取检查、构建和退出诊断', description: '读取当前编辑版本的诊断记录，并追踪该次构建关联的运行。',

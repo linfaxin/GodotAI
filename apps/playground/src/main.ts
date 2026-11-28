@@ -79,7 +79,7 @@ const summerDispatcher=createSummerDispatcher({
   projectId:context.projectId,editorRevision:context.editorRevision??0,
   activeRunId:context.activeRunId,pendingAttemptId:playIntent?.attemptId??null,
  };},
- getProjectContext:()=>playground.api.get_project_context(),
+ getProjectContext:includeCapabilities=>playground.getSummerProjectContext(includeCapabilities,playIntent?.attemptId??null),
  getDiagnostics:playground.getSummerDiagnostics,
  getScriptErrors:playground.getScriptErrors,
  play:input=>playground.api.play(input),

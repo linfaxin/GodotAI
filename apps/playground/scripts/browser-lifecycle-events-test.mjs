@@ -15,7 +15,7 @@ const scope = 'playground-lifecycle-events';
 const reportFile = path.resolve(process.env.PLAYGROUND_LIFECYCLE_REPORT ?? 'work/lifecycle-events/report.json');
 const ops = {recent: 'engine.recent_events', wait: 'engine.wait_for_event', play: 'engine.play',
   stop: 'engine.stop', probe: 'engine.game_probe', input: 'engine.game_input', diagnostics: 'engine.get_diagnostics',
-  scriptErrors: 'engine.get_script_errors'};
+  scriptErrors: 'engine.get_script_errors', context: 'engine.get_project_context'};
 const repairLesson = 'diagnostic-repair';
 const playerFile = '/src/Player.ts';
 
@@ -120,11 +120,12 @@ await runReportedBrowserTest({scope, reportFile, run: async test => {
   }
   async function waitUntilReady(runId) {
     await page.waitForFunction(async runId => {
-      const api = window.godotPlayground;
-      const main = (await api.summer_call({op: 'engine.is_running'})).result?.data;
-      if (!main?.playing || main.capturedRunId !== runId || main.pendingAttemptId !== null) return false;
-      const current = api.get_run({runId}).result;
-      return current?.state === 'running' && current.gameProbe?.ready && current.inputScript?.ready;
+      const reply = await window.godotPlayground.summer_call({
+        op: 'engine.get_project_context', input: {include: ['capabilities']},
+      });
+      const details = reply.result?.data.capabilityDetails, run = details?.run;
+      return details?.pendingAttemptId === null && run?.runId === runId && run.state === 'running' &&
+        run.capabilities.gameProbe.ready && run.capabilities.inputScript.ready;
     }, runId);
   }
   async function start({cursorStep, playStep, waitStep}) {
@@ -177,15 +178,18 @@ await runReportedBrowserTest({scope, reportFile, run: async test => {
     await element(page, 'open-example').click();
     await page.waitForFunction(previous => window.godotPlayground.get_project_context().result.projectId !== previous, previous);
     await selectReady();
+    await lesson('capabilities-before', ops.context);
     await prepareRepair();
 
     const first = await start({cursorStep: 'cursor-start', playStep: 'play', waitStep: 'started'});
     const {callId: launchedId} = await lesson('read-repaired-run', ops.diagnostics, undefined, repairLesson);
     report.repair.launched = launchedId;
+    await lesson('capabilities-ready', ops.context);
     const before = await capture('before', 'before.png');
     report.inputCallId = (await lesson('move', ops.input, before)).callId;
     const after = await capture('after', 'after.png');
     await stop({cursorStep: 'cursor-stop', stopStep: 'stop', waitStep: 'stopped'}, first.run, after);
+    await lesson('capabilities-stopped', ops.context);
 
     const {run: second} = await start({cursorStep: 'cursor-restart', playStep: 'restart', waitStep: 'restarted'});
     const reset = await capture('reset', 'restart.png');

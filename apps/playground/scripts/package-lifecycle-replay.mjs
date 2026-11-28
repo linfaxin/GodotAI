@@ -40,11 +40,15 @@ try {
   await writeFile(path.join(stage, 'START-HERE.md'), `# Playground diagnostic repair and replay
 
 Run \`node tools/start.mjs\` with Node.js 24. Open the printed URL in Chromium.
-Choose API 调用 → engine.get_diagnostics → 打开独立示例 and follow
-Summer：定位并修复类型错误, then Summer：等待启动与退出 on the same project.
+
+1. Choose API 调用 → engine.get_diagnostics → 打开独立示例. Before the first Play,
+   execute 查看启动前的能力 in Summer：等待启动与退出 and confirm that the run is null.
+2. Follow Summer：定位并修复类型错误 through 复查修复版 Player.ts.
+3. On the same project, resume Summer：等待启动与退出 at Play前取游标 to start the
+   repaired version. Compare the capability replies after startup and after exit.
 
 Run \`node tools/verify.mjs\` with Python 3 and Pillow installed to verify the
-site, diagnostic and lifecycle receipts, and the original game frames.
+site, capability, diagnostic and lifecycle receipts, and the original game frames.
 `);
   const payloads = await sitePayloads(stage);
   await writeFile(path.join(stage, 'SHA256SUMS'), Object.entries(payloads)
