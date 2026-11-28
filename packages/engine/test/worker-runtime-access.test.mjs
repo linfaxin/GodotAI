@@ -164,12 +164,17 @@ const completedScript = {kind: 'completed', source: 'native', base: '90071992547
 test('input scripts preserve exact frame evidence and reject malformed or unbounded commands', () => {
   const command = {runId: 'run', ...script};
   for (const fields of [{actionName: '界'.repeat(43)}, {actionName: 'x\0y'}, {actionName: '\ud800'},
-    {releaseOffset: 0}, {releaseOffset: 121}, {pressOffset: 1.5}, {timeoutMs: 0}, {timeoutMs: 30001}, {strength: 1}])
+    {releaseOffset: 0}, {releaseOffset: 121}, {pressOffset: 1.5}, {timeoutMs: 0}, {timeoutMs: 30001}, {strength: 1},
+    {requireUnscaled60Hz: false}, {requireUnscaled60Hz: 60}])
     assert.equal(prepareInputScript({...command, ...fields}).error.code, 'invalid_input');
   assert.equal(prepareInputScript(command, AbortSignal.abort()).error.code, 'cancelled');
   assert.deepEqual(readInputScriptTerminal(completedScript, script), completedScript);
   assert.equal(readInputScriptTerminal({...completedScript, up: {...completedScript.up, physics: completedScript.base}}, script), undefined);
   assert.equal(readInputScriptTerminal({...completedScript, releaseStepCompleted: false}, script), undefined);
+  const guarded = prepareInputScript({...command, requireUnscaled60Hz: true});
+  assert.equal(guarded.ok, true);
+  assert.deepEqual(guarded.command, {...script, requireUnscaled60Hz: true});
+  assert.deepEqual(readInputScriptTerminal(completedScript, guarded.command), completedScript);
 });
 
 test('native input staging receives the unchanged monotonic deadline in the exchange buffer', () => {
@@ -197,6 +202,9 @@ test('input cancellation keeps the original slot until a matching terminal retir
     pressOffset: 0, releaseOffset: 4});
   assert.equal(oldTemplate.error.code, 'unsupported');
   assert.equal(oldTemplate.receipt, undefined);
+  const oldHold = await runner.runGameInputScript({...command, requireUnscaled60Hz: true});
+  assert.equal(oldHold.error.code, 'unsupported');
+  assert.equal(oldHold.receipt, undefined);
   const abort = new AbortController();
   const posted = once(port, 'message');
   const pending = runner.runGameInputScript(command, abort.signal);

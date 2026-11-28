@@ -167,10 +167,17 @@ export function verifyBrowser(report, supported) {
   }
   const publicTicks = heldTicks(call(offsets.callId).reply.result.data, offsets.run, releaseId);
   assert.equal(publicTicks, 4);
-  const held = call(hold.callId).reply.error;
-  assert.equal(held.code, 'unsupported');
-  assert.equal(held.details.godotai.parameter, 'events[0].hold_ms');
-  assert.deepEqual(hold.dispatches, []);
+  const holdReply = call(hold.callId).reply;
+  let holdTicks;
+  if (holdReply.ok) {
+    holdTicks = heldTicks(holdReply.result.data, hold.run, releaseId);
+    assert.equal(holdTicks, 3);
+    assert.deepEqual(hold.dispatches, [{type: 'input-script-request', runId: hold.run.runId}]);
+  } else {
+    assert.equal(holdReply.error.code, 'unsupported');
+    assert.equal(holdReply.error.details.godotai.parameter, 'events[0].hold_ms');
+    assert.deepEqual(hold.dispatches, []);
+  }
   const rejected = call(unknown.callId).reply.error;
   assert.equal(rejected.code, 'unknown_action');
   const rejection = rejected.details.godotai.receipt;
@@ -192,7 +199,8 @@ export function verifyBrowser(report, supported) {
     assert.deepEqual(samples.map(sample => sample.properties[0].value), [position(start), position(end)]);
   }
   return {heldTicks: publicTicks, positions: [before.position, after.position, reset.position],
-    hold: held.code, unknown: rejected.code, stopped: noRun.code};
+    hold: holdReply.ok ? 'completed' : holdReply.error.code,
+    ...(holdTicks === undefined ? {} : {holdTicks}), unknown: rejected.code, stopped: noRun.code};
 }
 
 async function verifyNative(directory, native, cases, playground) {
@@ -286,8 +294,14 @@ async function verifyNative(directory, native, cases, playground) {
     cases.holdMilliseconds[key] = result;
   }
   const {summerDefault, summerFixed} = cases.holdMilliseconds;
-  if (summerDefault.status === 'passed' && summerFixed.status === 'passed')
-    cases.holdMilliseconds.comparison = 'summer_applies_request_playground_rejects_before_dispatch';
+  if (summerDefault.status === 'passed' && summerFixed.status === 'passed') {
+    if (playground.holdTicks === undefined) {
+      cases.holdMilliseconds.comparison = 'summer_applies_request_playground_rejects_before_dispatch';
+    } else {
+      cases.holdMilliseconds.matchesSummerDefault = playground.holdTicks === summerDefault.heldTicks;
+      cases.holdMilliseconds.matchesSummerFixed = playground.holdTicks === summerFixed.heldTicks;
+    }
+  }
 
   for (const [name, input, reason, comparison] of [
     ['unknownAction', requests.unknownAction, 'all_rejected', 'both_reject_unknown_action'],
@@ -307,7 +321,8 @@ async function verifyNative(directory, native, cases, playground) {
 
   const statuses = [cases.frameOffsets.summer, summerDefault.status, summerFixed.status, cases.unknownAction.summer, cases.notRunning.summer];
   if (statuses.includes('failed') || native.status === 'failed' || native.error) return 'failed';
-  if (statuses.includes('difference') || native.status === 'difference') return 'difference';
+  if (statuses.includes('difference') || native.status === 'difference' ||
+      cases.holdMilliseconds.matchesSummerDefault === false) return 'difference';
   if (statuses.every(status => status === 'passed') && native.status === 'passed') return 'passed';
   return 'partial';
 }
@@ -365,7 +380,9 @@ async function verify(root, summary) {
   const playground = results.new;
   summary.cases = {
     frameOffsets: {playground: 'completed', playgroundHeldTicks: playground.heldTicks, summer: 'not_run'},
-    holdMilliseconds: {playground: playground.hold, dispatches: 0, summerDefault: {status: 'not_run'}, summerFixed: {status: 'not_run'}},
+    holdMilliseconds: {playground: playground.hold, dispatches: playground.holdTicks === undefined ? 0 : 1,
+      ...(playground.holdTicks === undefined ? {} : {heldTicks: playground.holdTicks}),
+      summerDefault: {status: 'not_run'}, summerFixed: {status: 'not_run'}},
     unknownAction: {playground: playground.unknown, summer: 'not_run'},
     notRunning: {playground: playground.stopped, summer: 'not_run'},
   };

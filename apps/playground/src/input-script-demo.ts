@@ -29,6 +29,10 @@ move_right={
 "deadzone": 0.5,
 "events": []
 }
+jump={
+"deadzone": 0.5,
+"events": []
+}
 [GodotJS]
 runtime/core/camel_case_bindings_enabled=false
 `,

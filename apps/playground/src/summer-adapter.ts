@@ -17,6 +17,7 @@ import {canonicalPath} from '@godot-js/project-tools/paths';
 import {LIFECYCLE_KINDS, type LifecycleKind, type LifecycleQuery, type RecentLifecycleEvents,
   type WaitLifecycleEvents} from './lifecycle-events.ts';
 import type {SummerProjectContextData, StopResult, SummerDebuggerErrorsData, SummerDiagnosticsData, SummerScriptErrorsData} from './playground-api';
+import type {ProjectFileRead, ProjectFileReceipt, ProjectFileWrite} from './project-file-access.ts';
 import {SUMMER_OPERATION_SPECS as rules, SUMMER_TREE_LIMITS, SUMMER_COMPATIBILITY, type SummerOperation} from './summer-operation-spec.ts';
 export {SUMMER_COMPATIBILITY} from './summer-operation-spec.ts';
 
@@ -57,6 +58,8 @@ export interface SummerBackend {
   getDiagnostics?(): BackendReply<SummerDiagnosticsData>;
   getDebuggerErrors?(includeStack: boolean): BackendReply<SummerDebuggerErrorsData>;
   getScriptErrors?(path: string): Promise<BackendReply<SummerScriptErrorsData>>;
+  readFile?(path: string): Promise<BackendReply<ProjectFileRead>>;
+  writeFile?(input: ProjectFileWrite): Promise<BackendReply<ProjectFileReceipt>>;
   play(input: {projectId: string; expectedEditorRevision: number}): BackendReply<{attemptId: string}>;
   cancelLaunch(attemptId: string): void;
   getBuild(input: {attemptId: string}): BackendReply<{preview?: {status: string; runId?: string}}>;
@@ -81,7 +84,8 @@ export type StopData = {accepted: true; cancelledAttemptId: string | null; captu
 export type CallData = {route: 'runtime_call'; payload: {ok: true; receipt: Extract<MethodCallResult, {ok: true}>['receipt']; result: Extract<MethodOutcome, {outcome: 'returned'}>}};
 export type SummerData = Extract<GameProbeResult, {ok: true}>['result'] | Extract<InputScriptResult, {ok: true}> |
   CallData | SummerProjectContextData | RuntimeTreeSnapshot | RuntimeNodeSnapshot | GameScreenshot | WriteData | PlayData | RunningData | StopData |
-  RecentLifecycleEvents | WaitLifecycleEvents | SummerDiagnosticsData | SummerDebuggerErrorsData | SummerScriptErrorsData;
+  RecentLifecycleEvents | WaitLifecycleEvents | SummerDiagnosticsData | SummerDebuggerErrorsData | SummerScriptErrorsData |
+  ProjectFileRead | ProjectFileReceipt;
 export type FacadeSuccess<T = SummerData> = {ok: true; status: 'done'; result: {data: T; godotai: {compatibility: typeof SUMMER_COMPATIBILITY}}};
 export type FacadeFailure = {ok: false; error: {code: FacadeErrorCode; message: string; source?: AccessError['source']; retry: 'no';
   details: {godotai: {compatibility: typeof SUMMER_COMPATIBILITY; route?: 'runtime_properties' | 'legacy_write' | 'runtime_call';
@@ -134,11 +138,24 @@ function validateInputScript(input: Record<string, unknown>): Validated | Facade
     const name = 'events[' + index + ']';
     if (edge.type !== 'action') return localError(
       typeof edge.type === 'string' && ['key', 'mouse_click', 'axis', 'raw'].includes(edge.type) ? 'unsupported' : 'invalid_input', name + '.type');
-    for (const field of ['hold_ms', 'at_ms']) if (Object.hasOwn(edge, field)) return localError('unsupported', name + '.' + field);
-    if (Object.keys(edge).some(key => !['type', 'action', 'pressed', 'at_frame', 'strength'].includes(key)))
+    if (Object.hasOwn(edge, 'at_ms')) return localError('unsupported', name + '.at_ms');
+    if (Object.hasOwn(edge, 'hold_ms') && (index !== 0 || data.events.length !== 1))
+      return localError('unsupported', name + '.hold_ms');
+    if (Object.keys(edge).some(key => !['type', 'action', 'pressed', 'at_frame', 'strength', 'hold_ms'].includes(key)))
       return localError('invalid_input', name);
     if (Object.hasOwn(edge, 'strength') && (index !== 0 || edge.strength !== 1))
       return localError(typeof edge.strength === 'number' && edge.strength >= 0 && edge.strength <= 1 ? 'unsupported' : 'invalid_input', name + '.strength');
+  }
+  if (data.events.length === 1 && Object.hasOwn(press, 'hold_ms')) {
+    const {hold_ms: holdMs} = press;
+    if (typeof holdMs !== 'number' || !Number.isSafeInteger(holdMs) || holdMs < 0)
+      return localError('invalid_input', 'events[0].hold_ms');
+    if (holdMs !== 50) return localError('unsupported', 'events[0].hold_ms');
+    if (Object.hasOwn(press, 'pressed') && press.pressed !== true) return localError('invalid_input', 'events[0].pressed');
+    const pressOffset = Object.hasOwn(press, 'at_frame') ? press.at_frame : 0;
+    const command = typeof pressOffset === 'number' && readInputScriptCommand({actionName: press.action, pressOffset,
+      releaseOffset: pressOffset + 3, requireUnscaled60Hz: true});
+    return command ? {op: 'engine.game_input', input: command} : localError('invalid_input', 'events');
   }
   if (data.events.length !== 2) return localError('invalid_input', 'events');
   const command = readInputScriptCommand({actionName: press.action, pressOffset: Object.hasOwn(press, 'at_frame') ? press.at_frame : 0, releaseOffset: release.at_frame});
@@ -196,7 +213,7 @@ function validate(raw: unknown): Validated | FacadeFailure {
     }
     if (Object.hasOwn(input, 'instance') && input.instance !== 'main') return localError(typeof input.instance === 'string' ? 'unsupported' : 'invalid_input', 'instance');
     if (op === 'engine.game_input') return validateInputScript(input);
-    if (op === 'engine.get_script_errors') {
+    if (op === 'engine.get_script_errors' || op === 'engine.read_file' || op === 'engine.write_file') {
       const {path} = input;
       if (typeof path !== 'string' || path.length > 2048 || !path.startsWith('res://')) return localError('invalid_input', 'path');
       const projectPath = path.slice('res:/'.length);
@@ -204,6 +221,18 @@ function validate(raw: unknown): Validated | FacadeFailure {
         if (canonicalPath(projectPath) !== projectPath) return localError('invalid_input', 'path');
       } catch {return localError('invalid_input', 'path');}
       if (!/\.tsx?$/i.test(projectPath) || /\.d\.ts$/i.test(projectPath)) return localError('unsupported', 'path');
+      if (op === 'engine.write_file') {
+        const {content, expected_sha256, projectId, expectedEditorRevision} = input;
+        if (typeof content !== 'string') return localError('invalid_input', 'content');
+        if (typeof expected_sha256 !== 'string' || expected_sha256.length !== 64 || !/^[a-f0-9]{64}$/i.test(expected_sha256))
+          return localError('invalid_input', 'expected_sha256');
+        if (typeof projectId !== 'string' || !projectId.length || projectId.length > 256)
+          return localError('invalid_input', 'projectId');
+        if (typeof expectedEditorRevision !== 'number' || !Number.isSafeInteger(expectedEditorRevision) || expectedEditorRevision < 0)
+          return localError('invalid_input', 'expectedEditorRevision');
+        return {op, input: {path: projectPath, content, expectedSha256: expected_sha256.toLowerCase(),
+          expected: {projectId, editorRevision: expectedEditorRevision}}};
+      }
       return {op, input: {path: projectPath}};
     }
     if (op === 'engine.inspect_runtime_node' || op === 'engine.runtime_set' || op === 'engine.runtime_call' || Object.hasOwn(input, 'path')) {
@@ -413,6 +442,12 @@ export function createSummerDispatcher(backend: SummerBackend) {
       return response === undefined ? localError('unsupported', 'get_script_errors') :
         response.ok ? done(response.result) : backendFailure(response);
     }
+    if (op === 'engine.read_file' || op === 'engine.write_file') {
+      const response = op === 'engine.read_file' ? await backend.readFile?.(input.path as string) :
+        await backend.writeFile?.(input as ProjectFileWrite);
+      return response === undefined ? localError('unsupported', 'op') :
+        response.ok ? done(response.result) : backendFailure(response);
+    }
     if (op === 'engine.recent_events' || op === 'engine.wait_for_event') {
       const wait = op === 'engine.wait_for_event';
       const prepared = readLifecycleQuery(input, wait);
@@ -461,7 +496,8 @@ export function createSummerDispatcher(backend: SummerBackend) {
       if (context.pendingAttemptId || run.result.state !== 'running') return localError('not_ready', 'run');
       if (!backend.inputScript) return localError('unsupported', 'inputScript');
       const response = await backend.inputScript({runId, ...(input as InputScriptCommand)}, signal);
-      return response.ok ? done(response) : backendFailure(response, {receipt: response});
+      return response.ok ? done(response) : backendFailure(response, {receipt: response,
+        ...('requireUnscaled60Hz' in input && response.error.code === 'unsupported' ? {parameter: 'events[0].hold_ms'} : {})});
     }
     if (op === 'engine.game_probe') {
       if (!context.projectId || run.result.projectId !== context.projectId) return localError('revision_conflict', 'run');

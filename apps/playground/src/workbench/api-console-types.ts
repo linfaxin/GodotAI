@@ -3,6 +3,7 @@ import type {WorkerRunIdentity} from '@godot-js/engine/browser/dedicated/worker-
 import type {RunnerState} from '@godot-js/engine/browser/protocol';
 import type {RuntimeType} from '@godot-js/engine/browser/dedicated/worker-runtime-properties';
 import type {FacadeReply, SelectedRuntimeMethod} from '../summer-adapter';
+import type {ProjectFileReceipt} from '../project-file-access';
 
 export interface ConsoleAnchor {
   editorProjectId: string | null;
@@ -49,6 +50,7 @@ export interface ConsoleResultFacts {
   geometryEpoch?: number;
   stoppedRunIds?: string[];
   eventCursor?: {since: number; stream_id: string};
+  file?: Pick<ProjectFileReceipt, 'path' | 'projectId' | 'editorRevision' | 'sha256'>;
   truncated?: true;
 }
 export interface ConsoleCall {

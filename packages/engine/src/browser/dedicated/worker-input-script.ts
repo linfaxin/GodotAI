@@ -14,11 +14,11 @@ const readAborted = Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'abor
 
 type InputOffsets = {pressOffset: number; releaseOffset: number};
 export type InputScriptCommand = InputOffsets & (
-  {actionName: string} | {keycode: number; physical: boolean} |
+  {actionName: string; requireUnscaled60Hz?: true} | {keycode: number; physical: boolean} |
   {button: number; x: number; y: number; geometryEpoch?: number}
 );
 export type InputScriptInput = InputScriptCommand & {runId: string; timeoutMs?: number};
-export type InputScriptState = {supported: boolean | null; ready: boolean; devices?: true};
+export type InputScriptState = {supported: boolean | null; ready: boolean; devices?: true; holdMilliseconds?: true};
 export type InputScriptKey = {releaseId: string; requestId: string; sequence: number};
 export type InputScriptRequest = InputScriptKey & {command: InputScriptCommand; deadline: number};
 export type InputScriptReceipt = InputScriptKey & {run: WorkerRunIdentity};
@@ -74,10 +74,12 @@ export function readInputScriptCommand(value: unknown): InputScriptCommand | und
     if (fields !== 2 || !integer(keycode, 1, 0x7fffff) || typeof physical !== 'boolean') return;
     return {keycode, physical, pressOffset, releaseOffset};
   }
-  const {actionName} = target;
-  if (fields !== 1 || typeof actionName !== 'string' || !actionName || actionName.includes('\0') ||
+  const {actionName, requireUnscaled60Hz} = target;
+  const guarded = Object.hasOwn(target, 'requireUnscaled60Hz');
+  if (guarded && requireUnscaled60Hz !== true) return;
+  if (fields !== (guarded ? 2 : 1) || typeof actionName !== 'string' || !actionName || actionName.includes('\0') ||
       !validRuntimeString(actionName, 128)) return;
-  return {actionName, pressOffset, releaseOffset};
+  return {actionName, pressOffset, releaseOffset, ...(guarded ? {requireUnscaled60Hz: true} : {})};
 }
 
 export function prepareInputScript(value: unknown, signal: AbortSignal | undefined) {
@@ -163,6 +165,7 @@ export function createNativeInputScript(module: Record<string, any>) {
   buffer();
   return {
     devices: typeof module._godotjs_input_script_devices === 'function' && module._godotjs_input_script_devices() === 1,
+    holdMilliseconds: typeof module._godotjs_input_script_unscaled_60_hz === 'function' && module._godotjs_input_script_unscaled_60_hz() === 1,
     stage(request: InputScriptRequest, geometryEpoch?: number) {
       const command = request.command;
       const bytes = encoder.encode(JSON.stringify({...command, ...('button' in command ? {geometryEpoch} : {}), deadline: request.deadline}));

@@ -95,7 +95,14 @@ export function createCodeEditor(options: Options) {
       if (binary) { instance.setModel(null); document.getElementById('binary-file')!.textContent = `${path}\n${contents.length.toLocaleString()} bytes · binary asset`; return; }
       let model = models.get(path);
       if (!model) { model = monaco.editor.createModel(contents, languageFor(path), monaco.Uri.from({ scheme: 'file', path })); models.set(path, model); }
-      else if (model.getValue() !== contents) { suppress = true; try { model.pushEditOperations([], [{ range: model.getFullModelRange(), text: contents }], () => null); } finally { suppress = false; } }
+      else if (model.getValue() !== contents) {
+        suppress = true;
+        try {
+          model.pushStackElement();
+          model.pushEditOperations([], [{ range: model.getFullModelRange(), text: contents }], () => null);
+          model.pushStackElement();
+        } finally { suppress = false; }
+      }
       const same = instance.getModel() === model; instance.setModel(model);
       if (!same && views.has(path)) instance.restoreViewState(views.get(path)!);
       instance.layout(); const position = instance.getPosition(); if (position) options.position(position.lineNumber, position.column);

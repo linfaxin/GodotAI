@@ -125,6 +125,7 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
     const reason = !request ? 'invalid_input' : !lease.active || stopping || nativeExited || closed ? 'run_ended' :
       !nativeStarted ? 'not_ready' : !inputScriptSupported || !nativeInputScript ? 'unsupported' :
       !('actionName' in request.command) && !nativeInputScript.devices ? 'unsupported' :
+      'requireUnscaled60Hz' in request.command && !nativeInputScript.holdMilliseconds ? 'unsupported' :
       request.deadline <= interactionNow() ? 'timeout' : inputScript ? 'busy' : undefined;
     try {
       if (reason || !request || !nativeInputScript) {
@@ -303,7 +304,8 @@ async function runWorker(boot: WorkerBoot, scope: RuntimeScope): Promise<void> {
     assertStarting();
     post({type: 'phase', phase: value, ...(value === 'running' && supportsInteraction ? {interactionVersion: INTERACTION_VERSION} : {}),
       ...(value === 'running' && inputScriptSupported && nativeInputScript ? {inputScriptVersion: INPUT_SCRIPT_VERSION,
-        ...(nativeInputScript.devices ? {inputScriptDevices: true} : {})} : {}),
+        ...(nativeInputScript.devices ? {inputScriptDevices: true} : {}),
+        ...(nativeInputScript.holdMilliseconds ? {inputScriptHoldMilliseconds: true} : {})} : {}),
       ...(value === 'running' && sampleNativeObservation ? {observationVersion: RUNTIME_OBSERVATION_VERSION} : {}),
       ...(value === 'running' && supportsWrite && writeNativeProperty ? {runtimeWriteVersion: RUNTIME_WRITE_VERSION} : {}),
       ...(value === 'running' && supportsProperties && accessNativeProperties ? {runtimePropertiesVersion: RUNTIME_PROPERTIES_VERSION} : {}),

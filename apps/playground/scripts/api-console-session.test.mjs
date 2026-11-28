@@ -32,6 +32,68 @@ test('Summer request stays bound to its draft until an explicit target update',a
   assert.equal(last(f).draft.anchor.activeRunId,'run-2');f.session.dispose();
 });
 
+test('a write draft with content only accepts a receipt for the same file and base', async () => {
+  const {session, setReply, setContext} = createConsoleFixture();
+  const path = 'res://src/start.ts', content = 'const startupBroken = false;';
+  async function read(projectId, editorRevision, sha256) {
+    setContext({...consoleEnvironment, anchor: {...consoleEnvironment.anchor, editorProjectId: projectId, editorRevision}});
+    setReply('summer_call', {ok: true, result: {data: {path, projectId, editorRevision, sha256}}});
+    session.loadPreset('engine.read_file', JSON.stringify({path}));
+    await session.submit();
+    return {sourceCallId: session.snapshot().history.at(-1).callId};
+  }
+  const first = await read('project-1', 7, 'a'.repeat(64));
+  session.loadPreset('engine.write_file', JSON.stringify({path, content}));
+  session.updateTarget(first);
+  const writeDraft = () => JSON.parse(session.snapshot().draft.inputText);
+  assert.equal(writeDraft().content, content);
+
+  const refreshed = await read('project-1', 8, 'b'.repeat(64));
+  session.selectOperation('engine.write_file');
+  const original = session.snapshot().draft;
+  session.updateTarget(refreshed);
+  assert.equal(session.snapshot().clientError?.kind, 'missing_source');
+  assert.deepEqual(session.snapshot().draft, original);
+  session.updateDraft(JSON.stringify({path}));
+  session.updateTarget(refreshed);
+  assert.deepEqual(writeDraft(), {path, projectId: 'project-1', expectedEditorRevision: 8, expected_sha256: 'b'.repeat(64)});
+
+  session.updateDraft(JSON.stringify({...writeDraft(), content}));
+  const sameFile = await read('project-1', 9, 'b'.repeat(64));
+  session.selectOperation('engine.write_file');
+  session.updateTarget(sameFile);
+  assert.equal(writeDraft().content, content);
+
+  const switched = await read('project-2', 10, 'b'.repeat(64));
+  session.selectOperation('engine.write_file');
+  const previousProject = session.snapshot().draft;
+  session.updateTarget(switched);
+  assert.equal(session.snapshot().clientError?.kind, 'missing_source');
+  assert.deepEqual(session.snapshot().draft, previousProject);
+  session.dispose();
+});
+
+test('updating context cannot attach a newer read receipt to unguarded file content', async () => {
+  const {session, setReply, setContext} = createConsoleFixture();
+  const path = 'res://src/start.ts', sha256 = 'b'.repeat(64);
+  session.loadPreset('engine.write_file', JSON.stringify({path, content: 'const rate = 60;'}));
+  const original = session.snapshot().draft;
+  setContext({...consoleEnvironment, anchor: {...consoleEnvironment.anchor, editorRevision: 8}});
+  session.updateTarget();
+  assert.equal(session.snapshot().clientError?.kind, 'missing_source');
+  assert.deepEqual(session.snapshot().draft, original);
+
+  setReply('summer_call', {ok: true, result: {data: {path, projectId: 'project-1', editorRevision: 8, sha256}}});
+  session.loadPreset('engine.read_file', JSON.stringify({path}));
+  await session.submit();
+  const sourceCallId = session.snapshot().history.at(-1).callId;
+  session.selectOperation('engine.write_file');
+  session.updateTarget({sourceCallId});
+  assert.equal(session.snapshot().clientError?.kind, 'missing_source');
+  assert.deepEqual(session.snapshot().draft, original);
+  session.dispose();
+});
+
 test('input lesson requires a history receipt for the current stable run and fills without execution', async () => {
   const f = createConsoleFixture();
   f.session.selectOperation('engine.get_runtime_tree');
