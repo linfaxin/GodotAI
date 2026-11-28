@@ -62,7 +62,7 @@ function buildFixture(state='running'){
  };
  const context={
   AbortController,DOMException,Uint8Array,debugRecorder:recorder,clearTimeout,setTimeout:()=>0,checkTimer:undefined,saveTimer:undefined,
-  notifyConsoleContext(){},agentPanel:{abortReplay:()=>false},
+  notifyConsoleContext(){},agentPanel:{abortReplay:()=>false},consoleSession:{cancelRecovery:()=>false},
   ready:true,current:{engineProfile:'full-engine-v1'},siteEngineProfile:'full-engine-v1',selected:{id:'project',name:'Project'},
   MAX_PENDING_OPERATIONS:16,pendingBuilds:0,playIntent:undefined,runSerial:0,revision:1,checking:0,
   cancelledLaunches:new Map(),reconcilingCancelledLaunches:false,
@@ -143,18 +143,20 @@ test('toolbar stop restores the idle status while a build is still pending',asyn
  assert.equal(recorder.api.getBuild(attemptId).result.preview.status,'skipped');
 });
 
-test('toolbar stop delegates to replay cleanup without stopping or cancelling a later page launch',async()=>{
- const f=buildFixture('idle');
- const attemptId=f.compile();
- let cancelled=0,globalStops=0;
- f.context.agentPanel.abortReplay=()=>{cancelled++;return true;};
- f.context.nativePreview.stop=async()=>{globalStops++;};
- f.node('stop').onclick();
- assert.equal(cancelled,1);
- assert.equal(globalStops,0);
- assert.equal(f.context.playIntent.controller.signal.aborted,false);
- f.cancel(attemptId);f.requests[0].resolve(f.compileReply);await tick();
-});
+for(const [owner,method] of [['agentPanel','abortReplay'],['consoleSession','cancelRecovery']]){
+ test(`toolbar stop delegates to ${method} without stopping or cancelling a later page launch`,async()=>{
+  const f=buildFixture('idle');
+  const attemptId=f.compile();
+  let cancelled=0,globalStops=0;
+  f.context[owner][method]=()=>{cancelled++;return true;};
+  f.context.nativePreview.stop=async()=>{globalStops++;};
+  f.node('stop').onclick();
+  assert.equal(cancelled,1);
+  assert.equal(globalStops,0);
+  assert.equal(f.context.playIntent.controller.signal.aborted,false);
+  f.cancel(attemptId);f.requests[0].resolve(f.compileReply);await tick();
+ });
+}
 
 test('cancelled attempt retains a late-session stop obligation without targeting a later run',async()=>{
  const f=buildFixture();

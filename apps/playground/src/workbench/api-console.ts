@@ -53,6 +53,7 @@ export function createApiConsole(container: HTMLElement, navigation: HTMLElement
       if (!card) {
         card = createApiConsoleCard(container, session, getConsoleOperation(id)!, {
           attachmentUrl,
+          loadRecovery: () => openOperation('engine.get_debugger_errors', false),
           loadHistory(operationId, callId) {
             const operation = getConsoleOperation(operationId);
             if (!operation) return;
@@ -83,6 +84,7 @@ export function createApiConsole(container: HTMLElement, navigation: HTMLElement
 
 function createApiConsoleCard(container: HTMLElement, session: ConsoleSession, operation: ConsoleOperation, hooks: {
   attachmentUrl(id: string, blob: Blob): string;
+  loadRecovery(): void;
   loadHistory(operationId: string, callId: string): void;
   loadLesson(step: ConsoleLessonStep): void;
 }) {
@@ -131,7 +133,17 @@ function createApiConsoleCard(container: HTMLElement, session: ConsoleSession, o
   const heading = element('div', 'api-console-heading');
   const title = element('h2', '', operation.name);
   const open = button('打开独立示例', 'open-example', () => session.openExample());
-  heading.append(title, open);
+  const recover = button('一键演示故障恢复', 'run-recovery', () => {
+    selectedCallId = undefined;
+    return session.runRecovery(hooks.loadRecovery);
+  });
+  const cancelRecovery = button('取消演示', 'cancel-recovery', () => session.cancelRecovery());
+  const recoveryStatus = test(element('p', 'api-console-status'), 'recovery-status');
+  recoveryStatus.setAttribute('role', 'status');
+  heading.append(title, open, recover, cancelRecovery);
+  recover.hidden = true;
+  cancelRecovery.hidden = true;
+  recoveryStatus.hidden = true;
   const exampleNote = element('p', 'api-console-note', '打开示例会切换项目并结束当前预览，原项目保留；不会自动运行。');
   open.hidden = exampleNote.hidden = operation.id === 'get_run';
   const context = test(element('dl', 'api-console-context'), 'context');
@@ -232,7 +244,7 @@ function createApiConsoleCard(container: HTMLElement, session: ConsoleSession, o
     }
     section.append(steps); lessons.append(section);
   }
-  root.append(heading, exampleNote, context, compatibility, composer, resultSection, historySection, lessons);
+  root.append(heading, exampleNote, recoveryStatus, context, compatibility, composer, resultSection, historySection, lessons);
   panel.append(root); container.append(panel);
 
   async function copy(text: string) {
@@ -264,7 +276,7 @@ function createApiConsoleCard(container: HTMLElement, session: ConsoleSession, o
       row.classList.toggle('selected', active);
       row.querySelector('button')?.setAttribute('aria-pressed', String(active));
     }
-    clear.disabled = !state.history.some(call => call.phase !== 'pending');
+    clear.disabled = state.owner === 'recovery' || !state.history.some(call => call.phase !== 'pending');
   }
   function renderSources(call?: ConsoleCall) {
     const facts = call?.resultFacts;
@@ -390,6 +402,13 @@ function createApiConsoleCard(container: HTMLElement, session: ConsoleSession, o
     const recoveryExample = ['engine.get_debugger_errors', 'engine.read_file', 'engine.write_file'].includes(operation.id);
     open.disabled = state.owner !== null || methodExample && state.environment.methodExampleAvailable !== true ||
       (inputExample || recoveryExample) && state.environment.inputExampleAvailable !== true;
+    const recoveryEntry = operation.id === 'engine.get_debugger_errors';
+    recover.hidden = !recoveryEntry;
+    recover.disabled = state.owner !== null || state.environment.inputExampleAvailable !== true;
+    cancelRecovery.hidden = state.owner !== 'recovery';
+    recoveryStatus.hidden = !state.recovery || !recoveryEntry && state.owner !== 'recovery';
+    recoveryStatus.dataset.phase = state.recovery?.phase ?? '';
+    setText(recoveryStatus, state.recovery?.message ?? '');
     if (methodExample) setText(exampleNote, state.environment.methodExampleAvailable === true
       ? '打开玩法方法示例。选择方法和填参后，由你执行调用。'
       : '当前引擎发布或呈现模式不支持玩法方法示例。');
@@ -397,11 +416,13 @@ function createApiConsoleCard(container: HTMLElement, session: ConsoleSession, o
       ? '打开物理帧输入示例，按教程从调用历史选择运行。'
       : '物理帧输入示例需要支持输入脚本和帧探测的 Chromium Direct 预览。');
     if (recoveryExample) setText(exampleNote, state.environment.inputExampleAvailable === true
-      ? '打开故障示例并结束当前预览。需手动 Play。'
+      ? recoveryEntry ? '演示会切到独立示例并结束当前预览，随后自动修复、试玩和停止。'
+        : '打开故障示例并结束当前预览。需手动 Play。'
       : '故障恢复示例需要支持输入脚本和帧探测的 Chromium Full/debug Direct 预览。');
     const pendingHere = state.history.some(call => call.callId === state.pendingCallId && call.draft.operationId === operation.id);
     cancel.hidden = !pendingHere || !state.cancellable;
-    status.textContent = state.owner === 'replay' ? '自动验证正在运行；结束后可手工调用。'
+    status.textContent = state.owner === 'recovery' ? '故障恢复演示正在运行；结束后可手工调用。'
+      : state.owner === 'replay' ? '自动验证正在运行；结束后可手工调用。'
       : state.owner === 'open-example' ? '正在准备独立示例…'
       : pendingHere ? '请求处理中；可继续编辑下一份草稿。'
       : state.pendingCallId ? '另一个 API 的请求正在处理。' : '手工执行；载入参数或使用结果均不会自动调用。';

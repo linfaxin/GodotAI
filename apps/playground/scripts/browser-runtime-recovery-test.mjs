@@ -234,6 +234,74 @@ await runReportedBrowserTest({scope, reportFile, run: async test => {
       status === 200 && new URL(url).searchParams.get('editorOrigin') === editorOrigin));
     assert.deepEqual(pageErrors, []);
   });
+  if (test.steps.every(step => step.status === 'passed')) await test.step('one-click-recovery', async () => {
+    await openConsoleOperation(page, 'engine.get_debugger_errors');
+    const history = element(page, 'history');
+    const previous = await history.locator('[data-call-id]').evaluateAll(rows => rows.map(row => row.dataset.callId));
+    const draft = await element(page, 'input').inputValue();
+    const originalProjectId = consoleResult(await publicCall('get_project_context')).projectId;
+    await element(page, 'run-recovery').click();
+    await page.waitForFunction(() => {
+      const status = document.querySelector('.api-console-card:not([hidden]) [data-testid="api-console-recovery-status"]');
+      return status && ['passed', 'failed', 'cancelled'].includes(status.dataset.phase);
+    }, undefined, {timeout: 240_000});
+    const status = element(page, 'recovery-status');
+    assert.equal(await status.getAttribute('data-phase'), 'passed', await status.textContent());
+    assert.equal(await element(page, 'input').inputValue(), draft);
+
+    const project = consoleResult(await publicCall('get_project_context'));
+    assert.notEqual(project.projectId, originalProjectId);
+    assert.equal(project.activeRunId, null);
+    const rows = await history.locator('[data-call-id]').evaluateAll((nodes, previous) =>
+      nodes.filter(node => !previous.includes(node.dataset.callId)).map(node => ({
+        id: node.dataset.callId,
+        op: node.querySelector('[data-action="view-history"]').textContent.split(' · ')[0],
+      })), previous);
+    const replies = new Map();
+    for (const operation of ['engine.get_debugger_errors', 'engine.get_script_errors', 'engine.game_probe', 'wait_for_event']) {
+      const entries = [];
+      for (const {id} of rows.filter(row => row.op === operation).reverse()) {
+        await viewConsoleCall(page, id);
+        const reply = JSON.parse(await element(page, 'result').textContent());
+        entries.push({id, data: operation === 'wait_for_event' ? consoleResult(reply) : summerResult(reply)});
+      }
+      replies.set(operation, entries);
+    }
+    const [{data: error}] = replies.get('engine.get_debugger_errors');
+    assert.equal(error.status, 'observed');
+    assert.equal(error.entries[0].diagnostic.message, RUNTIME_RECOVERY_ERROR);
+    const [{data: check}] = replies.get('engine.get_script_errors');
+    const waits = replies.get('wait_for_event').map(({data}) => data);
+    const failed = waits.find(({run}) => run.runId === error.runId);
+    assert.equal(failed.build.sourceHash, error.build.sourceHash);
+    const clean = waits.filter(({run}) => run.exit?.report.reason === 'clean-exit');
+    assert.equal(clean.length, 2);
+    assert.equal(new Set(clean.map(({run}) => run.runId)).size, 2);
+    for (const {run} of clean) {
+      verifyCleanExit(run, run.exit);
+      const {build} = waits.find(receipt => receipt.run.runId === run.runId && receipt.build);
+      assert.equal(build.sourceHash, check.sourceHash);
+    }
+    const frames = replies.get('engine.game_probe'), screenshots = [];
+    assert.equal(frames.length, 3);
+    for (const [index, [file, x]] of [['one-click-before.png', 64], ['one-click-after.png', 128], ['one-click-restart.png', 64]].entries()) {
+      const {id, data} = frames[index];
+      await viewConsoleCall(page, id);
+      const png = await readConsolePng(page, id);
+      assert.deepEqual(data.properties[0].value, {x, y: 256});
+      const marker = x === 64 ? png.pixels.initialMarker : png.pixels.inputMarker;
+      const background = x === 64 ? png.pixels.inputMarker : png.pixels.initialMarker;
+      assert(Math.min(...marker.slice(0, 3)) >= 235, 'PNG must show the marker at the observed position');
+      assert(Math.min(...background.slice(0, 3)) < 235, 'PNG must not show the marker at the other position');
+      assert.equal(data.image.iteration, data.frame.iteration);
+      const bytes = Buffer.from(png.bytes);
+      await writeFile(path.join(path.dirname(reportFile), file), bytes);
+      screenshots.push({file, position: {x, y: 256}, sha256: createHash('sha256').update(bytes).digest('hex')});
+    }
+    assert.deepEqual(pageErrors, []);
+    report.oneClickRecovery = {status: 'passed', projectId: project.projectId, failedRunId: error.runId,
+      repairedSourceHash: check.sourceHash, cleanRunIds: clean.map(({run}) => run.runId), screenshots};
+  });
   if (test.steps.some(step => step.status !== 'passed')) return report;
   return withAcceptanceContext({...report, status: 'passed'}, {directory, browser});
 }});
